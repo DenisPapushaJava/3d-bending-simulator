@@ -1,7 +1,7 @@
 set(CPACK_PACKAGE_NAME "3d-bending-simulator")
 set(CPACK_PACKAGE_VENDOR "deniapapusha")
 set(CPACK_PACKAGE_CONTACT "denispapushajava@gmail.com")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Foundation of an open-source 3D bending simulator")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Open-source STEP viewer and foundation for a 3D bending simulator")
 set(CPACK_PACKAGE_VERSION "${BENDING_VERSION}")
 set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${BENDING_VERSION}-linux-x86_64")
 set(CPACK_GENERATOR "DEB")

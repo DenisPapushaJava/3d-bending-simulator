@@ -80,14 +80,15 @@ Triplet собирает общие DLL и только Release для зави�
 | Каталог / цель | Ответственность |
 | --- | --- |
 | `src/core`, `bending_core` | Независимый C++: стабильные ID гибов и перестановка с определением первого затронутого шага |
-| `src/cad`, `bending_cad` | Документ с PIMPL, импорт STEP одного тела, единицы/метаданные/диагностика; публичный API без Qt/OCCT |
-| `src/viewer`, `bending_viewer` | Нативный QWidget/OCCT с PIMPL: тестовый примитив, камера, выбор грани, framebuffer и диагностика; SDK-типы скрыты |
-| `src/ui`, `bending_ui` | Окно QMainWindow, три dock-панели и меню; сведения о runtime передаются из app |
+| `src/application`, `bending_application` | Стандартные типы документа/ошибки, порт импорта и машина состояния с ревизиями; без SDK/Qt |
+| `src/cad`, `bending_cad` | Реализация порта импорта, PIMPL, единицы/метаданные/грани/триангуляция; Bending::CadOcct выделяет нативный мост viewer |
+| `src/viewer`, `bending_viewer` | Нативный QWidget/OCCT с PIMPL: подготовленный CAD-документ, камера, выбор грани текущей ревизии, framebuffer и диагностика |
+| `src/ui`, `bending_ui` | Окно, свойства/ошибки, диалог STEP и ImportController с одним QThread; порт импорта передаётся из app |
 | `src/app`, `bending_simulator` | Настройки Qt, создание/соединение компонентов, запуск, диагностический `--smoke-test` |
 | `tests` | Перестановка/ошибки без изменения данных, связь OCCT, создание окна, правила версий |
 | `scripts`, `cmake` | Сборка, упаковка и согласованность версий |
 
-Пустые модули application/planning/simulation и адаптер хранения заранее не создаются. Они появятся вместе со сценариями из [первого плана](implementation-plan.md), сохраняя границы из архитектуры. UI не показывает искусственных успешных проверок и не содержит демонстрационных данных Figma как результатов расчёта.
+Пустые модули planning/simulation и адаптер хранения заранее не создаются. Они появятся вместе со сценариями из [первого плана](implementation-plan.md), сохраняя границы из архитектуры. UI не показывает искусственных успешных проверок и не содержит демонстрационных данных Figma как результатов расчёта.
 
 Предметная часть отдельно, без Qt/OCCT:
 
@@ -113,7 +114,7 @@ ctest --preset core
 ```bash
 python3 scripts/version.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
-find src tests -type f \( -name '*.h' -o -name '*.cpp' \) -print0 | xargs -0 clang-format-18 --dry-run --Werror
+find src tests tools -type f \( -name '*.h' -o -name '*.cpp' \) -print0 | xargs -0 clang-format-18 --dry-run --Werror
 cmake --preset release
 cmake --build --preset release --parallel 2
 ctest --preset release
@@ -209,3 +210,30 @@ Linux `.deb` пересобран после M1.2; запуск из распа�
 CI M1.2: [успешный прогон 39067557455](https://github.com/DenisPapushaJava/3d-bending-simulator/actions/runs/39067557455), код `a41f13be96b266ccb15b5d4e57e1480a3e67c421`. Quality/core — успешно, Ubuntu 24.04 — **8/8 CTest**, Windows 2022 / MSVC / Qt 6.8.3 / OCCT 7.9.3 — **6/6 CTest**. Обе ОС прошли `cad.step-import`, включая единицы, Unicode-пути и явный отказ для сборки из одного компонента. Собраны Linux `.deb`, Windows runtime ZIP и соответствующие исходники зависимостей; проверки запуска из пакетов успешны. Windows использует offscreen-проверку окна и по-прежнему не подтверждает интерактивный GPU-рендеринг.
 
 В первом Windows-прогоне имя тестовой функции `near` конфликтовало с макросом Windows SDK; исправлено переименованием в `requireNear`, без отключения предупреждений. Повторный CI выше успешен. Теги и релизы для M1.2 не создавались; версия остаётся `2026.1.0-alpha.1`.
+
+## Сквозное открытие STEP — M1.3–M1.4
+
+Реализовано 2026-10-18 в `feat/step-import-workflow`, одним функциональным PR по D016; архитектурное решение D017, контракт — [step-import.md](step-import.md). В обычном окне Ctrl+O открывает файл, Esc отменяет загрузку, Ctrl+W закрывает деталь. Проверочный пример можно передать сразу:
+
+```bash
+./build/dev/bin/3d-bending-simulator examples/angle-mm.step
+./build/dev/bin/3d-bending-simulator --graphics-smoke-test examples/angle-mm.step
+```
+
+`--smoke-test file.step` дополнительно требует успешного импорта; `--graphics-smoke-test file.step` требует также настоящий графический контекст и framebuffer. Без файла графическая диагностика явно создаёт тестовый примитив; нормальный запуск начинает с пустой сцены. Примеры и их происхождение — [examples/README.md](../examples/README.md).
+
+Текущие локальные доказательства: Linux Mint, GCC 13 / Qt 6.4.2 / OCCT 7.6.3; **10/10 CTest dev**. Набор `core` с запрещённым поиском Qt/OCCT — **2/2**. Полный Docker Release с Werror — **14/14**, включая четыре Xvfb/Mesa-графических теста. Отдельно `workflow_tests --graphics` прошёл на реальном GPU при DPR 1 и 2: диалог и Unicode-имя, мм/дюймы, разные модели в framebuffer, сохранность сцены после ошибки, выбор/свойства грани текущей ревизии и закрытие с ожидающим импортом. Это автоматизированный Qt-сценарий в графическом сеансе, а не ручное прохождение UI.
+
+Для собственного снимка только окна программы и его native framebuffer:
+
+```bash
+BENDING_WORKFLOW_SNAPSHOT="$PWD/out/step-workflow.png" ./build/dev/bin/workflow_tests --graphics
+```
+
+Снимок собирается из собственных Qt-виджетов и настоящего OCCT framebuffer; рабочий стол не снимается. MainWindow показывает свойства исходной геометрии и явно не считает их распознаванием сгибов. Примитив и импортированный документ проверяются разными сценариями.
+
+Один worker выполняет чтение/подготовку; GUI меняет DocumentSession и сцену. Тест контроллера специально возвращает поздний успех, игнорируя stop_token, и проверяет, что он не попал в presenter. После отмены или закрытия новая ожидающая загрузка заменяет прежнюю; завершение приложения дожидается текущего SDK-вызова. Большие производственные файлы и численные бюджеты времени/памяти пока не измерялись.
+
+Windows-упаковщик включает `Shaders`, `XSMessage`, `SHMessage`, `XSTEPResource`, `UnitsAPI`; app выбирает доступные пути относительно executable и сохраняет внешние CSF-переопределения. Проверка runtime очищает CSF/Qt plugin env и PATH до системного, затем читает входящий STEP-пример. Linux .deb автоматически получает Data Exchange/mesh runtime-зависимости. Примеры устанавливаются в `share/3d-bending-simulator/examples`. Ни дополнительный Qt-модуль, ни новый сторонний SDK не добавлены.
+
+Дополнительно: CAD без GUI и с запрещённым поиском Qt — **4/4**. .deb установлен в чистый Ubuntu 24.04 с `--no-install-recommends`, без SDK/компилятора; чтение дюймового примера и графический запуск уголка Xvfb/Mesa успешны. Нативный GDB остановился в main, продолжил импорт/рендеринг `angle-mm.step` и завершился с кодом 0. Контроллер и сквозной offscreen-сценарий также прошли AddressSanitizer/UBSan для собственного кода (`detect_leaks=0`, сторонние библиотеки не инструментированы); это проверка времени жизни/UB, не доказательство отсутствия утечек во всём SDK.

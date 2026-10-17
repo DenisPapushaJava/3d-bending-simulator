@@ -3,5 +3,5 @@ add_library(Bending::Viewer ALIAS bending_viewer)
 set_target_properties(bending_viewer PROPERTIES AUTOMOC ON)
 target_include_directories(bending_viewer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(bending_viewer SYSTEM PRIVATE "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(bending_viewer PUBLIC Qt6::Widgets
-    PRIVATE bending_options TKOpenGl TKV3d TKService TKPrim)
+target_link_libraries(bending_viewer PUBLIC Qt6::Widgets Bending::Application
+    PRIVATE Bending::CadOcct bending_options TKOpenGl TKV3d TKService TKPrim)

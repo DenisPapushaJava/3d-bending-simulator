@@ -3,9 +3,11 @@
 #include "CadDocumentData.h"
 #include "bending/cad/Kernel.h"
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
@@ -26,6 +28,7 @@
 #include <StepRepr_GlobalUnitAssignedContext.hxx>
 #include <TColStd_SequenceOfAsciiString.hxx>
 #include <TopExp.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -167,14 +170,46 @@ bool validBounds(const BoundsMm &bounds) {
            std::isfinite(max.x) && std::isfinite(max.y) && std::isfinite(max.z) && max.x > min.x &&
            max.y > min.y && max.z > min.z;
 }
+
+application::SurfaceKind surfaceKind(GeomAbs_SurfaceType surface) {
+    using Kind = application::SurfaceKind;
+    switch (surface) {
+    case GeomAbs_Plane:
+        return Kind::Plane;
+    case GeomAbs_Cylinder:
+        return Kind::Cylinder;
+    case GeomAbs_Cone:
+        return Kind::Cone;
+    case GeomAbs_Sphere:
+        return Kind::Sphere;
+    case GeomAbs_Torus:
+        return Kind::Torus;
+    case GeomAbs_BezierSurface:
+        return Kind::Bezier;
+    case GeomAbs_BSplineSurface:
+        return Kind::BSpline;
+    default:
+        return Kind::Other;
+    }
+}
 } // namespace
 
-StepImportResult StepImporter::read(const std::filesystem::path &path) const {
+StepImportResult StepImporter::read(const std::filesystem::path &path, std::stop_token stop,
+                                    const application::ImportProgress &progress) const {
     std::vector<ImportDiagnostic> diagnostics;
     const auto fail = [&](StepImportErrorCode code, std::string detail) -> StepImportResult {
         return StepImportError{code, std::move(detail), std::move(diagnostics)};
     };
+    const auto report = [&](application::ImportPhase phase) {
+        if (progress) {
+            progress(phase);
+        }
+        return stop.stop_requested();
+    };
     try {
+        if (stop.stop_requested()) {
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled");
+        }
         auto extension = path.extension().u8string();
         for (auto &character : extension) {
             if (character >= u8'A' && character <= u8'Z') {
@@ -204,9 +239,15 @@ StepImportResult StepImporter::read(const std::filesystem::path &path) const {
         }
 
         std::lock_guard lock(importMutex);
+        if (report(application::ImportPhase::Reading)) {
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled");
+        }
         STEPControl_Reader reader;
         if (reader.ReadStream("import.step", input) != IFSelect_RetDone || input.bad()) {
             return fail(StepImportErrorCode::InvalidStep, "STEP parser could not read the file");
+        }
+        if (stop.stop_requested()) {
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled after reading");
         }
         if (reader.StepModel().IsNull() || reader.StepModel()->NbEntities() == 0) {
             return fail(StepImportErrorCode::NoGeometry, "STEP contains no model entities");
@@ -236,7 +277,13 @@ StepImportResult StepImporter::read(const std::filesystem::path &path) const {
         // OCCT expresses this factor in millimetres. This changes this reader's model, not
         // Interface_Static.
         reader.SetSystemLengthUnit(1.0);
+        if (report(application::ImportPhase::Transferring)) {
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled before transfer");
+        }
         const int transferred = reader.TransferRoots();
+        if (report(application::ImportPhase::Validating)) {
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled after transfer");
+        }
         appendDiagnostics(reader.WS()->TransferReader()->LastCheckList(), ImportStage::Transfer,
                           diagnostics);
         if (transferred != roots || hasErrors(diagnostics)) {
@@ -287,6 +334,45 @@ StepImportResult StepImporter::read(const std::filesystem::path &path) const {
         auto data = std::make_unique<CadDocument::Impl>();
         data->shape = std::move(shape);
         data->metadata = std::move(metadata);
+        if (report(application::ImportPhase::Preparing)) {
+            return fail(StepImportErrorCode::Cancelled,
+                        "Import cancelled before presentation preparation");
+        }
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            if (stop.stop_requested()) {
+                return fail(StepImportErrorCode::Cancelled, "Import cancelled during preparation");
+            }
+            const auto &face = TopoDS::Face(faces(i));
+            GProp_GProps area;
+            BRepGProp::SurfaceProperties(face, area);
+            if (!std::isfinite(area.Mass()) || area.Mass() < 0.0) {
+                return fail(StepImportErrorCode::InvalidGeometry, "Invalid face area");
+            }
+            data->faces.push_back({static_cast<std::size_t>(i), area.Mass(),
+                                   surfaceKind(BRepAdaptor_Surface(face).GetType())});
+        }
+        const auto &minimum = bounds.minimum;
+        const auto &maximum = bounds.maximum;
+        const double diagonal =
+            std::hypot(maximum.x - minimum.x, maximum.y - minimum.y, maximum.z - minimum.z);
+        data->metadata.meshDeflectionMm = std::clamp(diagonal * 0.001, 0.02, 1.0);
+        data->metadata.meshAngleRadians = 0.5;
+        BRepMesh_IncrementalMesh mesh(data->shape, data->metadata.meshDeflectionMm, false,
+                                      data->metadata.meshAngleRadians, false);
+        if (stop.stop_requested()) {
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled after meshing");
+        }
+        if (!mesh.IsDone()) {
+            return fail(StepImportErrorCode::PreparationFailed, "CAD triangulation failed");
+        }
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            TopLoc_Location location;
+            const auto triangulation = BRep_Tool::Triangulation(TopoDS::Face(faces(i)), location);
+            if (triangulation.IsNull() || triangulation->NbTriangles() == 0) {
+                return fail(StepImportErrorCode::PreparationFailed,
+                            "A face has no display triangulation");
+            }
+        }
         return std::unique_ptr<const CadDocument>(new CadDocument(std::move(data)));
     } catch (const Standard_Failure &error) {
         return fail(StepImportErrorCode::KernelFailure,
@@ -294,5 +380,16 @@ StepImportResult StepImporter::read(const std::filesystem::path &path) const {
     } catch (const std::filesystem::filesystem_error &error) {
         return fail(StepImportErrorCode::ReadFailed, error.what());
     }
+}
+
+application::ImportResult StepImporter::load(const std::filesystem::path &path,
+                                             std::stop_token stop,
+                                             const application::ImportProgress &progress) const {
+    auto result = read(path, stop, progress);
+    if (auto *error = std::get_if<StepImportError>(&result)) {
+        return std::move(*error);
+    }
+    return application::DocumentPtr(
+        std::move(std::get<std::unique_ptr<const CadDocument>>(result)));
 }
 } // namespace bending::cad

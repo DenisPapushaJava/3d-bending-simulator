@@ -8,5 +8,6 @@ namespace bending::cad {
 struct CadDocument::Impl {
     TopoDS_Shape shape;
     DocumentMetadata metadata;
+    std::vector<application::FaceInfo> faces;
 };
 } // namespace bending::cad

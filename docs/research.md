@@ -135,3 +135,11 @@
 - В OCCT 7.6 STEP использует общий `StepData_GlobalFactors`; наши импорты сериализованы. В 7.9 API факторов изменён, базовые вызовы адаптера совместимы за счёт значений параметров по умолчанию: [UnitContext 7.9.3](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_3/src/STEPConstruct/STEPConstruct_UnitContext.hxx).
 
 Контракт, владение, ограничения и численные допуски проверок — в [step-import.md](step-import.md). Наличие чтения STEP не означает поддержки родных `.sldprt`/`.m3d`, внешних ссылок, распознавания сгибов или проверки гибки.
+
+## Сквозной просмотр STEP M1.3–M1.4
+
+2026-10-18: реализация и автоматические прогоны на собственных STEP, отдельно от обзора библиотек и производственных моделей. Контракт — [step-import.md](step-import.md), результаты — [development.md](development.md).
+
+- Один QObject-worker в QThread, queued-передача в GUI и ожидание завершения перед уничтожением зависимостей согласуются с [документацией QThread](https://doc.qt.io/qt-6.8/qthread.html) и [QMetaObject](https://doc.qt.io/qt-6.8/qmetaobject.html). Код использует API, доступный в Qt 6.4; поведение отмены/позднего ответа проверяется управляемым адаптером.
+- Для импортированного снимка триангуляция готовится в worker. `SetAutoTriangulation(false)` заставляет AIS использовать подготовленную сетку: [Prs3d_Drawer 7.6.3](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_6_3/src/Prs3d/Prs3d_Drawer.hxx). Численные параметры записаны в контракте и относятся только к визуализации.
+- Нужные пути STEP-ресурсов/сообщений сверены с [env.bat OCCT 7.9.3](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_3/adm/templates/env.bat). Windows-поставка расширена соответствующими ресурсами и проверкой чтения примера с изолированным окружением.

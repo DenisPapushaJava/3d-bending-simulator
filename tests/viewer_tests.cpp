@@ -75,6 +75,7 @@ int main(int argc, char *argv[]) {
         // Recreate all native/GL resources, not only a camera in a persistent global driver.
         for (int instance = 0; instance < 2; ++instance) {
             Viewer widget;
+            widget.showDiagnosticBox();
             widget.resize(640, 480);
             widget.show();
             waitUntil([&] { return widget.isReady() || !widget.errorString().isEmpty(); });
@@ -97,16 +98,16 @@ int main(int argc, char *argv[]) {
             require(initial.width() == qRound(canvas->width() * canvas->devicePixelRatioF()),
                     "Framebuffer size must use physical pixels");
 
-            QString selection;
+            int selection = 0;
             QObject::connect(&widget, &Viewer::selectionChanged,
-                             [&](const QString &value) { selection = value; });
+                             [&](quint64, int value) { selection = value; });
             const auto center = canvas->rect().center();
             mouse(canvas, QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton);
             mouse(canvas, QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton);
-            require(!selection.isEmpty(), "Clicking the primitive must select a real CAD face");
+            require(selection > 0, "Clicking the primitive must select a real CAD face");
             mouse(canvas, QEvent::MouseButtonPress, {5, 5}, Qt::LeftButton, Qt::LeftButton);
             mouse(canvas, QEvent::MouseButtonRelease, {5, 5}, Qt::LeftButton, Qt::NoButton);
-            require(selection.isEmpty(), "Clicking empty space must clear the selection");
+            require(selection == 0, "Clicking empty space must clear the selection");
 
             widget.setOrientation(Viewer::Orientation::Top);
             require(differences(initial, widget.captureImage()) > 200,

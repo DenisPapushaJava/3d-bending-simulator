@@ -36,7 +36,7 @@ jobs:
       - name: Check release version rules
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check C++ formatting
-        run: find src tests -type f \( -name '*.h' -o -name '*.cpp' \) -print0 | xargs -0 clang-format-18 --dry-run --Werror
+        run: find src tests tools -type f \( -name '*.h' -o -name '*.cpp' \) -print0 | xargs -0 clang-format-18 --dry-run --Werror
       - name: Check domain without Qt or OCCT
         run: |
           cmake --preset core --no-warn-unused-cli -DCMAKE_DISABLE_FIND_PACKAGE_Qt6=ON -DCMAKE_DISABLE_FIND_PACKAGE_OpenCASCADE=ON
@@ -130,7 +130,8 @@ jobs:
           dpkg-deb --info out/*.deb
           dpkg-deb --extract out/*.deb out/linux-check
           QT_QPA_PLATFORM=offscreen out/linux-check/usr/bin/3d-bending-simulator --smoke-test
-          xvfb-run -a -s "-screen 0 1920x1200x24" env QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 out/linux-check/usr/bin/3d-bending-simulator --graphics-smoke-test
+          QT_QPA_PLATFORM=offscreen out/linux-check/usr/bin/3d-bending-simulator --smoke-test out/linux-check/usr/share/3d-bending-simulator/examples/plate-inch.stp
+          xvfb-run -a -s "-screen 0 1920x1200x24" env QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 out/linux-check/usr/bin/3d-bending-simulator --graphics-smoke-test out/linux-check/usr/share/3d-bending-simulator/examples/angle-mm.step
       - name: Package Windows and corresponding sources
         if: runner.os == 'Windows' && github.event_name != 'pull_request'
         shell: pwsh

@@ -2,6 +2,7 @@
 
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRep_Builder.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
@@ -18,6 +19,7 @@
 #include <XSControl_WorkSession.hxx>
 #include <gp_Pln.hxx>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -25,6 +27,7 @@
 #include <future>
 #include <iostream>
 #include <iterator>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -160,6 +163,16 @@ void checkBox(const CadDocument &document) {
     requireNear(metadata.bounds.maximum.z, 7.0, lengthToleranceMm, "maximum Z (mm)");
     requireNear(metadata.volumeMm3, 12000.0, volumeToleranceMm3, "volume (mm^3)");
     require(metadata.faceCount == 6, "Box must have six faces");
+    require(document.faces().size() == 6, "Box face properties were not prepared");
+    double area = 0.0;
+    for (const auto &face : document.faces()) {
+        require(face.surface == bending::application::SurfaceKind::Plane,
+                "Box face must be planar");
+        area += face.areaMm2;
+    }
+    requireNear(area, 12640.0, 1.0e-4, "box surface area (mm^2)");
+    require(metadata.meshDeflectionMm > 0.0 && metadata.meshAngleRadians > 0.0,
+            "Missing display preparation parameters");
     require(std::isfinite(metadata.maximumToleranceMm) && metadata.maximumToleranceMm > 0.0,
             "Invalid BRep tolerance metadata");
     require(!metadata.kernelVersion.empty(), "Missing kernel provenance");
@@ -273,6 +286,33 @@ void testImport(const std::filesystem::path &directory) {
     auto concurrentInch = std::async(std::launch::async, [&] { return load(inches); });
     checkBox(*concurrentMm.get());
     checkBox(*concurrentInch.get());
+
+    std::stop_source stopped;
+    stopped.request_stop();
+    auto cancelled = StepImporter{}.read(millimetres, stopped.get_token());
+    require(std::get<StepImportError>(cancelled).code == StepImportErrorCode::Cancelled,
+            "Pre-cancelled request was imported");
+    std::stop_source preparing;
+    auto cancelledPreparation =
+        StepImporter{}.load(millimetres, preparing.get_token(), [&](auto phase) {
+            if (phase == bending::application::ImportPhase::Preparing) {
+                preparing.request_stop();
+            }
+        });
+    require(std::get<StepImportError>(cancelledPreparation).code == StepImportErrorCode::Cancelled,
+            "Preparation ignored cancellation");
+
+    const auto cylinderPath = directory / "cylinder.step";
+    writeStep(cylinderPath, BRepPrimAPI_MakeCylinder(8.0, 12.0).Shape(), "MM");
+    const auto cylinder = load(cylinderPath);
+    requireNear(cylinder->metadata().volumeMm3, 768.0 * std::numbers::pi, 1.0e-4,
+                "cylinder volume (mm^3)");
+    require(cylinder->faces().size() == 3, "Cylinder must have three prepared faces");
+    require(std::count_if(cylinder->faces().begin(), cylinder->faces().end(),
+                          [](const auto &face) {
+                              return face.surface == bending::application::SurfaceKind::Cylinder;
+                          }) == 1,
+            "Cylinder surface was not identified");
 }
 } // namespace
 

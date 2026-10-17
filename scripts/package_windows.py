@@ -82,10 +82,12 @@ def main():
     shutil.copy2(args.vcpkg_root / "LICENSE.txt", notices / "vcpkg-LICENSE.txt")
     installed = ROOT / "vcpkg_installed/x64-windows-release/share/opencascade/copyright"
     shutil.copy2(installed, notices / "OCCT-copyright.txt")
-    shaders = installed.parent / "resources/Shaders"
-    if not shaders.is_dir():
-        raise RuntimeError(f"OCCT shader resources are missing: {shaders}")
-    shutil.copytree(shaders, stage / "share/opencascade/resources/Shaders", dirs_exist_ok=True)
+    for resource in ("Shaders", "XSMessage", "SHMessage", "XSTEPResource", "UnitsAPI"):
+        resource_dir = installed.parent / "resources" / resource
+        if not resource_dir.is_dir():
+            raise RuntimeError(f"OCCT runtime resources are missing: {resource_dir}")
+        shutil.copytree(resource_dir, stage / "share/opencascade/resources" / resource,
+                        dirs_exist_ok=True)
     # A binary-cache hit does not populate vcpkg buildtrees. Reproduce sources independently.
     occt_archive = output / "OCCT-V7_9_3.tar.gz"
     urllib.request.urlretrieve("https://github.com/Open-Cascade-SAS/OCCT/archive/V7_9_3.tar.gz",
@@ -122,7 +124,8 @@ def main():
         "See https://github.com/DenisPapushaJava/3d-bending-simulator/blob/main/docs/development.md\n",
         encoding="utf-8")
     (stage / "README.txt").write_text(
-        "Run bin/3d-bending-simulator.exe. This is the foundation, not a working bending simulator.\n"
+        "Run bin/3d-bending-simulator.exe. STEP import/viewer; bending is not implemented yet.\n"
+        "Sample STEP files: share/3d-bending-simulator/examples.\n"
         "Microsoft Visual C++ 2015-2022 x64 Runtime may be required:\n"
         "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist\n"
         "Keep DLLs and plugins with the executable. They may be replaced with compatible builds.\n"
@@ -133,8 +136,14 @@ def main():
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment.pop("QT_PLUGIN_PATH", None)
     environment.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    for variable in list(environment):
+        if variable.startswith("CSF_"):
+            environment.pop(variable)
     environment["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
     subprocess.run([str(executable), "--smoke-test"], env=environment, check=True, timeout=20)
+    subprocess.run([str(executable), "--smoke-test",
+                    str(stage / "share/3d-bending-simulator/examples/plate-inch.stp")],
+                   env=environment, check=True, timeout=30)
     archive_tree(output / f"{name}.zip", stage)
     archive_tree(output / f"{sources.name}.zip", sources)
 

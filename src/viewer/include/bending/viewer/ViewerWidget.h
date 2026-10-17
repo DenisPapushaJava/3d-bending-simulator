@@ -5,6 +5,9 @@
 
 #include <memory>
 
+namespace bending::application {
+class Document;
+}
 namespace bending::viewer {
 
 // OCCT and native-window resources stay behind this Qt-only presentation boundary.
@@ -23,10 +26,16 @@ class ViewerWidget final : public QWidget {
     [[nodiscard]] QImage captureImage();
     void fitAll();
     void setOrientation(Orientation orientation);
+    // Empty result means accepted. Geometry is prepared by the importer before publication.
+    [[nodiscard]] QString presentDocument(std::shared_ptr<const application::Document> document,
+                                          quint64 revision);
+    void clearDocument(quint64 revision);
+    // Explicit diagnostic scene, never shown by the normal application startup.
+    void showDiagnosticBox();
 
   signals:
     void renderingChanged(bool ready);
-    void selectionChanged(const QString &description);
+    void selectionChanged(quint64 documentRevision, int faceIndex);
 
   private:
     class Impl;

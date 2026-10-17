@@ -27,6 +27,7 @@ include(cmake/ProjectOptions.cmake)
 include(cmake/Dependencies.cmake)
 configure_file(cmake/Version.h.in generated/bending/Version.h @ONLY)
 add_subdirectory(src/core)
+add_subdirectory(src/application)
 
 if(BENDING_BUILD_CAD)
     add_subdirectory(src/cad)
