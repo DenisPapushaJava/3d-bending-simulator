@@ -13,6 +13,7 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QListView>
 #include <QListWidget>
@@ -24,9 +25,11 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QStandardItemModel>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 
@@ -293,9 +296,14 @@ class MainWindow::Impl {
         showSelectedBend(false);
         camera->setEnabled(viewer->isReady() && document != nullptr);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
-        cancelAction->setEnabled(session.activeRequest().has_value());
-        progress->setVisible(session.activeRequest().has_value() || controller->isSaving());
-        if (controller->isSaving()) {
+        cancelAction->setEnabled(session.activeRequest().has_value() ||
+                                 controller->isPreparingPreview());
+        progress->setVisible(session.activeRequest().has_value() || controller->isSaving() ||
+                             controller->isPreparingPreview());
+        if (controller->isPreparingPreview()) {
+            window->statusBar()->showMessage(
+                QStringLiteral("Восстановление заготовки и подготовка состояний сгиба…"));
+        } else if (controller->isSaving()) {
             window->statusBar()->showMessage(QStringLiteral("Сохранение проекта…"));
         } else if (session.activeRequest()) {
             window->statusBar()->showMessage(QStringLiteral("%1 · %2").arg(
@@ -309,6 +317,9 @@ class MainWindow::Impl {
         } else if (!viewer->errorString().isEmpty()) {
             window->statusBar()->showMessage(
                 QStringLiteral("3D-просмотр недоступен: %1").arg(viewer->errorString()));
+        } else if (controller->bendPreview()) {
+            window->statusBar()->showMessage(QStringLiteral(
+                "Кинематический просмотр · ПКМ: вращение · СКМ: перенос · Колесо: масштаб"));
         } else {
             window->statusBar()->showMessage(
                 document ? QStringLiteral("Деталь загружена · ПКМ: вращение · СКМ: перенос · "
@@ -335,6 +346,126 @@ class MainWindow::Impl {
         }
         diagnostics->setPlainText(detail);
         diagnostics->setVisible(!detail.isEmpty());
+        refreshPreview();
+    }
+
+    void stopPlayback() {
+        playback->stop();
+        playBend->setText(QStringLiteral("Воспроизвести"));
+    }
+    void showPreviewFrame() {
+        const auto preview = controller->bendPreview();
+        if (!preview) {
+            return;
+        }
+        const auto index = static_cast<std::size_t>(bendFrame->value());
+        const auto failure =
+            viewer->presentBendPreview(preview, index, controller->session().revision());
+        if (!failure.isEmpty()) {
+            previewDisplayError = failure;
+            stopPlayback();
+            previewStatus->setText(
+                QStringLiteral("Не удалось показать состояние: %1").arg(failure));
+            return;
+        }
+        displayedPreview = preview;
+        previewDisplayError.clear();
+        const double progressValue =
+            static_cast<double>(index) / static_cast<double>(preview->frameCount() - 1);
+        frameLabel->setText(QStringLiteral("%1% · поворот %2°")
+                                .arg(number(progressValue * 100.0),
+                                     number(progressValue * preview->model().angleRadians * 180.0 /
+                                            std::numbers::pi)));
+    }
+    void refreshPreview() {
+        const auto &session = controller->session();
+        const auto &document = session.document();
+        const auto row = bendList->currentIndex().row();
+        const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
+        bool supported = document && row == 0 &&
+                         document->metadata().bendAnalysis.bends.size() == 1 &&
+                         !document->metadata().bendAnalysis.bends[0].trimmedEnds &&
+                         document->metadata().faceCount == 10;
+        bool matchingThickness = true;
+        if (supported && session.manualThicknessMm()) {
+            matchingThickness = std::abs(*session.manualThicknessMm() -
+                                         document->metadata().bendAnalysis.bends[0].thicknessMm) <=
+                                document->metadata().bendAnalysis.lengthToleranceMm;
+        }
+        preparePreview->setEnabled(previewBuilder && supported && matchingThickness && entry &&
+                                   entry->review == BendReview::Confirmed && entry->target &&
+                                   !controller->hasWork());
+        fixedSide->setEnabled(document && !controller->hasWork());
+        const auto preview = controller->bendPreview();
+        if (!preview) {
+            previewDisplayError.clear();
+        }
+        if (!preview && displayedPreview) {
+            stopPlayback();
+            displayedPreview.reset();
+            const auto failure = viewer->endBendPreview();
+            if (!failure.isEmpty()) {
+                previewStatus->setToolTip(failure);
+            }
+        }
+        if (preview && displayedPreview != preview) {
+            const QSignalBlocker block(bendFrame);
+            bendFrame->setRange(0, static_cast<int>(preview->frameCount() - 1));
+            bendFrame->setValue(0);
+            showPreviewFrame();
+        }
+        bendFrame->setEnabled(preview && !controller->hasWork() && previewDisplayError.isEmpty());
+        playBend->setEnabled(preview && !controller->hasWork() && previewDisplayError.isEmpty());
+        returnToCad->setEnabled(preview || controller->isPreparingPreview());
+        if (!preview || controller->hasWork()) {
+            stopPlayback();
+        }
+        if (controller->isPreparingPreview()) {
+            previewStatus->setText(
+                QStringLiteral("Проверяем восстановление всей детали и готовим 21 состояние…"));
+        } else if (const auto &failure = controller->bendPreviewError()) {
+            previewStatus->setText(
+                failure->code == BendPreviewErrorCode::TargetMismatch
+                    ? QStringLiteral("Для первого просмотра целевые угол и радиус должны совпадать "
+                                     "с STEP. Верните параметры из CAD.")
+                : failure->code == BendPreviewErrorCode::UnsupportedParameters
+                    ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
+                                     "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
+                : failure->code == BendPreviewErrorCode::UnsupportedGeometry
+                    ? QStringLiteral("Геометрия не поддерживается первым сценарием. Нужна одна "
+                                     "прямая зона и две прямоугольные полки без вырезов/подрезки; "
+                                     "исходная деталь доступна для просмотра.")
+                    : QStringLiteral("Не удалось подготовить кинематический просмотр. Исходная "
+                                     "деталь сохранена."));
+            previewStatus->setToolTip(text(failure->detail));
+        } else if (!previewDisplayError.isEmpty()) {
+            previewStatus->setText(
+                QStringLiteral("Не удалось показать состояние: %1").arg(previewDisplayError));
+        } else if (preview) {
+            const auto &m = preview->model();
+            previewStatus->setText(
+                QStringLiteral(
+                    "Заготовка: %1 × %2 × %3 мм\nНеподвижная полка: %4 мм\nПодвижная полка: %5 "
+                    "мм\nДуга средней поверхности: %6 мм\n\nСиняя — неподвижная полка; оранжевая — "
+                    "зона сгиба; зелёная — подвижная полка.")
+                    .arg(number(simulation::blankLengthMm(m)), number(m.widthMm),
+                         number(m.thicknessMm), number(m.fixedFlangeMm), number(m.movingFlangeMm),
+                         number(simulation::bendAllowanceMm(m))));
+            previewStatus->setToolTip({});
+        } else {
+            previewStatus->setText(
+                !document ? QStringLiteral("Откройте учебную деталь bend-90-6mm.step.")
+                : !supported ? QStringLiteral(
+                                   "Выберите единственный прямой сгиб детали с двумя "
+                                   "прямоугольными полками. Многогибовые детали и подрезанные "
+                                   "торцы пока поддерживаются только для просмотра исходного STEP.")
+                : !matchingThickness
+                    ? QStringLiteral("Ручная толщина отличается от геометрии. Для просмотра "
+                                     "используйте толщину из STEP.")
+                    : QStringLiteral("Подтвердите сгиб на вкладке «Сгиб» и примените целевые "
+                                     "параметры из CAD, затем подготовьте просмотр."));
+            frameLabel->setText(QStringLiteral("Исходная CAD-форма"));
+        }
     }
 
     void showThicknessEvidence(bool updateInput) {
@@ -629,6 +760,17 @@ class MainWindow::Impl {
     QDoubleSpinBox *targetRadius = nullptr;
     QPushButton *applyBendTarget = nullptr;
     QPushButton *resetBendTarget = nullptr;
+    std::shared_ptr<const SingleBendPreviewBuilder> previewBuilder;
+    application::BendPreviewPtr displayedPreview;
+    QString previewDisplayError;
+    QComboBox *fixedSide = nullptr;
+    QPushButton *preparePreview = nullptr;
+    QLabel *previewStatus = nullptr;
+    QSlider *bendFrame = nullptr;
+    QPushButton *playBend = nullptr;
+    QPushButton *returnToCad = nullptr;
+    QLabel *frameLabel = nullptr;
+    QTimer *playback = nullptr;
     std::optional<std::uint64_t> shownBendEditRevision;
     int shownTargetRow = -1;
     QTabWidget *propertyTabs = nullptr;
@@ -660,9 +802,11 @@ class MainWindow::Impl {
 
 MainWindow::MainWindow(RuntimeInfo runtime,
                        std::shared_ptr<const application::DocumentImporter> importer,
-                       std::shared_ptr<const application::ProjectWriter> writer)
+                       std::shared_ptr<const application::ProjectWriter> writer,
+                       std::shared_ptr<const application::SingleBendPreviewBuilder> previewBuilder)
     : impl_(std::make_unique<Impl>(this)) {
     impl_->writer = std::move(writer);
+    impl_->previewBuilder = std::move(previewBuilder);
     setObjectName(QStringLiteral("mainWindow"));
     impl_->title =
         QStringLiteral("3D Bending Simulator · %1").arg(text(runtime.applicationVersion));
@@ -847,8 +991,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             [this] { impl_->showThicknessEvidence(true); });
     connect(impl_->pairs, &QComboBox::currentIndexChanged, this,
             [this](int) { impl_->showThicknessEvidence(true); });
-    connect(impl_->bendList->selectionModel(), &QItemSelectionModel::currentChanged, this,
-            [this] { impl_->showSelectedBend(true); });
+    connect(impl_->bendList->selectionModel(), &QItemSelectionModel::currentChanged, this, [this] {
+        if (impl_->controller->bendPreview() || impl_->controller->isPreparingPreview()) {
+            impl_->controller->discardBendPreview();
+        }
+        impl_->showSelectedBend(true);
+        impl_->refreshPreview();
+    });
     impl_->selection = label(QStringLiteral("faceProperties"));
     impl_->error = label(QStringLiteral("importError"));
     impl_->error->setStyleSheet(QStringLiteral("color:#9D2828;"));
@@ -966,13 +1115,102 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->propertyTabs->setObjectName(QStringLiteral("propertiesTabs"));
     impl_->propertyTabs->addTab(scroll, QStringLiteral("Деталь"));
     impl_->propertyTabs->addTab(bendScroll, QStringLiteral("Сгиб"));
+    auto *operationPanel = new QWidget(this);
+    auto *operationLayout = new QVBoxLayout(operationPanel);
+    auto *operationTitle =
+        new QLabel(QStringLiteral("Один сгиб · кинематический просмотр"), operationPanel);
+    operationTitle->setWordWrap(true);
+    operationLayout->addWidget(operationTitle);
+    operationLayout->addWidget(new QLabel(QStringLiteral("Неподвижная полка:"), operationPanel));
+    impl_->fixedSide = new QComboBox(operationPanel);
+    impl_->fixedSide->setObjectName(QStringLiteral("fixedBendSide"));
+    impl_->fixedSide->setAccessibleName(QStringLiteral("Неподвижная полка сгиба"));
+    impl_->fixedSide->addItems({QStringLiteral("Полка A"), QStringLiteral("Полка B")});
+    operationLayout->addWidget(impl_->fixedSide);
+    impl_->preparePreview = new QPushButton(QStringLiteral("Подготовить просмотр"), operationPanel);
+    impl_->preparePreview->setObjectName(QStringLiteral("prepareBendPreview"));
+    operationLayout->addWidget(impl_->preparePreview);
+    impl_->previewStatus = new QLabel(operationPanel);
+    impl_->previewStatus->setObjectName(QStringLiteral("bendPreviewStatus"));
+    impl_->previewStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    impl_->previewStatus->setWordWrap(true);
+    impl_->previewStatus->setTextFormat(Qt::PlainText);
+    impl_->previewStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    operationLayout->addWidget(impl_->previewStatus);
+    auto *kinematicHint = new QLabel(
+        QStringLiteral("Модель сохраняет толщину и длину средней поверхности. Это геометрическая "
+                       "кинематика.\n\n"
+                       "Инструмент, контакты, столкновения, усилие и пружинение не рассчитываются. "
+                       "Это не технологическая развёртка для производства.\n\nВыбор полки и кадра "
+                       "относится к просмотру и не сохраняется в проекте."),
+        operationPanel);
+    kinematicHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    kinematicHint->setWordWrap(true);
+    operationLayout->addWidget(kinematicHint);
+    operationLayout->addStretch();
+    auto *operationScroll = new QScrollArea(this);
+    operationScroll->setWidgetResizable(true);
+    operationScroll->setMinimumWidth(300);
+    operationScroll->setWidget(operationPanel);
+    impl_->propertyTabs->addTab(operationScroll, QStringLiteral("Операция"));
     addDock(QStringLiteral("propertiesDock"), QStringLiteral("Параметры"), impl_->propertyTabs,
             Qt::RightDockWidgetArea);
-    auto *sequence =
-        new QLabel(QStringLiteral("Ручная последовательность · операции ещё не заданы"), this);
-    sequence->setMargin(16);
-    sequence->setMinimumHeight(100);
-    addDock(QStringLiteral("sequenceDock"), QStringLiteral("Порядок гибов"), sequence,
+    auto *sequence = new QWidget(this);
+    auto *sequenceLayout = new QVBoxLayout(sequence);
+    impl_->frameLabel = new QLabel(sequence);
+    impl_->frameLabel->setObjectName(QStringLiteral("bendFrameLabel"));
+    sequenceLayout->addWidget(impl_->frameLabel);
+    impl_->bendFrame = new QSlider(Qt::Horizontal, sequence);
+    impl_->bendFrame->setObjectName(QStringLiteral("bendFrame"));
+    impl_->bendFrame->setAccessibleName(QStringLiteral("Промежуточное состояние сгиба"));
+    impl_->bendFrame->setRange(0, 20);
+    impl_->bendFrame->setTickPosition(QSlider::TicksBelow);
+    impl_->bendFrame->setTickInterval(5);
+    sequenceLayout->addWidget(impl_->bendFrame);
+    auto *playLayout = new QHBoxLayout;
+    impl_->playBend = new QPushButton(QStringLiteral("Воспроизвести"), sequence);
+    impl_->playBend->setObjectName(QStringLiteral("playBend"));
+    impl_->returnToCad = new QPushButton(QStringLiteral("Вернуться к STEP"), sequence);
+    impl_->returnToCad->setObjectName(QStringLiteral("returnToCad"));
+    playLayout->addWidget(impl_->playBend);
+    playLayout->addWidget(impl_->returnToCad);
+    playLayout->addStretch();
+    sequenceLayout->addLayout(playLayout);
+    impl_->playback = new QTimer(this);
+    impl_->playback->setInterval(150);
+    connect(impl_->bendFrame, &QSlider::valueChanged, this, [this] { impl_->showPreviewFrame(); });
+    connect(impl_->playback, &QTimer::timeout, this, [this] {
+        if (impl_->bendFrame->value() >= impl_->bendFrame->maximum()) {
+            impl_->stopPlayback();
+        } else {
+            impl_->bendFrame->setValue(impl_->bendFrame->value() + 1);
+        }
+    });
+    connect(impl_->playBend, &QPushButton::clicked, this, [this] {
+        if (impl_->playback->isActive()) {
+            impl_->stopPlayback();
+            return;
+        }
+        if (impl_->bendFrame->value() == impl_->bendFrame->maximum()) {
+            impl_->bendFrame->setValue(0);
+        }
+        impl_->playBend->setText(QStringLiteral("Пауза"));
+        impl_->playback->start();
+    });
+    connect(impl_->returnToCad, &QPushButton::clicked, impl_->controller,
+            &ImportController::discardBendPreview);
+    connect(impl_->fixedSide, &QComboBox::currentIndexChanged, impl_->controller,
+            &ImportController::discardBendPreview);
+    connect(impl_->preparePreview, &QPushButton::clicked, this, [this] {
+        const auto row = impl_->bendList->currentIndex().row();
+        if (row >= 0) {
+            impl_->propertyTabs->setCurrentIndex(2);
+            impl_->controller->prepareBendPreview(static_cast<std::size_t>(row),
+                                                  impl_->fixedSide->currentIndex() == 1,
+                                                  impl_->previewBuilder);
+        }
+    });
+    addDock(QStringLiteral("sequenceDock"), QStringLiteral("Просмотр операции"), sequence,
             Qt::BottomDockWidgetArea);
 
     impl_->progress = new QProgressBar(this);
@@ -1010,8 +1248,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(about, &QAction::triggered, this, [this] {
         QMessageBox::about(
             this, QStringLiteral("3D Bending Simulator"),
-            impl_->title + QStringLiteral("\n\nИмпорт и просмотр STEP одной детали.\nМоделирование "
-                                          "гибки и столкновения ещё не реализованы."));
+            impl_->title +
+                QStringLiteral(
+                    "\n\nИмпорт STEP и кинематический просмотр одной простой зоны сгиба.\nКонтакты "
+                    "с инструментом и столкновения ещё не рассчитываются."));
     });
     impl_->refresh();
 }
