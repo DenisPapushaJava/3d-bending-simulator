@@ -359,12 +359,13 @@ class MainWindow::Impl {
             return;
         }
         const auto index = static_cast<std::size_t>(bendFrame->value());
-        const auto error =
+        const auto failure =
             viewer->presentBendPreview(preview, index, controller->session().revision());
-        if (!error.isEmpty()) {
-            previewDisplayError = error;
+        if (!failure.isEmpty()) {
+            previewDisplayError = failure;
             stopPlayback();
-            previewStatus->setText(QStringLiteral("Не удалось показать состояние: %1").arg(error));
+            previewStatus->setText(
+                QStringLiteral("Не удалось показать состояние: %1").arg(failure));
             return;
         }
         displayedPreview = preview;
@@ -402,9 +403,9 @@ class MainWindow::Impl {
         if (!preview && displayedPreview) {
             stopPlayback();
             displayedPreview.reset();
-            const auto error = viewer->endBendPreview();
-            if (!error.isEmpty()) {
-                previewStatus->setToolTip(error);
+            const auto failure = viewer->endBendPreview();
+            if (!failure.isEmpty()) {
+                previewStatus->setToolTip(failure);
             }
         }
         if (preview && displayedPreview != preview) {
@@ -422,21 +423,21 @@ class MainWindow::Impl {
         if (controller->isPreparingPreview()) {
             previewStatus->setText(
                 QStringLiteral("Проверяем восстановление всей детали и готовим 21 состояние…"));
-        } else if (const auto &error = controller->bendPreviewError()) {
+        } else if (const auto &failure = controller->bendPreviewError()) {
             previewStatus->setText(
-                error->code == BendPreviewErrorCode::TargetMismatch
+                failure->code == BendPreviewErrorCode::TargetMismatch
                     ? QStringLiteral("Для первого просмотра целевые угол и радиус должны совпадать "
                                      "с STEP. Верните параметры из CAD.")
-                : error->code == BendPreviewErrorCode::UnsupportedParameters
+                : failure->code == BendPreviewErrorCode::UnsupportedParameters
                     ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
                                      "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
-                : error->code == BendPreviewErrorCode::UnsupportedGeometry
+                : failure->code == BendPreviewErrorCode::UnsupportedGeometry
                     ? QStringLiteral("Геометрия не поддерживается первым сценарием. Нужна одна "
                                      "прямая зона и две прямоугольные полки без вырезов/подрезки; "
                                      "исходная деталь доступна для просмотра.")
                     : QStringLiteral("Не удалось подготовить кинематический просмотр. Исходная "
                                      "деталь сохранена."));
-            previewStatus->setToolTip(text(error->detail));
+            previewStatus->setToolTip(text(failure->detail));
         } else if (!previewDisplayError.isEmpty()) {
             previewStatus->setText(
                 QStringLiteral("Не удалось показать состояние: %1").arg(previewDisplayError));
