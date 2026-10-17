@@ -70,18 +70,14 @@ class ImportController::Impl {
                             if (auto document = resultDocument(result)) {
                                 try {
                                     const auto *project = std::get_if<OpenedProject>(&result);
-                                    const auto validation =
-                                        project && project->manualThicknessMm
-                                            ? validateThickness(*project->manualThicknessMm,
-                                                                document->metadata().thickness)
-                                            : ThicknessValidation::Unverified;
-                                    const auto error =
-                                        validation == ThicknessValidation::Invalid ||
-                                                validation ==
-                                                    ThicknessValidation::ConflictsWithGeometry
-                                            ? QStringLiteral("Invalid saved thickness")
-                                            : presenter(document, session.revision() + 1);
-                                    if (!error.isEmpty()) {
+                                    const auto invalid =
+                                        project ? projectSettingsError(*project) : std::nullopt;
+                                    if (invalid) {
+                                        result = ImportError{
+                                            ImportErrorCode::InvalidProject, *invalid, {}};
+                                    } else if (const auto error =
+                                                   presenter(document, session.revision() + 1);
+                                               !error.isEmpty()) {
                                         result = ImportError{ImportErrorCode::PresentationFailed,
                                                              error.toStdString(),
                                                              {}};
@@ -183,6 +179,23 @@ void ImportController::useAutomaticThickness() {
     impl_->session.useAutomaticThickness();
     emit stateChanged();
 }
+bool ImportController::setBendReview(std::size_t recognizedIndex, BendReview review) {
+    if (impl_->stopping || hasWork()) {
+        return false;
+    }
+    const auto result = impl_->session.setBendReview(recognizedIndex, review);
+    emit stateChanged();
+    return result;
+}
+bool ImportController::setBendTarget(std::size_t recognizedIndex,
+                                     std::optional<core::BendTarget> target) {
+    if (impl_->stopping || hasWork()) {
+        return false;
+    }
+    const auto result = impl_->session.setBendTarget(recognizedIndex, target);
+    emit stateChanged();
+    return result;
+}
 bool ImportController::isSaving() const {
     return impl_->saving;
 }
@@ -197,6 +210,7 @@ void ImportController::saveProject(std::filesystem::path path,
     auto *state = impl_.get();
     const auto document = state->session.document();
     const auto manual = state->session.manualThicknessMm();
+    const auto bends = state->session.bends();
     const auto revision = state->session.editRevision();
     const auto id = ++state->saveId;
     state->stop = std::stop_source{};
@@ -206,11 +220,11 @@ void ImportController::saveProject(std::filesystem::path path,
     state->writeError.clear();
     QMetaObject::invokeMethod(
         state->worker,
-        [state, document, manual, revision, id, stop, path = std::move(path),
+        [state, document, manual, bends, revision, id, stop, path = std::move(path),
          writer = std::move(writer)] {
             std::optional<std::string> error;
             try {
-                error = writer->save(path, *document, manual, stop);
+                error = writer->save(path, *document, manual, bends, stop);
             } catch (const std::exception &failure) {
                 error = failure.what();
             } catch (...) {

@@ -2,9 +2,12 @@
 
 #include <QCryptographicHash>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+
+#include <utility>
 
 namespace bending::project {
 namespace {
@@ -31,6 +34,118 @@ bool rejected(double value, const ThicknessAnalysis &analysis) {
     const auto result = validateThickness(value, analysis);
     return result == ThicknessValidation::Invalid ||
            result == ThicknessValidation::ConflictsWithGeometry;
+}
+QJsonArray pointJson(PointMm point) {
+    return {point.x, point.y, point.z};
+}
+bool readPoint(const QJsonValue &value, PointMm &point) {
+    if (!value.isArray()) {
+        return false;
+    }
+    const auto values = value.toArray();
+    if (values.size() != 3 || !values[0].isDouble() || !values[1].isDouble() ||
+        !values[2].isDouble()) {
+        return false;
+    }
+    point = {values[0].toDouble(), values[1].toDouble(), values[2].toDouble()};
+    return true;
+}
+QString reviewName(BendReview review) {
+    switch (review) {
+    case BendReview::Pending:
+        return QStringLiteral("pending");
+    case BendReview::Confirmed:
+        return QStringLiteral("confirmed");
+    case BendReview::Excluded:
+        return QStringLiteral("excluded");
+    }
+    return {};
+}
+QJsonArray bendsJson(const std::vector<BendPreparation> &bends) {
+    QJsonArray values;
+    for (const auto &bend : bends) {
+        const auto &a = bend.anchor;
+        const QJsonObject geometry{
+            {QStringLiteral("axisStartMm"), pointJson(a.axisStart)},
+            {QStringLiteral("axisEndMm"), pointJson(a.axisEnd)},
+            {QStringLiteral("angleRadians"), a.angleRadians},
+            {QStringLiteral("innerRadiusMm"), a.innerRadiusMm},
+            {QStringLiteral("thicknessMm"), a.thicknessMm},
+            {QStringLiteral("lengthMm"), a.lengthMm},
+            {QStringLiteral("trimmedEnds"), a.trimmedEnds},
+            {QStringLiteral("minimumStraightLengthMm"), a.minimumStraightLengthMm}};
+        const auto target =
+            bend.target ? QJsonValue(QJsonObject{
+                              {QStringLiteral("angleRadians"), bend.target->angleRadians},
+                              {QStringLiteral("innerRadiusMm"), bend.target->innerRadiusMm}})
+                        : QJsonValue(QJsonValue::Null);
+        values.append(QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
+                                  {QStringLiteral("review"), reviewName(bend.review)},
+                                  {QStringLiteral("geometry"), geometry},
+                                  {QStringLiteral("target"), target}});
+    }
+    return values;
+}
+bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends) {
+    if (!value.isArray() || value.toArray().size() > 512) {
+        return false;
+    }
+    for (const auto &item : value.toArray()) {
+        if (!item.isObject()) {
+            return false;
+        }
+        const auto object = item.toObject();
+        if (!object.value(QStringLiteral("id")).isString() ||
+            !object.value(QStringLiteral("geometry")).isObject()) {
+            return false;
+        }
+        BendPreparation bend{};
+        bend.id = object.value(QStringLiteral("id")).toString().toStdString();
+        const auto review = object.value(QStringLiteral("review")).toString();
+        if (review == QStringLiteral("pending")) {
+            bend.review = BendReview::Pending;
+        } else if (review == QStringLiteral("confirmed")) {
+            bend.review = BendReview::Confirmed;
+        } else if (review == QStringLiteral("excluded")) {
+            bend.review = BendReview::Excluded;
+        } else {
+            return false;
+        }
+        const auto geometry = object.value(QStringLiteral("geometry")).toObject();
+        auto &a = bend.anchor;
+        if (!readPoint(geometry.value(QStringLiteral("axisStartMm")), a.axisStart) ||
+            !readPoint(geometry.value(QStringLiteral("axisEndMm")), a.axisEnd) ||
+            !geometry.value(QStringLiteral("trimmedEnds")).isBool()) {
+            return false;
+        }
+        a.trimmedEnds = geometry.value(QStringLiteral("trimmedEnds")).toBool();
+        for (const auto &[name, destination] :
+             {std::pair{"angleRadians", &a.angleRadians},
+              {"innerRadiusMm", &a.innerRadiusMm},
+              {"thicknessMm", &a.thicknessMm},
+              {"lengthMm", &a.lengthMm},
+              {"minimumStraightLengthMm", &a.minimumStraightLengthMm}}) {
+            const auto number = geometry.value(QLatin1String(name));
+            if (!number.isDouble()) {
+                return false;
+            }
+            *destination = number.toDouble();
+        }
+        const auto target = object.value(QStringLiteral("target"));
+        if (target.isObject()) {
+            const auto parameters = target.toObject();
+            const auto angle = parameters.value(QStringLiteral("angleRadians"));
+            const auto radius = parameters.value(QStringLiteral("innerRadiusMm"));
+            if (!angle.isDouble() || !radius.isDouble()) {
+                return false;
+            }
+            bend.target = core::BendTarget{angle.toDouble(), radius.toDouble()};
+        } else if (!target.isNull()) {
+            return false;
+        }
+        bends.push_back(std::move(bend));
+    }
+    return validBendPreparations(bends);
 }
 } // namespace
 ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_token stop,
@@ -68,9 +183,9 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
         return invalid("Unknown project format");
     }
     const auto version = root.value(QStringLiteral("version"));
-    if (!version.isDouble() || version.toDouble() != 1.0) {
+    if (!version.isDouble() || (version.toDouble() != 1.0 && version.toDouble() != 2.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format version is 1",
+                           "Supported project format versions are 1 and 2",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -110,6 +225,14 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (manual && rejected(*manual, {})) {
         return invalid("Thickness is outside the supported range");
     }
+    std::vector<BendPreparation> bends;
+    if (version.toDouble() == 2.0) {
+        if (!readBends(root.value(QStringLiteral("bends")), bends)) {
+            return invalid("Invalid saved bend preparations");
+        }
+    } else if (root.contains(QStringLiteral("bends"))) {
+        return invalid("Version 1 cannot contain bend preparations");
+    }
     const auto absolute = std::filesystem::absolute(path).lexically_normal();
     auto loaded = importer_.readBytes(decoded.decoded.toStdString(),
                                       absolute.parent_path() / nativePath(name), stop, progress);
@@ -120,18 +243,22 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (manual && rejected(*manual, document->metadata().thickness)) {
         return invalid("Saved thickness conflicts with embedded geometry");
     }
-    return OpenedProject{std::move(document), manual, absolute};
+    return OpenedProject{std::move(document), manual, absolute, std::move(bends)};
 }
 
 std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                               const Document &document,
                                               std::optional<double> manualThicknessMm,
+                                              const std::vector<BendPreparation> &bends,
                                               std::stop_token stop) const {
     if (qtPath(path.extension()).compare(QStringLiteral(".bend"), Qt::CaseInsensitive) != 0) {
         return "Project filename must end with .bend";
     }
     if (manualThicknessMm && rejected(*manualThicknessMm, document.metadata().thickness)) {
         return "Thickness conflicts with geometry";
+    }
+    if (!validBendPreparations(bends)) {
+        return "Invalid bend preparations";
     }
     const auto source = document.sourceStep();
     if (source.empty() || source.size() > cad::StepImporter::maximumSourceBytes) {
@@ -143,7 +270,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
     const QByteArray bytes(source.data(), static_cast<qsizetype>(source.size()));
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 1},
+        {QStringLiteral("version"), 2},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},
@@ -154,7 +281,8 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
         {QStringLiteral("parameters"),
          QJsonObject{{QStringLiteral("manualThicknessMm"), manualThicknessMm
                                                                ? QJsonValue(*manualThicknessMm)
-                                                               : QJsonValue(QJsonValue::Null)}}}};
+                                                               : QJsonValue(QJsonValue::Null)}}},
+        {QStringLiteral("bends"), bendsJson(bends)}};
     const auto encoded = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (stop.stop_requested()) {
         return "Save cancelled";

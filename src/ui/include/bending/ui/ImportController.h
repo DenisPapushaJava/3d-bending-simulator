@@ -24,6 +24,8 @@ class ImportController final : public QObject {
     void shutdown();
     application::ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
+    bool setBendReview(std::size_t recognizedIndex, application::BendReview review);
+    bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     void saveProject(std::filesystem::path path,
                      std::shared_ptr<const application::ProjectWriter> writer);
     [[nodiscard]] bool isSaving() const;

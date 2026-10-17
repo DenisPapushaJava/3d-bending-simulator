@@ -1,7 +1,9 @@
 #include "bending/application/DocumentSession.h"
 
+#include <algorithm>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 
 namespace {
@@ -13,6 +15,9 @@ void require(bool value, const char *message) {
 }
 class TestDocument final : public Document {
   public:
+    explicit TestDocument(BendAnalysis analysis = {}) {
+        metadata_.bendAnalysis = std::move(analysis);
+    }
     const DocumentMetadata &metadata() const noexcept override {
         return metadata_;
     }
@@ -126,12 +131,106 @@ void testProjectState() {
     analysis.evidence.clear();
     require(!suggestThickness(analysis), "Missing geometry invented a default thickness");
 }
+void testBendPreparation() {
+    BendAnalysis analysis;
+    analysis.status = BendRecognitionStatus::Completed;
+    analysis.bends = {
+        {{0, 0, 0}, {0, 0, 80}, std::numbers::pi / 2, 4, 2, 80, 1, 2, {3, 4, 5, 6}, false, 80},
+        {{100, 0, 0},
+         {100, 0, 80},
+         std::numbers::pi / 2,
+         4,
+         2,
+         80,
+         7,
+         8,
+         {9, 10, 11, 12},
+         false,
+         80}};
+    const auto document = std::make_shared<TestDocument>(analysis);
+    DocumentSession session;
+    session.complete(session.beginImport("part.step"), DocumentPtr(document));
+    const auto geometryRevision = session.revision();
+    const auto id = session.bend(0)->id;
+    const bending::core::BendTarget target{std::numbers::pi * 2 / 3, 5.5};
+    require(session.bends().size() == 2 && !session.modified() && !session.bend(0)->target,
+            "New measurements became confirmed targets");
+    require(!session.setBendTarget(0, target), "Unconfirmed zone accepted a target");
+    require(session.setBendReview(0, BendReview::Confirmed) && session.setBendTarget(0, target),
+            "Confirmed target not accepted");
+    require(session.setBendReview(1, BendReview::Excluded), "Zone not excluded");
+    const auto editRevision = session.editRevision();
+    require(session.setBendTarget(0, target) && session.editRevision() == editRevision,
+            "Unchanged target dirtied project again");
+    require(!session.setBendTarget(0, bending::core::BendTarget{0, 4}) &&
+                !session.setBendReview(99, BendReview::Confirmed) &&
+                !session.setBendReview(0, static_cast<BendReview>(99)) &&
+                session.editRevision() == editRevision,
+            "Invalid edits changed state");
+    require(session.document() == document && session.revision() == geometryRevision &&
+                session.document()->metadata().bendAnalysis.bends[0].innerRadiusMm == 4 &&
+                session.modified(),
+            "User target changed the CAD measurement");
+    require(!session.markSaved(editRevision - 1, "old.bend") && session.modified(),
+            "Old save cleared new bend edits");
+    auto entries = session.bends();
+    auto reordered = analysis;
+    std::reverse(reordered.bends.begin(), reordered.bends.end());
+    std::swap(reordered.bends[1].axisStart, reordered.bends[1].axisEnd);
+    reordered.bends[1].innerFace = 77;
+    reordered.bends[1].axisStart.x += 1.0e-6;
+    const auto reorderedDocument = std::make_shared<TestDocument>(reordered);
+    session.complete(session.beginImport("saved.bend"),
+                     OpenedProject{reorderedDocument, {}, "saved.bend", entries});
+    require(session.bend(1)->id == id && session.bend(1)->target == target &&
+                session.bend(0)->review == BendReview::Excluded && !session.modified(),
+            "Reordering/axis reversal/face renumbering lost user intent");
+    session.setBendReview(1, BendReview::Excluded);
+    require(!session.setBendTarget(1, {}) && session.bend(1)->target == target,
+            "Excluding a zone destroyed its retained target");
+    session.setBendReview(1, BendReview::Confirmed);
+    require(session.setBendTarget(1, {}) && !session.bend(1)->target, "Explicit reset failed");
+    auto invalid = entries;
+    invalid[1].id = invalid[0].id;
+    session.complete(session.beginImport("invalid.bend"),
+                     OpenedProject{document, {}, "invalid.bend", invalid});
+    require(session.error() && session.document() == reorderedDocument && session.modified(),
+            "Invalid project replaced current edits");
+    const auto active = session.beginImport("other.step");
+    require(!session.setBendReview(0, BendReview::Confirmed), "Edit accepted during import");
+    session.cancel();
+    require(!session.complete(active, DocumentPtr(document)), "Stale import replaced preparations");
+
+    auto ambiguous = analysis;
+    ambiguous.bends.push_back(ambiguous.bends[0]);
+    auto binding = restoreBendPreparations(ambiguous, entries);
+    require(!binding.byRecognizedBend[0] && !binding.byRecognizedBend[2] &&
+                binding.unresolved == std::vector<std::size_t>{0} && entries[0].target == target,
+            "Ambiguous match silently reassigned a saved target");
+    auto duplicate = std::vector<BendPreparation>{entries[0], entries[0]};
+    duplicate[1].id = "other-id";
+    binding = restoreBendPreparations(analysis, duplicate);
+    require(!binding.byRecognizedBend[0] && binding.unresolved.size() == 2,
+            "Two saved entries bound to the same zone");
+    auto changed = analysis;
+    changed.bends[0].axisStart.x += 10;
+    changed.bends[0].axisEnd.x += 10;
+    binding = restoreBendPreparations(changed, entries);
+    require(binding.unresolved == std::vector<std::size_t>{0} && binding.byRecognizedBend[0] &&
+                entries[0].target == target &&
+                entries[*binding.byRecognizedBend[0]].review == BendReview::Pending &&
+                !entries[*binding.byRecognizedBend[0]].target,
+            "Unmatched decision lost or applied to a new zone");
+    session.close();
+    require(session.bends().empty() && !session.bend(0), "Close retained preparations");
+}
 
 } // namespace
 int main() {
     try {
         testSession();
         testProjectState();
+        testBendPreparation();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

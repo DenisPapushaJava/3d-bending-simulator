@@ -33,6 +33,9 @@ class TestDocument final : public Document {
   public:
     explicit TestDocument(std::filesystem::path source) {
         data_.sourcePath = std::move(source);
+        data_.bendAnalysis.status = BendRecognitionStatus::Completed;
+        data_.bendAnalysis.bends = {
+            {{0, 0, 0}, {0, 0, 80}, 1.5, 4, 2, 80, 1, 2, {3, 4, 5, 6}, false, 80}};
     }
     const DocumentMetadata &metadata() const noexcept override {
         return data_;
@@ -71,6 +74,12 @@ class GatedImporter final : public DocumentImporter {
             return ImportError{ImportErrorCode::InvalidStep, "broken", {}};
         }
         progress(ImportPhase::Preparing);
+        if (path == "invalid-project.bend") {
+            return OpenedProject{std::make_shared<TestDocument>(path),
+                                 {},
+                                 path,
+                                 {{"invalid", {}, BendReview::Confirmed, {}}}};
+        }
         return DocumentPtr(std::make_shared<TestDocument>(path));
     }
     void reset() {
@@ -150,6 +159,12 @@ void testController() {
     require(controller.session().error()->code == ImportErrorCode::PresentationFailed &&
                 controller.session().revision() == 2,
             "Presentation failure was committed");
+    const auto beforeInvalid = presented.size();
+    controller.open("invalid-project.bend");
+    waitUntil(finished);
+    require(controller.session().error()->code == ImportErrorCode::InvalidProject &&
+                controller.session().document() == latest && presented.size() == beforeInvalid,
+            "Invalid saved preparations reached presenter or replaced scene");
     importer->reset();
     controller.open("slow.step");
     waitUntil([&] { return importer->entered.load(); });
@@ -182,12 +197,15 @@ void testShutdown() {
 class GatedWriter final : public ProjectWriter {
   public:
     std::optional<std::string> save(const std::filesystem::path &path, const Document &,
-                                    std::optional<double>, std::stop_token stop) const override {
+                                    std::optional<double>,
+                                    const std::vector<BendPreparation> &bends,
+                                    std::stop_token stop) const override {
         require(QThread::currentThread() != QCoreApplication::instance()->thread(),
                 "Save ran in GUI thread");
         if (path == "failed.bend") {
             return "disk error";
         }
+        captured = bends;
         entered = true;
         while (!stop.stop_requested()) {
             QThread::msleep(1);
@@ -195,6 +213,7 @@ class GatedWriter final : public ProjectWriter {
         return {}; // Emulate a completed atomic rename racing with cancellation.
     }
     mutable std::atomic<bool> entered{false};
+    mutable std::vector<BendPreparation> captured;
 };
 void testSaveRace() {
     const auto importer = std::make_shared<GatedImporter>();
@@ -207,12 +226,19 @@ void testSaveRace() {
     waitUntil(finished);
     require(controller.setManualThickness(2.0) == ThicknessValidation::Unverified,
             "Manual edit failed");
+    require(controller.setBendReview(0, BendReview::Confirmed) &&
+                controller.setBendTarget(0, bending::core::BendTarget{2, 5}),
+            "Bend preparation failed");
     controller.saveProject("failed.bend", writer);
     waitUntil(finished);
     require(!controller.saveError().isEmpty() && controller.session().modified(),
             "Failed write cleared unsaved edits");
     controller.saveProject("old.bend", writer);
     waitUntil([&] { return writer->entered.load(); });
+    require(writer->captured.size() == 1 && writer->captured[0].review == BendReview::Confirmed &&
+                writer->captured[0].target == bending::core::BendTarget{2, 5} &&
+                !controller.setBendReview(0, BendReview::Excluded),
+            "Writer did not receive immutable preparation snapshot or allowed edits during save");
     int beats = 0;
     QTimer heartbeat;
     QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++beats; });
@@ -222,7 +248,9 @@ void testSaveRace() {
     waitUntil(finished);
     require(controller.session().document()->metadata().sourcePath == "new.step" &&
                 controller.session().projectPath().empty() &&
-                !controller.session().manualThicknessMm(),
+                !controller.session().manualThicknessMm() &&
+                controller.session().bend(0)->review == BendReview::Pending &&
+                !controller.session().bend(0)->target,
             "Late save rebound a new document to an old project");
     writer->entered = false;
     controller.saveProject("closing.bend", writer);

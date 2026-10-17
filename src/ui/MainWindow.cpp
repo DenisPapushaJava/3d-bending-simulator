@@ -11,6 +11,8 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFormLayout>
+#include <QGroupBox>
 #include <QLabel>
 #include <QListView>
 #include <QListWidget>
@@ -153,6 +155,17 @@ QString diagnosticsText(const std::vector<ImportDiagnostic> &diagnostics) {
     }
     return lines.join(QLatin1Char('\n'));
 }
+QString reviewText(BendReview review) {
+    switch (review) {
+    case BendReview::Pending:
+        return QStringLiteral("Не проверен");
+    case BendReview::Confirmed:
+        return QStringLiteral("Подтверждён");
+    case BendReview::Excluded:
+        return QStringLiteral("Исключён");
+    }
+    return {};
+}
 } // namespace
 
 class MainWindow::Impl {
@@ -206,8 +219,10 @@ class MainWindow::Impl {
             shownBendRevision = session.revision();
             fillBends();
         }
-        if (!shownEditRevision || *shownEditRevision != session.editRevision()) {
-            shownEditRevision = session.editRevision();
+        if (shownThicknessRevision != session.revision() ||
+            shownManualThickness != session.manualThicknessMm()) {
+            shownThicknessRevision = session.revision();
+            shownManualThickness = session.manualThicknessMm();
             fillThicknessControls();
         }
         const bool editable = document && !controller->hasWork();
@@ -274,6 +289,7 @@ class MainWindow::Impl {
             projectState->clear();
         }
         bendList->setEnabled(document && !controller->hasWork());
+        updateBendReviews();
         showSelectedBend(false);
         camera->setEnabled(viewer->isReady() && document != nullptr);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
@@ -426,6 +442,13 @@ class MainWindow::Impl {
             bendSummary->setText(QStringLiteral("Сгибы не анализировались."));
             break;
         }
+        if (!controller->session().bendBindings().unresolved.empty()) {
+            bendSummary->setText(
+                bendSummary->text() +
+                QStringLiteral(
+                    "\nНе привязано сохранённых записей: %1. Подробности на вкладке «Сгиб».")
+                    .arg(controller->session().bendBindings().unresolved.size()));
+        }
         for (std::size_t i = 0; i < analysis.bends.size(); ++i) {
             const auto &bend = analysis.bends[i];
             auto *item =
@@ -437,18 +460,67 @@ class MainWindow::Impl {
                 item->setText(item->text() + QStringLiteral(" · подрезка"));
             }
             item->setToolTip(item->text());
+            item->setData(item->text(), Qt::UserRole);
             item->setEditable(false);
             bendModel->appendRow(item);
         }
+    }
+    void updateBendReviews() {
+        const auto &session = controller->session();
+        for (int row = 0; row < bendModel->rowCount(); ++row) {
+            auto *item = bendModel->item(row);
+            const auto *entry = session.bend(static_cast<std::size_t>(row));
+            const auto status =
+                entry ? reviewText(entry->review) : QStringLiteral("Нет однозначной привязки");
+            item->setText(item->data(Qt::UserRole).toString() + QLatin1Char('\n') + status);
+            item->setToolTip(item->text());
+        }
+        QStringList unresolved;
+        for (const auto index : session.bendBindings().unresolved) {
+            const auto &entry = session.bends()[index];
+            auto line = text(entry.id) + QStringLiteral(" · ") + reviewText(entry.review);
+            if (entry.target) {
+                line += QStringLiteral(" · задание %1° / R%2 мм")
+                            .arg(number(entry.target->angleRadians * 180.0 / std::numbers::pi),
+                                 number(entry.target->innerRadiusMm));
+            }
+            unresolved.append(line);
+        }
+        bendBindingWarning->setVisible(!unresolved.isEmpty());
+        bendBindingWarning->setText(
+            QStringLiteral("Не удалось однозначно привязать сохранённые записи. Они сохранены, "
+                           "но не применяются к найденным зонам:\n%1")
+                .arg(unresolved.join(QLatin1Char('\n'))));
+    }
+    void updateTargetButtons() {
+        const auto row = bendList->currentIndex().row();
+        const auto *entry =
+            row < 0 ? nullptr : controller->session().bend(static_cast<std::size_t>(row));
+        const bool editable =
+            entry && entry->review == BendReview::Confirmed && !controller->hasWork();
+        targetGroup->setEnabled(editable);
+        applyBendTarget->setEnabled(
+            editable && core::validBendTarget({targetAngle->value() * std::numbers::pi / 180.0,
+                                               targetRadius->value()}));
+        resetBendTarget->setEnabled(editable && entry->target.has_value());
     }
     void showSelectedBend(bool highlight) {
         const auto &session = controller->session();
         const auto &document = session.document();
         const auto row = bendList->currentIndex().row();
+        const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
+        bendReview->setEnabled(entry && !controller->hasWork());
+        updateTargetButtons();
         if (!document || row < 0 ||
             static_cast<std::size_t>(row) >= document->metadata().bendAnalysis.bends.size()) {
             bendProperties->setText(QStringLiteral(
                 "Выберите найденный сгиб слева, чтобы посмотреть параметры и поверхности."));
+            bendTargetStatus->setText(QStringLiteral("Задание сгиба не выбрано."));
+            const QSignalBlocker block(bendReview);
+            bendReview->setCurrentIndex(-1);
+            targetAngle->setValue(90.0);
+            targetRadius->setValue(0.0);
+            shownBendEditRevision.reset();
             return;
         }
         const auto &bend = document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)];
@@ -462,7 +534,7 @@ class MainWindow::Impl {
                 "B%1 · измерено по CAD\nУгол поворота полок: %2°\nВнутренний радиус: %3 мм\n"
                 "Толщина зоны: %4 мм\nДлина сгиба: %5 мм\n\nОсь, мм:\n(%6; %7; %8) →\n(%9; %10; "
                 "%11)\n\n"
-                "Это параметры загруженной формы. Операция гибки ещё не задана.")
+                "Это неизменяемые измерения загруженной формы.")
                 .arg(row + 1, 2, 10, QLatin1Char('0'))
                 .arg(number(bend.angleRadians * 180.0 / std::numbers::pi),
                      number(bend.innerRadiusMm), number(bend.thicknessMm), number(bend.lengthMm),
@@ -484,6 +556,28 @@ class MainWindow::Impl {
             description += QStringLiteral("\nРучная толщина отличается от толщины этой зоны.");
         }
         bendProperties->setText(description);
+        if (highlight || shownBendEditRevision != session.editRevision() || shownTargetRow != row) {
+            shownBendEditRevision = session.editRevision();
+            shownTargetRow = row;
+            const QSignalBlocker block(bendReview);
+            bendReview->setCurrentIndex(entry ? static_cast<int>(entry->review) : -1);
+            const auto target = entry && entry->target
+                                    ? *entry->target
+                                    : core::BendTarget{bend.angleRadians, bend.innerRadiusMm};
+            targetAngle->setValue(target.angleRadians * 180.0 / std::numbers::pi);
+            targetRadius->setValue(target.innerRadiusMm);
+        }
+        bendTargetStatus->setText(
+            !entry ? QStringLiteral(
+                         "Сохранённые записи не привязаны к этой зоне. Редактирование недоступно.")
+            : entry->target
+                ? QStringLiteral("Задание применено: %1° · R%2 мм%3")
+                      .arg(number(entry->target->angleRadians * 180.0 / std::numbers::pi),
+                           number(entry->target->innerRadiusMm),
+                           entry->review == BendReview::Confirmed ? QString{}
+                                                                  : QStringLiteral(" · не активно"))
+                : QStringLiteral("Задание не задано. В полях предложены измерения CAD."));
+        updateTargetButtons();
         if (highlight && !controller->hasWork()) {
             viewer->highlightBend(bend, session.revision());
             propertyTabs->setCurrentIndex(1);
@@ -527,6 +621,16 @@ class MainWindow::Impl {
     QStandardItemModel *bendModel = nullptr;
     QLabel *bendSummary = nullptr;
     QLabel *bendProperties = nullptr;
+    QLabel *bendBindingWarning = nullptr;
+    QComboBox *bendReview = nullptr;
+    QGroupBox *targetGroup = nullptr;
+    QLabel *bendTargetStatus = nullptr;
+    QDoubleSpinBox *targetAngle = nullptr;
+    QDoubleSpinBox *targetRadius = nullptr;
+    QPushButton *applyBendTarget = nullptr;
+    QPushButton *resetBendTarget = nullptr;
+    std::optional<std::uint64_t> shownBendEditRevision;
+    int shownTargetRow = -1;
     QTabWidget *propertyTabs = nullptr;
     std::optional<std::uint64_t> shownBendRevision;
     QLabel *properties = nullptr;
@@ -550,7 +654,8 @@ class MainWindow::Impl {
     QProgressBar *progress = nullptr;
     QString title;
     std::optional<std::uint64_t> shownRevision;
-    std::optional<std::uint64_t> shownEditRevision;
+    std::optional<std::uint64_t> shownThicknessRevision;
+    std::optional<double> shownManualThickness;
 };
 
 MainWindow::MainWindow(RuntimeInfo runtime,
@@ -669,8 +774,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     leftLayout->addWidget(impl_->project);
     impl_->bendSummary = new QLabel(leftPanel);
     impl_->bendSummary->setObjectName(QStringLiteral("bendSummary"));
-    impl_->bendSummary->setWordWrap(true);
     impl_->bendSummary->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    impl_->bendSummary->setWordWrap(true);
     impl_->bendSummary->setTextFormat(Qt::PlainText);
     leftLayout->addWidget(impl_->bendSummary);
     impl_->bendList = new QListView(leftPanel);
@@ -758,16 +863,105 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     scroll->setWidgetResizable(true);
     scroll->setMinimumWidth(300);
     scroll->setWidget(panel);
-    impl_->bendProperties = new QLabel(this);
+    auto *bendPanel = new QWidget(this);
+    auto *bendLayout = new QVBoxLayout(bendPanel);
+    impl_->bendBindingWarning = new QLabel(bendPanel);
+    impl_->bendBindingWarning->setObjectName(QStringLiteral("bendBindingWarning"));
+    impl_->bendBindingWarning->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    impl_->bendBindingWarning->setWordWrap(true);
+    impl_->bendBindingWarning->setTextFormat(Qt::PlainText);
+    impl_->bendBindingWarning->setStyleSheet(QStringLiteral("color:#9D2828;"));
+    bendLayout->addWidget(impl_->bendBindingWarning);
+    impl_->bendProperties = new QLabel(bendPanel);
     impl_->bendProperties->setObjectName(QStringLiteral("bendProperties"));
+    impl_->bendProperties->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     impl_->bendProperties->setWordWrap(true);
     impl_->bendProperties->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     impl_->bendProperties->setTextFormat(Qt::PlainText);
     impl_->bendProperties->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    impl_->bendProperties->setMargin(16);
+    bendLayout->addWidget(impl_->bendProperties);
+    bendLayout->addWidget(new QLabel(QStringLiteral("Решение по зоне сгиба"), bendPanel));
+    impl_->bendReview = new QComboBox(bendPanel);
+    impl_->bendReview->setObjectName(QStringLiteral("bendReview"));
+    impl_->bendReview->setAccessibleName(QStringLiteral("Подтверждение зоны сгиба"));
+    for (const auto review : {BendReview::Pending, BendReview::Confirmed, BendReview::Excluded}) {
+        impl_->bendReview->addItem(reviewText(review));
+    }
+    bendLayout->addWidget(impl_->bendReview);
+    connect(impl_->bendReview, &QComboBox::activated, this, [this](int index) {
+        const auto row = impl_->bendList->currentIndex().row();
+        if (row >= 0 && index >= 0 && index <= 2) {
+            impl_->controller->setBendReview(static_cast<std::size_t>(row),
+                                             static_cast<BendReview>(index));
+        }
+    });
+    impl_->bendTargetStatus = new QLabel(bendPanel);
+    impl_->bendTargetStatus->setObjectName(QStringLiteral("bendTargetStatus"));
+    impl_->bendTargetStatus->setTextFormat(Qt::PlainText);
+    impl_->bendTargetStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    impl_->bendTargetStatus->setWordWrap(true);
+    bendLayout->addWidget(impl_->bendTargetStatus);
+    impl_->targetGroup = new QGroupBox(QStringLiteral("Целевые параметры сгиба"), bendPanel);
+    auto *targetLayout = new QFormLayout(impl_->targetGroup);
+    targetLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    targetLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    impl_->targetAngle = new QDoubleSpinBox(impl_->targetGroup);
+    impl_->targetAngle->setObjectName(QStringLiteral("bendTargetAngle"));
+    impl_->targetAngle->setAccessibleName(QStringLiteral("Целевой угол поворота в градусах"));
+    impl_->targetAngle->setDecimals(6);
+    impl_->targetAngle->setRange(1.0, 179.0);
+    impl_->targetAngle->setSuffix(QStringLiteral("°"));
+    targetLayout->addRow(QStringLiteral("Поворот от плоскости:"), impl_->targetAngle);
+    impl_->targetRadius = new QDoubleSpinBox(impl_->targetGroup);
+    impl_->targetRadius->setObjectName(QStringLiteral("bendTargetRadius"));
+    impl_->targetRadius->setAccessibleName(
+        QStringLiteral("Целевой внутренний радиус в миллиметрах"));
+    impl_->targetRadius->setDecimals(6);
+    impl_->targetRadius->setRange(0.0, 1000000.0);
+    impl_->targetRadius->setSuffix(QStringLiteral(" мм"));
+    targetLayout->addRow(QStringLiteral("Внутренний радиус:"), impl_->targetRadius);
+    auto *targetHint = new QLabel(
+        QStringLiteral("0° — плоский лист, 90° — прямой сгиб. Поддерживаемое задание: 1–179°. "
+                       "Это целевая форма, не угол хода пресса.\n\n"
+                       "Подтверждение зоны разрешает применить задание. Инструмент, направление, "
+                       "развёртка и движение будут заданы на следующем этапе."),
+        bendPanel);
+    targetHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    targetHint->setWordWrap(true);
+    impl_->applyBendTarget =
+        new QPushButton(QStringLiteral("Применить задание"), impl_->targetGroup);
+    impl_->applyBendTarget->setObjectName(QStringLiteral("applyBendTarget"));
+    impl_->resetBendTarget =
+        new QPushButton(QStringLiteral("Сбросить задание"), impl_->targetGroup);
+    impl_->resetBendTarget->setObjectName(QStringLiteral("resetBendTarget"));
+    targetLayout->addRow(impl_->applyBendTarget);
+    targetLayout->addRow(impl_->resetBendTarget);
+    bendLayout->addWidget(impl_->targetGroup);
+    bendLayout->addWidget(targetHint);
+    bendLayout->addStretch();
+    connect(impl_->targetAngle, &QDoubleSpinBox::valueChanged, this,
+            [this] { impl_->updateTargetButtons(); });
+    connect(impl_->targetRadius, &QDoubleSpinBox::valueChanged, this,
+            [this] { impl_->updateTargetButtons(); });
+    connect(impl_->applyBendTarget, &QPushButton::clicked, this, [this] {
+        const auto row = impl_->bendList->currentIndex().row();
+        if (row >= 0) {
+            impl_->controller->setBendTarget(
+                static_cast<std::size_t>(row),
+                core::BendTarget{impl_->targetAngle->value() * std::numbers::pi / 180.0,
+                                 impl_->targetRadius->value()});
+        }
+    });
+    connect(impl_->resetBendTarget, &QPushButton::clicked, this, [this] {
+        const auto row = impl_->bendList->currentIndex().row();
+        if (row >= 0) {
+            impl_->controller->setBendTarget(static_cast<std::size_t>(row), {});
+        }
+    });
     auto *bendScroll = new QScrollArea(this);
     bendScroll->setWidgetResizable(true);
-    bendScroll->setWidget(impl_->bendProperties);
+    bendScroll->setMinimumWidth(300);
+    bendScroll->setWidget(bendPanel);
     impl_->propertyTabs = new QTabWidget(this);
     impl_->propertyTabs->setObjectName(QStringLiteral("propertiesTabs"));
     impl_->propertyTabs->addTab(scroll, QStringLiteral("Деталь"));

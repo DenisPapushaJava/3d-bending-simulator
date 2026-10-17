@@ -11,10 +11,11 @@ class ProjectFiles final : public application::DocumentImporter, public applicat
     [[nodiscard]] application::ImportResult
     load(const std::filesystem::path &path, std::stop_token stop,
          const application::ImportProgress &progress) const override;
-    [[nodiscard]] std::optional<std::string> save(const std::filesystem::path &path,
-                                                  const application::Document &document,
-                                                  std::optional<double> manualThicknessMm,
-                                                  std::stop_token stop) const override;
+    [[nodiscard]] std::optional<std::string>
+    save(const std::filesystem::path &path, const application::Document &document,
+         std::optional<double> manualThicknessMm,
+         const std::vector<application::BendPreparation> &bends,
+         std::stop_token stop) const override;
 
   private:
     cad::StepImporter importer_;
