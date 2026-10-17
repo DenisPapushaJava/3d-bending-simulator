@@ -22,6 +22,8 @@ Installed copyright notices are under `/usr/share/doc/` in the respective distri
 Windows bundles use shared libraries and keep their DLLs replaceable. No third-party source was
 copied into original project code. OCCT optional FreeType, TBB, VTK and FreeImage features are off
 for the foundation build. Enabling them requires updating this inventory.
+The foundation bundle omits unused SVG/image plugins, Mesa software OpenGL and the system D3D
+compiler. Packaging rejects additional Qt modules until their source/license inventory is updated.
 
 The matching `dependency-sources` companion contains Qt base sources including its bundled
 third-party license texts, the OCCT sources as built, and the vcpkg port/patches. Windows packaging

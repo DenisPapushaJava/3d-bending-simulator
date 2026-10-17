@@ -39,7 +39,13 @@ def main():
     deploy = args.qt_root / "bin/windeployqt.exe"
     executable = stage / "bin/3d-bending-simulator.exe"
     subprocess.run([str(deploy), "--release", "--no-translations", "--no-compiler-runtime",
+                    "--no-opengl-sw", "--no-system-d3d-compiler",
+                    "--skip-plugin-types", "iconengines,imageformats",
                     "--dir", str(stage / "bin"), str(executable)], check=True)
+    inventoried_qt = {"Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"}
+    unexpected_qt = {dll.name for dll in (stage / "bin").glob("Qt6*.dll")} - inventoried_qt
+    if unexpected_qt:
+        raise RuntimeError(f"Update the source/license inventory before bundling {unexpected_qt}")
     # Lets the packaged startup check run headlessly; qwindows is also deployed above.
     shutil.copy2(args.qt_root / "plugins/platforms/qoffscreen.dll", stage / "bin/platforms")
 
