@@ -39,8 +39,8 @@ def main():
     deploy = args.qt_root / "bin/windeployqt.exe"
     executable = stage / "bin/3d-bending-simulator.exe"
     subprocess.run([str(deploy), "--release", "--no-translations", "--no-compiler-runtime",
-                    "--no-opengl-sw", "--no-system-d3d-compiler",
-                    "--skip-plugin-types", "iconengines,imageformats",
+                    "--no-opengl-sw", "--no-system-d3d-compiler", "--no-system-dxc-compiler",
+                    "--skip-plugin-types", "iconengines,imageformats,generic",
                     "--dir", str(stage / "bin"), str(executable)], check=True)
     inventoried_qt = {"Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"}
     unexpected_qt = {dll.name for dll in (stage / "bin").glob("Qt6*.dll")} - inventoried_qt
@@ -108,7 +108,7 @@ def main():
         subprocess.run(["git", "-C", str(occt_sources), "apply", "--ignore-whitespace",
                         str((port / patch).resolve())], check=True)
     shutil.rmtree(occt_sources / ".git")
-    for path in ["vcpkg.json", "CMakePresets.json", "THIRD_PARTY_NOTICES.md"]:
+    for path in ["vcpkg.json", "CMakePresets.json", "THIRD_PARTY_NOTICES.md", "LICENSE"]:
         shutil.copy2(ROOT / path, sources / path)
     shutil.copytree(ROOT / "cmake/triplets", sources / "triplets", dirs_exist_ok=True)
     (sources / "README.txt").write_text(

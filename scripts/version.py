@@ -2,7 +2,6 @@
 """Single release version, tag validation, and GitHub Actions outputs. No dependencies."""
 
 import argparse
-import json
 from pathlib import Path
 import re
 import sys
@@ -27,9 +26,6 @@ def main():
     args = parser.parse_args()
     try:
         info = parse_version((ROOT / "VERSION").read_text(encoding="utf-8").strip())
-        manifest = json.loads((ROOT / "vcpkg.json").read_text(encoding="utf-8"))
-        if manifest["version-string"] != info["version"]:
-            raise ValueError("vcpkg.json version-string must equal VERSION")
         if args.check_tag and args.check_tag != info["tag"]:
             raise ValueError(f"Tag {args.check_tag!r} does not match VERSION ({info['tag']})")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

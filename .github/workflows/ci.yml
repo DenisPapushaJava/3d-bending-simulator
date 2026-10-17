@@ -91,7 +91,10 @@ jobs:
         with:
           path: .cache/vcpkg
           key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}-msvc-${{ steps.compiler.outputs.version }}
-          restore-keys: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
+          # vcpkg checks each package ABI before reuse, including compiler and port inputs.
+          restore-keys: |
+            vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
+            vcpkg-windows-2022-
       - name: Configure Linux
         if: runner.os == 'Linux'
         run: cmake --preset release

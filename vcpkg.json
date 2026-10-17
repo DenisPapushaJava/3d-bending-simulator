@@ -1,6 +1,5 @@
 {
   "name": "3d-bending-simulator",
-  "version-string": "2026.1.0-alpha.1",
   "builtin-baseline": "256310531c1e57ee83f8ac01f7bea7c1e56630f5",
   "dependencies": [ { "name": "opencascade", "default-features": false } ]
 }
