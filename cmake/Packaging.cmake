@@ -7,6 +7,8 @@ set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${BENDING_VERSION}-linux-x86_
 set(CPACK_GENERATOR "DEB")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+# Platform plugins are loaded dynamically and are invisible to dpkg-shlibdeps.
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins")
 set(CPACK_DEBIAN_PACKAGE_SECTION "science")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "deniapapusha <denispapushajava@gmail.com>")
 string(REPLACE "-" "~" CPACK_DEBIAN_PACKAGE_VERSION "${BENDING_VERSION}")

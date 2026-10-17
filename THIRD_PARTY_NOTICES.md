@@ -4,8 +4,10 @@ The project license applies to original project code, not to Qt, OCCT or their d
 
 ## Linux packages
 
-The Ubuntu 24.04 package links dynamically to Qt 6.4.2 and OCCT 7.6.3 supplied by Ubuntu.
-They are dependencies of the `.deb`, not copied into it. Their license notices, source packages
+The Ubuntu 24.04 build uses Qt 6.4.2 and OCCT 7.6.3 supplied by Ubuntu.
+The initial window currently needs Qt at runtime; OCCT is exercised by the separate kernel test.
+The `.deb` records the actual runtime dependencies with dpkg-shlibdeps, not a hand-written list.
+System libraries are not copied into it. Their license notices, source packages
 and modifications are distributed through Ubuntu (`apt source qt6-base`, `apt source opencascade`).
 Installed copyright notices are under `/usr/share/doc/` in the respective distribution packages.
 
