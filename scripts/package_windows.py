@@ -78,6 +78,8 @@ def main():
 
     port = args.vcpkg_root / "ports/opencascade"
     shutil.copytree(port, sources / "vcpkg-port", dirs_exist_ok=True)
+    shutil.copy2(args.vcpkg_root / "LICENSE.txt", sources / "vcpkg-LICENSE.txt")
+    shutil.copy2(args.vcpkg_root / "LICENSE.txt", notices / "vcpkg-LICENSE.txt")
     installed = ROOT / "vcpkg_installed/x64-windows-release/share/opencascade/copyright"
     shutil.copy2(installed, notices / "OCCT-copyright.txt")
     # A binary-cache hit does not populate vcpkg buildtrees. Reproduce sources independently.
