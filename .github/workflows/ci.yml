@@ -160,10 +160,11 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           IS_PRERELEASE: ${{ needs.quality.outputs.prerelease }}
         run: |
+          python3 scripts/version.py --release-notes .release-notes.md
           flags=()
           if [ "$IS_PRERELEASE" = true ]; then flags+=(--prerelease); fi
           if ! gh release view "$RELEASE_TAG" --json isDraft > /dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft "${flags[@]}" --title "3D Bending Simulator $RELEASE_TAG" --notes-file CHANGELOG.md
+            gh release create "$RELEASE_TAG" --verify-tag --draft "${flags[@]}" --title "3D Bending Simulator $RELEASE_TAG" --notes-file .release-notes.md
           fi
           test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
           gh release upload "$RELEASE_TAG" release-assets/* --clobber

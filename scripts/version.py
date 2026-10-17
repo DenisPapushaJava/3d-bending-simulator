@@ -23,6 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-tag", default="")
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--release-notes", type=Path)
     args = parser.parse_args()
     try:
         info = parse_version((ROOT / "VERSION").read_text(encoding="utf-8").strip())
@@ -31,6 +32,15 @@ def main():
             raise ValueError("vcpkg.json version-string must equal VERSION")
         if args.check_tag and args.check_tag != info["tag"]:
             raise ValueError(f"Tag {args.check_tag!r} does not match VERSION ({info['tag']})")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        marker = f"\n## {info['version']}\n"
+        if marker not in changelog:
+            raise ValueError("CHANGELOG.md must contain a section for VERSION")
+        notes = changelog.split(marker, 1)[1].split("\n## ", 1)[0].strip()
+        if not notes:
+            raise ValueError("Release notes must not be empty")
+        if args.release_notes:
+            args.release_notes.write_text(notes + "\n", encoding="utf-8")
         if args.github_output:
             with args.github_output.open("a", encoding="utf-8") as output:
                 for key, value in info.items():

@@ -16,6 +16,8 @@ int main() {
                 "Stable bend IDs must survive moving earlier");
         require(!sequence.move(1, 1), "An unchanged order must preserve validation results");
         require(sequence.move(1, 3) == 1, "Moving later must return the affected suffix");
+        require(sequence.bendIds() == std::vector<std::string>({"B01", "B03", "B04", "B02"}),
+                "Moving later must preserve the order of the other bends");
         const auto before = sequence.bendIds();
         bool rejected = false;
         try {
