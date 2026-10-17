@@ -55,6 +55,9 @@ if(BENDING_BUILD_APP)
 
     qt_add_executable(bending_simulator src/app/main.cpp src/ui/MainWindow.cpp)
     set_target_properties(bending_simulator PROPERTIES OUTPUT_NAME "3d-bending-simulator")
+    if(WIN32)
+        set_target_properties(bending_simulator PROPERTIES WIN32_EXECUTABLE TRUE)
+    endif()
     target_link_libraries(bending_simulator PRIVATE
         bending_core bending_cad bending_viewer bending_options Qt6::Widgets)
     install(TARGETS bending_simulator RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

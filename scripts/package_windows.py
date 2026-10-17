@@ -13,6 +13,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 QT_VERSION = "6.8.3"
+QT_SOURCE_SHA256 = "56001b905601bb9023d399f3ba780d7fa940f3e4861e496a7c490331f49e0b80"
 
 
 def archive_tree(output, folder):
@@ -47,10 +48,8 @@ def main():
     qt_archive = sources / f"qtbase-everywhere-src-{QT_VERSION}.tar.xz"
     qt_url = f"https://download.qt.io/archive/qt/6.8/{QT_VERSION}/submodules/{qt_archive.name}"
     urllib.request.urlretrieve(qt_url, qt_archive)
-    with urllib.request.urlopen(qt_url + ".sha256") as response:
-        expected = response.read().decode().split()[0]
     actual = hashlib.sha256(qt_archive.read_bytes()).hexdigest()
-    if actual != expected:
+    if actual != QT_SOURCE_SHA256:
         raise RuntimeError("Qt source archive checksum mismatch")
 
     notices = stage / "share/licenses"
