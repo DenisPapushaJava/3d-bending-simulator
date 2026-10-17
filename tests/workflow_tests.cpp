@@ -158,6 +158,10 @@ void testWorkflow(bool graphics) {
         require(faceProperties->text().contains(QStringLiteral("Площадь:")) &&
                     faceProperties->text().contains(QStringLiteral("мм²")),
                 "Selected face properties are missing");
+        waitUntil([&] {
+            return faceProperties->height() >=
+                   faceProperties->heightForWidth(faceProperties->width());
+        });
         QCoreApplication::processEvents();
         if (const auto path = qEnvironmentVariable("BENDING_WORKFLOW_SNAPSHOT"); !path.isEmpty()) {
             require(QDir().mkpath(QFileInfo(path).absolutePath()),
