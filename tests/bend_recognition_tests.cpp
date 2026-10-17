@@ -25,7 +25,7 @@ void require(bool value, const char *message) {
         throw std::runtime_error(message);
     }
 }
-void near(double a, double b, double tolerance, const char *message) {
+void requireNear(double a, double b, double tolerance, const char *message) {
     require(std::isfinite(a) && std::abs(a - b) <= tolerance, message);
 }
 struct Temporary {
@@ -68,13 +68,14 @@ void test(const std::filesystem::path &directory) {
                   << result.unrecognizedCylindricalFaces << " unmatched cylinders\n";
         require(result.bends.size() == expected, "Unexpected bend count");
         for (const auto &bend : result.bends) {
-            near(bend.angleRadians, angle, 1.0e-6, "Wrong bend angle");
-            near(bend.innerRadiusMm, 4.0, 1.0e-5, "Wrong inner radius");
-            near(bend.thicknessMm, 2.0, 1.0e-5, "Wrong bend thickness");
-            near(bend.lengthMm, 80.0, 1.0e-5, "Wrong bend length");
-            near(std::hypot(bend.axisEnd.x - bend.axisStart.x, bend.axisEnd.y - bend.axisStart.y,
-                            bend.axisEnd.z - bend.axisStart.z),
-                 80.0, 1.0e-5, "Wrong axis endpoints");
+            requireNear(bend.angleRadians, angle, 1.0e-6, "Wrong bend angle");
+            requireNear(bend.innerRadiusMm, 4.0, 1.0e-5, "Wrong inner radius");
+            requireNear(bend.thicknessMm, 2.0, 1.0e-5, "Wrong bend thickness");
+            requireNear(bend.lengthMm, 80.0, 1.0e-5, "Wrong bend length");
+            requireNear(std::hypot(bend.axisEnd.x - bend.axisStart.x,
+                                   bend.axisEnd.y - bend.axisStart.y,
+                                   bend.axisEnd.z - bend.axisStart.z),
+                        80.0, 1.0e-5, "Wrong axis endpoints");
             for (const auto i : bend.flangeFaces) {
                 require(i > 0 && i <= document->faces().size(), "Bad flange reference");
                 require(document->faces()[i - 1].surface == application::SurfaceKind::Plane,
