@@ -1,4 +1,5 @@
 #include "bending/viewer/ViewerWidget.h"
+#include "bending/cad/occt/DocumentAccess.h"
 
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
@@ -16,8 +17,6 @@
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 
-#include <QCoreApplication>
-#include <QDir>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QLabel>
@@ -35,7 +34,12 @@
 namespace bending::viewer {
 namespace {
 
-// This primitive belongs to the rendering spike. It is not an imported/project document.
+QString failureText(const Standard_Failure &error) {
+    const auto *message = error.GetMessageString();
+    return message && *message ? QString::fromUtf8(message)
+                               : QStringLiteral("Ошибка отображения OCCT");
+}
+
 class OcctCanvas final : public QWidget {
   public:
     explicit OcctCanvas(QWidget *parent) : QWidget(parent) {
@@ -53,13 +57,75 @@ class OcctCanvas final : public QWidget {
 
     std::function<void(const QString &)> onError;
     std::function<void()> onReady;
-    std::function<void(const QString &)> onSelection;
+    std::function<void(quint64, int)> onSelection;
 
     bool ready() const {
         return ready_;
     }
 
+    QString present(const TopoDS_Shape &shape, application::DocumentPtr document, quint64 revision,
+                    bool diagnostic = false) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        Handle(AIS_Shape) candidate;
+        if (ready_) {
+            try {
+                candidate = new AIS_Shape(shape);
+                candidate->Attributes()->SetFaceBoundaryDraw(true);
+                candidate->Attributes()->SetAutoTriangulation(diagnostic);
+                context_->SetColor(candidate, Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
+                                   false);
+                context_->Display(candidate, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE),
+                                  false);
+                if (!presentation_.IsNull()) {
+                    context_->Remove(presentation_, false);
+                }
+                view_->SetProj(V3d_XposYnegZpos);
+                view_->FitAll(0.1, false);
+                view_->ZFitAll();
+                context_->ClearSelected(false);
+                view_->Redraw();
+            } catch (const Standard_Failure &error) {
+                restore(candidate);
+                return failureText(error);
+            } catch (const std::exception &error) {
+                restore(candidate);
+                return QString::fromUtf8(error.what());
+            }
+        }
+        presentation_ = candidate;
+        shape_ = shape;
+        faces_ = std::move(faces);
+        document_ = std::move(document);
+        revision_ = revision;
+        diagnostic_ = diagnostic;
+        if (onSelection) {
+            onSelection(revision_, 0);
+        }
+        return {};
+    }
+
+    void clearDocument(quint64 revision) {
+        guarded([&] {
+            context_->RemoveAll(false);
+            context_->ClearSelected(false);
+            view_->Redraw();
+        });
+        presentation_.Nullify();
+        shape_.Nullify();
+        faces_.Clear();
+        document_.reset();
+        revision_ = revision;
+        diagnostic_ = false;
+        if (onSelection) {
+            onSelection(revision_, 0);
+        }
+    }
+
     void fitAll() {
+        if (shape_.IsNull()) {
+            return;
+        }
         guarded([&] {
             view_->FitAll(0.1, false);
             view_->ZFitAll();
@@ -142,13 +208,12 @@ class OcctCanvas final : public QWidget {
                 context_->MoveTo(lastPosition_.x(), lastPosition_.y(), view_, false);
                 context_->SelectDetected(AIS_SelectionScheme_Replace);
                 context_->InitSelected();
-                QString description;
+                int face = 0;
                 if (context_->MoreSelected() && context_->HasSelectedShape()) {
-                    const int face = faces_.FindIndex(context_->SelectedShape());
-                    description = QStringLiteral("Тестовый примитив · грань %1").arg(face);
+                    face = faces_.FindIndex(context_->SelectedShape());
                 }
                 if (onSelection) {
-                    onSelection(description);
+                    onSelection(revision_, face);
                 }
                 view_->Redraw();
             }
@@ -196,6 +261,20 @@ class OcctCanvas final : public QWidget {
     }
 
   private:
+    void restore(const Handle(AIS_Shape) & candidate) {
+        try {
+            if (!candidate.IsNull()) {
+                context_->Remove(candidate, false);
+            }
+            if (!presentation_.IsNull()) {
+                context_->Display(presentation_, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE),
+                                  false);
+            }
+            view_->Redraw();
+        } catch (const Standard_Failure &error) {
+            fail(QString::fromUtf8(error.GetMessageString()));
+        }
+    }
     QSize physicalSize() const {
         return {qMax(1, qRound(width() * devicePixelRatioF())),
                 qMax(1, qRound(height() * devicePixelRatioF()))};
@@ -225,13 +304,7 @@ class OcctCanvas final : public QWidget {
     void initialize() {
         attempted_ = true;
         try {
-            // Packaged resources take precedence over system discovery; external overrides survive.
-            const auto shaders =
-                QDir(QCoreApplication::applicationDirPath())
-                    .filePath(QStringLiteral("../share/opencascade/resources/Shaders"));
-            if (!qEnvironmentVariableIsSet("CSF_ShadersDirectory") && QDir(shaders).exists()) {
-                qputenv("CSF_ShadersDirectory", QDir(shaders).absolutePath().toUtf8());
-            }
+            // app configures runtime resources before starting any CAD worker.
             display_ = new Aspect_DisplayConnection();
             driver_ = new OpenGl_GraphicDriver(display_);
             scene_ = new V3d_Viewer(driver_);
@@ -254,16 +327,13 @@ class OcctCanvas final : public QWidget {
             view_->SetBackgroundColor(Quantity_Color(0.125, 0.165, 0.21, Quantity_TOC_sRGB));
             view_->MustBeResized();
 
-            const auto shape = BRepPrimAPI_MakeBox(100.0, 60.0, 20.0).Shape();
-            TopExp::MapShapes(shape, TopAbs_FACE, faces_);
-            Handle(AIS_Shape) presentation = new AIS_Shape(shape);
-            presentation->Attributes()->SetFaceBoundaryDraw(true);
-            context_->Display(presentation, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE),
-                              false);
-            context_->SetColor(presentation, Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
-                               false);
             ready_ = true;
-            setOrientation(ViewerWidget::Orientation::Isometric);
+            if (!shape_.IsNull()) {
+                const auto error = present(shape_, document_, revision_, diagnostic_);
+                if (!error.isEmpty()) {
+                    throw std::runtime_error(error.toStdString());
+                }
+            }
             if (ready_ && onReady) {
                 onReady();
             }
@@ -291,6 +361,7 @@ class OcctCanvas final : public QWidget {
         } catch (const Standard_Failure &) {
             // The OS can already have removed a native surface while shutting down.
         }
+        presentation_.Nullify();
         context_.Nullify();
         view_.Nullify();
         scene_.Nullify();
@@ -302,6 +373,11 @@ class OcctCanvas final : public QWidget {
     bool attempted_ = false;
     bool ready_ = false;
     QPoint lastPosition_;
+    TopoDS_Shape shape_;
+    Handle(AIS_Shape) presentation_;
+    application::DocumentPtr document_;
+    quint64 revision_ = 0;
+    bool diagnostic_ = false;
     TopTools_IndexedMapOfShape faces_;
     Handle(Aspect_DisplayConnection) display_;
     Handle(OpenGl_GraphicDriver) driver_;
@@ -353,7 +429,9 @@ ViewerWidget::ViewerWidget(QWidget *parent) : QWidget(parent), impl_(std::make_u
         impl_->error.clear();
         emit renderingChanged(true);
     };
-    impl_->canvas->onSelection = [this](const QString &text) { emit selectionChanged(text); };
+    impl_->canvas->onSelection = [this](quint64 revision, int face) {
+        emit selectionChanged(revision, face);
+    };
     impl_->canvas->onError = [this, reportError](const QString &message) {
         // Switch pages after the native paint/input event has completed.
         QTimer::singleShot(0, this, [reportError, message] { reportError(message); });
@@ -384,6 +462,39 @@ void ViewerWidget::fitAll() {
 void ViewerWidget::setOrientation(Orientation orientation) {
     if (impl_->canvas) {
         impl_->canvas->setOrientation(orientation);
+    }
+}
+
+QString ViewerWidget::presentDocument(application::DocumentPtr document, quint64 revision) {
+    try {
+        const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(document);
+        if (!native) {
+            return QStringLiteral("Просмотрщик не поддерживает этот тип CAD-документа");
+        }
+        return impl_->canvas ? impl_->canvas->present(cad::OcctDocumentAccess::shape(*native),
+                                                      std::move(document), revision)
+                             : QString{};
+    } catch (const Standard_Failure &error) {
+        return failureText(error);
+    } catch (const std::exception &error) {
+        return QString::fromUtf8(error.what());
+    }
+}
+
+void ViewerWidget::clearDocument(quint64 revision) {
+    if (impl_->canvas) {
+        impl_->canvas->clearDocument(revision);
+    }
+    emit selectionChanged(revision, 0);
+}
+
+void ViewerWidget::showDiagnosticBox() {
+    if (impl_->canvas) {
+        const auto error =
+            impl_->canvas->present(BRepPrimAPI_MakeBox(100.0, 60.0, 20.0).Shape(), {}, 0, true);
+        if (!error.isEmpty()) {
+            impl_->error = error;
+        }
     }
 }
 

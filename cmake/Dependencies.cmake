@@ -4,8 +4,10 @@ if(BENDING_BUILD_CAD)
     find_package(OpenCASCADE REQUIRED COMPONENTS ${bending_occt_components})
     if(TARGET TKDESTEP)
         set(bending_step_toolkit TKDESTEP) # OCCT 7.8+
-    else()
+    elseif(TARGET TKSTEP)
         set(bending_step_toolkit TKSTEP) # OCCT 7.6/7.7
+    else()
+        message(FATAL_ERROR "OCCT STEP SDK is missing. On Ubuntu/Mint install libocct-data-exchange-dev (scripts/install-linux-deps.sh); on Windows use the configured vcpkg OCCT build.")
     endif()
     # Older OCCT packages use ExactVersion compatibility; inspect the detected version instead.
     set(BENDING_OCCT_VERSION "${OpenCASCADE_MAJOR_VERSION}.${OpenCASCADE_MINOR_VERSION}.${OpenCASCADE_MAINTENANCE_VERSION}")
