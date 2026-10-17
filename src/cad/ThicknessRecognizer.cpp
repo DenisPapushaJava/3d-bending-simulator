@@ -142,7 +142,10 @@ application::ThicknessAnalysis recognizeThickness(const TopoDS_Shape &shape, dou
                 }
                 double x0, y0, z0, x1, y1, z1;
                 bounds.Get(x0, y0, z0, x1, y1, z1);
-                if (std::min(x1 - x0, y1 - y0) < gap * 5.0) {
+                const double profileDiagonal = std::hypot(x1 - x0, y1 - y0);
+                // Area/diagonal also rejects narrow bars whose rotated bounding box looks wide.
+                if (std::min(x1 - x0, y1 - y0) < gap * 5.0 || !std::isfinite(profileDiagonal) ||
+                    profileDiagonal <= 0.0 || a.area / profileDiagonal < gap * 5.0) {
                     continue;
                 }
                 if (++reconstructions > 8) {

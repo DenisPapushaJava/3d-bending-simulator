@@ -79,6 +79,20 @@ void testProject() {
                       {}, {})
                 .has_value(),
             "Write failure was ignored");
+    const auto folded = resultDocument(files.load(
+        nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/angle-mm.step")), {},
+        {}));
+    require(folded && validateThickness(2.0, folded->metadata().thickness) ==
+                          ThicknessValidation::LocalMatch,
+            "Folded part must provide local evidence without a global thickness proof");
+    const auto foldedPath = temporary.path() + QStringLiteral("/folded.bend");
+    require(!files.save(nativePath(foldedPath), *folded, 2.0, {}),
+            "Cannot save local manual thickness");
+    const auto foldedProject = files.load(nativePath(foldedPath), {}, {});
+    require(std::get<OpenedProject>(foldedProject).manualThicknessMm == 2.0 &&
+                resultDocument(foldedProject)->metadata().thickness.status !=
+                    ThicknessStatus::Detected,
+            "Reload converted a local manual value into automatic recognition");
     const auto invalid = temporary.path() + QStringLiteral("/invalid.bend");
     const auto reject = [&](QJsonObject root, ImportErrorCode expected) {
         write(invalid, QJsonDocument(root).toJson());

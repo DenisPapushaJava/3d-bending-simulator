@@ -3,9 +3,11 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Builder.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
@@ -355,6 +357,19 @@ void testThickness(const std::filesystem::path &directory) {
            BRepAlgoAPI_Cut(BRepAlgoAPI_Cut(plate, pocket).Shape(), secondPocket).Shape(), "MM",
            false);
     verify("thin-disc.step", BRepPrimAPI_MakeCylinder(30.0, 2.0).Shape(), "MM", true);
+    BRepBuilderAPI_MakePolygon narrowProfile;
+    const double diagonal = std::sqrt(0.5);
+    for (const auto &point :
+         {gp_Pnt(0, 0, 0), gp_Pnt(100 * diagonal, 100 * diagonal, 0),
+          gp_Pnt(99 * diagonal, 101 * diagonal, 0), gp_Pnt(-diagonal, diagonal, 0)}) {
+        narrowProfile.Add(point);
+    }
+    narrowProfile.Close();
+    const auto narrowFace =
+        BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), narrowProfile.Wire())
+            .Face();
+    verify("diagonal-bar.step", BRepPrimAPI_MakePrism(narrowFace, gp_Vec(0, 0, 1)).Shape(), "MM",
+           false);
     verify("block.step", BRepPrimAPI_MakeBox(20, 20, 20).Shape(), "MM", false);
     const auto flange = BRepPrimAPI_MakeBox(gp_Pnt(0, 58, 0), 100, 2, 40).Shape();
     verify("folded.step", BRepAlgoAPI_Fuse(plate, flange).Shape(), "MM", false);
