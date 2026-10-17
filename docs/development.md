@@ -7,6 +7,7 @@
 - C++20, CMake 3.24+, Ninja.
 - Qt Widgets 6.4+; в Ubuntu 24.04 используется системная 6.4.2, в Windows CI — 6.8.3.
 - OCCT 7.6–7.9: Ubuntu 24.04 — 7.6.3, Windows — 7.9.3#1 из зафиксированного vcpkg.
+- Для STEP нужен Data Exchange: `libocct-data-exchange-dev` на Linux; Windows использует уже собираемый OCCT из vcpkg. CMake выбирает `TKSTEP` (7.6/7.7) либо `TKDESTEP` (7.8/7.9). Экспортированные SDK-цели также требуют загрузить Visualization/ApplicationFramework; CAD-код не использует Qt.
 - Windows x64 / MSVC 2022; Linux x64 / GCC 13, базовый дистрибутив Ubuntu 24.04, также Mint 22.x.
 - Python 3.10+ нужен только инструментам проверки версии и упаковки; в приложение не входит.
 
@@ -79,7 +80,7 @@ Triplet собирает общие DLL и только Release для зави�
 | Каталог / цель | Ответственность |
 | --- | --- |
 | `src/core`, `bending_core` | Независимый C++: стабильные ID гибов и перестановка с определением первого затронутого шага |
-| `src/cad`, `bending_cad` | Граница OCCT, пока только сведения о версии; отдельный тест создаёт и измеряет реальный CAD-примитив |
+| `src/cad`, `bending_cad` | Документ с PIMPL, импорт STEP одного тела, единицы/метаданные/диагностика; публичный API без Qt/OCCT |
 | `src/viewer`, `bending_viewer` | Нативный QWidget/OCCT с PIMPL: тестовый примитив, камера, выбор грани, framebuffer и диагностика; SDK-типы скрыты |
 | `src/ui`, `bending_ui` | Окно QMainWindow, три dock-панели и меню; сведения о runtime передаются из app |
 | `src/app`, `bending_simulator` | Настройки Qt, создание/соединение компонентов, запуск, диагностический `--smoke-test` |
@@ -169,3 +170,20 @@ BENDING_VIEWER_SNAPSHOT="$PWD/out/viewer-demo.png" ./build/dev/bin/viewer_tests
 M1.1: локально прошли сценарии на NVIDIA GTX 1650 / OpenGL 4.6 при Qt 6.4.2 и OCCT 7.6.3. Локальный оффскрин-набор содержит 5 тестов; Linux с Xvfb — 7. Переход между настоящими мониторами/DPI и интерактивный Windows/GPU остаются открытыми. Отрицательная проверка `app.graphics-unavailable` гарантирует, что графическая диагностика не сообщает успех без поддерживаемого backend.
 
 Подтверждённый прогон M1.1: [CI 39066117942](https://github.com/DenisPapushaJava/3d-bending-simulator/actions/runs/39066117942), коммит `57ae2a7`, 2026-10-17. Обе ОС прошли сборку, тесты и упаковку; Linux дополнительно проверяет настоящий рендеринг/DPR 2 и графический запуск из .deb. Windows-комплект включает OCCT Shaders и проходит проверку старта с изолированным PATH. В отдельном чистом Ubuntu 24.04 без SDK/компилятора .deb установлен через apt с `--no-install-recommends`; графический запуск с Xvfb/Mesa успешен. Это не заменяет интерактивную Windows/GPU-проверку.
+
+## CAD-документ и STEP M1.2
+
+Контракт и ограничения — [step-import.md](step-import.md), решение D015. Дополнительный Linux SDK-пакет входит в `scripts/install-linux-deps.sh`. При обновлении существующего рабочего места достаточно:
+
+```bash
+sudo apt-get install libocct-data-exchange-dev
+cmake --preset dev
+cmake --build --preset dev --parallel 2
+ctest --preset dev
+```
+
+Локальная проверка 2026-10-17: чистая сборка Docker-образа из `tools/Dockerfile` с Data Exchange, GCC 13.3 / Qt 6.4.2 / OCCT 7.6.3. Полный Release с ошибками на предупреждениях: **8/8 CTest**; CAD без GUI: **3/3**; независимый `core` с запрещённым поиском Qt/OCCT: **1/1**. Форматирование clang-format 18, правила версии и Python-тесты успешны. Новый `cad.step-import` проверяет геометрию/единицы/диагностику/Unicode-пути и независимость документов; графические тесты продолжают проверять демонстрационный примитив.
+
+На основной системе Linux Mint пакет Data Exchange dev пока не установлен; `sudo` требует пользовательский пароль. Поэтому локальный `dev` с новым импортёром нужно пересобрать после команды выше; выполнение в Docker не доказывает обновление IDE-окружения.
+
+Linux `.deb` пересобран после M1.2; запуск из распакованного пакета проверен с `--smoke-test` (offscreen) и `--graphics-smoke-test` (Xvfb/Mesa). Само окно пока показывает примитив M1.1, поскольку импорт к GUI ещё не подключён. Интерактивные проверки Windows/GPU и переходов между мониторами из M1.1 остаются открытыми.

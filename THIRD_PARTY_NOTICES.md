@@ -7,6 +7,8 @@ retain their own licenses.
 
 The Ubuntu 24.04 build uses Qt 6.4.2 and OCCT 7.6.3 supplied by Ubuntu.
 The native viewer needs Qt and OCCT visualization/modeling libraries at runtime.
+The CAD module also uses OCCT Data Exchange for single-solid STEP import (M1.2).
+Its SDK targets are loaded alongside OCCT Application Framework; no new third-party SDK is added.
 The `.deb` records the actual runtime dependencies with dpkg-shlibdeps, not a hand-written list.
 System libraries are not copied into it. Their license notices, source packages
 and modifications are distributed through Ubuntu (`apt source qt6-base`, `apt source opencascade`).

@@ -124,3 +124,14 @@
 В Linux CI используется отдельный Xvfb-сеанс с Mesa software OpenGL. Offscreen-проверка недоступной платформы, проверка окна и графические проверки имеют разные результаты. `--graphics-smoke-test` на неподдерживаемой платформе завершается с ошибкой, а `--smoke-test` проверяет только структуру окна.
 
 Ограничения: native Wayland пока не поддержан; переход между реальными мониторами/DPI не проверен; Windows сборка/упаковка и интерактивный рендеринг учитываются раздельно. В M1.1 нет импорта и CAD-документа проекта — только явно подписанный тестовый примитив. Windows Shaders входят в комплект с уведомлениями и соответствующими исходниками OCCT.
+
+## STEP-адаптер M1.2
+
+Проверено 2026-10-17 по исходникам OCCT 7.6.3/7.9.3 и воспроизводимым интеграционным тестам. Используются собственные примитивы; производственные экспорты из CAD-систем ещё не проверялись.
+
+- `XSControl_Reader::ReadStream` позволяет читать через нативный C++ filesystem stream. Это выбранный путь для Unicode-имён на Windows/Linux: [7.6.3 XSControl_Reader](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_6_3/src/XSControl/XSControl_Reader.hxx), [7.9.3 STEPControl_Reader](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_3/src/STEPControl/STEPControl_Reader.hxx).
+- `FileUnits` сохраняет исходные названия; `SetSystemLengthUnit(1.0)` задаёт мм для переноса модели. Размеры и объём сверены на эквивалентных STEP в мм, дюймах и метрах: [реализация reader 7.6.3](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_6_3/src/STEPControl/STEPControl_Reader.cxx).
+- В 7.6 `STEPConstruct_UnitContext::ComputeFactors(context)` возвращает статус последнего элемента. Поэтому адаптер проверяет каждый элемент и определение длины отдельно; тест с SI-единицей SECOND вместо METRE без этой проверки принимался. Это проверка конкретного дефекта данных, а не исчерпывающий валидатор STEP: [реализация UnitContext 7.6.3](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_6_3/src/STEPConstruct/STEPConstruct_UnitContext.cxx).
+- В OCCT 7.6 STEP использует общий `StepData_GlobalFactors`; наши импорты сериализованы. В 7.9 API факторов изменён, базовые вызовы адаптера совместимы за счёт значений параметров по умолчанию: [UnitContext 7.9.3](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_3/src/STEPConstruct/STEPConstruct_UnitContext.hxx).
+
+Контракт, владение, ограничения и численные допуски проверок — в [step-import.md](step-import.md). Наличие чтения STEP не означает поддержки родных `.sldprt`/`.m3d`, внешних ссылок, распознавания сгибов или проверки гибки.

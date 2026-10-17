@@ -1,5 +1,5 @@
-add_library(bending_cad STATIC Kernel.cpp)
+add_library(bending_cad STATIC Kernel.cpp CadDocument.cpp StepImporter.cpp)
 add_library(Bending::Cad ALIAS bending_cad)
 target_include_directories(bending_cad PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(bending_cad SYSTEM PRIVATE "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(bending_cad PRIVATE bending_options TKernel)
+target_link_libraries(bending_cad PRIVATE bending_options TKernel TKBRep TKTopAlgo ${bending_step_toolkit})
