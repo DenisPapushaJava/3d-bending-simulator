@@ -14,10 +14,12 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
+#include <QListView>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
@@ -42,6 +44,9 @@ void waitUntil(const std::function<bool()> &condition) {
         QThread::msleep(5);
     }
     require(condition(), "Workflow wait timed out");
+    // Worker completion precedes Qt's deferred dock/layout and native resize events.
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
 }
 void click(QWidget *widget, QPoint point) {
     QMouseEvent press(QEvent::MouseButtonPress, QPointF(point), QPointF(widget->mapToGlobal(point)),
@@ -368,6 +373,74 @@ void testInitialThickness(bool graphics, const QString &path, double expected) {
     window.close();
 }
 
+void testBendWorkflow(bool graphics) {
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.resize(1360, 900);
+    window.show();
+    auto &controller = window.importController();
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    auto *list = window.findChild<QListView *>(QStringLiteral("bendList"));
+    auto *details = window.findChild<QLabel *>(QStringLiteral("bendProperties"));
+    auto *summary = window.findChild<QLabel *>(QStringLiteral("bendSummary"));
+    require(list && details && summary && list->model()->rowCount() == 0,
+            "Missing or fabricated bends UI");
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/channel-2mm.step"));
+    waitUntil(finished);
+    require(list->model()->rowCount() == 2 &&
+                summary->text().contains(QStringLiteral("зон сгиба: 2")),
+            "Recognized bends not listed");
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady(), "Bend graphics unavailable");
+    }
+    list->setCurrentIndex(list->model()->index(0, 0));
+    require(details->text().contains(QStringLiteral("B01")) &&
+                details->text().contains(QStringLiteral("90")) &&
+                details->text().contains(QStringLiteral("Ось, мм")),
+            "Selected bend measurements missing");
+    require(!controller.session().modified(), "Bend selection dirtied project");
+    auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
+    require(tabs && tabs->currentIndex() == 1, "Bend selection did not reveal measurements");
+    if (graphics) {
+        const auto first = viewer->captureImage();
+        list->setCurrentIndex(list->model()->index(1, 0));
+        require(differences(first, viewer->captureImage()) > 20,
+                "Changing bend did not change highlighted surfaces");
+        const auto second = viewer->captureImage();
+        viewer->highlightFaces({}, controller.session().revision() - 1);
+        require(differences(second, viewer->captureImage()) == 0, "Stale bend highlight applied");
+        const auto output = qEnvironmentVariable("BENDING_BEND_SNAPSHOT");
+        if (!output.isEmpty()) {
+            QCoreApplication::processEvents();
+            auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+            QImage image = window.grab().toImage();
+            QPainter painter(&image);
+            painter.drawImage(QRect(canvas->mapTo(&window, QPoint()), canvas->size()),
+                              viewer->captureImage());
+            painter.end();
+            require(image.save(output), "Cannot save bend snapshot");
+        }
+    }
+    const auto revision = controller.session().revision();
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                    QStringLiteral("/does-not-exist.step"));
+    waitUntil(finished);
+    require(controller.session().revision() == revision && list->model()->rowCount() == 2 &&
+                list->currentIndex().isValid(),
+            "Failed import erased bend results");
+    require(tabs->currentIndex() == 0, "Import error hidden behind bend properties");
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/plate-mm.step"));
+    waitUntil(finished);
+    require(list->model()->rowCount() == 0 && !list->currentIndex().isValid() &&
+                !details->text().contains(QStringLiteral("B01")),
+            "Replacement kept old bends");
+    controller.closeDocument();
+    require(list->model()->rowCount() == 0 && !list->isEnabled(), "Close kept bend controls");
+}
 } // namespace
 int main(int argc, char *argv[]) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
@@ -378,6 +451,7 @@ int main(int argc, char *argv[]) {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
         testWorkflow(graphics);
         testProjectWorkflow(graphics);
+        testBendWorkflow(graphics);
         const auto external = qEnvironmentVariable("BENDING_THICKNESS_STEP");
         bool validExpected = false;
         const auto expected = qEnvironmentVariable("BENDING_THICKNESS_MM").toDouble(&validExpected);

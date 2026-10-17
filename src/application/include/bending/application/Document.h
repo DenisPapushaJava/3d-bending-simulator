@@ -2,6 +2,7 @@
 
 #include "bending/application/Thickness.h"
 
+#include <array>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
@@ -27,6 +28,27 @@ struct BoundsMm {
     PointMm minimum;
     PointMm maximum;
 };
+// Measurements of local cylindrical bend zones, not a manufacturing operation or a
+// proof that the entire solid is a sheet-metal part. Face indices are revision-scoped.
+enum class BendRecognitionStatus { NotAnalyzed, Completed, Unsupported, LimitReached, Failed };
+struct RecognizedBend {
+    PointMm axisStart;
+    PointMm axisEnd;
+    double angleRadians;
+    double innerRadiusMm;
+    double thicknessMm;
+    double lengthMm;
+    std::size_t innerFace;
+    std::size_t outerFace;
+    std::array<std::size_t, 4> flangeFaces;
+};
+struct BendAnalysis {
+    BendRecognitionStatus status = BendRecognitionStatus::NotAnalyzed;
+    double lengthToleranceMm = 1.0e-5;
+    double angleToleranceRadians = 1.0e-5;
+    std::size_t unrecognizedCylindricalFaces = 0;
+    std::vector<RecognizedBend> bends;
+};
 enum class SurfaceKind { Plane, Cylinder, Cone, Sphere, Torus, Bezier, BSpline, Other };
 struct FaceInfo {
     std::size_t index; // One-based, scoped to this document revision.
@@ -45,6 +67,7 @@ struct DocumentMetadata {
     double meshDeflectionMm = 0.0;
     double meshAngleRadians = 0.0;
     ThicknessAnalysis thickness{};
+    BendAnalysis bendAnalysis{};
 };
 
 // Immutable snapshot shared by the session and its presenter after worker preparation ends.

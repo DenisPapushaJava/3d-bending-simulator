@@ -12,6 +12,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QLabel>
+#include <QListView>
 #include <QListWidget>
 #include <QLocale>
 #include <QMenuBar>
@@ -21,12 +22,15 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QStandardItemModel>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QToolBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <optional>
 
 namespace bending::ui {
@@ -87,7 +91,7 @@ QString phaseName(ImportPhase phase) {
     case ImportPhase::Validating:
         return QStringLiteral("Проверка геометрии");
     case ImportPhase::Analyzing:
-        return QStringLiteral("Определение толщины");
+        return QStringLiteral("Анализ толщины и сгибов");
     case ImportPhase::Preparing:
         return QStringLiteral("Подготовка 3D-модели");
     }
@@ -168,7 +172,7 @@ class MainWindow::Impl {
                 project->setToolTip(displayPath(metadata.sourcePath).toHtmlEscaped());
                 project->addItem(
                     QStringLiteral("Одно объёмное тело · %1 граней").arg(metadata.faceCount));
-                project->addItem(QStringLiteral("Гибы ещё не заданы"));
+
                 QStringList units;
                 for (const auto &unit : metadata.sourceLengthUnits) {
                     units.append(text(unit));
@@ -178,7 +182,7 @@ class MainWindow::Impl {
                     QStringLiteral(
                         "Файл: %1\n\nГабариты: %2 × %3 × %4 мм\nОбъём: %5 мм³\nГраней: "
                         "%6\n\nЕдиницы файла: %7\nВ программе: мм\nДопуск BRep (макс.): %8 "
-                        "мм\n\nИсходная CAD-геометрия. Сгибы ещё не распознаны.")
+                        "мм\n\nИсходная CAD-геометрия.")
                         .arg(displayPath(metadata.sourcePath.filename()),
                              number(bounds.maximum.x - bounds.minimum.x),
                              number(bounds.maximum.y - bounds.minimum.y),
@@ -197,6 +201,10 @@ class MainWindow::Impl {
                     "корректное объёмное тело.\nЕдиницы будут приведены к мм."));
                 window->setWindowTitle(title);
             }
+        }
+        if (shownBendRevision != session.revision()) {
+            shownBendRevision = session.revision();
+            fillBends();
         }
         if (!shownEditRevision || *shownEditRevision != session.editRevision()) {
             shownEditRevision = session.editRevision();
@@ -265,6 +273,8 @@ class MainWindow::Impl {
             thickness->setText(QStringLiteral("Толщина: —"));
             projectState->clear();
         }
+        bendList->setEnabled(document && !controller->hasWork());
+        showSelectedBend(false);
         camera->setEnabled(viewer->isReady() && document != nullptr);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
         cancelAction->setEnabled(session.activeRequest().has_value());
@@ -289,7 +299,12 @@ class MainWindow::Impl {
                                           "Колесо: масштаб · ЛКМ: грань")
                          : QStringLiteral("Откройте STEP для начала работы · Ctrl+O"));
         }
-        error->setVisible(session.error().has_value() || !controller->saveError().isEmpty());
+        const bool hasFailure = session.error().has_value() || !controller->saveError().isEmpty();
+        error->setVisible(hasFailure);
+        if (hasFailure && !showingFailure) {
+            propertyTabs->setCurrentIndex(0);
+        }
+        showingFailure = hasFailure;
         QString detail;
         if (!controller->saveError().isEmpty()) {
             error->setText(
@@ -307,6 +322,7 @@ class MainWindow::Impl {
     }
 
     void showThicknessEvidence(bool updateInput) {
+        bendList->setCurrentIndex({});
         const auto &session = controller->session();
         const auto &document = session.document();
         if (!document) {
@@ -374,6 +390,96 @@ class MainWindow::Impl {
         pairs->setCurrentIndex(hasMatchingFaces ? 0 : -1);
         showThicknessEvidence(false);
     }
+    void fillBends() {
+        bendModel->clear();
+        const auto &document = controller->session().document();
+        if (!document) {
+            bendSummary->setText(QStringLiteral("Сгибы: откройте деталь"));
+            return;
+        }
+        const auto &analysis = document->metadata().bendAnalysis;
+        switch (analysis.status) {
+        case BendRecognitionStatus::Completed:
+            bendSummary->setText(
+                QStringLiteral("Найдено зон сгиба: %1\nЛокальный анализ прямых цилиндрических "
+                               "сгибов. Полнота распознавания и технологичность не проверены.")
+                    .arg(analysis.bends.size()));
+            if (analysis.unrecognizedCylindricalFaces > 0) {
+                bendSummary->setText(
+                    bendSummary->text() +
+                    QStringLiteral("\nЦилиндрических граней вне найденных зон: %1.")
+                        .arg(analysis.unrecognizedCylindricalFaces));
+            }
+            break;
+        case BendRecognitionStatus::LimitReached:
+            bendSummary->setText(QStringLiteral("Анализ сгибов: превышен лимит сложности."));
+            break;
+        case BendRecognitionStatus::Failed:
+            bendSummary->setText(
+                QStringLiteral("Анализ сгибов завершился ошибкой. Просмотр доступен."));
+            break;
+        case BendRecognitionStatus::Unsupported:
+            bendSummary->setText(
+                QStringLiteral("Допуски геометрии не поддерживаются анализом сгибов."));
+            break;
+        case BendRecognitionStatus::NotAnalyzed:
+            bendSummary->setText(QStringLiteral("Сгибы не анализировались."));
+            break;
+        }
+        for (std::size_t i = 0; i < analysis.bends.size(); ++i) {
+            const auto &bend = analysis.bends[i];
+            auto *item =
+                new QStandardItem(QStringLiteral("B%1 · %2° · R%3 · L%4 мм")
+                                      .arg(i + 1, 2, 10, QLatin1Char('0'))
+                                      .arg(number(bend.angleRadians * 180.0 / std::numbers::pi),
+                                           number(bend.innerRadiusMm), number(bend.lengthMm)));
+            item->setEditable(false);
+            bendModel->appendRow(item);
+        }
+    }
+    void showSelectedBend(bool highlight) {
+        const auto &session = controller->session();
+        const auto &document = session.document();
+        const auto row = bendList->currentIndex().row();
+        if (!document || row < 0 ||
+            static_cast<std::size_t>(row) >= document->metadata().bendAnalysis.bends.size()) {
+            bendProperties->setText(QStringLiteral(
+                "Выберите найденный сгиб слева, чтобы посмотреть параметры и поверхности."));
+            return;
+        }
+        const auto &bend = document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)];
+        const auto coordinate = [&](double value) {
+            return number(std::abs(value) <= document->metadata().bendAnalysis.lengthToleranceMm
+                              ? 0.0
+                              : value);
+        };
+        QString description =
+            QStringLiteral(
+                "B%1 · измерено по CAD\nУгол поворота полок: %2°\nВнутренний радиус: %3 мм\n"
+                "Толщина зоны: %4 мм\nДлина сгиба: %5 мм\n\nОсь, мм:\n(%6; %7; %8) →\n(%9; %10; "
+                "%11)\n\n"
+                "Это параметры загруженной формы. Операция гибки ещё не задана.")
+                .arg(row + 1, 2, 10, QLatin1Char('0'))
+                .arg(number(bend.angleRadians * 180.0 / std::numbers::pi),
+                     number(bend.innerRadiusMm), number(bend.thicknessMm), number(bend.lengthMm),
+                     coordinate(bend.axisStart.x), coordinate(bend.axisStart.y),
+                     coordinate(bend.axisStart.z), coordinate(bend.axisEnd.x),
+                     coordinate(bend.axisEnd.y), coordinate(bend.axisEnd.z));
+        if (session.manualThicknessMm() &&
+            std::abs(*session.manualThicknessMm() - bend.thicknessMm) >
+                document->metadata().bendAnalysis.lengthToleranceMm) {
+            description += QStringLiteral("\nРучная толщина отличается от толщины этой зоны.");
+        }
+        bendProperties->setText(description);
+        if (highlight && !controller->hasWork()) {
+            std::vector<std::size_t> indices{bend.innerFace, bend.outerFace};
+            indices.insert(indices.end(), bend.flangeFaces.begin(), bend.flangeFaces.end());
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            viewer->highlightFaces(indices, session.revision());
+            propertyTabs->setCurrentIndex(1);
+        }
+    }
     bool canDiscard() {
         if (!controller->session().modified()) {
             return true;
@@ -408,6 +514,12 @@ class MainWindow::Impl {
     viewer::ViewerWidget *viewer = nullptr;
     ImportController *controller = nullptr;
     QListWidget *project = nullptr;
+    QListView *bendList = nullptr;
+    QStandardItemModel *bendModel = nullptr;
+    QLabel *bendSummary = nullptr;
+    QLabel *bendProperties = nullptr;
+    QTabWidget *propertyTabs = nullptr;
+    std::optional<std::uint64_t> shownBendRevision;
     QLabel *properties = nullptr;
     QLabel *selection = nullptr;
     QLabel *thickness = nullptr;
@@ -420,6 +532,7 @@ class MainWindow::Impl {
     QAction *saveAction = nullptr;
     QAction *saveAsAction = nullptr;
     std::shared_ptr<const ProjectWriter> writer;
+    bool showingFailure = false;
     QLabel *error = nullptr;
     QPlainTextEdit *diagnostics = nullptr;
     QToolBar *camera = nullptr;
@@ -540,7 +653,22 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     };
     impl_->project = new QListWidget(this);
     impl_->project->setMinimumWidth(230);
-    addDock(QStringLiteral("projectDock"), QStringLiteral("Проект и гибы"), impl_->project,
+    impl_->project->setMaximumHeight(100);
+    auto *leftPanel = new QWidget(this);
+    auto *leftLayout = new QVBoxLayout(leftPanel);
+    leftLayout->addWidget(impl_->project);
+    impl_->bendSummary = new QLabel(leftPanel);
+    impl_->bendSummary->setObjectName(QStringLiteral("bendSummary"));
+    impl_->bendSummary->setWordWrap(true);
+    impl_->bendSummary->setTextFormat(Qt::PlainText);
+    leftLayout->addWidget(impl_->bendSummary);
+    impl_->bendList = new QListView(leftPanel);
+    impl_->bendList->setObjectName(QStringLiteral("bendList"));
+    impl_->bendList->setAccessibleName(QStringLiteral("Распознанные зоны сгибов"));
+    impl_->bendModel = new QStandardItemModel(impl_->bendList);
+    impl_->bendList->setModel(impl_->bendModel);
+    leftLayout->addWidget(impl_->bendList);
+    addDock(QStringLiteral("projectDock"), QStringLiteral("Проект и сгибы"), leftPanel,
             Qt::LeftDockWidgetArea);
 
     auto *panel = new QWidget(this);
@@ -602,6 +730,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             [this] { impl_->showThicknessEvidence(true); });
     connect(impl_->pairs, &QComboBox::currentIndexChanged, this,
             [this](int) { impl_->showThicknessEvidence(true); });
+    connect(impl_->bendList->selectionModel(), &QItemSelectionModel::currentChanged, this,
+            [this] { impl_->showSelectedBend(true); });
     impl_->selection = label(QStringLiteral("faceProperties"));
     impl_->error = label(QStringLiteral("importError"));
     impl_->error->setStyleSheet(QStringLiteral("color:#9D2828;"));
@@ -616,7 +746,21 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     scroll->setWidgetResizable(true);
     scroll->setMinimumWidth(300);
     scroll->setWidget(panel);
-    addDock(QStringLiteral("propertiesDock"), QStringLiteral("Параметры"), scroll,
+    impl_->bendProperties = new QLabel(this);
+    impl_->bendProperties->setObjectName(QStringLiteral("bendProperties"));
+    impl_->bendProperties->setWordWrap(true);
+    impl_->bendProperties->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    impl_->bendProperties->setTextFormat(Qt::PlainText);
+    impl_->bendProperties->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    impl_->bendProperties->setMargin(16);
+    auto *bendScroll = new QScrollArea(this);
+    bendScroll->setWidgetResizable(true);
+    bendScroll->setWidget(impl_->bendProperties);
+    impl_->propertyTabs = new QTabWidget(this);
+    impl_->propertyTabs->setObjectName(QStringLiteral("propertiesTabs"));
+    impl_->propertyTabs->addTab(scroll, QStringLiteral("Деталь"));
+    impl_->propertyTabs->addTab(bendScroll, QStringLiteral("Сгиб"));
+    addDock(QStringLiteral("propertiesDock"), QStringLiteral("Параметры"), impl_->propertyTabs,
             Qt::RightDockWidgetArea);
     auto *sequence =
         new QLabel(QStringLiteral("Ручная последовательность · операции ещё не заданы"), this);
