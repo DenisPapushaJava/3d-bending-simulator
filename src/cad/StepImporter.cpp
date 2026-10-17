@@ -22,6 +22,7 @@
 #include <StepGeom_GeomRepContextAndGlobUnitAssCtxAndGlobUncertaintyAssCtx.hxx>
 #include <StepGeom_GeometricRepresentationContext.hxx>
 #include <StepGeom_GeometricRepresentationContextAndGlobalUnitAssignedContext.hxx>
+#include <StepRepr_AssemblyComponentUsage.hxx>
 #include <StepRepr_GlobalUnitAssignedContext.hxx>
 #include <TColStd_SequenceOfAsciiString.hxx>
 #include <TopExp.hxx>
@@ -213,6 +214,14 @@ StepImportResult StepImporter::read(const std::filesystem::path &path) const {
         appendDiagnostics(reader.WS()->ModelCheckList(), ImportStage::Read, diagnostics);
         if (hasErrors(diagnostics)) {
             return fail(StepImportErrorCode::InvalidStep, "STEP model contains read errors");
+        }
+        for (int i = 1; i <= reader.StepModel()->NbEntities(); ++i) {
+            if (reader.StepModel()->Value(i)->IsKind(
+                    STANDARD_TYPE(StepRepr_AssemblyComponentUsage))) {
+                return fail(
+                    StepImportErrorCode::UnsupportedComposition,
+                    "STEP assemblies require explicit component selection; import a single part");
+            }
         }
         const int roots = reader.NbRootsForTransfer();
         if (roots == 0) {

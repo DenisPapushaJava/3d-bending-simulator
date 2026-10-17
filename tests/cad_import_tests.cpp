@@ -38,7 +38,7 @@ void require(bool condition, const std::string &message) {
     }
 }
 
-void near(double actual, double expected, double tolerance, const std::string &name) {
+void requireNear(double actual, double expected, double tolerance, const std::string &name) {
     require(std::isfinite(actual) && std::abs(actual - expected) <= tolerance,
             name + ": expected " + std::to_string(expected) + ", got " + std::to_string(actual));
 }
@@ -59,13 +59,15 @@ struct FixtureDirectory {
 };
 
 // Writer parameters are global in OCCT 7.6. Fixtures are generated before concurrent import tests.
-struct WriteUnit {
-    std::string previous = Interface_Static::CVal("write.step.unit");
-    explicit WriteUnit(const char *unit) {
-        require(Interface_Static::SetCVal("write.step.unit", unit), "Cannot set fixture unit");
+struct WriteParameter {
+    const char *name;
+    std::string previous;
+    WriteParameter(const char *parameter, const char *value)
+        : name(parameter), previous(Interface_Static::CVal(parameter)) {
+        require(Interface_Static::SetCVal(name, value), "Cannot set fixture parameter");
     }
-    ~WriteUnit() {
-        Interface_Static::SetCVal("write.step.unit", previous.c_str());
+    ~WriteParameter() {
+        Interface_Static::SetCVal(name, previous.c_str());
     }
 };
 
@@ -80,7 +82,7 @@ enum class UnitFixture { Normal, MissingLength, InvalidLength };
 
 void writeStep(const std::filesystem::path &path, const TopoDS_Shape &shape, const char *unit,
                UnitFixture unitFixture = UnitFixture::Normal) {
-    WriteUnit parameter(unit);
+    WriteParameter parameter("write.step.unit", unit);
     STEPControl_Writer writer;
     require(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone,
             "Fixture transfer failed");
@@ -150,13 +152,13 @@ void checkBox(const CadDocument &document) {
     const auto &metadata = document.metadata();
     constexpr double lengthToleranceMm = 1.0e-6;
     constexpr double volumeToleranceMm3 = 1.0e-4;
-    near(metadata.bounds.minimum.x, 10.0, lengthToleranceMm, "minimum X (mm)");
-    near(metadata.bounds.minimum.y, -20.0, lengthToleranceMm, "minimum Y (mm)");
-    near(metadata.bounds.minimum.z, 5.0, lengthToleranceMm, "minimum Z (mm)");
-    near(metadata.bounds.maximum.x, 110.0, lengthToleranceMm, "maximum X (mm)");
-    near(metadata.bounds.maximum.y, 40.0, lengthToleranceMm, "maximum Y (mm)");
-    near(metadata.bounds.maximum.z, 7.0, lengthToleranceMm, "maximum Z (mm)");
-    near(metadata.volumeMm3, 12000.0, volumeToleranceMm3, "volume (mm^3)");
+    requireNear(metadata.bounds.minimum.x, 10.0, lengthToleranceMm, "minimum X (mm)");
+    requireNear(metadata.bounds.minimum.y, -20.0, lengthToleranceMm, "minimum Y (mm)");
+    requireNear(metadata.bounds.minimum.z, 5.0, lengthToleranceMm, "minimum Z (mm)");
+    requireNear(metadata.bounds.maximum.x, 110.0, lengthToleranceMm, "maximum X (mm)");
+    requireNear(metadata.bounds.maximum.y, 40.0, lengthToleranceMm, "maximum Y (mm)");
+    requireNear(metadata.bounds.maximum.z, 7.0, lengthToleranceMm, "maximum Z (mm)");
+    requireNear(metadata.volumeMm3, 12000.0, volumeToleranceMm3, "volume (mm^3)");
     require(metadata.faceCount == 6, "Box must have six faces");
     require(std::isfinite(metadata.maximumToleranceMm) && metadata.maximumToleranceMm > 0.0,
             "Invalid BRep tolerance metadata");
@@ -198,6 +200,14 @@ void testImport(const std::filesystem::path &directory) {
     builder.Add(mixedShape, BRepBuilderAPI_MakeFace(gp_Pln(), 0.0, 10.0, 0.0, 20.0).Shape());
     const auto mixed = directory / "solid-and-surface.step";
     writeStep(mixed, mixedShape, "MM");
+    const auto assembly = directory / "single-component-assembly.step";
+    {
+        WriteParameter assemblyMode("write.step.assembly", "On");
+        TopoDS_Compound singleComponent;
+        builder.MakeCompound(singleComponent);
+        builder.Add(singleComponent, box);
+        writeStep(assembly, singleComponent, "MM");
+    }
 
     std::ifstream validInput(millimetres, std::ios::binary);
     std::string brokenEntity{std::istreambuf_iterator<char>(validInput),
@@ -244,6 +254,7 @@ void testImport(const std::filesystem::path &directory) {
     expectError(missingUnits, StepImportErrorCode::UnsupportedUnits);
     expectError(invalidUnits, StepImportErrorCode::UnsupportedUnits);
     expectError(mixed, StepImportErrorCode::UnsupportedComposition);
+    expectError(assembly, StepImportErrorCode::UnsupportedComposition);
     const auto malformedError = expectError(malformed, StepImportErrorCode::InvalidStep);
     require(!malformedError.diagnostics.empty(), "Lost STEP model diagnostics");
     require(malformedError.diagnostics.front().stage == ImportStage::Read,
@@ -268,6 +279,7 @@ void testImport(const std::filesystem::path &directory) {
 int main() {
     try {
         STEPControl_Controller::Init();
+        WriteParameter assemblyMode("write.step.assembly", "Off");
         FixtureDirectory fixtures;
         testImport(fixtures.path);
         std::cout << "STEP import: units, metadata, Unicode paths, failures and ownership passed\n";

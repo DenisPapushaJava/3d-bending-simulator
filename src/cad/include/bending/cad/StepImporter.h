@@ -30,9 +30,9 @@ using StepImportResult = std::variant<std::unique_ptr<const CadDocument>, StepIm
 
 class StepImporter final {
   public:
-    // Reads a single-file .step/.stp. Calls are serialized at the OCCT boundary (7.6
-    // compatibility). This is synchronous; the application layer must schedule it outside the GUI
-    // thread.
+    // Reads a single-file, single-part .step/.stp; assemblies are unsupported.
+    // Calls are serialized at the OCCT boundary (7.6 compatibility).
+    // This is synchronous; the application layer must schedule it outside the GUI thread.
     [[nodiscard]] StepImportResult read(const std::filesystem::path &path) const;
 };
 } // namespace bending::cad
