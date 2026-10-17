@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/DocumentSession.h"
+#include "bending/application/ProjectWriter.h"
 
 #include <QObject>
 #include <QString>
@@ -21,6 +22,12 @@ class ImportController final : public QObject {
     void cancel();
     void closeDocument();
     void shutdown();
+    application::ThicknessValidation setManualThickness(double valueMm);
+    void useAutomaticThickness();
+    void saveProject(std::filesystem::path path,
+                     std::shared_ptr<const application::ProjectWriter> writer);
+    [[nodiscard]] bool isSaving() const;
+    [[nodiscard]] QString saveError() const;
     [[nodiscard]] const application::DocumentSession &session() const;
     [[nodiscard]] bool hasWork() const;
 

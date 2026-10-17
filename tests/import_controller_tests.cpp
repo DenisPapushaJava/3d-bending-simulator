@@ -179,12 +179,67 @@ void testShutdown() {
     require(elapsed.elapsed() < 2000, "Cooperative shutdown hung");
     QCoreApplication::processEvents();
 }
+class GatedWriter final : public ProjectWriter {
+  public:
+    std::optional<std::string> save(const std::filesystem::path &path, const Document &,
+                                    std::optional<double>, std::stop_token stop) const override {
+        require(QThread::currentThread() != QCoreApplication::instance()->thread(),
+                "Save ran in GUI thread");
+        if (path == "failed.bend") {
+            return "disk error";
+        }
+        entered = true;
+        while (!stop.stop_requested()) {
+            QThread::msleep(1);
+        }
+        return {}; // Emulate a completed atomic rename racing with cancellation.
+    }
+    mutable std::atomic<bool> entered{false};
+};
+void testSaveRace() {
+    const auto importer = std::make_shared<GatedImporter>();
+    const auto writer = std::make_shared<GatedWriter>();
+    ImportController controller(importer, [](DocumentPtr, std::uint64_t) { return QString{}; });
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    controller.open("seed.step");
+    waitUntil(finished);
+    require(controller.setManualThickness(2.0) == ThicknessValidation::Unverified,
+            "Manual edit failed");
+    controller.saveProject("failed.bend", writer);
+    waitUntil(finished);
+    require(!controller.saveError().isEmpty() && controller.session().modified(),
+            "Failed write cleared unsaved edits");
+    controller.saveProject("old.bend", writer);
+    waitUntil([&] { return writer->entered.load(); });
+    int beats = 0;
+    QTimer heartbeat;
+    QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++beats; });
+    heartbeat.start(1);
+    waitUntil([&] { return beats >= 5; });
+    controller.open("new.step");
+    waitUntil(finished);
+    require(controller.session().document()->metadata().sourcePath == "new.step" &&
+                controller.session().projectPath().empty() &&
+                !controller.session().manualThicknessMm(),
+            "Late save rebound a new document to an old project");
+    writer->entered = false;
+    controller.saveProject("closing.bend", writer);
+    waitUntil([&] { return writer->entered.load(); });
+    controller.closeDocument();
+    waitUntil(finished);
+    require(!controller.session().document() && controller.session().projectPath().empty(),
+            "Late save resurrected a closed project");
+}
+
 } // namespace
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
     try {
         testController();
         testShutdown();
+        testSaveRace();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -1,6 +1,6 @@
 #include "bending/Version.h"
 #include "bending/cad/Kernel.h"
-#include "bending/cad/StepImporter.h"
+#include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
@@ -61,15 +61,15 @@ int main(int argc, char *argv[]) {
         QStringLiteral("Проверить настоящий OCCT/OpenGL-рендеринг и завершиться"));
     parser.addOption(graphicsTest);
     parser.addPositionalArgument(QStringLiteral("step"),
-                                 QStringLiteral("STEP одной детали для открытия"),
+                                 QStringLiteral("STEP одной детали или проект .bend для открытия"),
                                  QStringLiteral("[step]"));
     parser.process(app);
     if (parser.positionalArguments().size() > 1) {
         parser.showHelp(1);
     }
 
-    bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()},
-                                   std::make_shared<bending::cad::StepImporter>());
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files);
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());

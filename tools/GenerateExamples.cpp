@@ -62,6 +62,13 @@ int main(int argc, char *argv[]) {
             throw std::runtime_error("Cannot construct example angle");
         }
         write(output / "angle-mm.step", angle.Shape(), "MM");
+        const auto thickPlate = BRepPrimAPI_MakeBox(100.0, 60.0, 6.0).Shape();
+        const auto thickFlange = BRepPrimAPI_MakeBox(gp_Pnt(0, 54, 0), 100.0, 6.0, 40.0).Shape();
+        BRepAlgoAPI_Fuse thickAngle(thickPlate, thickFlange);
+        if (!thickAngle.IsDone()) {
+            throw std::runtime_error("Cannot construct 6 mm angle");
+        }
+        write(output / "angle-6mm.step", thickAngle.Shape(), "MM");
     } catch (const Standard_Failure &error) {
         std::cerr << error.GetMessageString() << '\n';
         return 1;

@@ -1,9 +1,12 @@
 #pragma once
 
+#include "bending/application/Thickness.h"
+
 #include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bending::application {
@@ -41,6 +44,7 @@ struct DocumentMetadata {
     std::vector<ImportDiagnostic> diagnostics;
     double meshDeflectionMm = 0.0;
     double meshAngleRadians = 0.0;
+    ThicknessAnalysis thickness{};
 };
 
 // Immutable snapshot shared by the session and its presenter after worker preparation ends.
@@ -49,6 +53,10 @@ class Document {
     virtual ~Document() = default;
     [[nodiscard]] virtual const DocumentMetadata &metadata() const noexcept = 0;
     [[nodiscard]] virtual const std::vector<FaceInfo> &faces() const noexcept = 0;
+    // Original STEP bytes captured during import, never re-read from a mutable source at save.
+    [[nodiscard]] virtual std::string_view sourceStep() const noexcept {
+        return {};
+    }
 };
 using DocumentPtr = std::shared_ptr<const Document>;
 } // namespace bending::application

@@ -6,12 +6,14 @@
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_NeutralWindow.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Compound.hxx>
 #include <V3d_AmbientLight.hxx>
 #include <V3d_DirectionalLight.hxx>
 #include <V3d_View.hxx>
@@ -93,12 +95,16 @@ class OcctCanvas final : public QWidget {
                 return QString::fromUtf8(error.what());
             }
         }
+        const auto retainedHighlights = document && document == document_ && revision == revision_
+                                            ? highlightedFaces_
+                                            : std::vector<std::size_t>{};
         presentation_ = candidate;
         shape_ = shape;
         faces_ = std::move(faces);
         document_ = std::move(document);
         revision_ = revision;
         diagnostic_ = diagnostic;
+        highlightFaces(retainedHighlights, revision_);
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -112,6 +118,8 @@ class OcctCanvas final : public QWidget {
             view_->Redraw();
         });
         presentation_.Nullify();
+        evidence_.Nullify();
+        highlightedFaces_.clear();
         shape_.Nullify();
         faces_.Clear();
         document_.reset();
@@ -120,6 +128,36 @@ class OcctCanvas final : public QWidget {
         if (onSelection) {
             onSelection(revision_, 0);
         }
+    }
+
+    void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
+        if (revision != revision_) {
+            return;
+        }
+        highlightedFaces_ = indices;
+        guarded([&] {
+            if (!evidence_.IsNull()) {
+                context_->Remove(evidence_, false);
+                evidence_.Nullify();
+            }
+            if (!indices.empty()) {
+                TopoDS_Compound compound;
+                BRep_Builder builder;
+                builder.MakeCompound(compound);
+                for (const auto index : indices) {
+                    if (index > 0 && index <= static_cast<std::size_t>(faces_.Extent())) {
+                        builder.Add(compound, faces_(static_cast<int>(index)));
+                    }
+                }
+                evidence_ = new AIS_Shape(compound);
+                evidence_->Attributes()->SetAutoTriangulation(false);
+                context_->SetColor(evidence_, Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
+                                   false);
+                context_->SetWidth(evidence_, 3.0, false);
+                context_->Display(evidence_, AIS_WireFrame, -1, false);
+            }
+            view_->Redraw();
+        });
     }
 
     void fitAll() {
@@ -362,6 +400,7 @@ class OcctCanvas final : public QWidget {
             // The OS can already have removed a native surface while shutting down.
         }
         presentation_.Nullify();
+        evidence_.Nullify();
         context_.Nullify();
         view_.Nullify();
         scene_.Nullify();
@@ -375,6 +414,8 @@ class OcctCanvas final : public QWidget {
     QPoint lastPosition_;
     TopoDS_Shape shape_;
     Handle(AIS_Shape) presentation_;
+    Handle(AIS_Shape) evidence_;
+    std::vector<std::size_t> highlightedFaces_;
     application::DocumentPtr document_;
     quint64 revision_ = 0;
     bool diagnostic_ = false;
@@ -486,6 +527,12 @@ void ViewerWidget::clearDocument(quint64 revision) {
         impl_->canvas->clearDocument(revision);
     }
     emit selectionChanged(revision, 0);
+}
+
+void ViewerWidget::highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
+    if (impl_->canvas) {
+        impl_->canvas->highlightFaces(indices, revision);
+    }
 }
 
 void ViewerWidget::showDiagnosticBox() {

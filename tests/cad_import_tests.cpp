@@ -1,8 +1,13 @@
 #include "bending/cad/StepImporter.h"
 
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Builder.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
@@ -314,6 +319,71 @@ void testImport(const std::filesystem::path &directory) {
                           }) == 1,
             "Cylinder surface was not identified");
 }
+void testThickness(const std::filesystem::path &directory) {
+    using bending::application::ThicknessStatus;
+    const auto plate = BRepPrimAPI_MakeBox(100.0, 60.0, 2.0).Shape();
+    const auto verify = [&](const char *name, const TopoDS_Shape &shape, const char *unit,
+                            bool expected) {
+        const auto path = directory / name;
+        writeStep(path, shape, unit);
+        const auto document = load(path);
+        const auto &result = document->metadata().thickness;
+        require((result.status == ThicknessStatus::Detected) == expected,
+                std::string("Unexpected thickness status for ") + name);
+        require(!document->sourceStep().empty(), "Original STEP bytes were not captured");
+        if (expected) {
+            require(result.thicknessMm.has_value() && !result.evidence.empty(),
+                    "No thickness evidence");
+            requireNear(*result.thicknessMm, 2.0, 1.0e-5, name);
+            for (const auto &pair : result.evidence) {
+                require(pair.firstFace > 0 && pair.secondFace <= document->faces().size(),
+                        "Invalid thickness face reference");
+            }
+        }
+    };
+    verify("thin-mm.step", plate, "MM", true);
+    verify("thin-inch.step", plate, "INCH", true);
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(12.0, -8.0, 20.0), gp_Dir(1.0, 2.0, 3.0)), 0.83);
+    verify("rotated.step", BRepBuilderAPI_Transform(plate, rotation, true).Shape(), "MM", true);
+    const auto hole =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(30.0, 30.0, -1.0), gp_Dir(0, 0, 1)), 5.0, 4.0)
+            .Shape();
+    verify("through-hole.step", BRepAlgoAPI_Cut(plate, hole).Shape(), "MM", true);
+    const auto pocket = BRepPrimAPI_MakeBox(gp_Pnt(10, 10, 1), 20, 20, 3).Shape();
+    verify("blind-pocket.step", BRepAlgoAPI_Cut(plate, pocket).Shape(), "MM", false);
+    const auto secondPocket = BRepPrimAPI_MakeBox(gp_Pnt(60, 10, -2), 20, 20, 3).Shape();
+    verify("opposed-blind-pockets.step",
+           BRepAlgoAPI_Cut(BRepAlgoAPI_Cut(plate, pocket).Shape(), secondPocket).Shape(), "MM",
+           false);
+    verify("thin-disc.step", BRepPrimAPI_MakeCylinder(30.0, 2.0).Shape(), "MM", true);
+    BRepBuilderAPI_MakePolygon narrowProfile;
+    const double diagonal = std::sqrt(0.5);
+    for (const auto &point :
+         {gp_Pnt(0, 0, 0), gp_Pnt(100 * diagonal, 100 * diagonal, 0),
+          gp_Pnt(99 * diagonal, 101 * diagonal, 0), gp_Pnt(-diagonal, diagonal, 0)}) {
+        narrowProfile.Add(point);
+    }
+    narrowProfile.Close();
+    const auto narrowFace =
+        BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), narrowProfile.Wire())
+            .Face();
+    verify("diagonal-bar.step", BRepPrimAPI_MakePrism(narrowFace, gp_Vec(0, 0, 1)).Shape(), "MM",
+           false);
+    verify("block.step", BRepPrimAPI_MakeBox(20, 20, 20).Shape(), "MM", false);
+    const auto flange = BRepPrimAPI_MakeBox(gp_Pnt(0, 58, 0), 100, 2, 40).Shape();
+    verify("folded.step", BRepAlgoAPI_Fuse(plate, flange).Shape(), "MM", false);
+    std::stop_source stopped;
+    auto result =
+        StepImporter{}.load(directory / "thin-mm.step", stopped.get_token(), [&](auto phase) {
+            if (phase == bending::application::ImportPhase::Analyzing) {
+                stopped.request_stop();
+            }
+        });
+    require(std::get<StepImportError>(result).code == StepImportErrorCode::Cancelled,
+            "Thickness analysis ignored cancellation");
+}
+
 } // namespace
 
 int main() {
@@ -322,6 +392,7 @@ int main() {
         WriteParameter assemblyMode("write.step.assembly", "Off");
         FixtureDirectory fixtures;
         testImport(fixtures.path);
+        testThickness(fixtures.path);
         std::cout << "STEP import: units, metadata, Unicode paths, failures and ownership passed\n";
     } catch (const Standard_Failure &error) {
         std::cerr << "OCCT fixture failure: " << error.GetMessageString() << '\n';

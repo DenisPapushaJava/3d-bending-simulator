@@ -9,5 +9,6 @@ struct CadDocument::Impl {
     TopoDS_Shape shape;
     DocumentMetadata metadata;
     std::vector<application::FaceInfo> faces;
+    std::string sourceStep;
 };
 } // namespace bending::cad
