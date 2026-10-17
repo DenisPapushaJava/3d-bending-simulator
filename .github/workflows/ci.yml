@@ -81,8 +81,9 @@ jobs:
           path: .deps/vcpkg
           persist-credentials: false
       - name: Cache OCCT binaries
+        id: vcpkg-cache
         if: runner.os == 'Windows'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/vcpkg
           key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
@@ -96,6 +97,12 @@ jobs:
           & ./.deps/vcpkg/bootstrap-vcpkg.bat -disableMetrics
           cmake --preset release "-DCMAKE_TOOLCHAIN_FILE=$pwd/.deps/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-release "-DVCPKG_OVERLAY_TRIPLETS=$pwd/cmake/triplets" "-DVCPKG_INSTALLED_DIR=$pwd/vcpkg_installed"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Save successful OCCT build before packaging
+        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/vcpkg
+          key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
       - name: Build
         run: cmake --build --preset release --parallel 2
       - name: Test core, OCCT and app startup

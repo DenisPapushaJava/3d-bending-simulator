@@ -19,6 +19,9 @@ int main(int argc, char *argv[]) {
     palette.setColor(QPalette::ButtonText, QColor("#1C2938"));
     palette.setColor(QPalette::Highlight, QColor("#087F83"));
     palette.setColor(QPalette::HighlightedText, Qt::white);
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor("#83909F"));
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor("#83909F"));
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor("#83909F"));
     app.setPalette(palette);
     QCoreApplication::setApplicationName(QStringLiteral("3D Bending Simulator"));
     QCoreApplication::setApplicationVersion(QString::fromUtf8(
