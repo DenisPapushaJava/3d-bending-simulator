@@ -1,13 +1,16 @@
 #pragma once
 
 // Original analytic fixtures shared by the example generator and geometry tests.
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <TopoDS.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
 
@@ -58,6 +61,13 @@ inline TopoDS_Shape bentStrip(double radius = 4.0, double thickness = 2.0,
     wire.Add(TopoDS::Edge(arc(radius).Reversed()));
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, length))
         .Shape();
+}
+// Oblique plane trims the cylinder with an ellipse. Its UV boundary is a
+// non-rational spline after STEP export, with the same constant-thickness core.
+inline TopoDS_Shape trimmedBend() {
+    const auto plane = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(-1, 0, 1))).Face();
+    const auto below = BRepPrimAPI_MakeHalfSpace(plane, gp_Pnt(0, 0, -10)).Solid();
+    return BRepAlgoAPI_Cut(bentStrip(), below).Shape();
 }
 inline TopoDS_Shape channel() {
     BRepBuilderAPI_MakeWire wire;

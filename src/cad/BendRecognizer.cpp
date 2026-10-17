@@ -4,7 +4,10 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom2dAdaptor_Curve.hxx>
+#include <Geom2d_BSplineCurve.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -43,6 +46,9 @@ struct Patch {
     bool outward;
     std::array<Rail, 2> rails;
     std::array<int, 2> caps;
+    gp_Pnt coreStart;
+    gp_Pnt coreEnd;
+    bool trimmedEnds;
 };
 PointMm point(const gp_Pnt &p) {
     return {p.X(), p.Y(), p.Z()};
@@ -56,6 +62,56 @@ gp_Dir radialAt(const gp_Cylinder &cylinder, const gp_Pnt &p) {
     return gp_Dir(offset - axis * offset.Dot(axis));
 }
 
+struct EndBounds {
+    int face;
+    double minimumV;
+    double maximumV;
+    bool straight;
+};
+// A monotone graph v(u) across the entire sector. Non-rational spline poles
+// bound v by the convex-hull property; no sampled curve is treated as proof.
+std::optional<EndBounds> inspectEnd(const TopoDS_Edge &edge, const TopoDS_Face &face,
+                                    int adjacentFace, bool normalPlanarCap, double u0, double u1,
+                                    double tolerance) {
+    double first, last;
+    const auto curve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+    if (curve.IsNull() || !std::isfinite(first) || !std::isfinite(last) || last <= first) {
+        return {};
+    }
+    Geom2dAdaptor_Curve adaptor(curve, first, last);
+    const auto a = adaptor.Value(first);
+    const auto b = adaptor.Value(last);
+    if (!std::isfinite(a.X()) || !std::isfinite(a.Y()) || !std::isfinite(b.X()) ||
+        !std::isfinite(b.Y()) || std::abs(std::min(a.X(), b.X()) - u0) > angularTolerance ||
+        std::abs(std::max(a.X(), b.X()) - u1) > angularTolerance) {
+        return {};
+    }
+    double minimumV = std::min(a.Y(), b.Y());
+    double maximumV = std::max(a.Y(), b.Y());
+    if (adaptor.GetType() == GeomAbs_BSplineCurve) {
+        const auto source = adaptor.BSpline();
+        if (source->IsRational() || source->IsPeriodic() || source->NbPoles() > 128) {
+            return {};
+        }
+        const auto spline = Handle(Geom2d_BSplineCurve)::DownCast(source->Copy());
+        spline->Segment(first, last);
+        const double sign = b.X() > a.X() ? 1.0 : -1.0;
+        for (int i = 1; i <= spline->NbPoles(); ++i) {
+            const auto pole = spline->Pole(i);
+            if (!std::isfinite(pole.X()) || !std::isfinite(pole.Y()) ||
+                (i > 1 && sign * (pole.X() - spline->Pole(i - 1).X()) <= 0.0)) {
+                return {};
+            }
+            minimumV = std::min(minimumV, pole.Y());
+            maximumV = std::max(maximumV, pole.Y());
+        }
+    } else if (adaptor.GetType() != GeomAbs_Line) {
+        return {};
+    }
+    return EndBounds{adjacentFace, minimumV, maximumV,
+                     normalPlanarCap && maximumV - minimumV <= tolerance};
+}
+
 std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                                   const TopTools_IndexedMapOfShape &faces,
                                   const TopTools_IndexedDataMapOfShapeListOfShape &neighbors,
@@ -66,8 +122,8 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
     BRepTools::UVBounds(face, u0, u1, v0, v1);
     const double angle = u1 - u0;
     const double length = v1 - v0;
-    if (!std::isfinite(angle) || !std::isfinite(length) || angle < minimumAngle ||
-        angle > maximumAngle || length <= 20.0 * tolerance ||
+    if (!std::isfinite(cylinder.Radius()) || !std::isfinite(angle) || !std::isfinite(length) ||
+        angle < minimumAngle || angle > maximumAngle || length <= 20.0 * tolerance ||
         cylinder.Radius() <= 20.0 * tolerance) {
         return {};
     }
@@ -77,7 +133,7 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
         return {};
     }
     std::vector<Rail> rails;
-    std::vector<int> caps;
+    std::vector<EndBounds> caps;
     for (int i = 1; i <= edges.Extent(); ++i) {
         const auto &edge = TopoDS::Edge(edges(i));
         if (!neighbors.Contains(edge)) {
@@ -89,13 +145,13 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
         }
         const auto &other = adjacent.First().IsSame(face) ? adjacent.Last() : adjacent.First();
         BRepAdaptor_Surface otherSurface(TopoDS::Face(other), true);
-        if (otherSurface.GetType() != GeomAbs_Plane) {
-            return {};
-        }
-        const auto plane = otherSurface.Plane();
         BRepAdaptor_Curve curve(edge);
         if (curve.GetType() == GeomAbs_Line &&
             parallel(curve.Line().Direction(), cylinder.Axis().Direction())) {
+            if (otherSurface.GetType() != GeomAbs_Plane) {
+                return {};
+            }
+            const auto plane = otherSurface.Plane();
             const auto p = curve.Value((curve.FirstParameter() + curve.LastParameter()) * 0.5);
             const auto radial = radialAt(cylinder, p);
             // A cylindrical hole or an arbitrary round corner is not enough: both
@@ -105,22 +161,38 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                 return {};
             }
             rails.push_back({radial, plane, static_cast<std::size_t>(faces.FindIndex(other))});
-        } else if (curve.GetType() == GeomAbs_Circle &&
-                   parallel(plane.Axis().Direction(), cylinder.Axis().Direction())) {
-            caps.push_back(faces.FindIndex(other));
         } else {
-            return {};
+            const bool normalPlanarCap =
+                otherSurface.GetType() == GeomAbs_Plane &&
+                parallel(otherSurface.Plane().Axis().Direction(), cylinder.Axis().Direction());
+            const auto cap =
+                inspectEnd(edge, face, faces.FindIndex(other), normalPlanarCap, u0, u1, tolerance);
+            if (!cap) {
+                return {};
+            }
+            caps.push_back(*cap);
         }
     }
     if (rails.size() != 2 || caps.size() != 2 || rails[0].flange == rails[1].flange ||
-        caps[0] == caps[1]) {
+        caps[0].face == caps[1].face) {
         return {};
     }
+    std::sort(caps.begin(), caps.end(),
+              [](const auto &a, const auto &b) { return a.minimumV < b.minimumV; });
+    const double coreMinimum = caps[0].maximumV;
+    const double coreMaximum = caps[1].minimumV;
+    if (coreMaximum - coreMinimum <= 20.0 * tolerance) {
+        return {};
+    }
+    const bool trimmed = !caps[0].straight || !caps[1].straight;
     GProp_GProps area;
     BRepGProp::SurfaceProperties(face, area);
     const double expectedArea = cylinder.Radius() * angle * length;
-    if (std::abs(area.Mass() - expectedArea) >
-        tolerance * (length + cylinder.Radius() * angle) * 4.0) {
+    const double areaTolerance = tolerance * (length + cylinder.Radius() * angle) * 4.0;
+    const double coreArea = cylinder.Radius() * angle * (coreMaximum - coreMinimum);
+    if (!std::isfinite(area.Mass()) || area.Mass() < coreArea - areaTolerance ||
+        area.Mass() > expectedArea + areaTolerance ||
+        (!trimmed && std::abs(area.Mass() - expectedArea) > areaTolerance)) {
         return {};
     }
     const auto middle = surface.Value((u0 + u1) * 0.5, (v0 + v1) * 0.5);
@@ -131,7 +203,8 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
     if (face.Orientation() == TopAbs_REVERSED) {
         normal.Reverse();
     }
-    std::sort(caps.begin(), caps.end());
+    std::array<int, 2> capFaces{caps[0].face, caps[1].face};
+    std::sort(capFaces.begin(), capFaces.end());
     const gp_Vec axis(cylinder.Axis().Direction());
     return Patch{index,
                  cylinder,
@@ -142,7 +215,10 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                  radialAt(cylinder, middle),
                  normal.Dot(gp_Vec(radialAt(cylinder, middle))) > 0.0,
                  {rails[0], rails[1]},
-                 {caps[0], caps[1]}};
+                 capFaces,
+                 cylinder.Location().Translated(axis * coreMinimum),
+                 cylinder.Location().Translated(axis * coreMaximum),
+                 trimmed};
 }
 
 std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, double tolerance) {
@@ -159,7 +235,17 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
                           inner.end.Distance(outer.end) <= tolerance;
     const bool reversedEnds = inner.start.Distance(outer.end) <= tolerance &&
                               inner.end.Distance(outer.start) <= tolerance;
-    if (!sameEnds && !reversedEnds) {
+    const gp_Vec axis(inner.cylinder.Axis().Direction());
+    const auto coreInterval = [&](const Patch &patch) {
+        const double a = gp_Vec(inner.cylinder.Location(), patch.coreStart).Dot(axis);
+        const double b = gp_Vec(inner.cylinder.Location(), patch.coreEnd).Dot(axis);
+        return std::array<double, 2>{std::min(a, b), std::max(a, b)};
+    };
+    const auto innerCore = coreInterval(inner);
+    const auto outerCore = coreInterval(outer);
+    const double straightLength =
+        std::min(innerCore[1], outerCore[1]) - std::max(innerCore[0], outerCore[0]);
+    if ((!sameEnds && !reversedEnds) || straightLength <= 20.0 * tolerance) {
         return {};
     }
     std::array<std::size_t, 4> flanges{};
@@ -190,9 +276,12 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
             break;
         }
     }
-    return RecognizedBend{point(start), point(end),   inner.angle, inner.cylinder.Radius(),
-                          thickness,    inner.length, inner.face,  outer.face,
-                          flanges};
+    return RecognizedBend{point(start),  point(end),
+                          inner.angle,   inner.cylinder.Radius(),
+                          thickness,     inner.length,
+                          inner.face,    outer.face,
+                          flanges,       inner.trimmedEnds || outer.trimmedEnds,
+                          straightLength};
 }
 } // namespace
 

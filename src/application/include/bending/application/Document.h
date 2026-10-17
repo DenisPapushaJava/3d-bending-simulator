@@ -41,6 +41,9 @@ struct RecognizedBend {
     std::size_t innerFace;
     std::size_t outerFace;
     std::array<std::size_t, 4> flangeFaces;
+    bool trimmedEnds = false;
+    // Conservative common axial span present at every angle on both cylinders.
+    double minimumStraightLengthMm = 0.0;
 };
 struct BendAnalysis {
     BendRecognitionStatus status = BendRecognitionStatus::NotAnalyzed;

@@ -433,6 +433,10 @@ class MainWindow::Impl {
                                       .arg(i + 1, 2, 10, QLatin1Char('0'))
                                       .arg(number(bend.angleRadians * 180.0 / std::numbers::pi),
                                            number(bend.innerRadiusMm), number(bend.lengthMm)));
+            if (bend.trimmedEnds) {
+                item->setText(item->text() + QStringLiteral(" · подрезка"));
+            }
+            item->setToolTip(item->text());
             item->setEditable(false);
             bendModel->appendRow(item);
         }
@@ -465,6 +469,13 @@ class MainWindow::Impl {
                      coordinate(bend.axisStart.x), coordinate(bend.axisStart.y),
                      coordinate(bend.axisStart.z), coordinate(bend.axisEnd.x),
                      coordinate(bend.axisEnd.y), coordinate(bend.axisEnd.z));
+        if (bend.trimmedEnds) {
+            description.replace(QStringLiteral("Длина сгиба:"),
+                                QStringLiteral("Габарит вдоль оси:"));
+            description +=
+                QStringLiteral("\n\nТорцы подрезаны. Прямой участок без подрезки — не менее %1 мм.")
+                    .arg(number(bend.minimumStraightLengthMm));
+        }
         if (session.manualThicknessMm() &&
             std::abs(*session.manualThicknessMm() - bend.thicknessMm) >
                 document->metadata().bendAnalysis.lengthToleranceMm) {
@@ -654,16 +665,19 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->project = new QListWidget(this);
     impl_->project->setMinimumWidth(230);
     impl_->project->setMaximumHeight(100);
+    impl_->project->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto *leftPanel = new QWidget(this);
     auto *leftLayout = new QVBoxLayout(leftPanel);
     leftLayout->addWidget(impl_->project);
     impl_->bendSummary = new QLabel(leftPanel);
     impl_->bendSummary->setObjectName(QStringLiteral("bendSummary"));
     impl_->bendSummary->setWordWrap(true);
+    impl_->bendSummary->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     impl_->bendSummary->setTextFormat(Qt::PlainText);
     leftLayout->addWidget(impl_->bendSummary);
     impl_->bendList = new QListView(leftPanel);
     impl_->bendList->setObjectName(QStringLiteral("bendList"));
+    impl_->bendList->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
     impl_->bendList->setAccessibleName(QStringLiteral("Распознанные зоны сгибов"));
     impl_->bendModel = new QStandardItemModel(impl_->bendList);
     impl_->bendList->setModel(impl_->bendModel);

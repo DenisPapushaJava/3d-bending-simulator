@@ -10,6 +10,7 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 
 namespace {
 using namespace bending::application;
@@ -93,23 +94,30 @@ void testProject() {
                 resultDocument(foldedProject)->metadata().thickness.status !=
                     ThicknessStatus::Detected,
             "Reload converted a local manual value into automatic recognition");
-    const auto bent = resultDocument(files.load(
-        nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/channel-2mm.step")),
-        {}, {}));
-    require(bent && bent->metadata().bendAnalysis.bends.size() == 2, "Missing channel bends");
-    const auto bendPath = nativePath(temporary.path() + QStringLiteral("/bends.bend"));
-    require(!files.save(bendPath, *bent, {}, {}), "Cannot save bent part");
-    const auto bendReopened = resultDocument(files.load(bendPath, {}, {}));
-    require(bendReopened && bendReopened->metadata().bendAnalysis.bends.size() == 2,
-            "Bends not reconstructed from embedded STEP");
-    for (std::size_t i = 0; i < 2; ++i) {
-        const auto &a = bent->metadata().bendAnalysis.bends[i];
-        const auto &b = bendReopened->metadata().bendAnalysis.bends[i];
-        require(std::abs(a.angleRadians - b.angleRadians) < 1.0e-6 &&
-                    std::abs(a.lengthMm - b.lengthMm) < 1.0e-5 &&
-                    std::abs(a.innerRadiusMm - b.innerRadiusMm) < 1.0e-5 &&
-                    std::abs(a.thicknessMm - b.thicknessMm) < 1.0e-5,
-                "Reopened bend measurements changed");
+    for (const auto &name : {"channel-2mm.step", "trimmed-bend-2mm.step"}) {
+        const auto bent =
+            resultDocument(files.load(nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                                                 QLatin1Char('/') + QString::fromLatin1(name)),
+                                      {}, {}));
+        const auto expected = std::string_view(name) == "channel-2mm.step" ? 2U : 1U;
+        require(bent && bent->metadata().bendAnalysis.bends.size() == expected,
+                "Missing bend fixtures");
+        const auto bendPath = nativePath(temporary.path() + QStringLiteral("/bends.bend"));
+        require(!files.save(bendPath, *bent, {}, {}), "Cannot save bent part");
+        const auto bendReopened = resultDocument(files.load(bendPath, {}, {}));
+        require(bendReopened && bendReopened->metadata().bendAnalysis.bends.size() == expected,
+                "Bends not reconstructed from embedded STEP");
+        for (std::size_t i = 0; i < expected; ++i) {
+            const auto &a = bent->metadata().bendAnalysis.bends[i];
+            const auto &b = bendReopened->metadata().bendAnalysis.bends[i];
+            require(std::abs(a.angleRadians - b.angleRadians) < 1.0e-6 &&
+                        std::abs(a.lengthMm - b.lengthMm) < 1.0e-5 &&
+                        std::abs(a.innerRadiusMm - b.innerRadiusMm) < 1.0e-5 &&
+                        std::abs(a.thicknessMm - b.thicknessMm) < 1.0e-5 &&
+                        a.trimmedEnds == b.trimmedEnds &&
+                        std::abs(a.minimumStraightLengthMm - b.minimumStraightLengthMm) < 1.0e-4,
+                    "Reopened bend measurements changed");
+        }
     }
     const auto invalid = temporary.path() + QStringLiteral("/invalid.bend");
     const auto reject = [&](QJsonObject root, ImportErrorCode expected) {

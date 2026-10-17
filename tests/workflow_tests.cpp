@@ -441,6 +441,68 @@ void testBendWorkflow(bool graphics) {
     controller.closeDocument();
     require(list->model()->rowCount() == 0 && !list->isEnabled(), "Close kept bend controls");
 }
+void testTrimmedBendWorkflow(bool graphics) {
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.resize(1360, 900);
+    window.show();
+    auto &controller = window.importController();
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    auto *list = window.findChild<QListView *>(QStringLiteral("bendList"));
+    auto *details = window.findChild<QLabel *>(QStringLiteral("bendProperties"));
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                    QStringLiteral("/trimmed-bend-2mm.step"));
+    waitUntil(finished);
+    require(list->model()->rowCount() == 1, "Trimmed bend missing from UI");
+    list->setCurrentIndex(list->model()->index(0, 0));
+    require(details->text().contains(QStringLiteral("Торцы подрезаны")) &&
+                details->text().contains(QStringLiteral("Габарит вдоль оси")) &&
+                details->text().contains(QStringLiteral("не менее 74")),
+            "Trimmed extent presented as uniform length");
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady(), "Trimmed bend graphics unavailable");
+        const auto highlighted = viewer->captureImage();
+        viewer->highlightFaces({}, controller.session().revision());
+        require(differences(highlighted, viewer->captureImage()) > 20,
+                "Trimmed bend faces not highlighted");
+    }
+    if (const auto external = qEnvironmentVariable("BENDING_RECOGNITION_STEP");
+        !external.isEmpty()) {
+        bool valid = false;
+        const int expected = qEnvironmentVariable("BENDING_RECOGNITION_COUNT").toInt(&valid);
+        require(valid && expected > 0, "Set BENDING_RECOGNITION_COUNT for private UI test");
+        window.openStep(external);
+        waitUntil(finished);
+        require(list->model()->rowCount() == expected, "Private model bend count differs in UI");
+        for (int i = expected - 1; i >= 0; --i) {
+            list->setCurrentIndex(list->model()->index(i, 0));
+            require(
+                details->text().contains(QStringLiteral("B%1").arg(i + 1, 2, 10, QLatin1Char('0'))),
+                "Private bend selection did not update measurements");
+        }
+    } else {
+        list->setCurrentIndex({});
+        list->setCurrentIndex(list->model()->index(0, 0));
+    }
+    if (graphics) {
+        const auto output = qEnvironmentVariable("BENDING_TRIM_SNAPSHOT");
+        if (!output.isEmpty()) {
+            QCoreApplication::processEvents();
+            auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+            QImage image = window.grab().toImage();
+            QPainter painter(&image);
+            painter.drawImage(QRect(canvas->mapTo(&window, QPoint()), canvas->size()),
+                              viewer->captureImage());
+            painter.end();
+            require(image.save(output), "Cannot save trimmed-bend snapshot");
+        }
+    }
+    controller.closeDocument();
+}
 } // namespace
 int main(int argc, char *argv[]) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
@@ -452,6 +514,7 @@ int main(int argc, char *argv[]) {
         testWorkflow(graphics);
         testProjectWorkflow(graphics);
         testBendWorkflow(graphics);
+        testTrimmedBendWorkflow(graphics);
         const auto external = qEnvironmentVariable("BENDING_THICKNESS_STEP");
         bool validExpected = false;
         const auto expected = qEnvironmentVariable("BENDING_THICKNESS_MM").toDouble(&validExpected);

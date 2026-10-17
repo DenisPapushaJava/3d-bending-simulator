@@ -57,7 +57,8 @@ void write(const std::filesystem::path &path, const TopoDS_Shape &shape, const c
 }
 void test(const std::filesystem::path &directory) {
     const auto check = [&](const TopoDS_Shape &shape, const char *name, std::size_t expected,
-                           double angle = std::numbers::pi / 2.0, const char *unit = "MM") {
+                           double angle = std::numbers::pi / 2.0, const char *unit = "MM",
+                           bool trimmed = false) {
         const auto path = directory / name;
         write(path, shape, unit);
         const auto document = read(path);
@@ -72,6 +73,9 @@ void test(const std::filesystem::path &directory) {
             requireNear(bend.innerRadiusMm, 4.0, 1.0e-5, "Wrong inner radius");
             requireNear(bend.thicknessMm, 2.0, 1.0e-5, "Wrong bend thickness");
             requireNear(bend.lengthMm, 80.0, 1.0e-5, "Wrong bend length");
+            require(bend.trimmedEnds == trimmed, "Wrong trimmed-end classification");
+            requireNear(bend.minimumStraightLengthMm, trimmed ? 74.0 : 80.0, 1.0e-4,
+                        "Wrong common straight span");
             requireNear(std::hypot(bend.axisEnd.x - bend.axisStart.x,
                                    bend.axisEnd.y - bend.axisStart.y,
                                    bend.axisEnd.z - bend.axisStart.z),
@@ -101,6 +105,10 @@ void test(const std::filesystem::path &directory) {
     mirror.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
     check(BRepBuilderAPI_Transform(fixtures::bentStrip(), mirror, true), "mirrored.step", 1);
     check(fixtures::channel(), "channel.step", 2);
+    check(fixtures::trimmedBend(), "trimmed.step", 1, std::numbers::pi / 2, "MM", true);
+    check(fixtures::trimmedBend(), "trimmed-inch.step", 1, std::numbers::pi / 2, "INCH", true);
+    check(BRepBuilderAPI_Transform(fixtures::trimmedBend(), transform, true),
+          "trimmed-rotated.step", 1, std::numbers::pi / 2, "MM", true);
     const auto flangeHole =
         BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(2, -15, 40), gp_Dir(1, 0, 0)), 3, 6).Shape();
     check(BRepAlgoAPI_Cut(fixtures::bentStrip(), flangeHole), "flange-hole.step", 1);
@@ -156,7 +164,8 @@ int main() {
             for (const auto &bend : analysis.bends) {
                 std::cout << "  R=" << bend.innerRadiusMm << " t=" << bend.thicknessMm
                           << " angle=" << bend.angleRadians * 180 / std::numbers::pi
-                          << " L=" << bend.lengthMm << '\n';
+                          << " L=" << bend.lengthMm << " trimmed=" << bend.trimmedEnds
+                          << " core=" << bend.minimumStraightLengthMm << '\n';
             }
         }
         return 0;
