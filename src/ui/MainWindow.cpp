@@ -6,8 +6,10 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDir>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QLabel>
 #include <QListWidget>
@@ -16,6 +18,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressBar>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QStatusBar>
 #include <QToolBar>
@@ -80,6 +83,8 @@ QString phaseName(ImportPhase phase) {
         return QStringLiteral("Построение CAD-геометрии");
     case ImportPhase::Validating:
         return QStringLiteral("Проверка геометрии");
+    case ImportPhase::Analyzing:
+        return QStringLiteral("Определение толщины");
     case ImportPhase::Preparing:
         return QStringLiteral("Подготовка 3D-модели");
     }
@@ -88,8 +93,8 @@ QString phaseName(ImportPhase phase) {
 QString errorText(ImportErrorCode code) {
     switch (code) {
     case ImportErrorCode::UnsupportedFormat:
-        return QStringLiteral(
-            "Выберите файл STEP (.step или .stp). Родные форматы CAD пока не поддерживаются.");
+        return QStringLiteral("Выберите STEP (.step, .stp) или проект (.bend). Родные форматы CAD "
+                              "пока не поддерживаются.");
     case ImportErrorCode::FileNotFound:
         return QStringLiteral("Файл не найден.");
     case ImportErrorCode::ReadFailed:
@@ -117,6 +122,11 @@ QString errorText(ImportErrorCode code) {
         return QStringLiteral("Не удалось подготовить деталь для 3D-просмотра.");
     case ImportErrorCode::PresentationFailed:
         return QStringLiteral("Не удалось показать новую деталь. Предыдущая модель сохранена.");
+    case ImportErrorCode::InvalidProject:
+        return QStringLiteral(
+            "Не удалось открыть проект: файл повреждён или параметры не согласованы с геометрией.");
+    case ImportErrorCode::UnsupportedProjectVersion:
+        return QStringLiteral("Эта версия формата проекта не поддерживается.");
     case ImportErrorCode::UnexpectedFailure:
         return QStringLiteral("Неожиданная ошибка загрузки.");
     }
@@ -165,7 +175,7 @@ class MainWindow::Impl {
                     QStringLiteral(
                         "Файл: %1\n\nГабариты: %2 × %3 × %4 мм\nОбъём: %5 мм³\nГраней: "
                         "%6\n\nЕдиницы файла: %7\nВ программе: мм\nДопуск BRep (макс.): %8 "
-                        "мм\n\nИсходная CAD-геометрия. Толщина и сгибы ещё не заданы.")
+                        "мм\n\nИсходная CAD-геометрия. Сгибы ещё не распознаны.")
                         .arg(displayPath(metadata.sourcePath.filename()),
                              number(bounds.maximum.x - bounds.minimum.x),
                              number(bounds.maximum.y - bounds.minimum.y),
@@ -174,9 +184,19 @@ class MainWindow::Impl {
                         .arg(metadata.faceCount)
                         .arg(units.join(QStringLiteral(", ")),
                              number(metadata.maximumToleranceMm)));
+                pairs->clear();
+                for (const auto &pair : metadata.thickness.evidence) {
+                    pairs->addItem(QStringLiteral("Грани %1 и %2 · %3 мм")
+                                       .arg(pair.firstFace)
+                                       .arg(pair.secondFace)
+                                       .arg(number(pair.distanceMm)));
+                }
+                thicknessInput->setValue(session.manualThicknessMm().value_or(
+                    metadata.thickness.thicknessMm.value_or(2.0)));
                 window->setWindowTitle(displayPath(metadata.sourcePath.filename()) +
                                        QStringLiteral(" — ") + title);
             } else {
+                pairs->clear();
                 project->addItem(QStringLiteral("Деталь не загружена"));
                 project->setToolTip({});
                 properties->setText(QStringLiteral(
@@ -185,11 +205,71 @@ class MainWindow::Impl {
                 window->setWindowTitle(title);
             }
         }
+        const bool editable = document && !controller->hasWork();
+        thicknessInput->setEnabled(editable);
+        applyThickness->setEnabled(editable);
+        automaticThickness->setEnabled(editable && session.manualThicknessMm().has_value());
+        pairs->setEnabled(editable && pairs->count() > 0);
+        showPair->setEnabled(editable && viewer->isReady() && pairs->count() > 0);
+        saveAction->setEnabled(editable && writer != nullptr);
+        saveAsAction->setEnabled(editable && writer != nullptr);
+        if (document) {
+            const auto &analysis = document->metadata().thickness;
+            QString description;
+            if (session.manualThicknessMm()) {
+                description = QStringLiteral("Толщина: %1 мм · задана вручную\n")
+                                  .arg(number(*session.manualThicknessMm()));
+                const auto validation = validateThickness(*session.manualThicknessMm(), analysis);
+                description +=
+                    validation == ThicknessValidation::Verified
+                        ? QStringLiteral("Подтверждена геометрией плоской детали.")
+                    : validation == ThicknessValidation::LocalMatch
+                        ? QStringLiteral("Совпадает с локальным расстоянием. Постоянство толщины "
+                                         "всей детали не проверено.")
+                        : QStringLiteral(
+                              "Геометрией не подтверждена. Постоянство толщины не проверено.");
+            } else if (analysis.status == ThicknessStatus::Detected && analysis.thicknessMm) {
+                description = QStringLiteral("Толщина: %1 мм · определена по геометрии\nПлоская "
+                                             "деталь постоянной толщины.")
+                                  .arg(number(*analysis.thicknessMm));
+            } else {
+                description =
+                    analysis.status == ThicknessStatus::LimitReached
+                        ? QStringLiteral("Автоопределение: превышен лимит сложности.")
+                    : analysis.status == ThicknessStatus::Failed
+                        ? QStringLiteral(
+                              "Автоопределение: геометрический анализ завершился ошибкой.")
+                    : analysis.status == ThicknessStatus::Ambiguous
+                        ? QStringLiteral("Толщина определена неоднозначно.")
+                        : QStringLiteral("Толщина автоматически не определена. Поддерживаются "
+                                         "плоские детали постоянной толщины.");
+                description += QStringLiteral("\nМожно задать толщину вручную; это не подтверждает "
+                                              "пригодность детали для гибки.");
+            }
+            thickness->setText(description);
+            const auto name = session.projectPath().empty()
+                                  ? displayPath(document->metadata().sourcePath.filename())
+                                  : displayPath(session.projectPath().filename());
+            window->setWindowTitle((session.modified() ? QStringLiteral("* ") : QString{}) + name +
+                                   QStringLiteral(" — ") + title);
+            projectState->setText(session.projectPath().empty()
+                                      ? QStringLiteral("Проект ещё не сохранён")
+                                      : QStringLiteral("Проект: %1%2")
+                                            .arg(displayPath(session.projectPath().filename()),
+                                                 session.modified()
+                                                     ? QStringLiteral(" · есть изменения")
+                                                     : QStringLiteral(" · сохранён")));
+        } else {
+            thickness->setText(QStringLiteral("Толщина: —"));
+            projectState->clear();
+        }
         camera->setEnabled(viewer->isReady() && document != nullptr);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
         cancelAction->setEnabled(session.activeRequest().has_value());
-        progress->setVisible(session.activeRequest().has_value());
-        if (session.activeRequest()) {
+        progress->setVisible(session.activeRequest().has_value() || controller->isSaving());
+        if (controller->isSaving()) {
+            window->statusBar()->showMessage(QStringLiteral("Сохранение проекта…"));
+        } else if (session.activeRequest()) {
             window->statusBar()->showMessage(QStringLiteral("%1 · %2").arg(
                 phaseName(session.phase()),
                 displayPath(session.activeRequest()->source.filename())));
@@ -207,9 +287,13 @@ class MainWindow::Impl {
                                           "Колесо: масштаб · ЛКМ: грань")
                          : QStringLiteral("Откройте STEP для начала работы · Ctrl+O"));
         }
-        error->setVisible(session.error().has_value());
+        error->setVisible(session.error().has_value() || !controller->saveError().isEmpty());
         QString detail;
-        if (session.error()) {
+        if (!controller->saveError().isEmpty()) {
+            error->setText(
+                QStringLiteral("Не удалось сохранить проект. Изменения остались в памяти."));
+            detail = controller->saveError();
+        } else if (session.error()) {
             error->setText(errorText(session.error()->code));
             detail = text(session.error()->detail) + QLatin1Char('\n') +
                      diagnosticsText(session.error()->diagnostics);
@@ -220,12 +304,52 @@ class MainWindow::Impl {
         diagnostics->setVisible(!detail.isEmpty());
     }
 
+    bool canDiscard() {
+        if (!controller->session().modified()) {
+            return true;
+        }
+        return QMessageBox::warning(
+                   window, QStringLiteral("Несохранённые изменения"),
+                   QStringLiteral(
+                       "В проекте есть несохранённые параметры. Продолжить без сохранения?"),
+                   QMessageBox::Discard | QMessageBox::Cancel,
+                   QMessageBox::Cancel) == QMessageBox::Discard;
+    }
+    void save(bool choosePath) {
+        auto path = displayPath(controller->session().projectPath());
+        if (choosePath || path.isEmpty()) {
+            QFileDialog dialog(window, QStringLiteral("Сохранить проект"), path,
+                               QStringLiteral("Проект симулятора (*.bend)"));
+            dialog.setAcceptMode(QFileDialog::AcceptSave);
+            dialog.setDefaultSuffix(QStringLiteral("bend"));
+            if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
+                return;
+            }
+            path = dialog.selectedFiles().first();
+            if (!path.endsWith(QStringLiteral(".bend"), Qt::CaseInsensitive)) {
+                QMessageBox::warning(window, QStringLiteral("Формат проекта"),
+                                     QStringLiteral("Имя проекта должно заканчиваться на .bend."));
+                return;
+            }
+        }
+        controller->saveProject(nativePath(path), writer);
+    }
     MainWindow *window;
     viewer::ViewerWidget *viewer = nullptr;
     ImportController *controller = nullptr;
     QListWidget *project = nullptr;
     QLabel *properties = nullptr;
     QLabel *selection = nullptr;
+    QLabel *thickness = nullptr;
+    QLabel *projectState = nullptr;
+    QDoubleSpinBox *thicknessInput = nullptr;
+    QComboBox *pairs = nullptr;
+    QPushButton *applyThickness = nullptr;
+    QPushButton *automaticThickness = nullptr;
+    QPushButton *showPair = nullptr;
+    QAction *saveAction = nullptr;
+    QAction *saveAsAction = nullptr;
+    std::shared_ptr<const ProjectWriter> writer;
     QLabel *error = nullptr;
     QPlainTextEdit *diagnostics = nullptr;
     QToolBar *camera = nullptr;
@@ -237,8 +361,10 @@ class MainWindow::Impl {
 };
 
 MainWindow::MainWindow(RuntimeInfo runtime,
-                       std::shared_ptr<const application::DocumentImporter> importer)
+                       std::shared_ptr<const application::DocumentImporter> importer,
+                       std::shared_ptr<const application::ProjectWriter> writer)
     : impl_(std::make_unique<Impl>(this)) {
+    impl_->writer = std::move(writer);
     setObjectName(QStringLiteral("mainWindow"));
     impl_->title =
         QStringLiteral("3D Bending Simulator · %1").arg(text(runtime.applicationVersion));
@@ -257,7 +383,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         this);
 
     auto *fileMenu = menuBar()->addMenu(QStringLiteral("Файл"));
-    auto *open = fileMenu->addAction(QStringLiteral("Открыть STEP…"));
+    auto *open = fileMenu->addAction(QStringLiteral("Открыть STEP или проект…"));
     open->setObjectName(QStringLiteral("openStepAction"));
     open->setShortcut(QKeySequence::Open);
     connect(open, &QAction::triggered, this, [this] {
@@ -274,12 +400,21 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                                               : QString{};
         }
         const auto path = QFileDialog::getOpenFileName(
-            this, QStringLiteral("Открыть STEP одной детали"), folder,
-            QStringLiteral("STEP (*.step *.stp *.STEP *.STP);;Все файлы (*)"));
+            this, QStringLiteral("Открыть деталь или проект"), folder,
+            QStringLiteral(
+                "Деталь и проект (*.step *.stp *.STEP *.STP *.bend *.BEND);;Все файлы (*)"));
         if (!path.isEmpty()) {
             openStep(path);
         }
     });
+    impl_->saveAction = fileMenu->addAction(QStringLiteral("Сохранить проект"));
+    impl_->saveAction->setObjectName(QStringLiteral("saveProjectAction"));
+    impl_->saveAction->setShortcut(QKeySequence::Save);
+    connect(impl_->saveAction, &QAction::triggered, this, [this] { impl_->save(false); });
+    impl_->saveAsAction = fileMenu->addAction(QStringLiteral("Сохранить проект как…"));
+    impl_->saveAsAction->setObjectName(QStringLiteral("saveProjectAsAction"));
+    impl_->saveAsAction->setShortcut(QKeySequence::SaveAs);
+    connect(impl_->saveAsAction, &QAction::triggered, this, [this] { impl_->save(true); });
     impl_->cancelAction = fileMenu->addAction(QStringLiteral("Отменить загрузку"));
     impl_->cancelAction->setObjectName(QStringLiteral("cancelImportAction"));
     impl_->cancelAction->setShortcut(QKeySequence(Qt::Key_Escape));
@@ -287,8 +422,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->closeAction = fileMenu->addAction(QStringLiteral("Закрыть деталь"));
     impl_->closeAction->setObjectName(QStringLiteral("closeDocumentAction"));
     impl_->closeAction->setShortcut(QKeySequence::Close);
-    connect(impl_->closeAction, &QAction::triggered, impl_->controller,
-            &ImportController::closeDocument);
+    connect(impl_->closeAction, &QAction::triggered, this, [this] {
+        if (impl_->canDiscard()) {
+            impl_->controller->closeDocument();
+        }
+    });
     fileMenu->addSeparator();
     auto *exit = fileMenu->addAction(QStringLiteral("Выход"));
     exit->setShortcut(QKeySequence::Quit);
@@ -299,6 +437,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     toolbar->setObjectName(QStringLiteral("workflowToolbar"));
     toolbar->setMovable(false);
     toolbar->addAction(open);
+    toolbar->addAction(impl_->saveAction);
     toolbar->addAction(impl_->cancelAction);
     toolbar->addAction(impl_->closeAction);
     toolbar->addSeparator();
@@ -346,6 +485,54 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         return result;
     };
     impl_->properties = label(QStringLiteral("documentProperties"));
+    impl_->projectState = label(QStringLiteral("projectState"));
+    impl_->thickness = label(QStringLiteral("thicknessProperties"));
+    impl_->thicknessInput = new QDoubleSpinBox(panel);
+    impl_->thicknessInput->setObjectName(QStringLiteral("thicknessInput"));
+    impl_->thicknessInput->setAccessibleName(QStringLiteral("Толщина листа в миллиметрах"));
+    impl_->thicknessInput->setDecimals(6);
+    impl_->thicknessInput->setRange(0.000001, 1000000.0);
+    impl_->thicknessInput->setValue(2.0);
+    impl_->thicknessInput->setSuffix(QStringLiteral(" мм"));
+    layout->addWidget(impl_->thicknessInput);
+    impl_->applyThickness = new QPushButton(QStringLiteral("Применить толщину вручную"), panel);
+    impl_->applyThickness->setObjectName(QStringLiteral("applyThickness"));
+    layout->addWidget(impl_->applyThickness);
+    connect(impl_->applyThickness, &QPushButton::clicked, this, [this] {
+        const auto validation =
+            impl_->controller->setManualThickness(impl_->thicknessInput->value());
+        if (validation == ThicknessValidation::ConflictsWithGeometry ||
+            validation == ThicknessValidation::Invalid) {
+            QMessageBox::warning(
+                this, QStringLiteral("Толщина не применена"),
+                QStringLiteral("Значение недопустимо или противоречит определённой толщине модели. "
+                               "CAD-геометрия не изменяется."));
+        }
+    });
+    impl_->automaticThickness =
+        new QPushButton(QStringLiteral("Использовать автоопределение"), panel);
+    impl_->automaticThickness->setObjectName(QStringLiteral("automaticThickness"));
+    layout->addWidget(impl_->automaticThickness);
+    connect(impl_->automaticThickness, &QPushButton::clicked, impl_->controller,
+            &ImportController::useAutomaticThickness);
+    impl_->pairs = new QComboBox(panel);
+    impl_->pairs->setObjectName(QStringLiteral("thicknessEvidence"));
+    impl_->pairs->setAccessibleName(QStringLiteral("Пары поверхностей для измерения толщины"));
+    layout->addWidget(impl_->pairs);
+    impl_->showPair = new QPushButton(QStringLiteral("Показать поверхности"), panel);
+    impl_->showPair->setObjectName(QStringLiteral("showThicknessFaces"));
+    layout->addWidget(impl_->showPair);
+    connect(impl_->showPair, &QPushButton::clicked, this, [this] {
+        const auto &session = impl_->controller->session();
+        const auto index = impl_->pairs->currentIndex();
+        if (!session.document() || index < 0) {
+            return;
+        }
+        const auto &pair =
+            session.document()->metadata().thickness.evidence.at(static_cast<std::size_t>(index));
+        impl_->viewer->highlightFaces({pair.firstFace, pair.secondFace}, session.revision());
+        impl_->thicknessInput->setValue(pair.distanceMm);
+    });
     impl_->selection = label(QStringLiteral("faceProperties"));
     impl_->error = label(QStringLiteral("importError"));
     impl_->error->setStyleSheet(QStringLiteral("color:#9D2828;"));
@@ -414,7 +601,7 @@ MainWindow::~MainWindow() {
     impl_->controller->shutdown();
 }
 void MainWindow::openStep(const QString &path) {
-    if (!path.isEmpty()) {
+    if (!path.isEmpty() && impl_->canDiscard()) {
         impl_->controller->open(nativePath(path));
     }
 }
@@ -422,6 +609,10 @@ ImportController &MainWindow::importController() const {
     return *impl_->controller;
 }
 void MainWindow::closeEvent(QCloseEvent *event) {
+    if (!impl_->canDiscard()) {
+        event->ignore();
+        return;
+    }
     impl_->controller->closeDocument();
     QMainWindow::closeEvent(event);
 }

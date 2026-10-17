@@ -4,7 +4,7 @@ if(WIN32)
     set_target_properties(bending_simulator PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 target_include_directories(bending_simulator PRIVATE "${PROJECT_BINARY_DIR}/generated")
-target_link_libraries(bending_simulator PRIVATE Bending::Ui Bending::Cad Bending::Viewer bending_options)
+target_link_libraries(bending_simulator PRIVATE Bending::Ui Bending::Cad Bending::Viewer Bending::Project bending_options)
 install(TARGETS bending_simulator RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY "${PROJECT_SOURCE_DIR}/examples/"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/3d-bending-simulator/examples"

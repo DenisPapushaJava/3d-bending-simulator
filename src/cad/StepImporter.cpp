@@ -1,6 +1,7 @@
 #include "bending/cad/StepImporter.h"
 
 #include "CadDocumentData.h"
+#include "ThicknessRecognizer.h"
 #include "bending/cad/Kernel.h"
 
 #include <BRepAdaptor_Surface.hxx>
@@ -36,9 +37,11 @@
 #include <XSControl_WorkSession.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <utility>
 
 namespace bending::cad {
@@ -200,12 +203,6 @@ StepImportResult StepImporter::read(const std::filesystem::path &path, std::stop
     const auto fail = [&](StepImportErrorCode code, std::string detail) -> StepImportResult {
         return StepImportError{code, std::move(detail), std::move(diagnostics)};
     };
-    const auto report = [&](application::ImportPhase phase) {
-        if (progress) {
-            progress(phase);
-        }
-        return stop.stop_requested();
-    };
     try {
         if (stop.stop_requested()) {
             return fail(StepImportErrorCode::Cancelled, "Import cancelled");
@@ -238,10 +235,50 @@ StepImportResult StepImporter::read(const std::filesystem::path &path, std::stop
                         "Source file contains no readable data");
         }
 
+        std::string source;
+        std::array<char, 65536> buffer{};
+        while (input) {
+            if (stop.stop_requested()) {
+                return fail(StepImportErrorCode::Cancelled, "Import cancelled while reading");
+            }
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            source.append(buffer.data(), static_cast<std::size_t>(input.gcount()));
+            if (source.size() > maximumSourceBytes) {
+                return fail(StepImportErrorCode::ReadFailed,
+                            "STEP exceeds the 64 MiB source limit");
+            }
+        }
+        if (input.bad()) {
+            return fail(StepImportErrorCode::ReadFailed, "Cannot read STEP source");
+        }
+        return readBytes(std::move(source), path, stop, progress);
+    } catch (const std::filesystem::filesystem_error &error) {
+        return fail(StepImportErrorCode::ReadFailed, error.what());
+    }
+}
+
+StepImportResult StepImporter::readBytes(std::string source, const std::filesystem::path &path,
+                                         std::stop_token stop,
+                                         const application::ImportProgress &progress) const {
+    std::vector<ImportDiagnostic> diagnostics;
+    const auto fail = [&](StepImportErrorCode code, std::string detail) -> StepImportResult {
+        return StepImportError{code, std::move(detail), std::move(diagnostics)};
+    };
+    const auto report = [&](application::ImportPhase phase) {
+        if (progress) {
+            progress(phase);
+        }
+        return stop.stop_requested();
+    };
+    if (source.empty() || source.size() > maximumSourceBytes) {
+        return fail(StepImportErrorCode::ReadFailed, "Empty or oversized STEP source");
+    }
+    try {
         std::lock_guard lock(importMutex);
         if (report(application::ImportPhase::Reading)) {
             return fail(StepImportErrorCode::Cancelled, "Import cancelled");
         }
+        std::istringstream input(source);
         STEPControl_Reader reader;
         if (reader.ReadStream("import.step", input) != IFSelect_RetDone || input.bad()) {
             return fail(StepImportErrorCode::InvalidStep, "STEP parser could not read the file");
@@ -334,6 +371,12 @@ StepImportResult StepImporter::read(const std::filesystem::path &path, std::stop
         auto data = std::make_unique<CadDocument::Impl>();
         data->shape = std::move(shape);
         data->metadata = std::move(metadata);
+        data->sourceStep = std::move(source);
+        if (report(application::ImportPhase::Analyzing)) {
+            return fail(StepImportErrorCode::Cancelled,
+                        "Import cancelled before thickness analysis");
+        }
+        data->metadata.thickness = recognizeThickness(data->shape, tolerance, stop);
         if (report(application::ImportPhase::Preparing)) {
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before presentation preparation");

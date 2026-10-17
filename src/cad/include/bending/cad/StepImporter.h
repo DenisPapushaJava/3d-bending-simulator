@@ -14,6 +14,10 @@ using StepImportResult = std::variant<std::unique_ptr<const CadDocument>, StepIm
 
 class StepImporter final : public application::DocumentImporter {
   public:
+    static constexpr std::size_t maximumSourceBytes = 64 * 1024 * 1024;
+    [[nodiscard]] StepImportResult
+    readBytes(std::string source, const std::filesystem::path &logicalPath,
+              std::stop_token stop = {}, const application::ImportProgress &progress = {}) const;
     // Reads a single-file, single-part .step/.stp; assemblies are unsupported.
     // Calls are serialized at the OCCT boundary (7.6 compatibility).
     // This is synchronous; the application layer must schedule it outside the GUI thread.

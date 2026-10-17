@@ -3,7 +3,9 @@
 #include <QImage>
 #include <QWidget>
 
+#include <cstddef>
 #include <memory>
+#include <vector>
 
 namespace bending::application {
 class Document;
@@ -30,6 +32,7 @@ class ViewerWidget final : public QWidget {
     [[nodiscard]] QString presentDocument(std::shared_ptr<const application::Document> document,
                                           quint64 revision);
     void clearDocument(quint64 revision);
+    void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
     // Explicit diagnostic scene, never shown by the normal application startup.
     void showDiagnosticBox();
 

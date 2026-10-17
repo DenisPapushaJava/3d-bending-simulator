@@ -1,5 +1,5 @@
 #include "bending/cad/Kernel.h"
-#include "bending/cad/StepImporter.h"
+#include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
@@ -7,13 +7,16 @@
 #include <QAction>
 #include <QApplication>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPushButton>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
@@ -67,8 +70,8 @@ void testWorkflow(bool graphics) {
     const auto unicodeFile = folder + QStringLiteral("/Пластина в дюймах.STP");
     require(QFile::copy(examples + QStringLiteral("/plate-inch.stp"), unicodeFile),
             "Cannot copy Unicode fixture");
-    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()},
-                                   std::make_shared<bending::cad::StepImporter>());
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
     window.resize(1280, 820);
     window.show();
     auto &controller = window.importController();
@@ -185,6 +188,98 @@ void testWorkflow(bool graphics) {
     waitUntil(finished);
     require(!controller.session().document(), "Late import reopened a closed window/document");
 }
+void testProjectWorkflow(bool graphics) {
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.resize(1440, 960);
+    window.show();
+    auto &controller = window.importController();
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/plate-mm.step"));
+    waitUntil([&] { return finished() && controller.session().document(); });
+    auto *label = window.findChild<QLabel *>(QStringLiteral("thicknessProperties"));
+    require(label && label->text().contains(QStringLiteral("определена по геометрии")),
+            "Automatic thickness not shown");
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady(); });
+        const auto before = viewer->captureImage();
+        window.findChild<QPushButton *>(QStringLiteral("showThicknessFaces"))->click();
+        require(differences(before, viewer->captureImage()) > 20,
+                "Thickness evidence not highlighted");
+        if (const auto path = qEnvironmentVariable("BENDING_PROJECT_SNAPSHOT"); !path.isEmpty()) {
+            QCoreApplication::processEvents();
+            auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+            QImage image = window.grab().toImage();
+            QPainter painter(&image);
+            painter.drawImage(QRect(canvas->mapTo(&window, QPoint()), canvas->size()),
+                              viewer->captureImage());
+            painter.end();
+            require(image.save(path), "Cannot save project workflow snapshot");
+        }
+        viewer->highlightFaces({}, controller.session().revision());
+        const auto cleared = viewer->captureImage();
+        viewer->highlightFaces({1, 2}, controller.session().revision() + 100);
+        require(differences(cleared, viewer->captureImage()) < 20,
+                "Stale thickness evidence applied");
+    }
+    window.findChild<QDoubleSpinBox *>(QStringLiteral("thicknessInput"))->setValue(2.0);
+    window.findChild<QPushButton *>(QStringLiteral("applyThickness"))->click();
+    require(controller.session().modified() &&
+                label->text().contains(QStringLiteral("задана вручную")),
+            "Manual thickness not applied");
+    // Cancel closing must retain edited parameters.
+    QTimer::singleShot(0, [] {
+        for (auto *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<QMessageBox *>(widget)) {
+                dialog->done(QMessageBox::Cancel);
+            }
+        }
+    });
+    window.close();
+    require(window.isVisible() && controller.session().manualThicknessMm() == 2.0,
+            "Cancelled close lost parameters");
+    QTemporaryDir temporary;
+    require(temporary.isValid(), "Cannot create project directory");
+    const auto destination = temporary.path() + QStringLiteral("/Мой проект.bend");
+    QTimer::singleShot(0, [&] {
+        bool found = false;
+        for (auto *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<QFileDialog *>(widget)) {
+                dialog->selectFile(destination);
+                QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
+                found = true;
+            }
+        }
+        require(found, "Save did not open file dialog");
+    });
+    window.findChild<QAction *>(QStringLiteral("saveProjectAction"))->trigger();
+    waitUntil(finished);
+    require(QFileInfo::exists(destination) && !controller.session().modified() &&
+                controller.saveError().isEmpty(),
+            "Project was not saved");
+    window.findChild<QAction *>(QStringLiteral("closeDocumentAction"))->trigger();
+    window.openStep(destination);
+    waitUntil([&] { return finished() && controller.session().document(); });
+    require(controller.session().manualThicknessMm() == 2.0 &&
+                label->text().contains(QStringLiteral("задана вручную")),
+            "Project did not restore manual thickness");
+    const auto restored = controller.session().document();
+    const auto broken = temporary.path() + QStringLiteral("/broken.bend");
+    QFile corrupt(broken);
+    require(corrupt.open(QIODevice::WriteOnly) && corrupt.write("broken") > 0,
+            "Cannot create broken project");
+    corrupt.close();
+    window.openStep(broken);
+    waitUntil(finished);
+    require(controller.session().document() == restored &&
+                controller.session().manualThicknessMm() == 2.0 && controller.session().error(),
+            "Failed project open discarded current state");
+    window.close();
+}
+
 } // namespace
 int main(int argc, char *argv[]) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
@@ -192,7 +287,9 @@ int main(int argc, char *argv[]) {
     QApplication::setStyle(QStringLiteral("Fusion"));
     app.setQuitOnLastWindowClosed(false);
     try {
-        testWorkflow(app.arguments().contains(QStringLiteral("--graphics")));
+        const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
+        testWorkflow(graphics);
+        testProjectWorkflow(graphics);
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

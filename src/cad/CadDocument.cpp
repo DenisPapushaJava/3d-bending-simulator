@@ -18,6 +18,10 @@ const std::vector<application::FaceInfo> &CadDocument::faces() const noexcept {
     return impl_->faces;
 }
 
+std::string_view CadDocument::sourceStep() const noexcept {
+    return impl_->sourceStep;
+}
+
 const TopoDS_Shape &OcctDocumentAccess::shape(const CadDocument &document) {
     return document.impl_->shape;
 }

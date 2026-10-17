@@ -24,6 +24,7 @@ class CadDocument final : public application::Document {
 
     [[nodiscard]] const DocumentMetadata &metadata() const noexcept override;
     [[nodiscard]] const std::vector<application::FaceInfo> &faces() const noexcept override;
+    [[nodiscard]] std::string_view sourceStep() const noexcept override;
 
   private:
     struct Impl;
