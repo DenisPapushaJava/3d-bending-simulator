@@ -98,6 +98,8 @@ Push проверяется только в main, остальные ветки 
 
 На PR выполняются сборка и тесты обеих ОС, а также Linux-упаковка. Windows-упаковка с полным комплектом соответствующих исходников выполняется для main и тегов; артефакты PR не публикуются.
 
+Проверенный прогон каркаса с MIT: [CI 39060800727](https://github.com/DenisPapushaJava/3d-bending-simulator/actions/runs/39060800727), коммит `2a07d38`, 2026-10-17. Обе ОС прошли сборку, три CTest-проверки и запуск упакованного приложения; правила версии и форматирование также прошли. Windows-задача с кэшем заняла 2 минуты 31 секунду, включая 36 секунд подготовки SDK и 40 секунд упаковки с соответствующими исходниками. Linux-задача заняла 53 секунды. Это проверка каркаса без реального CAD-просмотра и моделирования; интерактивная проверка на целевом Windows-ПК ещё предстоит. Выпуск по тегу пока не запускался, релиз не опубликован.
+
 ## Первоисточники
 
 [Qt deployment](https://doc.qt.io/qt-6.8/qt-generate-deploy-app-script.html), [CPack DEB](https://cmake.org/cmake/help/latest/cpack_gen/deb.html), [vcpkg port](https://github.com/microsoft/vcpkg/tree/256310531c1e57ee83f8ac01f7bea7c1e56630f5/ports/opencascade), [install-qt-action](https://github.com/jurplel/install-qt-action), [GitHub token permissions](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token).
