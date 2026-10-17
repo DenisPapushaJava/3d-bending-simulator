@@ -1,6 +1,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include "bending/cad/occt/DocumentAccess.h"
 
+#include <AIS_ColoredShape.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <Aspect_DisplayConnection.hxx>
@@ -10,6 +11,7 @@
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
+#include <Prs3d_LineAspect.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -28,6 +30,7 @@
 #include <QTimer>
 #include <QWheelEvent>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <stdexcept>
@@ -41,6 +44,12 @@ QString failureText(const Standard_Failure &error) {
     return message && *message ? QString::fromUtf8(message)
                                : QStringLiteral("Ошибка отображения OCCT");
 }
+
+struct FaceHighlights {
+    std::vector<std::size_t> primary;
+    std::vector<std::size_t> flanges;
+    bool bend = false;
+};
 
 class OcctCanvas final : public QWidget {
   public:
@@ -69,10 +78,10 @@ class OcctCanvas final : public QWidget {
                     bool diagnostic = false) {
         TopTools_IndexedMapOfShape faces;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
-        Handle(AIS_Shape) candidate;
+        Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
-                candidate = new AIS_Shape(shape);
+                candidate = new AIS_ColoredShape(shape);
                 candidate->Attributes()->SetFaceBoundaryDraw(true);
                 candidate->Attributes()->SetAutoTriangulation(diagnostic);
                 context_->SetColor(candidate, Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
@@ -96,15 +105,15 @@ class OcctCanvas final : public QWidget {
             }
         }
         const auto retainedHighlights = document && document == document_ && revision == revision_
-                                            ? highlightedFaces_
-                                            : std::vector<std::size_t>{};
+                                            ? highlights_
+                                            : FaceHighlights{};
         presentation_ = candidate;
         shape_ = shape;
         faces_ = std::move(faces);
         document_ = std::move(document);
         revision_ = revision;
         diagnostic_ = diagnostic;
-        highlightFaces(retainedHighlights, revision_);
+        setHighlights(retainedHighlights, revision_);
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -119,7 +128,8 @@ class OcctCanvas final : public QWidget {
         });
         presentation_.Nullify();
         evidence_.Nullify();
-        highlightedFaces_.clear();
+        support_.Nullify();
+        highlights_ = {};
         shape_.Nullify();
         faces_.Clear();
         document_.reset();
@@ -131,31 +141,69 @@ class OcctCanvas final : public QWidget {
     }
 
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
+        setHighlights({indices, {}, false}, revision);
+    }
+
+    void highlightBend(const application::RecognizedBend &bend, quint64 revision) {
+        setHighlights({{bend.innerFace, bend.outerFace},
+                       std::vector<std::size_t>(bend.flangeFaces.begin(), bend.flangeFaces.end()),
+                       true},
+                      revision);
+    }
+
+    void setHighlights(FaceHighlights state, quint64 revision) {
         if (revision != revision_) {
             return;
         }
-        highlightedFaces_ = indices;
+        const auto sanitize = [&](std::vector<std::size_t> &indices) {
+            std::erase_if(indices, [&](auto i) {
+                return i == 0 || i > static_cast<std::size_t>(faces_.Extent());
+            });
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+        };
+        sanitize(state.primary);
+        sanitize(state.flanges);
+        state.bend = state.bend && !state.primary.empty();
+        highlights_ = std::move(state);
         guarded([&] {
-            if (!evidence_.IsNull()) {
-                context_->Remove(evidence_, false);
-                evidence_.Nullify();
+            for (const auto &overlay : {evidence_, support_}) {
+                if (!overlay.IsNull()) {
+                    context_->Remove(overlay, false);
+                }
             }
-            if (!indices.empty()) {
-                TopoDS_Compound compound;
-                BRep_Builder builder;
-                builder.MakeCompound(compound);
-                for (const auto index : indices) {
-                    if (index > 0 && index <= static_cast<std::size_t>(faces_.Extent())) {
-                        builder.Add(compound, faces_(static_cast<int>(index)));
+            evidence_.Nullify();
+            support_.Nullify();
+            if (!presentation_.IsNull()) {
+                presentation_->ClearCustomAspects();
+                context_->SetColor(presentation_,
+                                   highlights_.bend
+                                       ? Quantity_Color(0.27, 0.35, 0.40, Quantity_TOC_RGB)
+                                       : Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
+                                   false);
+                if (highlights_.bend) {
+                    for (const auto i : highlights_.primary) {
+                        const auto &face = faces_(static_cast<int>(i));
+                        presentation_->SetCustomColor(
+                            face, Quantity_Color(1.0, 0.20, 0.025, Quantity_TOC_RGB));
+                        const auto drawer = presentation_->CustomAspects(face);
+                        drawer->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
+                        drawer->SetFaceBoundaryDraw(true);
+                        drawer->SetFaceBoundaryAspect(
+                            new Prs3d_LineAspect(Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB),
+                                                 Aspect_TOL_SOLID, 3.0));
                     }
                 }
-                evidence_ = new AIS_Shape(compound);
-                evidence_->Attributes()->SetAutoTriangulation(false);
-                context_->SetColor(evidence_, Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
-                                   false);
-                context_->SetWidth(evidence_, 3.0, false);
-                context_->Display(evidence_, AIS_WireFrame, -1, false);
+                context_->Redisplay(presentation_, false);
             }
+            if (highlights_.bend) {
+                support_ = outline(highlights_.flanges,
+                                   Quantity_Color(0.30, 0.50, 0.60, Quantity_TOC_RGB), 1.0);
+            }
+            evidence_ = outline(highlights_.primary,
+                                highlights_.bend ? Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB)
+                                                 : Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
+                                3.0);
             view_->Redraw();
         });
     }
@@ -299,6 +347,25 @@ class OcctCanvas final : public QWidget {
     }
 
   private:
+    Handle(AIS_Shape) outline(const std::vector<std::size_t> &indices, const Quantity_Color &color,
+                              double width) {
+        if (indices.empty()) {
+            return {};
+        }
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        for (const auto index : indices) {
+            builder.Add(compound, faces_(static_cast<int>(index)));
+        }
+        Handle(AIS_Shape) result = new AIS_Shape(compound);
+        result->Attributes()->SetAutoTriangulation(false);
+        context_->SetColor(result, color, false);
+        context_->SetWidth(result, width, false);
+        context_->Display(result, AIS_WireFrame, -1, false);
+        return result;
+    }
+
     void restore(const Handle(AIS_Shape) & candidate) {
         try {
             if (!candidate.IsNull()) {
@@ -401,6 +468,7 @@ class OcctCanvas final : public QWidget {
         }
         presentation_.Nullify();
         evidence_.Nullify();
+        support_.Nullify();
         context_.Nullify();
         view_.Nullify();
         scene_.Nullify();
@@ -413,9 +481,10 @@ class OcctCanvas final : public QWidget {
     bool ready_ = false;
     QPoint lastPosition_;
     TopoDS_Shape shape_;
-    Handle(AIS_Shape) presentation_;
+    Handle(AIS_ColoredShape) presentation_;
     Handle(AIS_Shape) evidence_;
-    std::vector<std::size_t> highlightedFaces_;
+    Handle(AIS_Shape) support_;
+    FaceHighlights highlights_;
     application::DocumentPtr document_;
     quint64 revision_ = 0;
     bool diagnostic_ = false;
@@ -532,6 +601,12 @@ void ViewerWidget::clearDocument(quint64 revision) {
 void ViewerWidget::highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
     if (impl_->canvas) {
         impl_->canvas->highlightFaces(indices, revision);
+    }
+}
+
+void ViewerWidget::highlightBend(const application::RecognizedBend &bend, quint64 revision) {
+    if (impl_->canvas) {
+        impl_->canvas->highlightBend(bend, revision);
     }
 }
 

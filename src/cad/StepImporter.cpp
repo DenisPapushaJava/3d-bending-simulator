@@ -1,5 +1,6 @@
 #include "bending/cad/StepImporter.h"
 
+#include "BendRecognizer.h"
 #include "CadDocumentData.h"
 #include "ThicknessRecognizer.h"
 #include "bending/cad/Kernel.h"
@@ -377,6 +378,7 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
                         "Import cancelled before thickness analysis");
         }
         data->metadata.thickness = recognizeThickness(data->shape, tolerance, stop);
+        data->metadata.bendAnalysis = recognizeBends(data->shape, tolerance, stop);
         if (report(application::ImportPhase::Preparing)) {
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before presentation preparation");
