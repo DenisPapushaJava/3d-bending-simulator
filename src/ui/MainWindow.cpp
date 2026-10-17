@@ -469,6 +469,8 @@ class MainWindow::Impl {
                      coordinate(bend.axisStart.x), coordinate(bend.axisStart.y),
                      coordinate(bend.axisStart.z), coordinate(bend.axisEnd.x),
                      coordinate(bend.axisEnd.y), coordinate(bend.axisEnd.z));
+        description += QStringLiteral("\n\nОранжевая заливка и светлая обводка — зона сгиба. "
+                                      "Тонкая голубая обводка — прилегающие полки.");
         if (bend.trimmedEnds) {
             description.replace(QStringLiteral("Длина сгиба:"),
                                 QStringLiteral("Габарит вдоль оси:"));
@@ -483,11 +485,7 @@ class MainWindow::Impl {
         }
         bendProperties->setText(description);
         if (highlight && !controller->hasWork()) {
-            std::vector<std::size_t> indices{bend.innerFace, bend.outerFace};
-            indices.insert(indices.end(), bend.flangeFaces.begin(), bend.flangeFaces.end());
-            std::sort(indices.begin(), indices.end());
-            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
-            viewer->highlightFaces(indices, session.revision());
+            viewer->highlightBend(bend, session.revision());
             propertyTabs->setCurrentIndex(1);
         }
     }

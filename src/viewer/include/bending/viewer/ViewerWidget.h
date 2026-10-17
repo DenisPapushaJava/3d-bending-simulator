@@ -9,7 +9,8 @@
 
 namespace bending::application {
 class Document;
-}
+struct RecognizedBend;
+} // namespace bending::application
 namespace bending::viewer {
 
 // OCCT and native-window resources stay behind this Qt-only presentation boundary.
@@ -33,6 +34,8 @@ class ViewerWidget final : public QWidget {
                                           quint64 revision);
     void clearDocument(quint64 revision);
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
+    // Distinguishes the bend zone from its adjacent planar flanges.
+    void highlightBend(const application::RecognizedBend &bend, quint64 revision);
     // Explicit diagnostic scene, never shown by the normal application startup.
     void showDiagnosticBox();
 
