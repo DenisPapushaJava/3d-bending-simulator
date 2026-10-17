@@ -1,0 +1,7 @@
+.git
+.deps
+build
+out
+.venv
+design/previews
+__pycache__

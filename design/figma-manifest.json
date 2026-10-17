@@ -1,0 +1,426 @@
+{
+  "schemaVersion": 1,
+  "createdOn": "2026-10-17",
+  "status": "UI concept; demonstration data, no CAD simulation",
+  "figma": {
+    "fileName": "3d bendinbg simulator",
+    "fileKey": null,
+    "transport": "Figwright @fw",
+    "pages": {
+      "screens": {
+        "id": "0:1",
+        "name": "01 · Рабочие состояния"
+      },
+      "components": {
+        "id": "3:2",
+        "name": "02 · Компоненты"
+      }
+    }
+  },
+  "frameSize": {
+    "width": 1600,
+    "height": 1000
+  },
+  "screens": [
+    {
+      "key": "empty",
+      "name": "01 · Новый проект",
+      "nodeId": "3:363",
+      "preview": "previews/3-363.png"
+    },
+    {
+      "key": "import",
+      "name": "02 · Проверка импортированной детали",
+      "nodeId": "3:364",
+      "preview": "previews/3-364.png"
+    },
+    {
+      "key": "tool",
+      "name": "03 · Выбор инструмента",
+      "nodeId": "3:365",
+      "preview": "previews/3-365.png"
+    },
+    {
+      "key": "sequence",
+      "name": "04 · Ручной порядок и симуляция",
+      "nodeId": "3:127",
+      "preview": "previews/3-127.png"
+    },
+    {
+      "key": "collision",
+      "name": "05 · Столкновение",
+      "nodeId": "3:366",
+      "preview": "previews/3-366.png"
+    },
+    {
+      "key": "reordered",
+      "name": "06 · Исправленный порядок",
+      "nodeId": "3:1382",
+      "preview": "previews/3-1382.png"
+    },
+    {
+      "key": "complete",
+      "name": "07 · Геометрическая проверка завершена",
+      "nodeId": "3:367",
+      "preview": "previews/3-367.png"
+    }
+  ],
+  "overviewNodeId": "3:1762",
+  "components": {
+    "sets": {
+      "button": "3:122",
+      "badge": "3:123",
+      "step": "3:124",
+      "bend": "3:125",
+      "card": "3:126"
+    },
+    "properties": {
+      "button": {
+        "Label": "Label#3:1"
+      },
+      "badge": {
+        "Label": "Label#3:8"
+      },
+      "step": {
+        "Label": "Label#3:13"
+      },
+      "bend": {
+        "Title": "Title#3:17",
+        "Detail": "Detail#3:22"
+      },
+      "card": {
+        "Title": "Title#3:27",
+        "Detail": "Detail#3:32"
+      },
+      "field": {
+        "Label": "Label#3:37",
+        "Value": "Value#3:38"
+      }
+    },
+    "mainComponents": {
+      "button/primary": "3:55",
+      "button/secondary": "3:57",
+      "button/ghost": "3:58",
+      "button/disabled": "3:59",
+      "button/danger": "3:60",
+      "button/scene": "3:61",
+      "badge/neutral": "3:62",
+      "badge/success": "3:63",
+      "badge/warning": "3:64",
+      "badge/danger": "3:65",
+      "step/active": "3:66",
+      "step/done": "3:67",
+      "step/pending": "3:68",
+      "field/default": "3:69",
+      "bend/pending": "3:70",
+      "bend/selected": "3:71",
+      "bend/success": "3:72",
+      "bend/danger": "3:73",
+      "card/pending": "3:74",
+      "card/selected": "3:75",
+      "card/success": "3:76",
+      "card/danger": "3:77",
+      "chrome/header": "3:78",
+      "chrome/footer": "3:79"
+    }
+  },
+  "tokens": {
+    "primitive": {
+      "white": "VariableID:3:10",
+      "gray/25": "VariableID:3:11",
+      "gray/50": "VariableID:3:12",
+      "gray/200": "VariableID:3:13",
+      "gray/400": "VariableID:3:14",
+      "gray/600": "VariableID:3:15",
+      "gray/900": "VariableID:3:16",
+      "teal/50": "VariableID:3:17",
+      "teal/600": "VariableID:3:18",
+      "teal/700": "VariableID:3:19",
+      "green/50": "VariableID:3:20",
+      "green/700": "VariableID:3:21",
+      "amber/50": "VariableID:3:22",
+      "amber/700": "VariableID:3:23",
+      "red/50": "VariableID:3:24",
+      "red/700": "VariableID:3:25",
+      "scene/900": "VariableID:3:26",
+      "scene/700": "VariableID:3:27",
+      "scene/400": "VariableID:3:28"
+    },
+    "semantic": {
+      "panel": "VariableID:3:29",
+      "window": "VariableID:3:30",
+      "subtle": "VariableID:3:31",
+      "border": "VariableID:3:32",
+      "muted": "VariableID:3:33",
+      "secondary": "VariableID:3:34",
+      "text": "VariableID:3:35",
+      "accentSoft": "VariableID:3:36",
+      "accent": "VariableID:3:37",
+      "accentHover": "VariableID:3:38",
+      "successSoft": "VariableID:3:39",
+      "success": "VariableID:3:40",
+      "warningSoft": "VariableID:3:41",
+      "warning": "VariableID:3:42",
+      "dangerSoft": "VariableID:3:43",
+      "danger": "VariableID:3:44",
+      "scene": "VariableID:3:45",
+      "sceneLine": "VariableID:3:46",
+      "sceneText": "VariableID:3:47"
+    },
+    "dimensions": {
+      "space/4": "VariableID:3:48",
+      "space/8": "VariableID:3:49",
+      "space/12": "VariableID:3:50",
+      "space/16": "VariableID:3:51",
+      "space/24": "VariableID:3:52",
+      "radius/4": "VariableID:3:53",
+      "radius/6": "VariableID:3:54"
+    },
+    "palette": {
+      "panel": "#FFFFFF",
+      "window": "#F7F9FB",
+      "subtle": "#F0F3F6",
+      "border": "#DCE3E9",
+      "muted": "#83909F",
+      "secondary": "#526171",
+      "text": "#1C2938",
+      "accentSoft": "#E5F3F3",
+      "accent": "#087F83",
+      "accentHover": "#05666A",
+      "successSoft": "#EAF5EF",
+      "success": "#287A50",
+      "warningSoft": "#FFF5DC",
+      "warning": "#976316",
+      "dangerSoft": "#FDEDEC",
+      "danger": "#BA3F3B",
+      "scene": "#202A36",
+      "sceneLine": "#364353",
+      "sceneText": "#A3B2C3"
+    }
+  },
+  "textStyles": {
+    "body": "S:32d146080548ef02c024340a0499809bee326e1f,",
+    "label": "S:0de92eb016dd79e6932959d113c934957462a184,",
+    "caption": "S:18588599428ce029d285428852addb7ce5d229dd,",
+    "section": "S:207fa8deca27735fc4c60ce71a70148a6cedfb6f,",
+    "title": "S:be635aac4dfd785c88dc2bf4f2c730334e516d84,"
+  },
+  "prototype": {
+    "flows": 2,
+    "navigationSources": 21,
+    "verifiedCoreReactions": [
+      {
+        "key": "empty/scene/import",
+        "nodeId": "3:1146",
+        "reactions": [
+          {
+            "trigger": {
+              "type": "ON_CLICK"
+            },
+            "actions": [
+              {
+                "type": "NODE",
+                "destinationId": "3:364",
+                "navigation": "NAVIGATE",
+                "transition": {
+                  "type": "DISSOLVE",
+                  "easing": {
+                    "type": "EASE_OUT"
+                  },
+                  "duration": 0.15000000596046448
+                },
+                "resetVideoPosition": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "import/right/continue",
+        "nodeId": "3:712",
+        "reactions": [
+          {
+            "trigger": {
+              "type": "ON_CLICK"
+            },
+            "actions": [
+              {
+                "type": "NODE",
+                "destinationId": "3:365",
+                "navigation": "NAVIGATE",
+                "transition": {
+                  "type": "DISSOLVE",
+                  "easing": {
+                    "type": "EASE_OUT"
+                  },
+                  "duration": 0.15000000596046448
+                },
+                "resetVideoPosition": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "tool/right/continue",
+        "nodeId": "3:859",
+        "reactions": [
+          {
+            "trigger": {
+              "type": "ON_CLICK"
+            },
+            "actions": [
+              {
+                "type": "NODE",
+                "destinationId": "3:127",
+                "navigation": "NAVIGATE",
+                "transition": {
+                  "type": "DISSOLVE",
+                  "easing": {
+                    "type": "EASE_OUT"
+                  },
+                  "duration": 0.15000000596046448
+                },
+                "resetVideoPosition": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "sequence/primary",
+        "nodeId": "3:171",
+        "reactions": [
+          {
+            "trigger": {
+              "type": "ON_CLICK"
+            },
+            "actions": [
+              {
+                "type": "NODE",
+                "destinationId": "3:366",
+                "navigation": "NAVIGATE",
+                "transition": {
+                  "type": "DISSOLVE",
+                  "easing": {
+                    "type": "EASE_OUT"
+                  },
+                  "duration": 0.15000000596046448
+                },
+                "resetVideoPosition": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "collision/right/reorder",
+        "nodeId": "3:1008",
+        "reactions": [
+          {
+            "trigger": {
+              "type": "ON_CLICK"
+            },
+            "actions": [
+              {
+                "type": "NODE",
+                "destinationId": "3:127",
+                "navigation": "NAVIGATE",
+                "transition": {
+                  "type": "DISSOLVE",
+                  "easing": {
+                    "type": "EASE_OUT"
+                  },
+                  "duration": 0.15000000596046448
+                },
+                "resetVideoPosition": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "sequence/timeline/earlier",
+        "nodeId": "3:342",
+        "reactions": [
+          {
+            "trigger": {
+              "type": "ON_CLICK"
+            },
+            "actions": [
+              {
+                "type": "NODE",
+                "destinationId": "3:1382",
+                "navigation": "NAVIGATE",
+                "transition": {
+                  "type": "DISSOLVE",
+                  "easing": {
+                    "type": "EASE_OUT"
+                  },
+                  "duration": 0.15000000596046448
+                },
+                "resetVideoPosition": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "reordered/right/check",
+        "nodeId": "3:1560",
+        "reactions": [
+          {
+            "trigger": {
+              "type": "ON_CLICK"
+            },
+            "actions": [
+              {
+                "type": "NODE",
+                "destinationId": "3:367",
+                "navigation": "NAVIGATE",
+                "transition": {
+                  "type": "DISSOLVE",
+                  "easing": {
+                    "type": "EASE_OUT"
+                  },
+                  "duration": 0.15000000596046448
+                },
+                "resetVideoPosition": false
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "notes": "Core click path verified through Figma reaction readback. Playback in Figma Present was not exercised. Drag and unfinished catalog/report controls are not implemented."
+  },
+  "verification": {
+    "allScreensReviewedVisually": true,
+    "dimensionsVerified": true,
+    "fontFamilies": [
+      "Inter"
+    ],
+    "nativeTextNodes": 521,
+    "componentInstancesAcrossScreens": 239,
+    "imageFillsAcrossScreens": 0,
+    "remainingNativeContentOverflow": 0
+  },
+  "references": [
+    {
+      "name": "Delem Profile-T",
+      "url": "https://www.delem.com/en/solutions/offline-software/profile-t/profile-t"
+    },
+    {
+      "name": "Metalix MBend",
+      "url": "https://www.metalix.net/product/mbend/"
+    },
+    {
+      "name": "Metalix collision UI screenshot",
+      "url": "https://www.metalix.net/wp-content/uploads/2017/02/Collision-Testing-for-All-Machine-Parts.png"
+    },
+    {
+      "name": "TRUMPF TecZone Bend",
+      "url": "https://www.trumpf.com/en_GB/products/software/programming-software/teczone-bend/"
+    }
+  ]
+}
