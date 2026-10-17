@@ -28,14 +28,14 @@ ctest --preset dev
 
 ```bash
 docker build -f tools/Dockerfile -t 3d-bending-dev:ubuntu24.04 .
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" \
+docker run --rm --init --user "$(id -u):$(id -g)" -v "$PWD:/workspace" \
   3d-bending-dev:ubuntu24.04 bash -c \
   'cmake --preset release && cmake --build --preset release --parallel 2 && ctest --preset release'
 ```
 
-Контейнер проверяет сборку и создание окна с Qt offscreen. Он не подключает дисплей или видеокарту и не подтверждает работу будущего 3D-просмотрщика на реальном GPU.
+Контейнер проверяет сборку, окно с Qt offscreen и рендеринг через Xvfb/Mesa при наличии этих инструментов. Это software OpenGL, отдельный от проверки на реальном GPU. Использовать `--init`, чтобы Xvfb-run корректно получал сигнал готовности X-сервера и не становился PID 1 при запуске отдельной графической команды.
 
-Локальная проверка 2026-10-17: GCC 13.3 / Qt 6.4.2 / OCCT 7.6.3, сборка Release, все три CTest и запуск из распакованного .deb успешны. У текущего окна ещё нет вызовов операций OCCT в рабочем сценарии, поэтому фактические runtime-зависимости .deb пока включают Qt; OCCT отдельно проверяется тестом ядра. Упаковка пересчитывает зависимости при добавлении CAD-функций.
+Проверка до M1.1, 2026-10-17: GCC 13.3 / Qt 6.4.2 / OCCT 7.6.3, сборка Release, три CTest и запуск из распакованного .deb успешны. До добавления просмотрщика runtime-зависимости .deb включали Qt; теперь он также использует OCCT visualization/modeling. Упаковка пересчитывает зависимости при добавлении CAD-функций.
 
 Дополнительно .deb установлен с `--no-install-recommends` в чистый контейнер Ubuntu 24.04 без SDK/компилятора; проверка запуска успешна. `qt6-qpa-plugins` указан явно, поскольку такие плагины загружаются динамически и не попадают в список обычных библиотечных зависимостей.
 
@@ -80,7 +80,7 @@ Triplet собирает общие DLL и только Release для зави�
 | --- | --- |
 | `src/core`, `bending_core` | Независимый C++: стабильные ID гибов и перестановка с определением первого затронутого шага |
 | `src/cad`, `bending_cad` | Граница OCCT, пока только сведения о версии; отдельный тест создаёт и измеряет реальный CAD-примитив |
-| `src/viewer`, `bending_viewer` | Изолированная область просмотра; сейчас QWidget-заглушка, без OpenGL/OCCT-рендеринга |
+| `src/viewer`, `bending_viewer` | Нативный QWidget/OCCT с PIMPL: тестовый примитив, камера, выбор грани, framebuffer и диагностика; SDK-типы скрыты |
 | `src/ui`, `bending_ui` | Окно QMainWindow, три dock-панели и меню; сведения о runtime передаются из app |
 | `src/app`, `bending_simulator` | Настройки Qt, создание/соединение компонентов, запуск, диагностический `--smoke-test` |
 | `tests` | Перестановка/ошибки без изменения данных, связь OCCT, создание окна, правила версий |
@@ -144,3 +144,26 @@ Push проверяется только в main, остальные ветки 
 ## Первоисточники
 
 [Qt deployment](https://doc.qt.io/qt-6.8/qt-generate-deploy-app-script.html), [CPack DEB](https://cmake.org/cmake/help/latest/cpack_gen/deb.html), [vcpkg port](https://github.com/microsoft/vcpkg/tree/256310531c1e57ee83f8ac01f7bea7c1e56630f5/ports/opencascade), [install-qt-action](https://github.com/jurplel/install-qt-action), [GitHub token permissions](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token).
+
+## Просмотрщик M1.1 и графические проверки
+
+Нативное окно Qt/OCCT работает с Windows или Linux/X11; Wayland пока через XWayland и `QT_QPA_PLATFORM=xcb`. OCCT создаёт контекст; Qt OpenGLWidgets не используется. Драйвер OpenGL — системный. В Windows Shaders копируются в `share/opencascade/resources/Shaders`, в Linux используются системные ресурсы OCCT. `libfontconfig-dev` нужен для корректной линковки импортированного TKService в Ubuntu; в контейнере он указан явно.
+
+Управление: ПКМ — вращение, СКМ — перенос, колесо — масштаб, ЛКМ — выбор/очистка выбора грани, F — вписывание. Проекции задаются на панели «Камера». Сцена содержит только тестовый параллелепипед 100 × 60 × 20 мм; импорт и технологическая модель ещё отсутствуют.
+
+```bash
+# Окно/диагностика на offscreen-платформе, без доказательства GPU-работы:
+ctest --preset dev -L integration
+# Настоящий контекст и framebuffer в графическом сеансе:
+./build/dev/bin/3d-bending-simulator --graphics-smoke-test
+./build/dev/bin/viewer_tests
+QT_SCALE_FACTOR=2 ./build/dev/bin/viewer_tests
+# Необязательный снимок только сцены, не всего рабочего стола:
+BENDING_VIEWER_SNAPSHOT="$PWD/out/viewer-demo.png" ./build/dev/bin/viewer_tests
+```
+
+`viewer_tests` проверяет непустое изображение геометрии, выбор реальной грани, проекции и изменение кадра при вращении/переносе/масштабировании, физический размер framebuffer, resize, hide/show, minimize/restore и новое создание ресурсов. Это сценарии реального OCCT, а не макеты результатов. Публичный метод `captureImage()` читает OCCT framebuffer: обычный QWidget::grab не предназначен для захвата такого нативного дочернего окна.
+
+При наличии `xvfb-run` CMake регистрирует `viewer.render` и `viewer.render.hidpi` с меткой `graphics`. Они запускают отдельный X11-сервер с Mesa software OpenGL при DPR 1/2. Скрипт установки/Docker включает Xvfb/xauth/Mesa. В Windows CI проверяются сборка, недоступный offscreen backend и упаковка; для проверки OpenGL-драйвера нужен отдельный интерактивный запуск.
+
+M1.1: локально прошли сценарии на NVIDIA GTX 1650 / OpenGL 4.6 при Qt 6.4.2 и OCCT 7.6.3. Локальный оффскрин-набор содержит 5 тестов; Linux с Xvfb — 7. Переход между настоящими мониторами/DPI и интерактивный Windows/GPU остаются открытыми. Отрицательная проверка `app.graphics-unavailable` гарантирует, что графическая диагностика не сообщает успех без поддерживаемого backend.

@@ -1,6 +1,6 @@
 #include "bending/ui/MainWindow.h"
 
-#include "bending/viewer/ViewerPlaceholder.h"
+#include "bending/viewer/ViewerWidget.h"
 
 #include <QAction>
 #include <QApplication>
@@ -21,12 +21,14 @@ MainWindow::MainWindow(RuntimeInfo runtime) {
             .arg(QString::fromUtf8(runtime.applicationVersion.data(),
                                    static_cast<qsizetype>(runtime.applicationVersion.size()))));
     resize(1440, 900);
-    setCentralWidget(new viewer::ViewerPlaceholder(this));
+    auto *viewer = new viewer::ViewerWidget(this);
+    setCentralWidget(viewer);
 
     auto *fileMenu = menuBar()->addMenu(QStringLiteral("Файл"));
     auto *importAction = fileMenu->addAction(QStringLiteral("Импорт STEP…"));
     importAction->setEnabled(false);
-    importAction->setToolTip(QStringLiteral("Будет доступно после подключения CAD-просмотрщика"));
+    importAction->setToolTip(
+        QStringLiteral("Следующий этап — импорт STEP; сейчас показан тестовый примитив"));
     fileMenu->addSeparator();
     auto *exitAction = fileMenu->addAction(QStringLiteral("Выход"));
     exitAction->setShortcut(QKeySequence::Quit);
@@ -42,6 +44,29 @@ MainWindow::MainWindow(RuntimeInfo runtime) {
         toolbar->addAction(QString::fromUtf8(title))->setEnabled(false);
     }
 
+    auto *camera = addToolBar(QStringLiteral("Камера"));
+    camera->setObjectName(QStringLiteral("cameraToolbar"));
+    auto *fit = camera->addAction(QStringLiteral("Вписать · F"));
+    connect(fit, &QAction::triggered, viewer, &viewer::ViewerWidget::fitAll);
+    const auto addOrientation = [&](const QString &title,
+                                    viewer::ViewerWidget::Orientation orientation) {
+        auto *action = camera->addAction(title);
+        connect(action, &QAction::triggered, viewer,
+                [viewer, orientation] { viewer->setOrientation(orientation); });
+    };
+    addOrientation(QStringLiteral("Изометрия"), viewer::ViewerWidget::Orientation::Isometric);
+    addOrientation(QStringLiteral("Сверху"), viewer::ViewerWidget::Orientation::Top);
+    addOrientation(QStringLiteral("Спереди"), viewer::ViewerWidget::Orientation::Front);
+    camera->setEnabled(false);
+    connect(
+        viewer, &viewer::ViewerWidget::renderingChanged, this, [this, viewer, camera](bool ready) {
+            camera->setEnabled(ready);
+            statusBar()->showMessage(
+                ready ? QStringLiteral("Тестовая сцена · ПКМ: вращение · СКМ: перенос · Колесо: "
+                                       "масштаб · ЛКМ: грань")
+                      : QStringLiteral("3D-просмотр недоступен: %1").arg(viewer->errorString()));
+        });
+
     auto addDock = [&](const QString &name, const QString &title, QWidget *widget,
                        Qt::DockWidgetArea area) {
         auto *dock = new QDockWidget(title, this);
@@ -53,14 +78,23 @@ MainWindow::MainWindow(RuntimeInfo runtime) {
     };
 
     auto *bends = new QListWidget(this);
-    bends->addItem(QStringLiteral("Деталь не загружена"));
+    bends->addItem(QStringLiteral("Тестовый примитив · 100 × 60 × 20 мм"));
     bends->setMinimumWidth(220);
     addDock(QStringLiteral("projectDock"), QStringLiteral("Проект и гибы"), bends,
             Qt::LeftDockWidgetArea);
 
-    auto *properties = new QLabel(QStringLiteral("Выберите деталь или операцию.\n\n"
-                                                 "Геометрическая проверка пока не реализована."),
-                                  this);
+    const auto propertiesText = QStringLiteral("Тестовый CAD-примитив\n100 × 60 × 20 мм\n\n"
+                                               "ЛКМ — выбрать грань.\n\n"
+                                               "Импорт и моделирование гибки ещё не реализованы.");
+    auto *properties = new QLabel(propertiesText, this);
+    connect(viewer, &viewer::ViewerWidget::selectionChanged, properties,
+            [properties, propertiesText](const QString &description) {
+                properties->setText(
+                    description.isEmpty()
+                        ? propertiesText
+                        : description + QStringLiteral("\n\nВыбрана грань демонстрационного тела.\n"
+                                                       "Сгибы ещё не заданы."));
+            });
     properties->setWordWrap(true);
     properties->setMargin(16);
     properties->setAlignment(Qt::AlignTop | Qt::AlignLeft);
@@ -75,7 +109,10 @@ MainWindow::MainWindow(RuntimeInfo runtime) {
     addDock(QStringLiteral("sequenceDock"), QStringLiteral("Порядок гибов"), sequence,
             Qt::BottomDockWidgetArea);
 
-    statusBar()->showMessage(QStringLiteral("Локальный проект · мм · градусы"));
+    statusBar()->showMessage(QStringLiteral("Тестовая сцена · создание OpenGL-контекста…"));
+    if (!viewer->errorString().isEmpty()) {
+        statusBar()->showMessage(viewer->errorString());
+    }
     statusBar()->addPermanentWidget(
         new QLabel(QStringLiteral("Qt %1 · OCCT %2")
                        .arg(QString::fromLatin1(qVersion()),
@@ -86,10 +123,10 @@ MainWindow::MainWindow(RuntimeInfo runtime) {
     auto *helpMenu = menuBar()->addMenu(QStringLiteral("Справка"));
     auto *about = helpMenu->addAction(QStringLiteral("О программе"));
     connect(about, &QAction::triggered, this, [this] {
-        QMessageBox::about(this, QStringLiteral("3D Bending Simulator"),
-                           windowTitle() +
-                               QStringLiteral("\n\nНачальный каркас приложения.\n"
-                                              "Импорт, 3D-просмотр и гибка ещё не реализованы."));
+        QMessageBox::about(
+            this, QStringLiteral("3D Bending Simulator"),
+            windowTitle() + QStringLiteral("\n\nПрототип OCCT-просмотрщика на тестовом примитиве.\n"
+                                           "Импорт и моделирование гибки ещё не реализованы."));
     });
 }
 

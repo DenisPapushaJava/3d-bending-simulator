@@ -82,6 +82,10 @@ def main():
     shutil.copy2(args.vcpkg_root / "LICENSE.txt", notices / "vcpkg-LICENSE.txt")
     installed = ROOT / "vcpkg_installed/x64-windows-release/share/opencascade/copyright"
     shutil.copy2(installed, notices / "OCCT-copyright.txt")
+    shaders = installed.parent / "resources/Shaders"
+    if not shaders.is_dir():
+        raise RuntimeError(f"OCCT shader resources are missing: {shaders}")
+    shutil.copytree(shaders, stage / "share/opencascade/resources/Shaders", dirs_exist_ok=True)
     # A binary-cache hit does not populate vcpkg buildtrees. Reproduce sources independently.
     occt_archive = output / "OCCT-V7_9_3.tar.gz"
     urllib.request.urlretrieve("https://github.com/Open-Cascade-SAS/OCCT/archive/V7_9_3.tar.gz",

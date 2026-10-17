@@ -1,5 +1,9 @@
 if(BENDING_BUILD_CAD)
-    find_package(OpenCASCADE REQUIRED COMPONENTS FoundationClasses ModelingData ModelingAlgorithms)
+    set(bending_occt_components FoundationClasses ModelingData ModelingAlgorithms)
+    if(BENDING_BUILD_APP)
+        list(APPEND bending_occt_components Visualization)
+    endif()
+    find_package(OpenCASCADE REQUIRED COMPONENTS ${bending_occt_components})
     # Older OCCT packages use ExactVersion compatibility; inspect the detected version instead.
     set(BENDING_OCCT_VERSION "${OpenCASCADE_MAJOR_VERSION}.${OpenCASCADE_MINOR_VERSION}.${OpenCASCADE_MAINTENANCE_VERSION}")
     if(BENDING_OCCT_VERSION VERSION_LESS 7.6.0 OR NOT BENDING_OCCT_VERSION VERSION_LESS 8.0.0)

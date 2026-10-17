@@ -6,7 +6,7 @@ retain their own licenses.
 ## Linux packages
 
 The Ubuntu 24.04 build uses Qt 6.4.2 and OCCT 7.6.3 supplied by Ubuntu.
-The initial window currently needs Qt at runtime; OCCT is exercised by the separate kernel test.
+The native viewer needs Qt and OCCT visualization/modeling libraries at runtime.
 The `.deb` records the actual runtime dependencies with dpkg-shlibdeps, not a hand-written list.
 System libraries are not copied into it. Their license notices, source packages
 and modifications are distributed through Ubuntu (`apt source qt6-base`, `apt source opencascade`).
@@ -26,6 +26,11 @@ for the foundation build. Enabling them requires updating this inventory.
 The foundation bundle omits unused SVG/image and generic touch plugins, Mesa software OpenGL,
 and the system D3D/DXC compilers. Packaging rejects additional Qt modules until their
 source/license inventory is updated.
+
+The native viewer uses the operating system's OpenGL driver. Windows packaging includes the
+OCCT `resources/Shaders` directory next to the runtime bundle; the corresponding source archive
+and OCCT copyright notices cover these resources. No sample implementation was copied into
+the original viewer code.
 
 The matching `dependency-sources` companion contains Qt base sources including its bundled
 third-party license texts, the OCCT sources as built, and the vcpkg port/patches. Windows packaging
