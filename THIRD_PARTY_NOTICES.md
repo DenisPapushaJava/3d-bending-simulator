@@ -27,8 +27,8 @@ compiler. Packaging rejects additional Qt modules until their source/license inv
 
 The matching `dependency-sources` companion contains Qt base sources including its bundled
 third-party license texts, the OCCT sources as built, and the vcpkg port/patches. Windows packaging
-also copies license notices into `share/licenses`. Microsoft runtime components installed by the
-Qt deployment tool remain subject to their own redistribution terms; they are not project code.
+also copies license notices into `share/licenses`. The Microsoft Visual C++ Runtime is a separate
+prerequisite and is not redistributed in this ZIP.
 
 This inventory describes the initial build. Changing dependencies, build options, fonts, assets,
 or packaging requires checking and updating the notices and corresponding sources.

@@ -94,6 +94,10 @@ Push проверяется только в main, остальные ветки 
 
 Нет develop-ветки, обязательного числа ревью, автоматического изменения версии или сложного release-бота. Изменения удобно вести короткими ветками и PR в main. Графические проверки, установщик, подпись Windows и универсальный AppImage — последующие задачи.
 
+Фактический первый прогон 2026-10-17: установка/сборка полного OCCT SDK через vcpkg на Windows заняла около 45 минут. После неё сборка самого каркаса заняла 9 секунд, CTest — около 2 секунд. Это стоимость холодной зависимости; кэш двоичных пакетов сохраняется отдельным шагом до упаковки. Ключ включает manifest/triplet и версию MSVC, чтобы обновление компилятора не приводило к постоянным промахам по старому неизменяемому кэшу. Повторный прогон должен проверять фактическое восстановление SDK.
+
+На PR выполняются сборка и тесты обеих ОС, а также Linux-упаковка. Windows-упаковка с полным комплектом соответствующих исходников выполняется для main и тегов; артефакты PR не публикуются.
+
 ## Первоисточники
 
 [Qt deployment](https://doc.qt.io/qt-6.8/qt-generate-deploy-app-script.html), [CPack DEB](https://cmake.org/cmake/help/latest/cpack_gen/deb.html), [vcpkg port](https://github.com/microsoft/vcpkg/tree/256310531c1e57ee83f8ac01f7bea7c1e56630f5/ports/opencascade), [install-qt-action](https://github.com/jurplel/install-qt-action), [GitHub token permissions](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token).
