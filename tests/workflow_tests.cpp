@@ -28,6 +28,7 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <numbers>
 #include <stdexcept>
 
 namespace {
@@ -512,6 +513,147 @@ void testBendWorkflow(bool graphics) {
     controller.closeDocument();
     require(list->model()->rowCount() == 0 && !list->isEnabled(), "Close kept bend controls");
 }
+void testBendPreparationWorkflow(bool graphics) {
+    using namespace bending::application;
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.resize(1360, 1000);
+    window.show();
+    auto &controller = window.importController();
+    auto *list = window.findChild<QListView *>(QStringLiteral("bendList"));
+    auto *review = window.findChild<QComboBox *>(QStringLiteral("bendReview"));
+    auto *angle = window.findChild<QDoubleSpinBox *>(QStringLiteral("bendTargetAngle"));
+    auto *radius = window.findChild<QDoubleSpinBox *>(QStringLiteral("bendTargetRadius"));
+    auto *apply = window.findChild<QPushButton *>(QStringLiteral("applyBendTarget"));
+    auto *reset = window.findChild<QPushButton *>(QStringLiteral("resetBendTarget"));
+    auto *status = window.findChild<QLabel *>(QStringLiteral("bendTargetStatus"));
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    require(review && angle && radius && apply && reset && status && !review->isEnabled(),
+            "Empty project has active bend editing");
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/channel-2mm.step"));
+    waitUntil(finished);
+    list->setCurrentIndex(list->model()->index(0, 0));
+    const auto id = controller.session().bend(0)->id;
+    require(review->currentIndex() == 0 && !apply->isEnabled() && !controller.session().modified(),
+            "Selection created a target before confirmation");
+    const auto chooseReview = [&](int index) {
+        review->setCurrentIndex(index);
+        QMetaObject::invokeMethod(review, "activated", Qt::DirectConnection, Q_ARG(int, index));
+    };
+    chooseReview(1);
+    require(controller.session().bend(0)->review == BendReview::Confirmed &&
+                controller.session().modified() && list->currentIndex().row() == 0 &&
+                apply->isEnabled() && !reset->isEnabled(),
+            "Confirming lost selection or created an implicit target");
+    angle->setValue(120.0);
+    radius->setValue(0.0);
+    require(!apply->isEnabled(), "Zero-radius target can be applied");
+    radius->setValue(5.25);
+    apply->click();
+    require(controller.session().bend(0)->target &&
+                std::abs(controller.session().bend(0)->target->angleRadians -
+                         2 * std::numbers::pi / 3) < 1.0e-9 &&
+                controller.session().bend(0)->target->innerRadiusMm == 5.25 &&
+                controller.session().document()->metadata().bendAnalysis.bends[0].innerRadiusMm ==
+                    4.0 &&
+                list->currentIndex().row() == 0 && reset->isEnabled(),
+            "Applying a target changed measurements or lost selected zone");
+    list->setCurrentIndex(list->model()->index(1, 0));
+    chooseReview(2);
+    require(controller.session().bend(1)->review == BendReview::Excluded && !apply->isEnabled() &&
+                list->model()->index(1, 0).data().toString().contains(QStringLiteral("Исключён")),
+            "Exclusion not visible in list");
+    list->setCurrentIndex(list->model()->index(0, 0));
+    require(angle->value() == 120 && radius->value() == 5.25, "Selection lost saved target");
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady() && warmPixels(viewer->captureImage()) > 100,
+                "Preparing a bend lost its contrast highlight");
+        if (const auto output = qEnvironmentVariable("BENDING_PREPARATION_SNAPSHOT");
+            !output.isEmpty()) {
+            auto image = window.grab().toImage();
+            const auto frame = viewer->captureImage();
+            QPainter painter(&image);
+            painter.drawImage(QRect(viewer->mapTo(&window, QPoint(0, 0)), viewer->size()), frame);
+            painter.end();
+            require(image.save(output), "Cannot save preparation UI snapshot");
+        }
+    }
+    QTemporaryDir temporary;
+    const auto destination = temporary.path() + QStringLiteral("/Решения.bend");
+    // Same asynchronous save command as Ctrl+S; separate existing workflow tests cover its dialog.
+#ifdef _WIN32
+    const auto path = std::filesystem::path(destination.toStdWString());
+#else
+    const auto path = std::filesystem::path(destination.toUtf8().toStdString());
+#endif
+    controller.saveProject(path, files);
+    require(!review->isEnabled() && !apply->isEnabled(), "Edits enabled during snapshot save");
+    waitUntil(finished);
+    require(!controller.session().modified() && controller.saveError().isEmpty(),
+            "Bend edits not saved");
+    window.openStep(destination);
+    waitUntil(finished);
+    list->setCurrentIndex(list->model()->index(0, 0));
+    require(controller.session().bend(0)->id == id && review->currentIndex() == 1 &&
+                angle->value() == 120 && radius->value() == 5.25 &&
+                controller.session().bend(1)->review == BendReview::Excluded &&
+                !controller.session().modified(),
+            "Project did not restore decisions and targets in UI");
+    chooseReview(2);
+    require(!apply->isEnabled() && controller.session().bend(0)->target &&
+                status->text().contains(QStringLiteral("не активно")),
+            "Exclusion erased retained target");
+    chooseReview(1);
+    reset->click();
+    require(!controller.session().bend(0)->target && angle->value() == 90 && radius->value() == 4,
+            "Explicit reset did not return to CAD proposal");
+    const auto document = controller.session().document();
+    controller.open("missing-part.step");
+    waitUntil(finished);
+    require(controller.session().document() == document && controller.session().modified() &&
+                list->currentIndex().row() == 0,
+            "Failed import discarded user preparation");
+    auto unresolved = controller.session().bends();
+    unresolved[0].target = bending::core::BendTarget{2, 5};
+    const auto unresolvedId = unresolved[0].id;
+    unresolved[0].anchor.axisStart.x += 20;
+    unresolved[0].anchor.axisEnd.x += 20;
+    require(!files->save(path, *document, {}, unresolved, {}),
+            "Cannot create unmatched UI fixture");
+    controller.open(path);
+    waitUntil(finished);
+    list->setCurrentIndex(list->model()->index(0, 0));
+    auto *bindingWarning = window.findChild<QLabel *>(QStringLiteral("bendBindingWarning"));
+    auto *summary = window.findChild<QLabel *>(QStringLiteral("bendSummary"));
+    require(bindingWarning->isVisible() &&
+                bindingWarning->text().contains(QString::fromStdString(unresolvedId)) &&
+                summary->text().contains(QStringLiteral("Не привязано")) &&
+                review->currentIndex() == 0 && !controller.session().bend(0)->target,
+            "Unmatched saved target hidden or incorrectly applied in UI");
+    auto ambiguous = controller.session().bends();
+    const auto boundIndex = *controller.session().bendBindings().byRecognizedBend[0];
+    auto duplicate = ambiguous[boundIndex];
+    duplicate.id = "ambiguous-record";
+    ambiguous.push_back(duplicate);
+    require(!files->save(path, *controller.session().document(), {}, ambiguous, {}),
+            "Cannot create ambiguous UI fixture");
+    controller.open(path);
+    waitUntil(finished);
+    list->setCurrentIndex(list->model()->index(0, 0));
+    require(!controller.session().bend(0) && !review->isEnabled() && !apply->isEnabled() &&
+                bindingWarning->isVisible() &&
+                status->text().contains(QStringLiteral("не привязаны")),
+            "Ambiguous saved records silently enabled editing of a zone");
+    controller.closeDocument();
+    require(!review->isEnabled() && !apply->isEnabled() && !reset->isEnabled() &&
+                controller.session().bends().empty(),
+            "Close kept prepared operation controls");
+    window.close();
+}
 void testTrimmedBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
@@ -590,6 +732,7 @@ int main(int argc, char *argv[]) {
         testWorkflow(graphics);
         testProjectWorkflow(graphics);
         testBendWorkflow(graphics);
+        testBendPreparationWorkflow(graphics);
         testTrimmedBendWorkflow(graphics);
         const auto external = qEnvironmentVariable("BENDING_THICKNESS_STEP");
         bool validExpected = false;

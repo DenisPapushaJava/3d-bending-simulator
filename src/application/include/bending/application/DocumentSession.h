@@ -23,6 +23,15 @@ class DocumentSession final {
     void close();
     [[nodiscard]] ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
+    bool setBendReview(std::size_t recognizedIndex, BendReview review);
+    bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
+    [[nodiscard]] const std::vector<BendPreparation> &bends() const {
+        return bends_;
+    }
+    [[nodiscard]] const BendBindings &bendBindings() const {
+        return bendBindings_;
+    }
+    [[nodiscard]] const BendPreparation *bend(std::size_t recognizedIndex) const;
     bool markSaved(std::uint64_t editRevision, std::filesystem::path path);
     [[nodiscard]] const std::optional<double> &manualThicknessMm() const {
         return manualThickness_;
@@ -64,5 +73,7 @@ class DocumentSession final {
     std::filesystem::path projectPath_;
     std::uint64_t editRevision_ = 0;
     bool modified_ = false;
+    std::vector<BendPreparation> bends_;
+    BendBindings bendBindings_;
 };
 } // namespace bending::application
