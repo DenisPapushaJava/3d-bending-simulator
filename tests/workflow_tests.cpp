@@ -457,7 +457,6 @@ void testBendWorkflow(bool graphics) {
         const auto output = qEnvironmentVariable("BENDING_BEND_SNAPSHOT");
         if (!output.isEmpty()) {
             QCoreApplication::processEvents();
-            auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
             QImage image = window.grab().toImage();
             QPainter painter(&image);
             painter.drawImage(QRect(canvas->mapTo(&window, QPoint()), canvas->size()),
