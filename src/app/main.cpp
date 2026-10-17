@@ -1,5 +1,6 @@
 #include "bending/Version.h"
 #include "bending/cad/Kernel.h"
+#include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -69,7 +70,9 @@ int main(int argc, char *argv[]) {
     }
 
     const auto files = std::make_shared<bending::project::ProjectFiles>();
-    bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files);
+    const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
+    bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
+                                   previewBuilder);
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());

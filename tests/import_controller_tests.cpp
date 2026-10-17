@@ -260,6 +260,137 @@ void testSaveRace() {
     require(!controller.session().document() && controller.session().projectPath().empty(),
             "Late save resurrected a closed project");
 }
+class TestPreview final : public SingleBendPreview {
+  public:
+    const bending::simulation::SingleBend &model() const noexcept override {
+        return model_;
+    }
+    std::size_t frameCount() const noexcept override {
+        return 21;
+    }
+    BoundsMm bounds() const noexcept override {
+        return {{-30, -2, 0}, {50, 40, 80}};
+    }
+
+  private:
+    bending::simulation::SingleBend model_{2, 4, 1.5, 80, 30, 30};
+};
+class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
+  public:
+    BendPreviewResult build(DocumentPtr, std::size_t, bending::core::BendTarget, bool,
+                            std::stop_token) const override {
+        require(QThread::currentThread() != QCoreApplication::instance()->thread(),
+                "Preview built in GUI thread");
+        std::unique_lock lock(mutex);
+        entered = true;
+        condition.wait(lock, [&] { return released; }); // Deliberately ignore cancellation.
+        if (fail) {
+            return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, "unsupported"};
+        }
+        return BendPreviewPtr(std::make_shared<TestPreview>());
+    }
+    void reset() {
+        std::lock_guard lock(mutex);
+        entered = false;
+        released = false;
+    }
+    void release() {
+        std::lock_guard lock(mutex);
+        released = true;
+        condition.notify_all();
+    }
+    mutable std::mutex mutex;
+    mutable std::condition_variable condition;
+    mutable std::atomic<bool> entered{false};
+    mutable bool released = true;
+    std::atomic<bool> fail{false};
+};
+void testPreviewLifecycle() {
+    const auto importer = std::make_shared<GatedImporter>();
+    const auto builder = std::make_shared<GatedPreviewBuilder>();
+    ImportController controller(importer, [](DocumentPtr, std::uint64_t) { return QString{}; });
+    struct ReleasePreview {
+        std::shared_ptr<GatedPreviewBuilder> service;
+        ~ReleasePreview() {
+            service->release();
+        }
+    } release{builder};
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    const auto prepare = [&] {
+        require(controller.setBendReview(0, BendReview::Confirmed) &&
+                    controller.setBendTarget(0, bending::core::BendTarget{1.5, 4}) &&
+                    controller.prepareBendPreview(0, false, builder),
+                "Cannot start preview");
+    };
+    controller.open("part.step");
+    waitUntil(finished);
+    require(!controller.prepareBendPreview(0, false, builder), "Unconfirmed bend was simulated");
+    const auto source = controller.session().document();
+    prepare();
+    waitUntil(finished);
+    require(controller.bendPreview() && !controller.bendPreviewError() &&
+                controller.session().document() == source,
+            "Preview replaced source document");
+    const auto revision = controller.session().editRevision();
+    controller.discardBendPreview();
+    require(!controller.bendPreview() && controller.session().editRevision() == revision,
+            "Discarding view dirtied project");
+    controller.prepareBendPreview(0, true, builder);
+    waitUntil(finished);
+    controller.setBendTarget(0, bending::core::BendTarget{2, 4});
+    require(!controller.bendPreview(), "Changed target retained stale states");
+    builder->reset();
+    prepare();
+    waitUntil([&] { return builder->entered.load(); });
+    require(controller.isPreparingPreview() && !controller.setBendReview(0, BendReview::Excluded),
+            "Editing accepted during preview preparation");
+    int beats = 0;
+    QTimer heartbeat;
+    QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++beats; });
+    heartbeat.start(1);
+    waitUntil([&] { return beats >= 5; });
+    controller.open("replacement.step");
+    builder->release();
+    waitUntil(finished);
+    require(!controller.bendPreview() &&
+                controller.session().document()->metadata().sourcePath == "replacement.step",
+            "Late preview applied to a new document");
+    builder->reset();
+    prepare();
+    waitUntil([&] { return builder->entered.load(); });
+    controller.cancel();
+    builder->release();
+    waitUntil(finished);
+    require(!controller.bendPreview() && !controller.bendPreviewError() &&
+                controller.session().document(),
+            "Cancelled preview was published or dropped source");
+    builder->reset();
+    prepare();
+    waitUntil([&] { return builder->entered.load(); });
+    controller.setManualThickness(3); // Direct API edit exercises revision protection.
+    builder->release();
+    waitUntil(finished);
+    require(!controller.bendPreview(), "Preview ignored edit revision");
+    require(!controller.prepareBendPreview(0, false, builder),
+            "Conflicting manual thickness simulated");
+    controller.useAutomaticThickness();
+    builder->fail = true;
+    prepare();
+    waitUntil(finished);
+    require(controller.bendPreviewError() && controller.session().document(),
+            "Unsupported preview destroyed source");
+    builder->fail = false;
+    builder->reset();
+    prepare();
+    waitUntil([&] { return builder->entered.load(); });
+    controller.closeDocument();
+    builder->release();
+    waitUntil(finished);
+    require(!controller.bendPreview() && !controller.session().document(),
+            "Late preview resurrected closed model");
+}
 
 } // namespace
 int main(int argc, char *argv[]) {
@@ -268,6 +399,7 @@ int main(int argc, char *argv[]) {
         testController();
         testShutdown();
         testSaveRace();
+        testPreviewLifecycle();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

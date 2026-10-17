@@ -2,6 +2,7 @@
 
 #include "bending/application/DocumentSession.h"
 #include "bending/application/ProjectWriter.h"
+#include "bending/application/SingleBendPreview.h"
 
 #include <QObject>
 #include <QString>
@@ -32,6 +33,12 @@ class ImportController final : public QObject {
     [[nodiscard]] QString saveError() const;
     [[nodiscard]] const application::DocumentSession &session() const;
     [[nodiscard]] bool hasWork() const;
+    bool prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
+                            std::shared_ptr<const application::SingleBendPreviewBuilder> builder);
+    void discardBendPreview();
+    [[nodiscard]] application::BendPreviewPtr bendPreview() const;
+    [[nodiscard]] const std::optional<application::BendPreviewError> &bendPreviewError() const;
+    [[nodiscard]] bool isPreparingPreview() const;
 
   signals:
     void stateChanged();

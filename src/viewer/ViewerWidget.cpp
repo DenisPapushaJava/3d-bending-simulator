@@ -1,5 +1,6 @@
 #include "bending/viewer/ViewerWidget.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/PreviewAccess.h"
 
 #include <AIS_ColoredShape.hxx>
 #include <AIS_InteractiveContext.hxx>
@@ -8,6 +9,7 @@
 #include <Aspect_NeutralWindow.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
+#include <Bnd_Box.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
@@ -31,6 +33,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <stdexcept>
@@ -108,6 +111,7 @@ class OcctCanvas final : public QWidget {
                                             ? highlights_
                                             : FaceHighlights{};
         presentation_ = candidate;
+        preview_.reset();
         shape_ = shape;
         faces_ = std::move(faces);
         document_ = std::move(document);
@@ -118,6 +122,79 @@ class OcctCanvas final : public QWidget {
             onSelection(revision_, 0);
         }
         return {};
+    }
+
+    QString presentPreview(application::BendPreviewPtr preview, std::size_t index,
+                           quint64 revision) {
+        if (revision != revision_ || !document_ || !preview || index >= preview->frameCount()) {
+            return QStringLiteral("Неактуальный результат просмотра сгиба");
+        }
+        const auto &frame = cad::OcctPreviewAccess::frame(*preview, index);
+        const bool entering = preview_ != preview;
+        Handle(AIS_ColoredShape) candidate;
+        if (ready_) {
+            try {
+                candidate = new AIS_ColoredShape(frame.shape);
+                candidate->Attributes()->SetAutoTriangulation(false);
+                candidate->Attributes()->SetFaceBoundaryDraw(true);
+                const std::array<Quantity_Color, 3> colors{
+                    Quantity_Color(0.15, 0.48, 0.65, Quantity_TOC_RGB),
+                    Quantity_Color(1.0, 0.25, 0.04, Quantity_TOC_RGB),
+                    Quantity_Color(0.16, 0.70, 0.51, Quantity_TOC_RGB)};
+                for (std::size_t region = 0; region < frame.regions.size(); ++region) {
+                    TopTools_IndexedMapOfShape regionFaces;
+                    TopExp::MapShapes(frame.regions[region], TopAbs_FACE, regionFaces);
+                    for (int face = 1; face <= regionFaces.Extent(); ++face) {
+                        candidate->SetCustomColor(regionFaces(face), colors[region]);
+                    }
+                }
+                context_->Display(candidate, AIS_Shaded, -1, false);
+                if (!presentation_.IsNull()) {
+                    context_->Remove(presentation_, false);
+                }
+                for (const auto &overlay : {evidence_, support_}) {
+                    if (!overlay.IsNull()) {
+                        context_->Remove(overlay, false);
+                    }
+                }
+                context_->ClearSelected(false);
+                if (entering) {
+                    view_->SetProj(V3d_XposYnegZpos);
+                    fitPreview(*preview);
+                }
+                view_->ZFitAll();
+                view_->Redraw();
+            } catch (const Standard_Failure &error) {
+                restore(candidate);
+                return failureText(error);
+            } catch (const std::exception &error) {
+                restore(candidate);
+                return QString::fromUtf8(error.what());
+            }
+        }
+        presentation_ = candidate;
+        evidence_.Nullify();
+        support_.Nullify();
+        preview_ = std::move(preview);
+        previewFrame_ = index;
+        if (onSelection) {
+            onSelection(revision_, 0);
+        }
+        return {};
+    }
+    QString endPreview() {
+        QString error;
+        try {
+            error = preview_ ? present(shape_, document_, revision_) : QString{};
+        } catch (const Standard_Failure &failure) {
+            error = failureText(failure);
+        } catch (const std::exception &failure) {
+            error = QString::fromUtf8(failure.what());
+        }
+        if (!error.isEmpty()) {
+            fail(error);
+        }
+        return error;
     }
 
     void clearDocument(quint64 revision) {
@@ -133,6 +210,7 @@ class OcctCanvas final : public QWidget {
         shape_.Nullify();
         faces_.Clear();
         document_.reset();
+        preview_.reset();
         revision_ = revision;
         diagnostic_ = false;
         if (onSelection) {
@@ -166,6 +244,9 @@ class OcctCanvas final : public QWidget {
         sanitize(state.flanges);
         state.bend = state.bend && !state.primary.empty();
         highlights_ = std::move(state);
+        if (preview_) {
+            return;
+        }
         guarded([&] {
             for (const auto &overlay : {evidence_, support_}) {
                 if (!overlay.IsNull()) {
@@ -213,7 +294,11 @@ class OcctCanvas final : public QWidget {
             return;
         }
         guarded([&] {
-            view_->FitAll(0.1, false);
+            if (preview_) {
+                fitPreview(*preview_);
+            } else {
+                view_->FitAll(0.1, false);
+            }
             view_->ZFitAll();
             view_->Redraw();
         });
@@ -290,7 +375,7 @@ class OcctCanvas final : public QWidget {
         guarded([&] {
             if (event->button() == Qt::RightButton) {
                 view_->StartRotation(lastPosition_.x(), lastPosition_.y());
-            } else if (event->button() == Qt::LeftButton) {
+            } else if (event->button() == Qt::LeftButton && !preview_) {
                 context_->MoveTo(lastPosition_.x(), lastPosition_.y(), view_, false);
                 context_->SelectDetected(AIS_SelectionScheme_Replace);
                 context_->InitSelected();
@@ -314,7 +399,7 @@ class OcctCanvas final : public QWidget {
                 view_->Rotation(position.x(), position.y());
             } else if (event->buttons().testFlag(Qt::MiddleButton)) {
                 view_->Pan(position.x() - lastPosition_.x(), lastPosition_.y() - position.y());
-            } else if (event->buttons() == Qt::NoButton) {
+            } else if (event->buttons() == Qt::NoButton && !preview_) {
                 context_->MoveTo(position.x(), position.y(), view_, false);
             }
             view_->Redraw();
@@ -372,8 +457,8 @@ class OcctCanvas final : public QWidget {
                 context_->Remove(candidate, false);
             }
             if (!presentation_.IsNull()) {
-                context_->Display(presentation_, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE),
-                                  false);
+                context_->Display(presentation_, AIS_Shaded,
+                                  preview_ ? -1 : AIS_Shape::SelectionMode(TopAbs_FACE), false);
             }
             view_->Redraw();
         } catch (const Standard_Failure &error) {
@@ -383,6 +468,14 @@ class OcctCanvas final : public QWidget {
     QSize physicalSize() const {
         return {qMax(1, qRound(width() * devicePixelRatioF())),
                 qMax(1, qRound(height() * devicePixelRatioF()))};
+    }
+    void fitPreview(const application::SingleBendPreview &preview) {
+        const auto bounds = preview.bounds();
+        Bnd_Box box;
+        box.Add(gp_Pnt(bounds.minimum.x, bounds.minimum.y, bounds.minimum.z));
+        box.Add(gp_Pnt(bounds.maximum.x, bounds.maximum.y, bounds.maximum.z));
+        view_->FitAll(box, 0.1, false);
+        view_->ZFitAll();
     }
 
     QPoint physicalPoint(QPointF point) const {
@@ -433,7 +526,16 @@ class OcctCanvas final : public QWidget {
             view_->MustBeResized();
 
             ready_ = true;
-            if (!shape_.IsNull()) {
+            if (preview_) {
+                // Rebuild native resources from the same immutable worker snapshot.
+                const auto preview = preview_;
+                const auto index = previewFrame_;
+                preview_.reset();
+                const auto error = presentPreview(preview, index, revision_);
+                if (!error.isEmpty()) {
+                    throw std::runtime_error(error.toStdString());
+                }
+            } else if (!shape_.IsNull()) {
                 const auto error = present(shape_, document_, revision_, diagnostic_);
                 if (!error.isEmpty()) {
                     throw std::runtime_error(error.toStdString());
@@ -486,6 +588,8 @@ class OcctCanvas final : public QWidget {
     Handle(AIS_Shape) support_;
     FaceHighlights highlights_;
     application::DocumentPtr document_;
+    application::BendPreviewPtr preview_;
+    std::size_t previewFrame_ = 0;
     quint64 revision_ = 0;
     bool diagnostic_ = false;
     TopTools_IndexedMapOfShape faces_;
@@ -608,6 +712,22 @@ void ViewerWidget::highlightBend(const application::RecognizedBend &bend, quint6
     if (impl_->canvas) {
         impl_->canvas->highlightBend(bend, revision);
     }
+}
+
+QString ViewerWidget::presentBendPreview(application::BendPreviewPtr preview,
+                                         std::size_t frameIndex, quint64 revision) {
+    try {
+        return impl_->canvas
+                   ? impl_->canvas->presentPreview(std::move(preview), frameIndex, revision)
+                   : QString{};
+    } catch (const Standard_Failure &error) {
+        return failureText(error);
+    } catch (const std::exception &error) {
+        return QString::fromUtf8(error.what());
+    }
+}
+QString ViewerWidget::endBendPreview() {
+    return impl_->canvas ? impl_->canvas->endPreview() : QString{};
 }
 
 void ViewerWidget::showDiagnosticBox() {

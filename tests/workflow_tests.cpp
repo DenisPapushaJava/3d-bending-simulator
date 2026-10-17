@@ -1,4 +1,5 @@
 #include "bending/cad/Kernel.h"
+#include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -13,12 +14,14 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListView>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QSlider>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
@@ -654,6 +657,150 @@ void testBendPreparationWorkflow(bool graphics) {
             "Close kept prepared operation controls");
     window.close();
 }
+void testSingleBendWorkflow(bool graphics) {
+    using namespace bending::application;
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    const auto builder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files, builder);
+    window.resize(1360, 1000);
+    window.show();
+    auto &controller = window.importController();
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    auto *list = window.findChild<QListView *>(QStringLiteral("bendList"));
+    auto *prepare = window.findChild<QPushButton *>(QStringLiteral("prepareBendPreview"));
+    auto *status = window.findChild<QLabel *>(QStringLiteral("bendPreviewStatus"));
+    auto *slider = window.findChild<QSlider *>(QStringLiteral("bendFrame"));
+    auto *side = window.findChild<QComboBox *>(QStringLiteral("fixedBendSide"));
+    auto *play = window.findChild<QPushButton *>(QStringLiteral("playBend"));
+    auto *returnToCad = window.findChild<QPushButton *>(QStringLiteral("returnToCad"));
+    auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    require(prepare && status && slider && side && play && returnToCad && !prepare->isEnabled() &&
+                !slider->isEnabled(),
+            "Missing or active empty operation controls");
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/bend-90-6mm.step"));
+    waitUntil(finished);
+    list->setCurrentIndex(list->model()->index(0, 0));
+    require(!prepare->isEnabled(), "Unconfirmed zone enabled preview");
+    controller.setBendReview(0, BendReview::Confirmed);
+    window.findChild<QPushButton *>(QStringLiteral("applyBendTarget"))->click();
+    QTemporaryDir temporary;
+    const auto destination = temporary.path() + QStringLiteral("/operation.bend");
+#ifdef _WIN32
+    const auto path = std::filesystem::path(destination.toStdWString());
+#else
+    const auto path = std::filesystem::path(destination.toUtf8().toStdString());
+#endif
+    controller.saveProject(path, files);
+    waitUntil(finished);
+    require(!controller.session().modified() && prepare->isEnabled(), "Prepared target not saved");
+    const auto source = controller.session().document();
+    const auto revision = controller.session().revision();
+    tabs->setCurrentIndex(2);
+    prepare->click();
+    require(controller.isPreparingPreview() &&
+                window.findChild<QAction *>(QStringLiteral("cancelImportAction"))->isEnabled(),
+            "Preview cannot be cancelled");
+    waitUntil(finished);
+    if (controller.bendPreviewError()) {
+        throw std::runtime_error(controller.bendPreviewError()->detail);
+    }
+    require(controller.bendPreview() && slider->isEnabled() && slider->maximum() == 20 &&
+                status->text().contains(QStringLiteral("Заготовка")) &&
+                !controller.session().modified() && controller.session().document() == source,
+            "Preview changed source or lost blank parameters");
+    const auto snapshot = [&](const char *suffix) {
+        const auto output = qEnvironmentVariable("BENDING_KINEMATIC_SNAPSHOT");
+        if (graphics && !output.isEmpty()) {
+            waitUntil([&] { return viewer->isReady(); });
+            auto image = window.grab().toImage();
+            QPainter painter(&image);
+            painter.drawImage(QRect(viewer->mapTo(&window, QPoint(0, 0)), viewer->size()),
+                              viewer->captureImage());
+            painter.end();
+            require(image.save(output + QLatin1Char('-') + QString::fromLatin1(suffix) +
+                               QStringLiteral(".png")),
+                    "Cannot save operation snapshot");
+        }
+    };
+    QImage flat;
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady(), "Operation graphics unavailable");
+        flat = viewer->captureImage();
+        require(warmPixels(flat) > 50, "Flat bend zone not distinguished");
+    }
+    snapshot("flat");
+    slider->setValue(10);
+    require(window.findChild<QLabel *>(QStringLiteral("bendFrameLabel"))
+                ->text()
+                .contains(QStringLiteral("45")),
+            "Intermediate angle missing");
+    snapshot("half");
+    if (graphics) {
+        const auto half = viewer->captureImage();
+        require(differences(flat, half) > 500, "Intermediate state did not change geometry");
+        require(!viewer->presentBendPreview(controller.bendPreview(), 20, revision - 1).isEmpty() &&
+                    differences(half, viewer->captureImage()) == 0,
+                "Stale preview revision displayed");
+        int selected = -1;
+        const auto connection =
+            QObject::connect(viewer, &bending::viewer::ViewerWidget::selectionChanged,
+                             [&](quint64, int face) { selected = face; });
+        auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+        click(canvas, canvas->rect().center());
+        require(selected <= 0, "Preview face was mistaken for an original CAD face");
+        QObject::disconnect(connection);
+        QEvent change(QEvent::WinIdChange);
+        QApplication::sendEvent(canvas, &change);
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady() && differences(half, viewer->captureImage()) < 200,
+                "Native scene recreation lost preview state");
+    }
+    slider->setValue(20);
+    snapshot("final");
+    slider->setFocus();
+    QKeyEvent previous(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
+    QApplication::sendEvent(slider, &previous);
+    require(slider->value() == 19, "Operation slider is not keyboard accessible");
+    slider->setValue(10);
+    play->click();
+    waitUntil([&] { return slider->value() > 10; });
+    play->click();
+    require(play->text() == QStringLiteral("Воспроизвести"), "Playback did not pause");
+    returnToCad->click();
+    require(!controller.bendPreview() && !slider->isEnabled() &&
+                controller.session().document() == source && !controller.session().modified(),
+            "Return to CAD changed project");
+    side->setCurrentIndex(1);
+    prepare->click();
+    waitUntil(finished);
+    require(controller.bendPreview() != nullptr, "Second fixed side failed");
+    if (graphics) {
+        require(differences(flat, viewer->captureImage()) > 500,
+                "Fixed-side choice did not change initial placement");
+    }
+    controller.setBendTarget(0, bending::core::BendTarget{std::numbers::pi / 3, 8});
+    require(!controller.bendPreview() && !slider->isEnabled(),
+            "Changed target retained old states");
+    prepare->click();
+    waitUntil(finished);
+    require(controller.bendPreviewError() &&
+                controller.bendPreviewError()->code == BendPreviewErrorCode::TargetMismatch &&
+                controller.session().document() == source && !controller.bendPreview(),
+            "Target mismatch rebuilt wrong blank");
+    controller.open(std::filesystem::path(BENDING_EXAMPLE_DIR) / "channel-2mm.step");
+    waitUntil(finished);
+    list->setCurrentIndex(list->model()->index(0, 0));
+    require(!prepare->isEnabled() && !controller.bendPreview(),
+            "Multi-bend solid enabled single-bend preview");
+    controller.closeDocument();
+    require(!slider->isEnabled() && !play->isEnabled() && !returnToCad->isEnabled(),
+            "Close retained playback");
+    window.close();
+}
 void testTrimmedBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
@@ -733,6 +880,7 @@ int main(int argc, char *argv[]) {
         testProjectWorkflow(graphics);
         testBendWorkflow(graphics);
         testBendPreparationWorkflow(graphics);
+        testSingleBendWorkflow(graphics);
         testTrimmedBendWorkflow(graphics);
         const auto external = qEnvironmentVariable("BENDING_THICKNESS_STEP");
         bool validExpected = false;

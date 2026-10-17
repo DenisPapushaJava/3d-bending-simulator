@@ -2,6 +2,7 @@
 
 #include <QThread>
 
+#include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -110,6 +111,19 @@ class ImportController::Impl {
     bool saving = false;
     std::uint64_t saveId = 0;
     QString writeError;
+    BendPreviewPtr preview;
+    std::optional<BendPreviewError> previewError;
+    std::uint64_t previewId = 0;
+    bool preparingPreview = false;
+    void invalidatePreview() {
+        ++previewId;
+        preview.reset();
+        previewError.reset();
+        if (preparingPreview) {
+            stop.request_stop();
+            preparingPreview = false;
+        }
+    }
 };
 
 ImportController::ImportController(std::shared_ptr<const DocumentImporter> importer,
@@ -126,6 +140,7 @@ void ImportController::open(std::filesystem::path path) {
         return;
     }
     impl_->stop.request_stop();
+    impl_->invalidatePreview();
     ++impl_->saveId;
     impl_->writeError.clear();
     impl_->pending = impl_->session.beginImport(std::move(path));
@@ -135,6 +150,7 @@ void ImportController::open(std::filesystem::path path) {
 
 void ImportController::cancel() {
     impl_->stop.request_stop();
+    impl_->invalidatePreview();
     ++impl_->saveId;
     impl_->writeError.clear();
     impl_->pending.reset();
@@ -171,19 +187,31 @@ bool ImportController::hasWork() const {
 }
 
 ThicknessValidation ImportController::setManualThickness(double valueMm) {
+    const auto before = impl_->session.editRevision();
     const auto result = impl_->session.setManualThickness(valueMm);
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidatePreview();
+    }
     emit stateChanged();
     return result;
 }
 void ImportController::useAutomaticThickness() {
+    const auto before = impl_->session.editRevision();
     impl_->session.useAutomaticThickness();
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidatePreview();
+    }
     emit stateChanged();
 }
 bool ImportController::setBendReview(std::size_t recognizedIndex, BendReview review) {
     if (impl_->stopping || hasWork()) {
         return false;
     }
+    const auto before = impl_->session.editRevision();
     const auto result = impl_->session.setBendReview(recognizedIndex, review);
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidatePreview();
+    }
     emit stateChanged();
     return result;
 }
@@ -192,7 +220,11 @@ bool ImportController::setBendTarget(std::size_t recognizedIndex,
     if (impl_->stopping || hasWork()) {
         return false;
     }
+    const auto before = impl_->session.editRevision();
     const auto result = impl_->session.setBendTarget(recognizedIndex, target);
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidatePreview();
+    }
     emit stateChanged();
     return result;
 }
@@ -252,5 +284,91 @@ void ImportController::saveProject(std::filesystem::path path,
         },
         Qt::QueuedConnection);
     emit stateChanged();
+}
+bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
+                                          std::shared_ptr<const SingleBendPreviewBuilder> builder) {
+    if (impl_->stopping || hasWork() || !builder || !impl_->session.document()) {
+        return false;
+    }
+    const auto *entry = impl_->session.bend(recognizedIndex);
+    if (!entry || entry->review != BendReview::Confirmed || !entry->target) {
+        return false;
+    }
+    const auto &metadata = impl_->session.document()->metadata();
+    if (recognizedIndex >= metadata.bendAnalysis.bends.size() ||
+        (impl_->session.manualThicknessMm() &&
+         std::abs(*impl_->session.manualThicknessMm() -
+                  metadata.bendAnalysis.bends[recognizedIndex].thicknessMm) >
+             metadata.bendAnalysis.lengthToleranceMm)) {
+        return false;
+    }
+    auto *state = impl_.get();
+    state->invalidatePreview();
+    const auto id = state->previewId;
+    const auto document = state->session.document();
+    const auto revision = state->session.revision();
+    const auto editRevision = state->session.editRevision();
+    const auto target = *entry->target;
+    state->stop = std::stop_source{};
+    const auto stop = state->stop.get_token();
+    state->running = true;
+    state->preparingPreview = true;
+    QMetaObject::invokeMethod(
+        state->worker,
+        [state, document, revision, editRevision, id, target, recognizedIndex, fixedSecond, stop,
+         builder = std::move(builder)] {
+            BendPreviewResult result =
+                BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
+            try {
+                result = builder->build(document, recognizedIndex, target, fixedSecond, stop);
+            } catch (const std::exception &error) {
+                result = BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
+            } catch (...) {
+                result = BendPreviewError{BendPreviewErrorCode::Failed, "Unknown preview failure"};
+            }
+            QMetaObject::invokeMethod(
+                state->owner,
+                [state, revision, editRevision, id, result = std::move(result)] {
+                    state->running = false;
+                    state->preparingPreview = false;
+                    if (state->stopping) {
+                        return;
+                    }
+                    if (id == state->previewId && revision == state->session.revision() &&
+                        editRevision == state->session.editRevision() &&
+                        !state->session.activeRequest()) {
+                        if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
+                            if (*preview && (*preview)->frameCount() >= 2) {
+                                state->preview = *preview;
+                            } else {
+                                state->previewError =
+                                    BendPreviewError{BendPreviewErrorCode::Failed, "Empty preview"};
+                            }
+                        } else if (const auto &error = std::get<BendPreviewError>(result);
+                                   error.code != BendPreviewErrorCode::Cancelled) {
+                            state->previewError = error;
+                        }
+                    }
+                    state->dispatch();
+                    emit state->owner->stateChanged();
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
+    emit stateChanged();
+    return true;
+}
+void ImportController::discardBendPreview() {
+    impl_->invalidatePreview();
+    emit stateChanged();
+}
+BendPreviewPtr ImportController::bendPreview() const {
+    return impl_->preview;
+}
+const std::optional<BendPreviewError> &ImportController::bendPreviewError() const {
+    return impl_->previewError;
+}
+bool ImportController::isPreparingPreview() const {
+    return impl_->preparingPreview;
 }
 } // namespace bending::ui
