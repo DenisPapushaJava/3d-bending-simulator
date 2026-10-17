@@ -6,7 +6,11 @@
 /vcpkg_installed/
 /.cache/
 /.idea/
-/.vscode/
+/.vscode/*
+!/.vscode/settings.json
+!/.vscode/extensions.json
+!/.vscode/tasks.json
+!/.vscode/launch.json
 *.user
 *.swp
 __pycache__/

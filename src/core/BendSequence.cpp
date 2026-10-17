@@ -1,11 +1,11 @@
-#include "core/BendSequence.h"
+#include "bending/core/BendSequence.h"
 
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
-namespace bending {
+namespace bending::core {
 
 BendSequence::BendSequence(std::vector<std::string> bendIds) : bendIds_(std::move(bendIds)) {
     std::unordered_set<std::string> seen;
@@ -41,4 +41,4 @@ std::optional<std::size_t> BendSequence::move(std::size_t from, std::size_t to) 
     return std::min(from, to);
 }
 
-} // namespace bending
+} // namespace bending::core

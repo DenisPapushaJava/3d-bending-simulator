@@ -37,6 +37,11 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check C++ formatting
         run: find src tests -type f \( -name '*.h' -o -name '*.cpp' \) -print0 | xargs -0 clang-format-18 --dry-run --Werror
+      - name: Check domain without Qt or OCCT
+        run: |
+          cmake --preset core --no-warn-unused-cli -DCMAKE_DISABLE_FIND_PACKAGE_Qt6=ON -DCMAKE_DISABLE_FIND_PACKAGE_OpenCASCADE=ON
+          cmake --build --preset core --parallel 2
+          ctest --preset core
 
   build:
     name: Build (${{ matrix.os }})

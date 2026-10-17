@@ -1,5 +1,6 @@
 #include "bending/Version.h"
-#include "ui/MainWindow.h"
+#include "bending/cad/Kernel.h"
+#include "bending/ui/MainWindow.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -36,7 +37,7 @@ int main(int argc, char *argv[]) {
     parser.addOption(smokeTest);
     parser.process(app);
 
-    bending::MainWindow window;
+    bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()});
     window.show();
     if (parser.isSet(smokeTest)) {
         QTimer::singleShot(100, &app, [&] {

@@ -1,4 +1,4 @@
-#include "cad/Kernel.h"
+#include "bending/cad/Kernel.h"
 
 #include <Standard_Version.hxx>
 

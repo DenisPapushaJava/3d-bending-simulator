@@ -1,8 +1,8 @@
-#include "viewer/ViewerPlaceholder.h"
+#include "bending/viewer/ViewerPlaceholder.h"
 
 #include <QPainter>
 
-namespace bending {
+namespace bending::viewer {
 
 ViewerPlaceholder::ViewerPlaceholder(QWidget *parent) : QWidget(parent) {
     setObjectName(QStringLiteral("viewer"));
@@ -31,4 +31,4 @@ void ViewerPlaceholder::paintEvent(QPaintEvent *) {
                      QStringLiteral("Начальный каркас · CAD-просмотрщик ещё не подключён"));
 }
 
-} // namespace bending
+} // namespace bending::viewer

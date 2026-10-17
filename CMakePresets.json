@@ -15,14 +15,27 @@
       "inherits": "dev",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "BENDING_WARNINGS_AS_ERRORS": "ON" }
+    },
+    {
+      "name": "core",
+      "displayName": "Domain only — no Qt or OCCT",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/core",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON",
+        "BENDING_BUILD_APP": "OFF", "BENDING_BUILD_CAD": "OFF",
+        "BENDING_WARNINGS_AS_ERRORS": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "core", "configurePreset": "core" }
   ],
   "testPresets": [
     { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } },
-    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } }
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "core", "configurePreset": "core", "output": { "outputOnFailure": true } }
   ]
 }

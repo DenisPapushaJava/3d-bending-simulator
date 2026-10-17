@@ -2,7 +2,7 @@
 
 #include <QWidget>
 
-namespace bending {
+namespace bending::viewer {
 
 // Keeps the future OCCT/Qt context adapter separate from the main window.
 class ViewerPlaceholder final : public QWidget {
@@ -13,4 +13,4 @@ class ViewerPlaceholder final : public QWidget {
     void paintEvent(QPaintEvent *event) override;
 };
 
-} // namespace bending
+} // namespace bending::viewer

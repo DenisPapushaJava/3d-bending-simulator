@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace bending {
+namespace bending::core {
 
 // IDs survive reordering. No Qt, CAD objects or simulated validation results here.
 class BendSequence {
@@ -21,4 +21,4 @@ class BendSequence {
     std::vector<std::string> bendIds_;
 };
 
-} // namespace bending
+} // namespace bending::core

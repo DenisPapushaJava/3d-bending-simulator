@@ -1,0 +1,6 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "cmake.parallelJobs": 2,
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/dev/compile_commands.json"
+}

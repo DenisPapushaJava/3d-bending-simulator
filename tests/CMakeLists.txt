@@ -1,0 +1,17 @@
+add_executable(core_tests core_tests.cpp)
+target_link_libraries(core_tests PRIVATE Bending::Core bending_options)
+add_test(NAME core.sequence COMMAND core_tests)
+set_tests_properties(core.sequence PROPERTIES LABELS "unit")
+
+if(BENDING_BUILD_CAD)
+    add_executable(cad_smoke cad_smoke.cpp)
+    target_include_directories(cad_smoke SYSTEM PRIVATE "${OpenCASCADE_INCLUDE_DIR}")
+    target_link_libraries(cad_smoke PRIVATE Bending::Cad bending_options TKPrim TKBRep TKTopAlgo)
+    add_test(NAME cad.kernel COMMAND cad_smoke)
+    set_tests_properties(cad.kernel PROPERTIES LABELS "integration")
+endif()
+if(BENDING_BUILD_APP)
+    add_test(NAME app.startup COMMAND bending_simulator --smoke-test)
+    set_tests_properties(app.startup PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20 LABELS "integration")
+endif()

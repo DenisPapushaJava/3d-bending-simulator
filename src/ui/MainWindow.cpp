@@ -1,8 +1,6 @@
-#include "ui/MainWindow.h"
+#include "bending/ui/MainWindow.h"
 
-#include "bending/Version.h"
-#include "cad/Kernel.h"
-#include "viewer/ViewerPlaceholder.h"
+#include "bending/viewer/ViewerPlaceholder.h"
 
 #include <QAction>
 #include <QApplication>
@@ -14,15 +12,16 @@
 #include <QStatusBar>
 #include <QToolBar>
 
-namespace bending {
+namespace bending::ui {
 
-MainWindow::MainWindow() {
+MainWindow::MainWindow(RuntimeInfo runtime) {
     setObjectName(QStringLiteral("mainWindow"));
     setWindowTitle(
         QStringLiteral("3D Bending Simulator · %1")
-            .arg(QString::fromUtf8(version.data(), static_cast<qsizetype>(version.size()))));
+            .arg(QString::fromUtf8(runtime.applicationVersion.data(),
+                                   static_cast<qsizetype>(runtime.applicationVersion.size()))));
     resize(1440, 900);
-    setCentralWidget(new ViewerPlaceholder(this));
+    setCentralWidget(new viewer::ViewerPlaceholder(this));
 
     auto *fileMenu = menuBar()->addMenu(QStringLiteral("Файл"));
     auto *importAction = fileMenu->addAction(QStringLiteral("Импорт STEP…"));
@@ -77,12 +76,12 @@ MainWindow::MainWindow() {
             Qt::BottomDockWidgetArea);
 
     statusBar()->showMessage(QStringLiteral("Локальный проект · мм · градусы"));
-    const auto kernel = cad::kernelVersion();
-    statusBar()->addPermanentWidget(new QLabel(
-        QStringLiteral("Qt %1 · OCCT %2")
-            .arg(QString::fromLatin1(qVersion()),
-                 QString::fromLatin1(kernel.data(), static_cast<qsizetype>(kernel.size()))),
-        this));
+    statusBar()->addPermanentWidget(
+        new QLabel(QStringLiteral("Qt %1 · OCCT %2")
+                       .arg(QString::fromLatin1(qVersion()),
+                            QString::fromLatin1(runtime.cadVersion.data(),
+                                                static_cast<qsizetype>(runtime.cadVersion.size()))),
+                   this));
 
     auto *helpMenu = menuBar()->addMenu(QStringLiteral("Справка"));
     auto *about = helpMenu->addAction(QStringLiteral("О программе"));
@@ -94,4 +93,4 @@ MainWindow::MainWindow() {
     });
 }
 
-} // namespace bending
+} // namespace bending::ui

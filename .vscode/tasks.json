@@ -1,0 +1,35 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Linux: настроить dev",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "dev"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Linux: собрать dev",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "dev", "--parallel", "2"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "Linux: настроить dev",
+      "dependsOrder": "sequence",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Linux: проверить dev",
+      "type": "process",
+      "command": "ctest",
+      "args": ["--preset", "dev"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "Linux: собрать dev",
+      "dependsOrder": "sequence",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    }
+  ]
+}

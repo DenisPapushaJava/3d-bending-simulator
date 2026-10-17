@@ -1,4 +1,4 @@
-#include "cad/Kernel.h"
+#include "bending/cad/Kernel.h"
 
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>

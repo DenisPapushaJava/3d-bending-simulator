@@ -1,4 +1,4 @@
-#include "core/BendSequence.h"
+#include "bending/core/BendSequence.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -10,7 +10,7 @@ int main() {
         }
     };
     try {
-        bending::BendSequence sequence({"B01", "B03", "B02", "B04"});
+        bending::core::BendSequence sequence({"B01", "B03", "B02", "B04"});
         require(sequence.move(2, 1) == 1, "Reordering must invalidate from the first changed step");
         require(sequence.bendIds() == std::vector<std::string>({"B01", "B02", "B03", "B04"}),
                 "Stable bend IDs must survive moving earlier");
@@ -30,13 +30,13 @@ int main() {
              {std::vector<std::string>{"B01", "B01"}, std::vector<std::string>{"B01", ""}}) {
             rejected = false;
             try {
-                bending::BendSequence invalid(ids);
+                bending::core::BendSequence invalid(ids);
             } catch (const std::invalid_argument &) {
                 rejected = true;
             }
             require(rejected, "Empty and duplicate IDs must be rejected");
         }
-        bending::BendSequence empty({});
+        bending::core::BendSequence empty({});
         require(empty.bendIds().empty(), "New project must permit an empty sequence");
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
