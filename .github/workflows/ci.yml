@@ -57,13 +57,17 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo bash scripts/install-linux-deps.sh
       - name: Windows compiler environment
+        id: compiler
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath
           $environment = & "$vs/Common7/Tools/VsDevCmd.bat" -arch=x64 -host_arch=x64 '&&' set
           foreach ($line in $environment) {
-            if ($line -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV }
+            if ($line -match '^([^=]+)=(.*)$') {
+              "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV
+              if ($Matches[1] -eq 'VCToolsVersion') { "version=$($Matches[2])" >> $env:GITHUB_OUTPUT }
+            }
           }
       - name: Qt 6.8.3 (shared libraries)
         if: runner.os == 'Windows'
@@ -86,7 +90,8 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/vcpkg
-          key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
+          key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}-msvc-${{ steps.compiler.outputs.version }}
+          restore-keys: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
       - name: Configure Linux
         if: runner.os == 'Linux'
         run: cmake --preset release
@@ -102,7 +107,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/vcpkg
-          key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
+          key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}-msvc-${{ steps.compiler.outputs.version }}
       - name: Build
         run: cmake --build --preset release --parallel 2
       - name: Test core, OCCT and app startup
