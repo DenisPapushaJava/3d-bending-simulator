@@ -95,13 +95,16 @@ class OcctCanvas final : public QWidget {
                 return QString::fromUtf8(error.what());
             }
         }
+        const auto retainedHighlights = document && document == document_ && revision == revision_
+                                            ? highlightedFaces_
+                                            : std::vector<std::size_t>{};
         presentation_ = candidate;
         shape_ = shape;
         faces_ = std::move(faces);
         document_ = std::move(document);
         revision_ = revision;
         diagnostic_ = diagnostic;
-        highlightFaces({}, revision_);
+        highlightFaces(retainedHighlights, revision_);
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -116,6 +119,7 @@ class OcctCanvas final : public QWidget {
         });
         presentation_.Nullify();
         evidence_.Nullify();
+        highlightedFaces_.clear();
         shape_.Nullify();
         faces_.Clear();
         document_.reset();
@@ -130,6 +134,7 @@ class OcctCanvas final : public QWidget {
         if (revision != revision_) {
             return;
         }
+        highlightedFaces_ = indices;
         guarded([&] {
             if (!evidence_.IsNull()) {
                 context_->Remove(evidence_, false);
@@ -410,6 +415,7 @@ class OcctCanvas final : public QWidget {
     TopoDS_Shape shape_;
     Handle(AIS_Shape) presentation_;
     Handle(AIS_Shape) evidence_;
+    std::vector<std::size_t> highlightedFaces_;
     application::DocumentPtr document_;
     quint64 revision_ = 0;
     bool diagnostic_ = false;

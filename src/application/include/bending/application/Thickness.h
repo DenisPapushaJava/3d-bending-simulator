@@ -17,6 +17,9 @@ struct ThicknessAnalysis {
     double toleranceMm = 1.0e-6;
     std::vector<ThicknessEvidence> evidence;
 };
+// A display proposal, not a proof of uniform thickness for unsupported geometry.
+// Incomplete/ambiguous analysis must not silently choose one local distance.
+[[nodiscard]] std::optional<double> suggestThickness(const ThicknessAnalysis &analysis);
 enum class ThicknessValidation { Invalid, ConflictsWithGeometry, LocalMatch, Unverified, Verified };
 [[nodiscard]] ThicknessValidation validateThickness(double valueMm,
                                                     const ThicknessAnalysis &analysis);

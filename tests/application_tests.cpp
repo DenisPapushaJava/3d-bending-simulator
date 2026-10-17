@@ -106,10 +106,25 @@ void testProjectState() {
     require(validateThickness(2.0, analysis) == ThicknessValidation::Verified &&
                 validateThickness(3.0, analysis) == ThicknessValidation::ConflictsWithGeometry,
             "Detected thickness conflict was not checked");
+    require(suggestThickness(analysis) == 2.0, "Confirmed thickness was not proposed");
     analysis.status = ThicknessStatus::Unsupported;
     analysis.evidence = {{1, 2, 1.5}};
     require(validateThickness(1.5, analysis) == ThicknessValidation::LocalMatch,
             "Local measurement was treated as a global proof");
+    analysis.evidence = {{1, 2, 6.0}, {3, 4, 6.0 + 1.0e-8}};
+    require(suggestThickness(analysis) == 6.0 && analysis.status == ThicknessStatus::Unsupported,
+            "Consistent local evidence must be proposed without claiming a global proof");
+    analysis.evidence.push_back({5, 6, 4.0});
+    require(!suggestThickness(analysis), "Conflicting distances were silently resolved");
+    analysis.evidence.pop_back();
+    for (const auto status :
+         {ThicknessStatus::Ambiguous, ThicknessStatus::LimitReached, ThicknessStatus::Failed}) {
+        analysis.status = status;
+        require(!suggestThickness(analysis), "Incomplete analysis suggested a thickness");
+    }
+    analysis.status = ThicknessStatus::Unsupported;
+    analysis.evidence.clear();
+    require(!suggestThickness(analysis), "Missing geometry invented a default thickness");
 }
 
 } // namespace

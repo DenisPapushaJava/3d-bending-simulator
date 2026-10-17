@@ -20,10 +20,13 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <cmath>
 #include <optional>
 
 namespace bending::ui {
@@ -184,19 +187,9 @@ class MainWindow::Impl {
                         .arg(metadata.faceCount)
                         .arg(units.join(QStringLiteral(", ")),
                              number(metadata.maximumToleranceMm)));
-                pairs->clear();
-                for (const auto &pair : metadata.thickness.evidence) {
-                    pairs->addItem(QStringLiteral("Грани %1 и %2 · %3 мм")
-                                       .arg(pair.firstFace)
-                                       .arg(pair.secondFace)
-                                       .arg(number(pair.distanceMm)));
-                }
-                thicknessInput->setValue(session.manualThicknessMm().value_or(
-                    metadata.thickness.thicknessMm.value_or(2.0)));
                 window->setWindowTitle(displayPath(metadata.sourcePath.filename()) +
                                        QStringLiteral(" — ") + title);
             } else {
-                pairs->clear();
                 project->addItem(QStringLiteral("Деталь не загружена"));
                 project->setToolTip({});
                 properties->setText(QStringLiteral(
@@ -205,9 +198,13 @@ class MainWindow::Impl {
                 window->setWindowTitle(title);
             }
         }
+        if (!shownEditRevision || *shownEditRevision != session.editRevision()) {
+            shownEditRevision = session.editRevision();
+            fillThicknessControls();
+        }
         const bool editable = document && !controller->hasWork();
         thicknessInput->setEnabled(editable);
-        applyThickness->setEnabled(editable);
+        applyThickness->setEnabled(editable && thicknessInput->value() > 0.0);
         automaticThickness->setEnabled(editable && session.manualThicknessMm().has_value());
         pairs->setEnabled(editable && pairs->count() > 0);
         showPair->setEnabled(editable && viewer->isReady() && pairs->count() > 0);
@@ -232,6 +229,11 @@ class MainWindow::Impl {
                 description = QStringLiteral("Толщина: %1 мм · определена по геометрии\nПлоская "
                                              "деталь постоянной толщины.")
                                   .arg(number(*analysis.thicknessMm));
+            } else if (const auto suggestion = suggestThickness(analysis)) {
+                description =
+                    QStringLiteral("Предполагаемая толщина: %1 мм · по локальным "
+                                   "измерениям\nПостоянство толщины всей детали не подтверждено.")
+                        .arg(number(*suggestion));
             } else {
                 description =
                     analysis.status == ThicknessStatus::LimitReached
@@ -304,6 +306,74 @@ class MainWindow::Impl {
         diagnostics->setVisible(!detail.isEmpty());
     }
 
+    void showThicknessEvidence(bool updateInput) {
+        const auto &session = controller->session();
+        const auto &document = session.document();
+        if (!document) {
+            return;
+        }
+        std::vector<std::size_t> indices;
+        const auto &analysis = document->metadata().thickness;
+        if (pairs->currentIndex() >= 0) {
+            const int selected = pairs->currentData().toInt();
+            std::optional<double> value;
+            if (selected < 0) {
+                value = session.manualThicknessMm() ? session.manualThicknessMm()
+                                                    : suggestThickness(analysis);
+                if (value) {
+                    for (const auto &pair : analysis.evidence) {
+                        if (std::abs(pair.distanceMm - *value) <= analysis.toleranceMm) {
+                            indices.push_back(pair.firstFace);
+                            indices.push_back(pair.secondFace);
+                        }
+                    }
+                }
+            } else if (static_cast<std::size_t>(selected) < analysis.evidence.size()) {
+                const auto &pair = analysis.evidence[static_cast<std::size_t>(selected)];
+                value = pair.distanceMm;
+                indices = {pair.firstFace, pair.secondFace};
+            }
+            if (updateInput && value) {
+                thicknessInput->setValue(*value);
+            }
+        }
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+        viewer->highlightFaces(indices, session.revision());
+    }
+    void fillThicknessControls() {
+        const auto &session = controller->session();
+        const auto &document = session.document();
+        const QSignalBlocker block(pairs);
+        pairs->clear();
+        thicknessInput->setValue(0.0);
+        if (!document) {
+            return;
+        }
+        const auto &analysis = document->metadata().thickness;
+        const auto value =
+            session.manualThicknessMm() ? session.manualThicknessMm() : suggestThickness(analysis);
+        thicknessInput->setValue(value.value_or(0.0));
+        const bool hasMatchingFaces =
+            value &&
+            std::any_of(analysis.evidence.begin(), analysis.evidence.end(), [&](const auto &pair) {
+                return std::abs(pair.distanceMm - *value) <= analysis.toleranceMm;
+            });
+        if (hasMatchingFaces) {
+            pairs->addItem(QStringLiteral("Поверхности для %1 мм · все пары").arg(number(*value)),
+                           -1);
+        }
+        for (std::size_t i = 0; i < analysis.evidence.size(); ++i) {
+            const auto &pair = analysis.evidence[i];
+            pairs->addItem(QStringLiteral("Грани %1 и %2 · %3 мм")
+                               .arg(pair.firstFace)
+                               .arg(pair.secondFace)
+                               .arg(number(pair.distanceMm)),
+                           static_cast<int>(i));
+        }
+        pairs->setCurrentIndex(hasMatchingFaces ? 0 : -1);
+        showThicknessEvidence(false);
+    }
     bool canDiscard() {
         if (!controller->session().modified()) {
             return true;
@@ -358,6 +428,7 @@ class MainWindow::Impl {
     QProgressBar *progress = nullptr;
     QString title;
     std::optional<std::uint64_t> shownRevision;
+    std::optional<std::uint64_t> shownEditRevision;
 };
 
 MainWindow::MainWindow(RuntimeInfo runtime,
@@ -491,13 +562,18 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->thicknessInput->setObjectName(QStringLiteral("thicknessInput"));
     impl_->thicknessInput->setAccessibleName(QStringLiteral("Толщина листа в миллиметрах"));
     impl_->thicknessInput->setDecimals(6);
-    impl_->thicknessInput->setRange(0.000001, 1000000.0);
-    impl_->thicknessInput->setValue(2.0);
+    impl_->thicknessInput->setRange(0.0, 1000000.0);
+    impl_->thicknessInput->setSpecialValueText(QStringLiteral("Не определена"));
     impl_->thicknessInput->setSuffix(QStringLiteral(" мм"));
     layout->addWidget(impl_->thicknessInput);
     impl_->applyThickness = new QPushButton(QStringLiteral("Применить толщину вручную"), panel);
     impl_->applyThickness->setObjectName(QStringLiteral("applyThickness"));
     layout->addWidget(impl_->applyThickness);
+    connect(impl_->thicknessInput, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        const auto &session = impl_->controller->session();
+        impl_->applyThickness->setEnabled(session.document() && !impl_->controller->hasWork() &&
+                                          value > 0.0);
+    });
     connect(impl_->applyThickness, &QPushButton::clicked, this, [this] {
         const auto validation =
             impl_->controller->setManualThickness(impl_->thicknessInput->value());
@@ -522,17 +598,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->showPair = new QPushButton(QStringLiteral("Показать поверхности"), panel);
     impl_->showPair->setObjectName(QStringLiteral("showThicknessFaces"));
     layout->addWidget(impl_->showPair);
-    connect(impl_->showPair, &QPushButton::clicked, this, [this] {
-        const auto &session = impl_->controller->session();
-        const auto index = impl_->pairs->currentIndex();
-        if (!session.document() || index < 0) {
-            return;
-        }
-        const auto &pair =
-            session.document()->metadata().thickness.evidence.at(static_cast<std::size_t>(index));
-        impl_->viewer->highlightFaces({pair.firstFace, pair.secondFace}, session.revision());
-        impl_->thicknessInput->setValue(pair.distanceMm);
-    });
+    connect(impl_->showPair, &QPushButton::clicked, this,
+            [this] { impl_->showThicknessEvidence(true); });
+    connect(impl_->pairs, &QComboBox::currentIndexChanged, this,
+            [this](int) { impl_->showThicknessEvidence(true); });
     impl_->selection = label(QStringLiteral("faceProperties"));
     impl_->error = label(QStringLiteral("importError"));
     impl_->error->setStyleSheet(QStringLiteral("color:#9D2828;"));
