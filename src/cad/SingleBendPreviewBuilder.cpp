@@ -10,6 +10,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -41,6 +42,14 @@ class CadPreview final : public SingleBendPreview {
     BoundsMm envelope{};
     std::vector<PreviewFrame> frames;
     std::optional<simulation::FlatToolSetup> setup;
+    std::optional<simulation::PressMotion> motion;
+    std::vector<simulation::PressState> states;
+    const simulation::PressMotion *pressMotion() const noexcept override {
+        return motion ? &*motion : nullptr;
+    }
+    const simulation::PressState *pressState(std::size_t i) const noexcept override {
+        return i < states.size() ? &states[i] : nullptr;
+    }
     const simulation::FlatToolSetup *toolSetup() const noexcept override {
         return setup ? &*setup : nullptr;
     }
@@ -104,12 +113,8 @@ TopoDS_Shape prism(const std::vector<gp_Pnt> &points, const gp_Vec &extrusion) {
     }
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), extrusion).Shape();
 }
-PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &basis,
-                       double progress) {
-    const auto state = simulation::singleBendSection(model, progress);
-    if (!state) {
-        throw std::invalid_argument("Unsupported single-bend parameters");
-    }
+PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBasis &basis,
+                              const simulation::BendSection &state) {
     const auto position = [&](simulation::Point2Mm p) {
         return basis.origin.Translated(basis.x * p.x + basis.y * p.y);
     };
@@ -122,11 +127,11 @@ PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &ba
         return prism(points, extrusion);
     };
     PreviewFrame frame;
-    frame.regions[0] = flange(state->fixed);
-    frame.regions[2] = flange(state->moving);
-    if (progress == 0.0) {
-        frame.regions[1] = prism({position(state->innerArc[0]), position(state->outerArc[0]),
-                                  position(state->outerArc[2]), position(state->innerArc[2])},
+    frame.regions[0] = flange(state.fixed);
+    frame.regions[2] = flange(state.moving);
+    if (state.angleRadians == 0.0) {
+        frame.regions[1] = prism({position(state.innerArc[0]), position(state.outerArc[0]),
+                                  position(state.outerArc[2]), position(state.innerArc[2])},
                                  extrusion);
     } else {
         const auto arc = [&](const auto &points) {
@@ -137,12 +142,12 @@ PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &ba
                 .Edge();
         };
         BRepBuilderAPI_MakeWire wire;
-        wire.Add(BRepBuilderAPI_MakeEdge(position(state->innerArc[0]), position(state->outerArc[0]))
+        wire.Add(BRepBuilderAPI_MakeEdge(position(state.innerArc[0]), position(state.outerArc[0]))
                      .Edge());
-        wire.Add(arc(state->outerArc));
-        wire.Add(BRepBuilderAPI_MakeEdge(position(state->outerArc[2]), position(state->innerArc[2]))
+        wire.Add(arc(state.outerArc));
+        wire.Add(BRepBuilderAPI_MakeEdge(position(state.outerArc[2]), position(state.innerArc[2]))
                      .Edge());
-        wire.Add(TopoDS::Edge(arc(state->innerArc).Reversed()));
+        wire.Add(TopoDS::Edge(arc(state.innerArc).Reversed()));
         frame.regions[1] =
             BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), extrusion).Shape();
     }
@@ -157,6 +162,14 @@ PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &ba
     }
     frame.shape = compound;
     return frame;
+}
+PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &basis,
+                       double progress) {
+    const auto state = simulation::singleBendSection(model, progress);
+    if (!state) {
+        throw std::invalid_argument("Unsupported single-bend parameters");
+    }
+    return makeSectionFrame(model, basis, *state);
 }
 std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, double thickness) {
     const auto &t = setup.tools;
@@ -243,7 +256,8 @@ const PreviewFrame &OcctPreviewAccess::frame(const application::SingleBendPrevie
 static application::BendPreviewResult buildPreview(DocumentPtr document, std::size_t bendIndex,
                                                    core::BendTarget target, bool fixedSecond,
                                                    std::stop_token stop,
-                                                   std::optional<core::PressTools> toolParameters) {
+                                                   std::optional<core::PressTools> toolParameters,
+                                                   bool withMotion = false) {
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -336,32 +350,90 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                 return BendPreviewError{code, "Initial tool setup parameters/support rejected"};
             }
             preview->setup = std::get<simulation::FlatToolSetup>(placement);
+            if (withMotion) {
+                const auto prepared = simulation::preparePressMotion(model, *toolParameters,
+                                                                     analysis.lengthToleranceMm);
+                if (const auto *issue = std::get_if<simulation::PressMotionIssue>(&prepared)) {
+                    const auto code = *issue == simulation::PressMotionIssue::ToolAngleConflict
+                                          ? BendPreviewErrorCode::ToolAngleConflict
+                                      : *issue == simulation::PressMotionIssue::NoseTooLarge
+                                          ? BendPreviewErrorCode::NoseTooLarge
+                                      : *issue == simulation::PressMotionIssue::SupportNotProven
+                                          ? BendPreviewErrorCode::SupportNotProven
+                                          : BendPreviewErrorCode::UnsupportedParameters;
+                    return BendPreviewError{code, "Contact motion parameters rejected"};
+                }
+                preview->motion = std::get<simulation::PressMotion>(prepared);
+            }
             basis = {{-simulation::bendAllowanceMm(model) / 2.0, model.thicknessMm,
                       (toolParameters->lengthMm - model.widthMm) / 2.0},
                      {1, 0, 0},
                      {0, 1, 0},
                      {0, 0, 1}};
         }
+        if (withMotion) {
+            basis.origin = gp_Pnt(0, 0, (toolParameters->lengthMm - model.widthMm) / 2.0);
+        }
+        std::array<TopoDS_Shape, 2> initialTools;
+        if (preview->setup) {
+            initialTools = makeTools(*preview->setup, model.thicknessMm);
+        }
         Bnd_Box envelope;
-        const std::size_t intervals = toolParameters ? 0 : 20;
+        const std::size_t intervals = withMotion ? 40 : toolParameters ? 0 : 20;
         for (std::size_t i = 0; i <= intervals; ++i) {
             if (stop.stop_requested()) {
                 return cancelled();
             }
-            auto frame =
-                !toolParameters && i == intervals
-                    ? std::move(finalFrame)
-                    : makeFrame(model, basis,
-                                intervals ? static_cast<double>(i) / static_cast<double>(intervals)
-                                          : 0.0);
+            const double progress =
+                intervals ? static_cast<double>(i) / static_cast<double>(intervals) : 0.0;
+            if (withMotion) {
+                const auto state = simulation::pressMotionState(model, *preview->motion, progress);
+                if (!state) {
+                    return BendPreviewError{BendPreviewErrorCode::Failed,
+                                            "Cannot compute press state", i};
+                }
+                preview->states.push_back(*state);
+            }
+            auto frame = withMotion ? makeSectionFrame(model, basis, preview->states.back().section)
+                         : !toolParameters && i == intervals ? std::move(finalFrame)
+                                                             : makeFrame(model, basis, progress);
             const double materialVolume = volume(frame.shape);
             if (!std::isfinite(materialVolume) ||
                 std::abs(materialVolume - expectedVolume) > budget) {
                 return BendPreviewError{BendPreviewErrorCode::Failed,
                                         "Intermediate state changed material volume"};
             }
+            if (withMotion && i == intervals) {
+                // Independently place the already verified CAD reconstruction into the machine
+                // frame. The contact section must be congruent with it, not merely have the same
+                // volume.
+                const auto &left = preview->states.back().section.innerArc[0];
+                const double h = model.angleRadians / 2.0;
+                const FrameBasis endpoint{gp_Pnt(left.x, left.y, basis.origin.Z()),
+                                          gp_Vec(std::cos(h), -std::sin(h), 0),
+                                          gp_Vec(std::sin(h), std::cos(h), 0), gp_Vec(0, 0, 1)};
+                const auto expected = makeFrame(model, endpoint, 1.0);
+                if (!sameVolume(expected.shape, frame.shape, analysis.lengthToleranceMm, budget,
+                                stop)) {
+                    if (stop.stop_requested()) {
+                        return cancelled();
+                    }
+                    return BendPreviewError{
+                        BendPreviewErrorCode::Failed,
+                        "Contact endpoint differs from the verified STEP reconstruction", i};
+                }
+            }
             if (preview->setup) {
-                frame.tools = makeTools(*preview->setup, model.thicknessMm);
+                frame.tools = initialTools;
+                if (withMotion) {
+                    gp_Trsf translation;
+                    translation.SetTranslation(gp_Vec(0,
+                                                      preview->states.back().punchTipYmm -
+                                                          model.thicknessMm -
+                                                          toolParameters->clearanceMm,
+                                                      0));
+                    frame.tools[1] = initialTools[1].Moved(TopLoc_Location(translation));
+                }
                 for (const auto &[a, b] : {std::pair{frame.shape, frame.tools[0]},
                                            std::pair{frame.shape, frame.tools[1]},
                                            std::pair{frame.tools[0], frame.tools[1]}}) {
@@ -370,8 +442,30 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                     }
                     if (!disjointVolumes(a, b, analysis.lengthToleranceMm, budget)) {
                         return BendPreviewError{
-                            BendPreviewErrorCode::Failed,
-                            "Initial setup has a tool/material intersection or failed check"};
+                            BendPreviewErrorCode::ToolIntersection,
+                            "Tool/material intersection or failed Boolean check", i};
+                    }
+                }
+                if (withMotion) {
+                    const auto &state = preview->states.back();
+                    for (const auto &region : {frame.regions[0], frame.regions[2]}) {
+                        if (stop.stop_requested()) {
+                            return cancelled();
+                        }
+                        BRepExtrema_DistShapeShape contact(region, frame.tools[0]);
+                        if (!contact.IsDone() || contact.Value() > analysis.lengthToleranceMm) {
+                            return BendPreviewError{BendPreviewErrorCode::ContactLost,
+                                                    "Die shoulder contact missing", i};
+                        }
+                    }
+                    BRepExtrema_DistShapeShape punchContact(frame.regions[1], frame.tools[1]);
+                    const double expectedGap = state.phase == simulation::PressPhase::Approach
+                                                   ? state.punchTipYmm - model.thicknessMm
+                                                   : 0.0;
+                    if (!punchContact.IsDone() ||
+                        std::abs(punchContact.Value() - expectedGap) > analysis.lengthToleranceMm) {
+                        return BendPreviewError{BendPreviewErrorCode::ContactLost,
+                                                "Punch contact/clearance mismatch", i};
                     }
                 }
                 BRep_Builder builder;
@@ -417,5 +511,11 @@ SingleBendPreviewBuilder::buildToolSetup(DocumentPtr document, std::size_t bendI
                                          core::BendTarget target, core::PressTools tools,
                                          std::stop_token stop) const {
     return buildPreview(std::move(document), bendIndex, target, false, stop, tools);
+}
+application::BendPreviewResult
+SingleBendPreviewBuilder::buildToolMotion(DocumentPtr document, std::size_t bendIndex,
+                                          core::BendTarget target, core::PressTools tools,
+                                          std::stop_token stop) const {
+    return buildPreview(std::move(document), bendIndex, target, false, stop, tools, true);
 }
 } // namespace bending::cad

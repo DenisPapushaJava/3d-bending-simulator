@@ -1,4 +1,5 @@
 #include "bending/simulation/FlatToolSetup.h"
+#include "bending/simulation/PressMotion.h"
 #include "bending/simulation/SingleBend.h"
 
 #include <cmath>
@@ -100,6 +101,69 @@ int main() {
         require(std::get<ToolSetupIssue>(flatToolSetup(model, tools, 0.1)) ==
                     ToolSetupIssue::InvalidParameters,
                 "Excessive tolerance accepted");
+        const SingleBend pressModel{6, 8, std::numbers::pi / 2, 80, 30, 35};
+        const auto motion = std::get<PressMotion>(preparePressMotion(pressModel, tools, 1e-5));
+        close(pressMotionState(pressModel, motion, 0)->punchTipYmm, 16,
+              "Wrong initial tip clearance");
+        close(pressMotionState(pressModel, motion, 0.2)->punchTipYmm, 6,
+              "Approach did not contact flat sheet");
+        close(pressMotionState(pressModel, motion, 0.6)->section.angleRadians, std::numbers::pi / 4,
+              "Wrong middle angle");
+        const auto end = *pressMotionState(pressModel, motion, 1);
+        close(*end.section.innerRadiusMm, 8, "Press end radius differs from CAD");
+        close(end.punchTravelMm, 10 + 24 - 14 * (std::sqrt(2.0) - 1), "Wrong final punch travel");
+        double lastTravel = -1;
+        for (int i = 0; i <= 1000; ++i) {
+            const auto state =
+                *pressMotionState(pressModel, motion, static_cast<double>(i) / 1000.0);
+            const auto &section = state.section;
+            const double h = section.angleRadians / 2, c = std::cos(h), sine = std::sin(h);
+            close(section.outerArc[0].x - state.supportDistanceMm * c, -24,
+                  "Left shoulder contact X drifted");
+            close(section.outerArc[0].y + state.supportDistanceMm * sine, 0,
+                  "Left shoulder contact Y drifted");
+            close(section.outerArc[2].x + state.supportDistanceMm * c, 24,
+                  "Right shoulder contact X drifted");
+            close(section.outerArc[2].y + state.supportDistanceMm * sine, 0,
+                  "Right shoulder contact Y drifted");
+            require(state.supportDistanceMm > 0 && state.supportDistanceMm < 30 &&
+                        state.supportDistanceMm <= motion.maximumSupportDistanceMm + 1e-8,
+                    "Shoulder contact left the straight flanges or violated certified bound");
+            require(state.punchTravelMm >= lastTravel - 1e-8,
+                    "Punch reversed during forward stroke");
+            lastTravel = state.punchTravelMm;
+            if (state.phase == PressPhase::Bending) {
+                close(state.punchTipYmm, section.innerArc[1].y, "Punch lost central contact");
+            }
+            for (std::size_t j = 0; j < 3; ++j) {
+                close(std::hypot(section.innerArc[j].x - section.outerArc[j].x,
+                                 section.innerArc[j].y - section.outerArc[j].y),
+                      6, "Press changed sheet thickness");
+            }
+        }
+        auto badPress = tools;
+        badPress.dieAngleRadians = 100 * std::numbers::pi / 180;
+        require(std::get<PressMotionIssue>(preparePressMotion(pressModel, badPress, 1e-5)) ==
+                    PressMotionIssue::ToolAngleConflict,
+                "Die angle conflict accepted");
+        badPress = tools;
+        badPress.punchAngleRadians = 100 * std::numbers::pi / 180;
+        require(std::get<PressMotionIssue>(preparePressMotion(pressModel, badPress, 1e-5)) ==
+                    PressMotionIssue::ToolAngleConflict,
+                "Punch angle conflict accepted");
+        badPress = tools;
+        badPress.noseRadiusMm = 8;
+        require(std::get<PressMotionIssue>(preparePressMotion(pressModel, badPress, 1e-5)) ==
+                    PressMotionIssue::NoseTooLarge,
+                "Conformal nose contact accepted");
+        auto shortFlange = pressModel;
+        shortFlange.fixedFlangeMm = 18;
+        require(std::get<PressMotionIssue>(preparePressMotion(shortFlange, tools, 1e-5)) ==
+                    PressMotionIssue::SupportNotProven,
+                "Intermediate support not checked");
+        require(!pressMotionState(pressModel, motion, -0.1) &&
+                    !pressMotionState(pressModel, motion, 1.1),
+                "Invalid press progress accepted");
         auto invalid = model;
         invalid.thicknessMm = -2;
         require(!singleBendSection(invalid, 0.5), "Negative thickness accepted");

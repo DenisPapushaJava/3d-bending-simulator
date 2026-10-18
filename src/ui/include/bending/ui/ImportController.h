@@ -34,9 +34,10 @@ class ImportController final : public QObject {
     [[nodiscard]] QString saveError() const;
     [[nodiscard]] const application::DocumentSession &session() const;
     [[nodiscard]] bool hasWork() const;
-    bool prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
-                            std::shared_ptr<const application::SingleBendPreviewBuilder> builder,
-                            bool toolSetup = false);
+    bool
+    prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
+                       std::shared_ptr<const application::SingleBendPreviewBuilder> builder,
+                       application::BendPreviewMode mode = application::BendPreviewMode::Kinematic);
     void discardBendPreview();
     [[nodiscard]] application::BendPreviewPtr bendPreview() const;
     [[nodiscard]] const std::optional<application::BendPreviewError> &bendPreviewError() const;

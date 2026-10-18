@@ -262,7 +262,14 @@ void testSaveRace() {
 }
 class TestPreview final : public SingleBendPreview {
   public:
-    explicit TestPreview(bool tools = false) : withTools_(tools) {}
+    explicit TestPreview(bool tools = false, bool motion = false)
+        : withTools_(tools), withMotion_(motion) {}
+    const bending::simulation::PressMotion *pressMotion() const noexcept override {
+        return withMotion_ ? &motion_ : nullptr;
+    }
+    const bending::simulation::PressState *pressState(std::size_t) const noexcept override {
+        return withMotion_ ? &state_ : nullptr;
+    }
     const bending::simulation::FlatToolSetup *toolSetup() const noexcept override {
         return withTools_ ? &setup_ : nullptr;
     }
@@ -270,7 +277,7 @@ class TestPreview final : public SingleBendPreview {
         return model_;
     }
     std::size_t frameCount() const noexcept override {
-        return withTools_ ? 1 : 21;
+        return withMotion_ ? 41 : withTools_ ? 1 : 21;
     }
     BoundsMm bounds() const noexcept override {
         return {{-30, -2, 0}, {50, 40, 80}};
@@ -278,11 +285,23 @@ class TestPreview final : public SingleBendPreview {
 
   private:
     bool withTools_;
+    bool withMotion_;
+    bending::simulation::PressMotion motion_{};
+    bending::simulation::PressState state_{};
     bending::simulation::FlatToolSetup setup_{};
     bending::simulation::SingleBend model_{2, 4, 1.5, 80, 30, 30};
 };
 class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
   public:
+    BendPreviewResult buildToolMotion(DocumentPtr document, std::size_t index,
+                                      bending::core::BendTarget target, bending::core::PressTools,
+                                      std::stop_token stop) const override {
+        const auto result = build(document, index, target, false, stop);
+        if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
+            return *failure;
+        }
+        return BendPreviewPtr(std::make_shared<TestPreview>(true, true));
+    }
     BendPreviewResult buildToolSetup(DocumentPtr document, std::size_t index,
                                      bending::core::BendTarget target, bending::core::PressTools,
                                      std::stop_token stop) const override {
@@ -320,7 +339,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     mutable bool released = true;
     std::atomic<bool> fail{false};
 };
-void testPreviewLifecycle(bool toolsMode = false) {
+void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     const auto importer = std::make_shared<GatedImporter>();
     const auto builder = std::make_shared<GatedPreviewBuilder>();
     ImportController controller(importer, [](DocumentPtr, std::uint64_t) { return QString{}; });
@@ -334,7 +353,7 @@ void testPreviewLifecycle(bool toolsMode = false) {
         return !controller.hasWork() && !controller.session().activeRequest();
     };
     const auto prepare = [&] {
-        if (toolsMode) {
+        if (mode != BendPreviewMode::Kinematic) {
             require(
                 controller.setBendReview(0, BendReview::Confirmed) &&
                     controller.setBendTools(0, bending::core::PressTools{48, 1.5, 1.4, 2, 100, 10}),
@@ -342,12 +361,12 @@ void testPreviewLifecycle(bool toolsMode = false) {
         }
         require(controller.setBendReview(0, BendReview::Confirmed) &&
                     controller.setBendTarget(0, bending::core::BendTarget{1.5, 4}) &&
-                    controller.prepareBendPreview(0, false, builder, toolsMode),
+                    controller.prepareBendPreview(0, false, builder, mode),
                 "Cannot start preview");
     };
     controller.open("part.step");
     waitUntil(finished);
-    require(!controller.prepareBendPreview(0, false, builder, toolsMode),
+    require(!controller.prepareBendPreview(0, false, builder, mode),
             "Unconfirmed bend was simulated");
     const auto source = controller.session().document();
     prepare();
@@ -359,7 +378,7 @@ void testPreviewLifecycle(bool toolsMode = false) {
     controller.discardBendPreview();
     require(!controller.bendPreview() && controller.session().editRevision() == revision,
             "Discarding view dirtied project");
-    controller.prepareBendPreview(0, true, builder, toolsMode);
+    controller.prepareBendPreview(0, true, builder, mode);
     waitUntil(finished);
     controller.setBendTarget(0, bending::core::BendTarget{2, 4});
     require(!controller.bendPreview(), "Changed target retained stale states");
@@ -395,7 +414,7 @@ void testPreviewLifecycle(bool toolsMode = false) {
     builder->release();
     waitUntil(finished);
     require(!controller.bendPreview(), "Preview ignored edit revision");
-    require(!controller.prepareBendPreview(0, false, builder, toolsMode),
+    require(!controller.prepareBendPreview(0, false, builder, mode),
             "Conflicting manual thickness simulated");
     controller.useAutomaticThickness();
     builder->fail = true;
@@ -422,7 +441,8 @@ int main(int argc, char *argv[]) {
         testShutdown();
         testSaveRace();
         testPreviewLifecycle();
-        testPreviewLifecycle(true);
+        testPreviewLifecycle(BendPreviewMode::ToolSetup);
+        testPreviewLifecycle(BendPreviewMode::ToolMotion);
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;
