@@ -6,9 +6,11 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
@@ -25,6 +27,7 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Lin.hxx>
 
 #include <algorithm>
@@ -82,6 +85,71 @@ struct FrameBasis {
     gp_Vec y;
     gp_Vec z;
 };
+gp_Pnt sectionPoint(const FrameBasis &basis, simulation::Point2Mm p) {
+    return basis.origin.Translated(basis.x * p.x + basis.y * p.y);
+}
+gp_Ax3 flangeAxes(const FrameBasis &basis, const simulation::BendSection &section, bool second) {
+    const auto root = second ? section.moving[0] : section.fixed[0];
+    const auto end = second ? section.moving[3] : section.fixed[1];
+    return {sectionPoint(basis, root), gp_Dir(basis.z),
+            gp_Dir(gp_Vec(sectionPoint(basis, root), sectionPoint(basis, end)))};
+}
+double flangeExtent(const TopoDS_Shape &inner, const TopoDS_Shape &outer, const gp_Ax3 &axes) {
+    gp_Trsf local;
+    local.SetTransformation(axes);
+    Bnd_Box bounds;
+    for (const auto &face : {inner, outer}) {
+        const auto transformed = BRepBuilderAPI_Transform(face, local, true).Shape();
+        BRepBndLib::AddOptimal(transformed, bounds, false, false);
+    }
+    return bounds.CornerMax().X();
+}
+void assemble(PreviewFrame &frame) {
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const auto &region : frame.regions) {
+        if (!BRepCheck_Analyzer(region).IsValid()) {
+            throw std::runtime_error("Invalid preview region");
+        }
+        builder.Add(compound, region);
+    }
+    frame.shape = compound;
+}
+// Keep the exact flange solids, including holes, countersinks and the free contour.
+// Every frame owns fresh geometry: meshing may not mutate the imported document.
+void placeFlanges(PreviewFrame &frame, const std::array<TopoDS_Shape, 2> &flanges,
+                  const FrameBasis &sourceBasis, const simulation::BendSection &sourceSection,
+                  const FrameBasis &targetBasis, const simulation::BendSection &targetSection) {
+    for (std::size_t i = 0; i < flanges.size(); ++i) {
+        gp_Trsf placement;
+        placement.SetDisplacement(flangeAxes(sourceBasis, sourceSection, i == 1),
+                                  flangeAxes(targetBasis, targetSection, i == 1));
+        frame.regions[i * 2] = BRepBuilderAPI_Transform(flanges[i], placement, true).Shape();
+    }
+    assemble(frame);
+}
+std::optional<TopoDS_Shape> extractFlange(const TopoDS_Shape &source, const TopoDS_Shape &envelope,
+                                          double tolerance) {
+    BRepAlgoAPI_Common common;
+    TopTools_ListOfShape arguments, tools;
+    arguments.Append(source);
+    tools.Append(envelope);
+    common.SetArguments(arguments);
+    common.SetTools(tools);
+    common.SetNonDestructive(true);
+    common.SetFuzzyValue(tolerance);
+    common.Build();
+    if (!common.IsDone() || common.HasErrors() || !BRepCheck_Analyzer(common.Shape()).IsValid()) {
+        return {};
+    }
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(common.Shape(), TopAbs_SOLID, solids);
+    if (solids.Extent() != 1 || !std::isfinite(volume(solids(1))) || volume(solids(1)) <= 0) {
+        return {};
+    }
+    return BRepBuilderAPI_Copy(solids(1), true, false).Shape();
+}
 std::optional<gp_Vec> railRadial(const TopoDS_Face &cylinder, const TopoDS_Face &flange,
                                  const gp_Pnt &axisOrigin, const gp_Vec &axis, double tolerance) {
     TopTools_IndexedMapOfShape cylinderEdges, flangeEdges;
@@ -151,16 +219,7 @@ PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBa
         frame.regions[1] =
             BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), extrusion).Shape();
     }
-    BRep_Builder builder;
-    TopoDS_Compound compound;
-    builder.MakeCompound(compound);
-    for (const auto &region : frame.regions) {
-        if (!BRepCheck_Analyzer(region).IsValid()) {
-            throw std::runtime_error("Invalid preview region");
-        }
-        builder.Add(compound, region);
-    }
-    frame.shape = compound;
+    assemble(frame);
     return frame;
 }
 PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &basis,
@@ -274,9 +333,8 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
     const auto &metadata = native->metadata();
     const auto &analysis = metadata.bendAnalysis;
     if (analysis.status != BendRecognitionStatus::Completed || analysis.bends.size() != 1 ||
-        bendIndex != 0 || analysis.bends[0].trimmedEnds || metadata.faceCount != 10) {
-        return unsupported("Requires one straight bend and two rectangular flanges, without "
-                           "cutouts or trimmed ends");
+        bendIndex != 0 || analysis.bends[0].trimmedEnds) {
+        return unsupported("Requires one complete straight bend and two planar flanges");
     }
     const auto &bend = analysis.bends[0];
     if (!core::validBendTarget(target) ||
@@ -311,28 +369,54 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                                 : point(bend.axisEnd);
         FrameBasis basis{origin.Translated(*radialA * bend.innerRadiusMm), axis.Crossed(*radialA),
                          -*radialA, axis};
-        simulation::SingleBend model{bend.thicknessMm,
-                                     bend.innerRadiusMm,
-                                     bend.angleRadians,
-                                     bend.lengthMm,
-                                     area(fixedSecond ? flangeB : flangeA) / bend.lengthMm,
-                                     area(fixedSecond ? flangeA : flangeB) / bend.lengthMm};
+        const FrameBasis sourceBasis = basis;
+        simulation::SingleBend model{
+            bend.thicknessMm, bend.innerRadiusMm, bend.angleRadians, bend.lengthMm, 1, 1};
+        const auto seed = simulation::singleBendSection(model, 1.0);
+        if (!seed) {
+            return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                    "Unsupported bend dimensions/angle"};
+        }
+        const std::array<std::size_t, 2> innerIndices{fixedSecond ? 2U : 0U, fixedSecond ? 0U : 2U};
+        std::array<double, 2> extents{};
+        for (std::size_t i = 0; i < extents.size(); ++i) {
+            const auto index = innerIndices[i];
+            extents[i] = flangeExtent(faces(static_cast<int>(bend.flangeFaces[index])),
+                                      faces(static_cast<int>(bend.flangeFaces[index + 1])),
+                                      flangeAxes(basis, *seed, i == 1));
+        }
+        model.fixedFlangeMm = extents[0];
+        model.movingFlangeMm = extents[1];
         if (!simulation::validSingleBend(model)) {
             return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                     "Supported sizes: thickness/radius 0.1–100000 mm, "
                                     "width/flanges 1–100000 mm, angle 5–175 degrees"};
         }
+        const auto sourceSection = *simulation::singleBendSection(model, 1.0);
         auto finalFrame = makeFrame(model, basis, 1.0);
-        const double expectedVolume =
-            simulation::blankLengthMm(model) * model.thicknessMm * model.widthMm;
+        std::array<TopoDS_Shape, 2> flanges;
+        for (std::size_t i = 0; i < flanges.size(); ++i) {
+            if (stop.stop_requested()) {
+                return cancelled();
+            }
+            const auto extracted =
+                extractFlange(source, finalFrame.regions[i * 2], analysis.lengthToleranceMm);
+            if (!extracted) {
+                return unsupported("Cannot isolate one connected solid for each planar flange");
+            }
+            flanges[i] = *extracted;
+            finalFrame.regions[i * 2] = *extracted;
+        }
+        assemble(finalFrame);
+        const double expectedVolume = metadata.volumeMm3;
         const double budget =
             std::max(metadata.volumeMm3 * 1.0e-8, area(source) * analysis.lengthToleranceMm * 2.0);
-        if (std::abs(expectedVolume - metadata.volumeMm3) > budget ||
+        if (std::abs(volume(finalFrame.shape) - expectedVolume) > budget ||
             !sameVolume(source, finalFrame.shape, analysis.lengthToleranceMm, budget, stop)) {
             if (stop.stop_requested()) {
                 return cancelled();
             }
-            return unsupported("Reconstructed strip does not match the entire imported solid");
+            return unsupported("Isolated flanges and complete bend do not match the entire STEP");
         }
         auto preview = std::make_shared<CadPreview>();
         preview->geometry = model;
@@ -365,6 +449,54 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                 }
                 preview->motion = std::get<simulation::PressMotion>(prepared);
             }
+            // The section model uses flange envelopes. Certify actual material under every
+            // possible shoulder position, rather than inferring support from a bounding box.
+            const double reach =
+                preview->motion
+                    ? preview->motion->maximumSupportDistanceMm
+                    : (toolParameters->openingMm - simulation::bendAllowanceMm(model)) / 2.0;
+            if (reach > analysis.lengthToleranceMm) {
+                auto supportSection = sourceSection;
+                const double length = reach + analysis.lengthToleranceMm / 2.0;
+                const auto shorten = [length](simulation::Point2Mm root, simulation::Point2Mm end,
+                                              double extent) {
+                    return simulation::Point2Mm{root.x + (end.x - root.x) * length / extent,
+                                                root.y + (end.y - root.y) * length / extent};
+                };
+                supportSection.fixed[1] =
+                    shorten(sourceSection.fixed[0], sourceSection.fixed[1], model.fixedFlangeMm);
+                supportSection.fixed[2] =
+                    shorten(sourceSection.fixed[3], sourceSection.fixed[2], model.fixedFlangeMm);
+                supportSection.moving[3] =
+                    shorten(sourceSection.moving[0], sourceSection.moving[3], model.movingFlangeMm);
+                supportSection.moving[2] =
+                    shorten(sourceSection.moving[1], sourceSection.moving[2], model.movingFlangeMm);
+                const auto support = makeSectionFrame(model, sourceBasis, supportSection);
+                for (std::size_t i = 0; i < flanges.size(); ++i) {
+                    if (stop.stop_requested()) {
+                        return cancelled();
+                    }
+                    BRepAlgoAPI_Cut missing;
+                    TopTools_ListOfShape arguments, tools;
+                    arguments.Append(support.regions[i * 2]);
+                    tools.Append(flanges[i]);
+                    missing.SetArguments(arguments);
+                    missing.SetTools(tools);
+                    missing.SetNonDestructive(true);
+                    missing.SetFuzzyValue(analysis.lengthToleranceMm);
+                    missing.Build();
+                    const double supportBudget =
+                        area(support.regions[i * 2]) * analysis.lengthToleranceMm * 2.0;
+                    if (!missing.IsDone() || missing.HasErrors() ||
+                        !BRepCheck_Analyzer(missing.Shape()).IsValid() ||
+                        !std::isfinite(volume(missing.Shape())) ||
+                        volume(missing.Shape()) > supportBudget) {
+                        return BendPreviewError{BendPreviewErrorCode::SupportNotProven,
+                                                "A hole or contour interrupts the conservative "
+                                                "full-width support strip"};
+                    }
+                }
+            }
             basis = {{-simulation::bendAllowanceMm(model) / 2.0, model.thicknessMm,
                       (toolParameters->lengthMm - model.widthMm) / 2.0},
                      {1, 0, 0},
@@ -394,9 +526,10 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                 }
                 preview->states.push_back(*state);
             }
-            auto frame = withMotion ? makeSectionFrame(model, basis, preview->states.back().section)
-                         : !toolParameters && i == intervals ? std::move(finalFrame)
-                                                             : makeFrame(model, basis, progress);
+            const auto section = withMotion ? preview->states.back().section
+                                            : *simulation::singleBendSection(model, progress);
+            auto frame = makeSectionFrame(model, basis, section);
+            placeFlanges(frame, flanges, sourceBasis, sourceSection, basis, section);
             const double materialVolume = volume(frame.shape);
             if (!std::isfinite(materialVolume) ||
                 std::abs(materialVolume - expectedVolume) > budget) {
@@ -412,9 +545,12 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                 const FrameBasis endpoint{gp_Pnt(left.x, left.y, basis.origin.Z()),
                                           gp_Vec(std::cos(h), -std::sin(h), 0),
                                           gp_Vec(std::sin(h), std::cos(h), 0), gp_Vec(0, 0, 1)};
-                const auto expected = makeFrame(model, endpoint, 1.0);
-                if (!sameVolume(expected.shape, frame.shape, analysis.lengthToleranceMm, budget,
-                                stop)) {
+                gp_Trsf placement;
+                placement.SetDisplacement(
+                    gp_Ax3(sourceBasis.origin, gp_Dir(sourceBasis.z), gp_Dir(sourceBasis.x)),
+                    gp_Ax3(endpoint.origin, gp_Dir(endpoint.z), gp_Dir(endpoint.x)));
+                const auto expected = BRepBuilderAPI_Transform(source, placement, true).Shape();
+                if (!sameVolume(expected, frame.shape, analysis.lengthToleranceMm, budget, stop)) {
                     if (stop.stop_requested()) {
                         return cancelled();
                     }
@@ -448,11 +584,16 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                 }
                 if (withMotion) {
                     const auto &state = preview->states.back();
-                    for (const auto &region : {frame.regions[0], frame.regions[2]}) {
+                    for (std::size_t flange = 0; flange < 2; ++flange) {
                         if (stop.stop_requested()) {
                             return cancelled();
                         }
-                        BRepExtrema_DistShapeShape contact(region, frame.tools[0]);
+                        const double x = (flange == 0 ? -0.5 : 0.5) * toolParameters->openingMm;
+                        const auto shoulder =
+                            BRepBuilderAPI_MakeEdge(gp_Pnt(x, 0, 0),
+                                                    gp_Pnt(x, 0, toolParameters->lengthMm))
+                                .Edge();
+                        BRepExtrema_DistShapeShape contact(frame.regions[flange * 2], shoulder);
                         if (!contact.IsDone() || contact.Value() > analysis.lengthToleranceMm) {
                             return BendPreviewError{BendPreviewErrorCode::ContactLost,
                                                     "Die shoulder contact missing", i};

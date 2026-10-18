@@ -72,6 +72,7 @@ int main(int argc, char *argv[]) {
         }
         write(output / "angle-6mm.step", thickAngle.Shape(), "MM");
         write(output / "bend-90-6mm.step", bending::fixtures::bentStrip(8.0, 6.0), "MM");
+        write(output / "profiled-bend-6mm.step", bending::fixtures::profiledBend(), "MM");
         write(output / "channel-2mm.step", bending::fixtures::channel(), "MM");
         write(output / "trimmed-bend-2mm.step", bending::fixtures::trimmedBend(), "MM");
     } catch (const Standard_Failure &error) {
