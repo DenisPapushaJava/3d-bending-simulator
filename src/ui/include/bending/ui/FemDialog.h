@@ -6,6 +6,7 @@
 
 namespace bending::ui {
 class FemDialog final : public QDialog {
+    Q_OBJECT
   public:
     explicit FemDialog(std::shared_ptr<application::FemRunner> runner, QWidget *parent = nullptr);
     ~FemDialog() override;
