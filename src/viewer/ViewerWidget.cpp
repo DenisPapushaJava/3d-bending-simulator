@@ -52,6 +52,7 @@ struct FaceHighlights {
     std::vector<std::size_t> primary;
     std::vector<std::size_t> flanges;
     bool bend = false;
+    std::vector<std::size_t> cutouts{};
 };
 
 class OcctCanvas final : public QWidget {
@@ -242,6 +243,16 @@ class OcctCanvas final : public QWidget {
                       revision);
     }
 
+    void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
+                                 quint64 revision) {
+        const auto &bend = diagnostic.candidate;
+        setHighlights({{bend.innerFace, bend.outerFace},
+                       std::vector<std::size_t>(bend.flangeFaces.begin(), bend.flangeFaces.end()),
+                       true,
+                       diagnostic.boundaryFaces},
+                      revision);
+    }
+
     void setHighlights(FaceHighlights state, quint64 revision) {
         if (revision != revision_) {
             return;
@@ -255,6 +266,7 @@ class OcctCanvas final : public QWidget {
         };
         sanitize(state.primary);
         sanitize(state.flanges);
+        sanitize(state.cutouts);
         state.bend = state.bend && !state.primary.empty();
         highlights_ = std::move(state);
         if (preview_) {
@@ -286,6 +298,17 @@ class OcctCanvas final : public QWidget {
                         drawer->SetFaceBoundaryAspect(
                             new Prs3d_LineAspect(Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB),
                                                  Aspect_TOL_SOLID, 3.0));
+                    }
+                    for (const auto i : highlights_.cutouts) {
+                        const auto &face = faces_(static_cast<int>(i));
+                        presentation_->SetCustomColor(
+                            face, Quantity_Color(1.0, 0.025, 0.20, Quantity_TOC_RGB));
+                        const auto drawer = presentation_->CustomAspects(face);
+                        drawer->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
+                        drawer->SetFaceBoundaryDraw(true);
+                        drawer->SetFaceBoundaryAspect(
+                            new Prs3d_LineAspect(Quantity_Color(1.0, 0.55, 0.65, Quantity_TOC_RGB),
+                                                 Aspect_TOL_SOLID, 2.0));
                     }
                 }
                 context_->Redisplay(presentation_, false);
@@ -738,6 +761,13 @@ void ViewerWidget::highlightFaces(const std::vector<std::size_t> &indices, quint
 void ViewerWidget::highlightBend(const application::RecognizedBend &bend, quint64 revision) {
     if (impl_->canvas) {
         impl_->canvas->highlightBend(bend, revision);
+    }
+}
+
+void ViewerWidget::highlightBendDiagnostic(
+    const application::BendInteriorContourDiagnostic &diagnostic, quint64 revision) {
+    if (impl_->canvas) {
+        impl_->canvas->highlightBendDiagnostic(diagnostic, revision);
     }
 }
 

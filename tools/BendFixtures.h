@@ -94,6 +94,17 @@ inline TopoDS_Shape profiledBend() {
                                                         gp_Vec(8, 0, 0)))
         .Shape();
 }
+// An analytic drilling cut through (or into) the cylindrical zone of our own
+// bent strip. It is a diagnostic fixture, not a predicted forming result.
+inline TopoDS_Shape bendWithZoneOpening(bool through = true) {
+    constexpr double angle = std::numbers::pi / 6.0;
+    const double startRadius = through ? 4.0 : 12.0;
+    const gp_Pnt start(startRadius * std::cos(angle), startRadius * std::sin(angle), 40);
+    const auto cutter =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(start, gp_Dir(std::cos(angle), std::sin(angle), 0)), 2, 14)
+            .Shape();
+    return BRepAlgoAPI_Cut(bentStrip(8, 6), cutter).Shape();
+}
 inline TopoDS_Shape channel() {
     BRepBuilderAPI_MakeWire wire;
     const auto line = [&](const gp_Pnt &a, const gp_Pnt &b) {
@@ -120,5 +131,12 @@ inline TopoDS_Shape channel() {
     line({-4, 6, 0}, {-4, 40, 0});
     line({-4, 40, 0}, {-6, 40, 0});
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, 80)).Shape();
+}
+inline TopoDS_Shape channelWithZoneOpening() {
+    const auto cutter = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-1, 6 - std::sqrt(3.0), 40),
+                                                        gp_Dir(-0.5, -std::sqrt(3.0) / 2, 0)),
+                                                 1.5, 8)
+                            .Shape();
+    return BRepAlgoAPI_Cut(channel(), cutter).Shape();
 }
 } // namespace bending::fixtures

@@ -354,6 +354,10 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
     }
     const auto &metadata = native->metadata();
     const auto &analysis = metadata.bendAnalysis;
+    if (!analysis.interiorContourDiagnostics.empty()) {
+        return BendPreviewError{BendPreviewErrorCode::BendZoneInteriorContours,
+                                "Enclosed opening boundaries interrupt a cylindrical bend zone"};
+    }
     if (analysis.status != BendRecognitionStatus::Completed || analysis.bends.size() != 1 ||
         bendIndex != 0 || analysis.bends[0].trimmedEnds) {
         return unsupported("Requires one complete straight bend and two planar flanges");

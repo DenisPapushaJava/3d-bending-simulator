@@ -73,6 +73,20 @@ int differences(const QImage &a, const QImage &b) {
     }
     return count;
 }
+int cutoutPixels(const QImage &image) {
+    require(!image.isNull(), "Missing opening highlight capture");
+    int count = 0;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const auto pixel = image.pixel(x, y);
+            count += qRed(pixel) > 220 && qGreen(pixel) < 120 && qBlue(pixel) > 80 &&
+                             qBlue(pixel) > qGreen(pixel)
+                         ? 1
+                         : 0;
+        }
+    }
+    return count;
+}
 bool warmPixel(QRgb pixel) {
     return qRed(pixel) > 180 && qRed(pixel) > qBlue(pixel) * 1.4 &&
            qRed(pixel) > qGreen(pixel) * 1.04;
@@ -1165,6 +1179,129 @@ void testProfiledBendWorkflow(bool graphics) {
     controller.closeDocument();
     window.close();
 }
+void testBendOpeningDiagnosticWorkflow(bool graphics) {
+    using namespace bending::application;
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    const auto builder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files, builder);
+    window.resize(1360, 1000);
+    window.show();
+    auto &controller = window.importController();
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    auto *list = window.findChild<QListView *>(QStringLiteral("bendList"));
+    auto *details = window.findChild<QLabel *>(QStringLiteral("bendProperties"));
+    auto *review = window.findChild<QComboBox *>(QStringLiteral("bendReview"));
+    auto *applyTarget = window.findChild<QPushButton *>(QStringLiteral("applyBendTarget"));
+    auto *prepare = window.findChild<QPushButton *>(QStringLiteral("prepareBendPreview"));
+    auto *applyTools = window.findChild<QPushButton *>(QStringLiteral("applyToolSetup"));
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    for (const auto *name :
+         {"bend-zone-hole-6mm.step", "bend-zone-pocket-6mm.step", "channel-zone-hole-2mm.step"}) {
+        window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QLatin1Char('/') +
+                        QString::fromLatin1(name));
+        waitUntil(finished);
+        const auto source = controller.session().document();
+        require(source && source->metadata().bendAnalysis.interiorContourDiagnostics.size() == 1,
+                "Opening diagnostic missing from imported document");
+        const auto &analysis = source->metadata().bendAnalysis;
+        const auto row = static_cast<int>(analysis.bends.size());
+        require(list->model()->rowCount() == row + 1 &&
+                    list->model()->index(row, 0).data().toString().contains(QStringLiteral("D01")),
+                "Opening diagnostic missing from the list");
+        if (row > 0) {
+            list->setCurrentIndex(list->model()->index(0, 0));
+            require(controller.setBendReview(0, BendReview::Confirmed),
+                    "Complete bend cannot be reviewed");
+            applyTarget->click();
+        }
+        const auto edits = controller.session().editRevision();
+        list->setCurrentIndex(list->model()->index(row, 0));
+        require(
+            details->text().contains(QStringLiteral("Внутренний вырез")) && !review->isEnabled() &&
+                !applyTarget->isEnabled() && !prepare->isEnabled() && !applyTools->isEnabled() &&
+                !controller.session().bend(static_cast<std::size_t>(row)) &&
+                !controller.setBendReview(static_cast<std::size_t>(row), BendReview::Confirmed) &&
+                !controller.prepareBendPreview(static_cast<std::size_t>(row), false, builder) &&
+                controller.session().editRevision() == edits,
+            "Diagnostic was editable or created a fake bend operation");
+        require(window.findChild<QLabel *>(QStringLiteral("bendPreviewStatus"))
+                    ->text()
+                    .contains(QStringLiteral("внутренний вырез")),
+                "Preview did not explain the opening limit");
+        if (graphics) {
+            waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+            require(viewer->isReady(), "Opening diagnostic graphics unavailable");
+            const auto &diagnostic = analysis.interiorContourDiagnostics.front();
+            viewer->highlightBend(diagnostic.candidate, controller.session().revision());
+            const auto ordinary = viewer->captureImage();
+            viewer->highlightBendDiagnostic(diagnostic, controller.session().revision());
+            const auto highlighted = viewer->captureImage();
+            const auto output = qEnvironmentVariable("BENDING_OPENING_SNAPSHOT");
+            if (!output.isEmpty()) {
+                QApplication::processEvents();
+                auto shot = window.grab().toImage();
+                QPainter painter(&shot);
+                painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                                  highlighted);
+                painter.end();
+                require(shot.save(output + QLatin1Char('-') + QString::fromLatin1(name) +
+                                  QStringLiteral(".png")),
+                        "Cannot save opening diagnostic screenshot");
+            }
+            require(cutoutPixels(ordinary) == 0 && cutoutPixels(highlighted) > 20,
+                    "Opening walls were not highlighted separately");
+            QEvent change(QEvent::WinIdChange);
+            QApplication::sendEvent(viewer->findChild<QWidget *>(QStringLiteral("cadCanvas")),
+                                    &change);
+            waitUntil([&] { return viewer->isReady(); });
+            const auto recreated = viewer->captureImage();
+            // Reinitialization fits the camera again; compare roles at that same camera.
+            viewer->highlightBendDiagnostic(diagnostic, controller.session().revision());
+            require(cutoutPixels(recreated) > 20 &&
+                        differences(recreated, viewer->captureImage()) < 10,
+                    "Native recreation lost opening highlight");
+            viewer->highlightFaces({}, controller.session().revision());
+            const auto plain = viewer->captureImage();
+            viewer->highlightBendDiagnostic(diagnostic, controller.session().revision() - 1);
+            require(differences(plain, viewer->captureImage()) < 10,
+                    "Stale diagnostic face IDs were applied");
+            viewer->highlightBendDiagnostic(diagnostic, controller.session().revision());
+        }
+        require(controller.session().document() == source &&
+                    controller.session().editRevision() == edits,
+                "Diagnostic selection changed the source or project");
+        QTemporaryDir temporary;
+        const auto destination = temporary.path() + QStringLiteral("/opening.bend");
+#ifdef _WIN32
+        const auto path = std::filesystem::path(destination.toStdWString());
+#else
+        const auto path = std::filesystem::path(destination.toUtf8().toStdString());
+#endif
+        controller.saveProject(path, files);
+        waitUntil(finished);
+        require(!controller.session().modified(), "Diagnostic project could not be saved");
+        controller.closeDocument();
+        window.openStep(destination);
+        waitUntil(finished);
+        const auto reopened = controller.session().document();
+        require(reopened && reopened->sourceStep() == source->sourceStep() &&
+                    reopened->metadata().bendAnalysis.interiorContourDiagnostics.size() == 1 &&
+                    controller.session().bends().size() == analysis.bends.size(),
+                "Project lost opening evidence or persisted it as an operation");
+        if (row > 0) {
+            require(controller.session().bend(0)->review == BendReview::Confirmed &&
+                        controller.session().bend(0)->target,
+                    "Diagnostic selection/reopen overwrote the separate complete bend");
+        }
+        list->setCurrentIndex(list->model()->index(row, 0));
+        require(!review->isEnabled() && !applyTarget->isEnabled(),
+                "Reopened diagnostic became an operation");
+        controller.closeDocument();
+    }
+    window.close();
+}
 void testTrimmedBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
@@ -1247,6 +1384,7 @@ int main(int argc, char *argv[]) {
         testSingleBendWorkflow(graphics);
         testTrimmedBendWorkflow(graphics);
         testProfiledBendWorkflow(graphics);
+        testBendOpeningDiagnosticWorkflow(graphics);
         const auto external = qEnvironmentVariable("BENDING_THICKNESS_STEP");
         bool validExpected = false;
         const auto expected = qEnvironmentVariable("BENDING_THICKNESS_MM").toDouble(&validExpected);

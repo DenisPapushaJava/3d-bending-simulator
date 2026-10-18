@@ -10,9 +10,11 @@
 #include <Geom2d_BSplineCurve.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Wire.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
@@ -22,6 +24,7 @@
 #include <cmath>
 #include <numbers>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace bending::cad {
@@ -49,6 +52,7 @@ struct Patch {
     gp_Pnt coreStart;
     gp_Pnt coreEnd;
     bool trimmedEnds;
+    std::vector<std::size_t> boundaryFaces;
 };
 PointMm point(const gp_Pnt &p) {
     return {p.X(), p.Y(), p.Z()};
@@ -128,10 +132,39 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
         return {};
     }
     TopTools_IndexedMapOfShape edges;
-    TopExp::MapShapes(face, TopAbs_EDGE, edges);
+    const auto outerWire = BRepTools::OuterWire(face);
+    if (outerWire.IsNull()) {
+        return {};
+    }
+    TopExp::MapShapes(outerWire, TopAbs_EDGE, edges);
     if (edges.Extent() != 4) {
         return {};
     }
+    std::vector<std::size_t> boundaryFaces;
+    for (TopExp_Explorer wire(face, TopAbs_WIRE); wire.More(); wire.Next()) {
+        if (wire.Current().IsSame(outerWire)) {
+            continue;
+        }
+        for (TopExp_Explorer boundary(wire.Current(), TopAbs_EDGE); boundary.More();
+             boundary.Next()) {
+            if (!neighbors.Contains(boundary.Current())) {
+                return {};
+            }
+            const auto &adjacent = neighbors.FindFromKey(boundary.Current());
+            if (adjacent.Extent() != 2) {
+                return {};
+            }
+            const auto &other = adjacent.First().IsSame(face) ? adjacent.Last() : adjacent.First();
+            const int otherIndex = faces.FindIndex(other);
+            if (otherIndex == 0 || other.IsSame(face)) {
+                return {};
+            }
+            boundaryFaces.push_back(static_cast<std::size_t>(otherIndex));
+        }
+    }
+    std::sort(boundaryFaces.begin(), boundaryFaces.end());
+    boundaryFaces.erase(std::unique(boundaryFaces.begin(), boundaryFaces.end()),
+                        boundaryFaces.end());
     std::vector<Rail> rails;
     std::vector<EndBounds> caps;
     for (int i = 1; i <= edges.Extent(); ++i) {
@@ -190,9 +223,11 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
     const double expectedArea = cylinder.Radius() * angle * length;
     const double areaTolerance = tolerance * (length + cylinder.Radius() * angle) * 4.0;
     const double coreArea = cylinder.Radius() * angle * (coreMaximum - coreMinimum);
-    if (!std::isfinite(area.Mass()) || area.Mass() < coreArea - areaTolerance ||
+    if (!std::isfinite(area.Mass()) || area.Mass() <= tolerance * tolerance ||
         area.Mass() > expectedArea + areaTolerance ||
-        (!trimmed && std::abs(area.Mass() - expectedArea) > areaTolerance)) {
+        (boundaryFaces.empty() &&
+         (area.Mass() < coreArea - areaTolerance ||
+          (!trimmed && std::abs(area.Mass() - expectedArea) > areaTolerance)))) {
         return {};
     }
     const auto middle = surface.Value((u0 + u1) * 0.5, (v0 + v1) * 0.5);
@@ -218,7 +253,8 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                  capFaces,
                  cylinder.Location().Translated(axis * coreMinimum),
                  cylinder.Location().Translated(axis * coreMaximum),
-                 trimmed};
+                 trimmed,
+                 std::move(boundaryFaces)};
 }
 
 std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, double tolerance) {
@@ -339,13 +375,26 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
             }
             const auto j = partners[i].front();
             if (partners[j].size() == 1) {
-                result.bends.push_back(*match(patches[i], patches[j], result.lengthToleranceMm));
+                auto candidate = *match(patches[i], patches[j], result.lengthToleranceMm);
+                auto boundaries = patches[i].boundaryFaces;
+                boundaries.insert(boundaries.end(), patches[j].boundaryFaces.begin(),
+                                  patches[j].boundaryFaces.end());
+                if (boundaries.empty()) {
+                    result.bends.push_back(std::move(candidate));
+                } else {
+                    std::sort(boundaries.begin(), boundaries.end());
+                    boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
+                                     boundaries.end());
+                    result.interiorContourDiagnostics.push_back(
+                        {std::move(candidate), std::move(boundaries)});
+                }
                 result.unrecognizedCylindricalFaces -= 2;
             }
         }
         result.status = BendRecognitionStatus::Completed;
     } catch (const Standard_Failure &) {
         result.bends.clear();
+        result.interiorContourDiagnostics.clear();
         result.status = BendRecognitionStatus::Failed;
     }
     return result;

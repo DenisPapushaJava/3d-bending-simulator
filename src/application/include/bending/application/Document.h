@@ -45,12 +45,20 @@ struct RecognizedBend {
     // Conservative common axial span present at every angle on both cylinders.
     double minimumStraightLengthMm = 0.0;
 };
+// A paired cylindrical sector interrupted by enclosed contours (hole or pocket).
+// Candidate measurements describe its outer boundary, not a supported bend.
+// All face references are scoped to this immutable document revision.
+struct BendInteriorContourDiagnostic {
+    RecognizedBend candidate;
+    std::vector<std::size_t> boundaryFaces;
+};
 struct BendAnalysis {
     BendRecognitionStatus status = BendRecognitionStatus::NotAnalyzed;
     double lengthToleranceMm = 1.0e-5;
     double angleToleranceRadians = 1.0e-5;
     std::size_t unrecognizedCylindricalFaces = 0;
     std::vector<RecognizedBend> bends;
+    std::vector<BendInteriorContourDiagnostic> interiorContourDiagnostics;
 };
 enum class SurfaceKind { Plane, Cylinder, Cone, Sphere, Torus, Bezier, BSpline, Other };
 struct FaceInfo {
