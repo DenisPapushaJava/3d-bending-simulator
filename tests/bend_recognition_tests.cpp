@@ -155,8 +155,10 @@ void testInteriorContours(const std::filesystem::path &directory) {
         const auto document = read(path);
         const auto &analysis = document->metadata().bendAnalysis;
         require(analysis.status == application::BendRecognitionStatus::Completed &&
-                    analysis.bends.empty() && analysis.interiorContourDiagnostics.size() == 1,
-                "A bend-zone opening was lost or published as a supported bend");
+                    analysis.bends.size() == 1 && analysis.interiorContourDiagnostics.size() == 1 &&
+                    document->metadata().closedCutouts.status ==
+                        application::ClosedCutoutStatus::Filled,
+                "Closed cutout approximation or source evidence was lost");
         const auto &diagnostic = analysis.interiorContourDiagnostics.front();
         const auto &candidate = diagnostic.candidate;
         requireNear(candidate.innerRadiusMm, 8, 1e-5, "Wrong diagnostic radius");
@@ -196,7 +198,7 @@ void testInteriorContours(const std::filesystem::path &directory) {
             "An isolated round sector was called an interrupted bend");
     write(path, fixtures::channelWithZoneOpening(), "MM");
     const auto mixed = read(path);
-    require(mixed->metadata().bendAnalysis.bends.size() == 1 &&
+    require(mixed->metadata().bendAnalysis.bends.size() == 2 &&
                 mixed->metadata().bendAnalysis.interiorContourDiagnostics.size() == 1,
             "An interrupted zone hid the separate complete bend");
 }
