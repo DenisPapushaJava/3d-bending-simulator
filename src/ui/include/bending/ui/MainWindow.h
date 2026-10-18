@@ -3,6 +3,7 @@
 #include <QMainWindow>
 
 #include "bending/application/DocumentImporter.h"
+#include "bending/application/FemExperiment.h"
 #include "bending/application/ProjectWriter.h"
 #include "bending/application/SingleBendPreview.h"
 #include <memory>
@@ -21,7 +22,8 @@ class MainWindow final : public QMainWindow {
   public:
     MainWindow(RuntimeInfo runtime, std::shared_ptr<const application::DocumentImporter> importer,
                std::shared_ptr<const application::ProjectWriter> writer = {},
-               std::shared_ptr<const application::SingleBendPreviewBuilder> previewBuilder = {});
+               std::shared_ptr<const application::SingleBendPreviewBuilder> previewBuilder = {},
+               std::shared_ptr<application::FemRunner> femRunner = {});
     ~MainWindow() override;
     void openStep(const QString &path);
     [[nodiscard]] ImportController &importController() const;

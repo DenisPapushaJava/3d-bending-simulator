@@ -1,6 +1,7 @@
 #include "bending/Version.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/fem/DockerFemRunner.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -14,6 +15,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QPalette>
+#include <QStandardPaths>
 #include <QTimer>
 
 int main(int argc, char *argv[]) {
@@ -71,8 +73,20 @@ int main(int argc, char *argv[]) {
 
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
+    const auto native = [](const QString &path) {
+#ifdef _WIN32
+        return std::filesystem::path(path.toStdWString());
+#else
+        return std::filesystem::path(path.toStdString());
+#endif
+    };
+    const auto fem = std::make_shared<bending::fem::DockerFemRunner>(
+        native(QDir(QCoreApplication::applicationDirPath())
+                   .filePath(QStringLiteral("../share/3d-bending-simulator/fem"))),
+        native(QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+                   .filePath(QStringLiteral("fem-runs"))));
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
-                                   previewBuilder);
+                                   previewBuilder, fem);
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());

@@ -13,6 +13,27 @@ from results import check_completion, read_frd, read_reactions
 
 
 class BendHoleOutputTests(unittest.TestCase):
+    def test_gui_request_requires_bounded_complete_parameters(self):
+        from gui_job import validate_request
+        valid = {"schema": 1, "id": "job-id", "context": "D01", "parameters":
+                 {"hole": "center", "mesh": "medium", "unload": True}}
+        self.assertEqual(validate_request(valid), valid["parameters"])
+        import copy
+        for field, value in (("schema", True), ("schema", 2), ("id", ""), ("context", None)):
+            case = copy.deepcopy(valid)
+            case[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_request(case)
+        for field, value in (("hole", "STEP"), ("mesh", "arbitrary"), ("unload", "false")):
+            case = copy.deepcopy(valid)
+            case["parameters"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_request(case)
+        case = copy.deepcopy(valid)
+        del case["parameters"]["unload"]
+        with self.assertRaises(ValueError):
+            validate_request(case)
+
     def test_finished_banner_does_not_accept_an_incomplete_step(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -16,7 +16,7 @@ from bend_hole import boundary
 from results import analyze, tool_outline
 
 
-def viewer(directory, target, parsed):
+def viewer(directory, target, parsed, provenance=None):
     result, model, nodes, elements, groups, frames = parsed
     faces = [face for _, _, face in boundary(elements, groups["PLATE"])
              if not (model.half_model and all(abs(nodes[n][2]) < 1e-8 for n in face))]
@@ -32,6 +32,8 @@ def viewer(directory, target, parsed):
                                "maxPe": entry["max_nodal_averaged_peeq"],
                                "u": [round(value, 7) for n in ids for value in frame["DISP"][n]],
                                "pe": [round(frame.get("PE", {}).get(n, (0,))[0], 7) for n in ids]})
+    if provenance is not None:
+        data["provenance"] = provenance
     data["formedIndex"] = min(range(1, len(data["frames"])), key=lambda i: abs(data["frames"][i]["time"]-1))
     template = Path(__file__).with_name("viewer.html").read_text(encoding="utf-8")
     payload = json.dumps(data, separators=(",", ":"), allow_nan=False).replace("</", "<\\/")

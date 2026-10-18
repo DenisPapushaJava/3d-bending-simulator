@@ -1,5 +1,6 @@
 #include "bending/ui/MainWindow.h"
 
+#include "bending/ui/FemDialog.h"
 #include "bending/ui/ImportController.h"
 #include "bending/viewer/ViewerWidget.h"
 
@@ -176,7 +177,46 @@ class MainWindow::Impl {
   public:
     explicit Impl(MainWindow *parentWindow) : window(parentWindow) {}
 
+    QString femContext() const {
+        const auto &session = controller->session();
+        if (!session.document()) {
+            return QStringLiteral("Без загруженной детали");
+        }
+        const auto row = bendList->currentIndex().row();
+        const auto &analysis = session.document()->metadata().bendAnalysis;
+        auto context = QStringLiteral("%1 · ревизия %2 · правка %3")
+                           .arg(displayPath(session.document()->metadata().sourcePath.filename()))
+                           .arg(session.revision())
+                           .arg(session.editRevision());
+        if (row >= 0) {
+            const bool diagnostic = static_cast<std::size_t>(row) >= analysis.bends.size();
+            const auto index = diagnostic ? static_cast<std::size_t>(row) - analysis.bends.size()
+                                          : static_cast<std::size_t>(row);
+            context += QStringLiteral(" · %1%2")
+                           .arg(diagnostic ? QLatin1String("D") : QLatin1String("B"))
+                           .arg(index + 1, 2, 10, QLatin1Char('0'));
+        }
+        return context;
+    }
+    void openFem() {
+        if (!femDialog) {
+            femDialog = new FemDialog(femRunner, window);
+            QObject::connect(femDialog, &QDialog::finished, window, [this] {
+                if (closeAfterFem) {
+                    closeAfterFem = false;
+                    QTimer::singleShot(0, window, &QWidget::close);
+                }
+            });
+        }
+        femDialog->setCadContext(femContext());
+        femDialog->show();
+        femDialog->raise();
+        femDialog->activateWindow();
+    }
     void refresh() {
+        if (femDialog) {
+            femDialog->setCadContext(femContext());
+        }
         const auto &session = controller->session();
         const auto &document = session.document();
         if (!shownRevision || *shownRevision != session.revision()) {
@@ -785,6 +825,14 @@ class MainWindow::Impl {
         resetBendTarget->setEnabled(editable && entry->target.has_value());
     }
     void showSelectedBend(bool highlight) {
+        if (femDialog) {
+            femDialog->setCadContext(femContext());
+        }
+        const auto &currentDocument = controller->session().document();
+        const auto currentRow = bendList->currentIndex().row();
+        researchOpening->setVisible(currentDocument && currentRow >= 0 &&
+                                    static_cast<std::size_t>(currentRow) >=
+                                        currentDocument->metadata().bendAnalysis.bends.size());
         const auto &session = controller->session();
         const auto &document = session.document();
         const auto row = bendList->currentIndex().row();
@@ -983,6 +1031,10 @@ class MainWindow::Impl {
     bool showingFailure = false;
     QLabel *error = nullptr;
     QPlainTextEdit *diagnostics = nullptr;
+    std::shared_ptr<application::FemRunner> femRunner;
+    FemDialog *femDialog = nullptr;
+    bool closeAfterFem = false;
+    QPushButton *researchOpening = nullptr;
     QToolBar *camera = nullptr;
     QAction *closeAction = nullptr;
     QAction *cancelAction = nullptr;
@@ -996,9 +1048,11 @@ class MainWindow::Impl {
 MainWindow::MainWindow(RuntimeInfo runtime,
                        std::shared_ptr<const application::DocumentImporter> importer,
                        std::shared_ptr<const application::ProjectWriter> writer,
-                       std::shared_ptr<const application::SingleBendPreviewBuilder> previewBuilder)
+                       std::shared_ptr<const application::SingleBendPreviewBuilder> previewBuilder,
+                       std::shared_ptr<application::FemRunner> femRunner)
     : impl_(std::make_unique<Impl>(this)) {
     impl_->writer = std::move(writer);
+    impl_->femRunner = std::move(femRunner);
     impl_->previewBuilder = std::move(previewBuilder);
     setObjectName(QStringLiteral("mainWindow"));
     impl_->title =
@@ -1067,6 +1121,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     exit->setShortcut(QKeySequence::Quit);
     connect(exit, &QAction::triggered, this, &QWidget::close);
     auto *viewMenu = menuBar()->addMenu(QStringLiteral("Вид"));
+    auto *research = menuBar()->addMenu(QStringLiteral("Исследование"));
+    auto *fem = research->addAction(QStringLiteral("FEM: отверстие в зоне гиба…"));
+    fem->setObjectName(QStringLiteral("femExperimentAction"));
+    fem->setEnabled(impl_->femRunner != nullptr);
+    connect(fem, &QAction::triggered, this, [this] { impl_->openFem(); });
 
     auto *toolbar = addToolBar(QStringLiteral("Подготовка"));
     toolbar->setObjectName(QStringLiteral("workflowToolbar"));
@@ -1233,6 +1292,12 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->bendProperties->setTextInteractionFlags(Qt::TextSelectableByMouse);
     bendLayout->addWidget(impl_->bendProperties);
     bendLayout->addWidget(new QLabel(QStringLiteral("Решение по зоне сгиба"), bendPanel));
+    impl_->researchOpening = new QPushButton(QStringLiteral("Исследовать отверстие (FEM)…"), this);
+    impl_->researchOpening->setObjectName(QStringLiteral("researchOpening"));
+    impl_->researchOpening->setEnabled(impl_->femRunner != nullptr);
+    impl_->researchOpening->hide();
+    bendLayout->addWidget(impl_->researchOpening);
+    connect(impl_->researchOpening, &QPushButton::clicked, this, [this] { impl_->openFem(); });
     impl_->bendReview = new QComboBox(bendPanel);
     impl_->bendReview->setObjectName(QStringLiteral("bendReview"));
     impl_->bendReview->setAccessibleName(QStringLiteral("Подтверждение зоны сгиба"));
@@ -1569,13 +1634,16 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             this, QStringLiteral("3D Bending Simulator"),
             impl_->title +
                 QStringLiteral(
-                    "\n\nИмпорт STEP и кинематический просмотр одной простой зоны сгиба.\nКонтакты "
-                    "с инструментом и столкновения ещё не рассчитываются."));
+                    "\n\nИмпорт STEP, геометрический просмотр одной зоны с инструментом.\n"
+                    "Исследовательский FEM учебной пластины запускается отдельно; "
+                    "производственная точность не установлена."));
     });
     impl_->refresh();
 }
 
 MainWindow::~MainWindow() {
+    delete impl_->femDialog;
+    impl_->femDialog = nullptr;
     impl_->controller->shutdown();
 }
 void MainWindow::openStep(const QString &path) {
@@ -1587,6 +1655,12 @@ ImportController &MainWindow::importController() const {
     return *impl_->controller;
 }
 void MainWindow::closeEvent(QCloseEvent *event) {
+    if (impl_->femDialog && impl_->femDialog->isRunning()) {
+        impl_->closeAfterFem = true;
+        impl_->femDialog->close();
+        event->ignore();
+        return;
+    }
     if (!impl_->canDiscard()) {
         event->ignore();
         return;
