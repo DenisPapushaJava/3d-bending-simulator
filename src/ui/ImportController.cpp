@@ -300,13 +300,13 @@ void ImportController::saveProject(std::filesystem::path path,
 }
 bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
                                           std::shared_ptr<const SingleBendPreviewBuilder> builder,
-                                          bool toolSetup) {
+                                          BendPreviewMode mode) {
     if (impl_->stopping || hasWork() || !builder || !impl_->session.document()) {
         return false;
     }
     const auto *entry = impl_->session.bend(recognizedIndex);
     if (!entry || entry->review != BendReview::Confirmed || !entry->target ||
-        (toolSetup && !entry->tools)) {
+        (mode != BendPreviewMode::Kinematic && !entry->tools)) {
         return false;
     }
     const auto &metadata = impl_->session.document()->metadata();
@@ -324,7 +324,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     const auto revision = state->session.revision();
     const auto editRevision = state->session.editRevision();
     const auto target = *entry->target;
-    const auto tools = toolSetup ? entry->tools : std::nullopt;
+    const auto tools = mode == BendPreviewMode::Kinematic ? std::nullopt : entry->tools;
     state->stop = std::stop_source{};
     const auto stop = state->stop.get_token();
     state->running = true;
@@ -332,13 +332,16 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     QMetaObject::invokeMethod(
         state->worker,
         [state, document, revision, editRevision, id, target, recognizedIndex, fixedSecond, stop,
-         tools, builder = std::move(builder)] {
+         tools, mode, builder = std::move(builder)] {
             BendPreviewResult result =
                 BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
             try {
                 result =
-                    tools ? builder->buildToolSetup(document, recognizedIndex, target, *tools, stop)
-                          : builder->build(document, recognizedIndex, target, fixedSecond, stop);
+                    mode == BendPreviewMode::ToolMotion
+                        ? builder->buildToolMotion(document, recognizedIndex, target, *tools, stop)
+                    : tools
+                        ? builder->buildToolSetup(document, recognizedIndex, target, *tools, stop)
+                        : builder->build(document, recognizedIndex, target, fixedSecond, stop);
             } catch (const std::exception &error) {
                 result = BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
             } catch (...) {
@@ -346,7 +349,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
             }
             QMetaObject::invokeMethod(
                 state->owner,
-                [state, revision, editRevision, id, result = std::move(result)] {
+                [state, revision, editRevision, id, mode, result = std::move(result)] {
                     state->running = false;
                     state->preparingPreview = false;
                     if (state->stopping) {
@@ -356,13 +359,23 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         editRevision == state->session.editRevision() &&
                         !state->session.activeRequest()) {
                         if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
-                            if (*preview &&
-                                ((*preview)->toolSetup() ? (*preview)->frameCount() == 1
-                                                         : (*preview)->frameCount() >= 2)) {
+                            const bool matchingMode =
+                                *preview &&
+                                (mode == BendPreviewMode::ToolSetup
+                                     ? (*preview)->toolSetup() && !(*preview)->pressMotion() &&
+                                           (*preview)->frameCount() == 1
+                                 : mode == BendPreviewMode::ToolMotion
+                                     ? (*preview)->toolSetup() && (*preview)->pressMotion() &&
+                                           (*preview)->frameCount() >= 2 &&
+                                           (*preview)->pressState(0) &&
+                                           (*preview)->pressState((*preview)->frameCount() - 1)
+                                     : !(*preview)->toolSetup() && !(*preview)->pressMotion() &&
+                                           (*preview)->frameCount() >= 2);
+                            if (matchingMode) {
                                 state->preview = *preview;
                             } else {
-                                state->previewError =
-                                    BendPreviewError{BendPreviewErrorCode::Failed, "Empty preview"};
+                                state->previewError = BendPreviewError{
+                                    BendPreviewErrorCode::Failed, "Empty or mismatched preview"};
                             }
                         } else if (const auto &error = std::get<BendPreviewError>(result);
                                    error.code != BendPreviewErrorCode::Cancelled) {

@@ -93,9 +93,91 @@ void check(const application::BendPreviewPtr &result, double sourceVolume) {
         }
     }
 }
+void checkMotion(application::DocumentPtr document, core::PressTools tools) {
+    const auto &bend = document->metadata().bendAnalysis.bends.at(0);
+    const auto result = cad::SingleBendPreviewBuilder{}.buildToolMotion(
+        document, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {});
+    if (const auto *failure = std::get_if<application::BendPreviewError>(&result)) {
+        throw std::runtime_error("Motion failed at frame " +
+                                 std::to_string(failure->frameIndex.value_or(0)) + ": " +
+                                 failure->detail);
+    }
+    const auto motion = std::get<application::BendPreviewPtr>(result);
+    require(motion->frameCount() == 41 && motion->pressMotion() && motion->toolSetup(),
+            "Missing press motion frames");
+    double firstFixedY = 0, lastFixedY = 0;
+    double previousTip = 1e10;
+    for (std::size_t i = 0; i < motion->frameCount(); ++i) {
+        const auto &frame = cad::OcctPreviewAccess::frame(*motion, i);
+        const auto *state = motion->pressState(i);
+        require(state && BRepCheck_Analyzer(frame.shape).IsValid(), "Invalid press frame");
+        double total = 0;
+        for (const auto &region : frame.regions) {
+            total += volume(region);
+        }
+        require(std::abs(total - document->metadata().volumeMm3) < 1e-4,
+                "Contact motion changed material volume");
+        BRepExtrema_DistShapeShape left(frame.regions[0], frame.tools[0]),
+            right(frame.regions[2], frame.tools[0]);
+        BRepExtrema_DistShapeShape punch(frame.regions[1], frame.tools[1]);
+        require(left.IsDone() && right.IsDone() && punch.IsDone() && left.Value() < 1e-5 &&
+                    right.Value() < 1e-5,
+                "Geometric shoulder contact missing");
+        const double gap = state->phase == simulation::PressPhase::Approach
+                               ? state->punchTipYmm - motion->model().thicknessMm
+                               : 0;
+        require(std::abs(punch.Value() - gap) < 1e-5, "Punch missed expected contact/clearance");
+        require(state->punchTipYmm <= previousTip + 1e-7,
+                "Punch moved upwards during forward stroke");
+        previousTip = state->punchTipYmm;
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(frame.regions[0], properties);
+        if (i == 0) {
+            firstFixedY = properties.CentreOfMass().Y();
+        }
+        if (i == 40) {
+            lastFixedY = properties.CentreOfMass().Y();
+        }
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(frame.shape, TopAbs_FACE, faces);
+        for (int j = 1; j <= faces.Extent(); ++j) {
+            TopLoc_Location location;
+            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces(j)), location);
+            require(!mesh.IsNull() && mesh->NbTriangles() > 0, "Unmeshed press/tool face");
+        }
+    }
+    require(std::abs(lastFixedY - firstFixedY) > 0.1,
+            "One flange incorrectly remained stationary in machine coordinates");
+    require(!motion->pressState(41) &&
+                motion->pressState(8)->phase == simulation::PressPhase::Bending &&
+                std::abs(motion->pressState(40)->section.angleRadians - bend.angleRadians) < 1e-8,
+            "Wrong press phase/endpoint metadata");
+    auto invalid = tools;
+    invalid.punchAngleRadians = 100 * std::numbers::pi / 180;
+    const auto rejected = cad::SingleBendPreviewBuilder{}.buildToolMotion(
+        document, 0, {bend.angleRadians, bend.innerRadiusMm}, invalid, {});
+    require(std::holds_alternative<application::BendPreviewError>(rejected) &&
+                std::get<application::BendPreviewError>(rejected).code ==
+                    application::BendPreviewErrorCode::ToolAngleConflict,
+            "Incompatible tool motion accepted or reported incorrectly");
+    std::stop_source cancelled;
+    cancelled.request_stop();
+    require(
+        std::get<application::BendPreviewError>(
+            cad::SingleBendPreviewBuilder{}.buildToolMotion(
+                document, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, cancelled.get_token()))
+                .code == application::BendPreviewErrorCode::Cancelled,
+        "Cancelled press motion was built");
+}
 void test(const std::filesystem::path &path) {
     const auto right = load(fixtures::bentStrip(), path);
     const core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
+    checkMotion(right, tools);
+    auto acuteTools = tools;
+    acuteTools.openingMm = 24;
+    acuteTools.dieAngleRadians = std::numbers::pi / 3;
+    acuteTools.punchAngleRadians = 55 * std::numbers::pi / 180;
+    checkMotion(load(fixtures::bentStrip(4, 2, 120 * std::numbers::pi / 180), path), acuteTools);
     const auto buildSetup = [&](core::PressTools parameters) {
         return cad::SingleBendPreviewBuilder{}.buildToolSetup(right, 0, {std::numbers::pi / 2, 4},
                                                               parameters, {});
@@ -240,6 +322,9 @@ void test(const std::filesystem::path &path) {
             "Fixed-side selection lost unequal flange lengths");
     check(fixedA, asymmetric->metadata().volumeMm3);
     check(fixedB, asymmetric->metadata().volumeMm3);
+    auto asymmetricTools = tools;
+    asymmetricTools.openingMm = 32;
+    checkMotion(asymmetric, asymmetricTools);
     const auto mismatch = cad::SingleBendPreviewBuilder{}.build(right, 0, {1.0, 4}, false, {});
     require(std::get<application::BendPreviewError>(mismatch).code ==
                 application::BendPreviewErrorCode::TargetMismatch,

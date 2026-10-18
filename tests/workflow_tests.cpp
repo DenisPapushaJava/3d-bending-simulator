@@ -9,6 +9,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDir>
+#include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFile>
@@ -784,6 +785,7 @@ void testSingleBendWorkflow(bool graphics) {
     }
     window.findChild<QAction *>(QStringLiteral("toolSetupAction"))->trigger();
     require(tabs->currentIndex() == 3, "Tool toolbar action did not open editor");
+    window.findChild<QComboBox *>(QStringLiteral("toolPreviewMode"))->setCurrentIndex(1);
     auto *applyTools = window.findChild<QPushButton *>(QStringLiteral("applyToolSetup"));
     auto *clearTools = window.findChild<QPushButton *>(QStringLiteral("clearToolSetup"));
     auto *toolStatus = window.findChild<QLabel *>(QStringLiteral("toolSetupStatus"));
@@ -842,7 +844,7 @@ void testSingleBendWorkflow(bool graphics) {
     auto *modeHint = window.findChild<QLabel *>(QStringLiteral("setupPlaybackHint"));
     auto *kinematics = window.findChild<QPushButton *>(QStringLiteral("showKinematics"));
     require(modeHint && modeHint->isVisible() &&
-                modeHint->text().contains(QStringLiteral("ещё не реализована")) && kinematics &&
+                modeHint->text().contains(QStringLiteral("одно начальное")) && kinematics &&
                 kinematics->isVisible() && kinematics->isEnabled() && !slider->isVisible() &&
                 !play->isVisible(),
             "Static setup looks like a playable operation");
@@ -910,6 +912,114 @@ void testSingleBendWorkflow(bool graphics) {
     require(controller.bendPreview() && controller.bendPreview()->toolSetup() &&
                 !controller.session().modified(),
             "Restored setup not reproducible");
+    auto *mode = window.findChild<QComboBox *>(QStringLiteral("toolPreviewMode"));
+    mode->setCurrentIndex(0);
+    auto *sequenceDock = window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"));
+    sequenceDock->hide();
+    applyTools->click();
+    require(sequenceDock->isVisible(), "Press preparation did not reveal playback controls");
+    waitUntil(finished);
+    if (controller.bendPreviewError()) {
+        throw std::runtime_error(
+            "Press UI: " + controller.bendPreviewError()->detail + " at " +
+            std::to_string(controller.bendPreviewError()->frameIndex.value_or(0)));
+    }
+    require(controller.bendPreview() && controller.bendPreview()->pressMotion() &&
+                slider->maximum() == 40 && slider->isVisible() && slider->isEnabled() &&
+                play->isVisible() && play->isEnabled() && !modeHint->isVisible() &&
+                !controller.session().modified(),
+            "Press mode is not playable or dirtied project");
+    const auto pressSource = controller.session().document();
+    const auto pressRevision = controller.session().revision();
+    const auto pressSnapshot = [&](const char *suffix) {
+        const auto output = qEnvironmentVariable("BENDING_PRESS_MOTION_SNAPSHOT");
+        if (graphics && !output.isEmpty()) {
+            QApplication::processEvents();
+            auto shot = window.grab().toImage();
+            QPainter painter(&shot);
+            painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                              viewer->captureImage());
+            painter.end();
+            require(shot.save(output + QLatin1Char('-') + QString::fromLatin1(suffix) +
+                              QStringLiteral(".png")),
+                    "Cannot save press motion screenshot");
+        }
+    };
+    QApplication::processEvents();
+    const auto pressStart = graphics ? viewer->captureImage() : QImage{};
+    pressSnapshot("start");
+    slider->setValue(8);
+    require(controller.bendPreview()->pressState(8)->section.angleRadians == 0 &&
+                window.findChild<QLabel *>(QStringLiteral("bendFrameLabel"))
+                    ->text()
+                    .contains(QStringLiteral("Гибка")),
+            "Approach phase metadata missing");
+    slider->setValue(24);
+    pressSnapshot("half");
+    if (graphics) {
+        const auto halfPress = viewer->captureImage();
+        require(differences(pressStart, halfPress) > 500,
+                "Press or both flanges did not move on screen");
+        auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+        QEvent change(QEvent::WinIdChange);
+        QApplication::sendEvent(canvas, &change);
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady() && differences(halfPress, viewer->captureImage()) < 200,
+                "Native recreation lost press motion frame");
+        require(
+            !viewer->presentBendPreview(controller.bendPreview(), 0, pressRevision - 1).isEmpty(),
+            "Stale press revision accepted");
+    }
+    slider->setValue(40);
+    pressSnapshot("final");
+    slider->setFocus();
+    QApplication::sendEvent(slider, &previous);
+    require(slider->value() == 39, "Press slider keyboard failed");
+    play->click();
+    waitUntil([&] { return slider->value() == 40; });
+    waitUntil([&] { return play->text() == QStringLiteral("Воспроизвести"); });
+    play->click();
+    waitUntil([&] { return slider->value() > 0 && slider->value() < 40; });
+    play->click();
+    require(controller.session().document() == pressSource &&
+                controller.session().revision() == pressRevision &&
+                !controller.session().modified(),
+            "Press playback changed source or project");
+    auto *dieAngle = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolDieAngle"));
+    dieAngle->setValue(110);
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreviewError() &&
+                controller.bendPreviewError()->code == BendPreviewErrorCode::ToolAngleConflict &&
+                !controller.bendPreview() && controller.session().document() == pressSource,
+            "Die angle conflict not shown");
+    dieAngle->setValue(90);
+    auto *nose = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolNoseRadius"));
+    nose->setValue(10);
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreviewError() &&
+                controller.bendPreviewError()->code == BendPreviewErrorCode::NoseTooLarge,
+            "Nose conflict not shown");
+    nose->setValue(2);
+    opening->setValue(70);
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreviewError() &&
+                controller.bendPreviewError()->code == BendPreviewErrorCode::SupportNotProven,
+            "Motion support bounds not enforced");
+    mode->setCurrentIndex(1);
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreview() && !controller.bendPreview()->pressMotion() &&
+                controller.bendPreview()->toolSetup(),
+            "Static setup incorrectly inherited motion-only restrictions");
+    opening->setValue(48);
+    mode->setCurrentIndex(0);
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreview() && controller.bendPreview()->pressMotion(),
+            "Press mode did not recover after parameter errors");
     clearTools->click();
     require(!controller.session().bend(0)->tools && !controller.bendPreview() &&
                 controller.session().modified(),
