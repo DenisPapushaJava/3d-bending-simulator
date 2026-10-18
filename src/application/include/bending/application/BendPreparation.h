@@ -2,6 +2,7 @@
 
 #include "bending/application/Document.h"
 #include "bending/core/BendTarget.h"
+#include "bending/core/PressTools.h"
 
 #include <optional>
 
@@ -24,6 +25,7 @@ struct BendPreparation {
     BendAnchor anchor;
     BendReview review = BendReview::Pending;
     std::optional<core::BendTarget> target;
+    std::optional<core::PressTools> tools = std::nullopt;
 };
 struct BendBindings {
     // Current recognized zone -> preparation entry. Ambiguous matches stay unbound.

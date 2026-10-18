@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <numbers>
 #include <stdexcept>
 #include <string_view>
 
@@ -177,6 +178,9 @@ void testBendProject() {
         const bending::core::BendTarget target{2.0, 5.25};
         session.setBendReview(0, BendReview::Confirmed);
         session.setBendTarget(0, target);
+        const bending::core::PressTools tools{
+            48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
+        require(session.setBendTools(0, tools), "Cannot assign tools");
         if (session.bend(1)) {
             session.setBendReview(1, BendReview::Excluded);
         }
@@ -186,9 +190,10 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 2, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 3, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
+                    session.bend(0)->tools == tools &&
                     session.bend(0)->review == BendReview::Confirmed && !session.modified() &&
                     session.bendBindings().unresolved.empty(),
                 "Reopen lost bend target or stable ID");
@@ -219,6 +224,35 @@ void testBendProject() {
             invalid.insert(QStringLiteral("bends"), bad);
             reject(invalid);
         }
+        for (const auto &toolValue :
+             {QJsonValue(QJsonValue::Undefined), QJsonValue(QStringLiteral("bad")),
+              QJsonValue(QJsonObject{{QStringLiteral("openingMm"), 48}})}) {
+            auto badTools = bends;
+            auto entry = badTools[0].toObject();
+            entry.insert(QStringLiteral("tools"), toolValue);
+            badTools[0] = entry;
+            invalid = root;
+            invalid.insert(QStringLiteral("bends"), badTools);
+            reject(invalid);
+        }
+        // Legacy v2 retains targets but has no tools. A v3-only record must not be silently read as
+        // v2.
+        invalid = root;
+        invalid.insert(QStringLiteral("version"), 2);
+        reject(invalid);
+        auto legacyBends = bends;
+        for (qsizetype i = 0; i < legacyBends.size(); ++i) {
+            auto entry = legacyBends[i].toObject();
+            entry.remove(QStringLiteral("tools"));
+            legacyBends[i] = entry;
+        }
+        auto legacy = root;
+        legacy.insert(QStringLiteral("version"), 2);
+        legacy.insert(QStringLiteral("bends"), legacyBends);
+        write(destination, QJsonDocument(legacy).toJson());
+        session.complete(session.beginImport(path), files.load(path, {}, {}));
+        require(session.bend(0)->target == target && !session.bend(0)->tools && !session.modified(),
+                "Legacy v2 migration failed");
         auto bad = bends;
         bad.append(bad[0]);
         invalid = root;
@@ -251,12 +285,13 @@ void testBendProject() {
                 "Legacy v1 did not open cleanly");
         require(!files.save(path, *session.document(), session.manualThicknessMm(), session.bends(),
                             {}),
-                "Legacy project could not be saved as v2");
+                "Legacy project could not be saved as v3");
 
         // A valid but unmatched geometry record is retained and never transferred to another zone.
         auto unresolved = session.bends();
         unresolved[0].review = BendReview::Confirmed;
         unresolved[0].target = target;
+        unresolved[0].tools = tools;
         unresolved[0].anchor.axisStart.x += 20;
         unresolved[0].anchor.axisEnd.x += 20;
         const auto unresolvedId = unresolved[0].id;
@@ -270,7 +305,8 @@ void testBendProject() {
                 "Cannot retain unresolved decisions");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bendBindings().unresolved.size() == 1 &&
-                    session.bends()[session.bendBindings().unresolved[0]].target == target,
+                    session.bends()[session.bendBindings().unresolved[0]].target == target &&
+                    session.bends()[session.bendBindings().unresolved[0]].tools == tools,
                 "Repeated save discarded unresolved intent");
     }
 }

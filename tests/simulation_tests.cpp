@@ -1,3 +1,4 @@
+#include "bending/simulation/FlatToolSetup.h"
 #include "bending/simulation/SingleBend.h"
 
 #include <cmath>
@@ -60,6 +61,45 @@ int main() {
             invalid.angleRadians = angle;
             require(!singleBendSection(invalid, 0.5), "Unsupported angle accepted");
         }
+        const bending::core::PressTools tools{
+            48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
+        const auto setup = std::get<FlatToolSetup>(flatToolSetup(model, tools, 1e-5));
+        close(setup.grooveDepthMm, 24, "Wrong V depth");
+        close(setup.sheetLeftMm, -30 - 5 * std::numbers::pi / 4, "Bend zone not centred");
+        close(setup.leftOverlapMm, 6 + 5 * std::numbers::pi / 4, "Wrong left support");
+        close(setup.rightOverlapMm, 16 + 5 * std::numbers::pi / 4, "Wrong right support");
+        auto tooShort = tools;
+        tooShort.lengthMm = 79;
+        require(std::get<ToolSetupIssue>(flatToolSetup(model, tooShort, 1e-5)) ==
+                    ToolSetupIssue::ToolTooShort,
+                "Short tools accepted");
+        auto wide = tools;
+        wide.openingMm = 80;
+        require(std::get<ToolSetupIssue>(flatToolSetup(model, wide, 1e-5)) ==
+                    ToolSetupIssue::MissingLeftSupport,
+                "Missing left support accepted");
+        auto flipped = model;
+        std::swap(flipped.fixedFlangeMm, flipped.movingFlangeMm);
+        require(std::get<ToolSetupIssue>(flatToolSetup(flipped, wide, 1e-5)) ==
+                    ToolSetupIssue::MissingRightSupport,
+                "Missing right support accepted");
+        wide.openingMm = -2 * setup.sheetLeftMm;
+        require(std::get<ToolSetupIssue>(flatToolSetup(model, wide, 1e-5)) ==
+                    ToolSetupIssue::MissingLeftSupport,
+                "Zero support overlap accepted");
+        for (const double bad : {-1.0, std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::infinity()}) {
+            auto invalidTools = tools;
+            invalidTools.clearanceMm = bad;
+            require(!bending::core::validPressTools(invalidTools),
+                    "Invalid tool clearance accepted");
+        }
+        auto invalidTools = tools;
+        invalidTools.noseRadiusMm = 13;
+        require(!bending::core::validPressTools(invalidTools), "Oversized tool nose accepted");
+        require(std::get<ToolSetupIssue>(flatToolSetup(model, tools, 0.1)) ==
+                    ToolSetupIssue::InvalidParameters,
+                "Excessive tolerance accepted");
         auto invalid = model;
         invalid.thicknessMm = -2;
         require(!singleBendSection(invalid, 0.5), "Negative thickness accepted");

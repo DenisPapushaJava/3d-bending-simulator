@@ -3,6 +3,7 @@
 #include "bending/cad/occt/PreviewAccess.h"
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -39,6 +40,10 @@ class CadPreview final : public SingleBendPreview {
     simulation::SingleBend geometry{};
     BoundsMm envelope{};
     std::vector<PreviewFrame> frames;
+    std::optional<simulation::FlatToolSetup> setup;
+    const simulation::FlatToolSetup *toolSetup() const noexcept override {
+        return setup ? &*setup : nullptr;
+    }
     const simulation::SingleBend &model() const noexcept override {
         return geometry;
     }
@@ -153,6 +158,58 @@ PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &ba
     frame.shape = compound;
     return frame;
 }
+std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, double thickness) {
+    const auto &t = setup.tools;
+    const double v = t.openingMm;
+    const double bottom = -setup.grooveDepthMm - v / 2.0;
+    const gp_Vec extrusion(0, 0, t.lengthMm);
+    auto die = prism({{-v, 0, 0},
+                      {-v / 2.0, 0, 0},
+                      {0, -setup.grooveDepthMm, 0},
+                      {v / 2.0, 0, 0},
+                      {v, 0, 0},
+                      {v, bottom, 0},
+                      {-v, bottom, 0}},
+                     extrusion);
+    const double halfAngle = t.punchAngleRadians / 2.0;
+    const double tip = thickness + t.clearanceMm;
+    const double tangentX = t.noseRadiusMm * std::cos(halfAngle);
+    const double tangentY = tip + t.noseRadiusMm * (1.0 - std::sin(halfAngle));
+    const double topY = tip + v;
+    const double topX =
+        (v - t.noseRadiusMm) * std::tan(halfAngle) + t.noseRadiusMm / std::cos(halfAngle);
+    const gp_Pnt leftTop(-topX, topY, 0), rightTop(topX, topY, 0);
+    const gp_Pnt left(-tangentX, tangentY, 0), right(tangentX, tangentY, 0);
+    BRepBuilderAPI_MakeWire wire;
+    wire.Add(BRepBuilderAPI_MakeEdge(leftTop, left).Edge());
+    wire.Add(
+        BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(left, gp_Pnt(0, tip, 0), right).Value()).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(right, rightTop).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(rightTop, leftTop).Edge());
+    auto punch =
+        BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), extrusion).Shape();
+    for (const auto &shape : {die, punch}) {
+        if (!BRepCheck_Analyzer(shape).IsValid() || !std::isfinite(volume(shape)) ||
+            volume(shape) <= 0.0) {
+            throw std::runtime_error("Invalid tool solid");
+        }
+    }
+    return {die, punch};
+}
+bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
+                     double budget) {
+    BRepAlgoAPI_Common common;
+    TopTools_ListOfShape arguments, tools;
+    arguments.Append(a);
+    tools.Append(b);
+    common.SetArguments(arguments);
+    common.SetTools(tools);
+    common.SetNonDestructive(true);
+    common.SetFuzzyValue(tolerance);
+    common.Build();
+    return common.IsDone() && !common.HasErrors() && BRepCheck_Analyzer(common.Shape()).IsValid() &&
+           std::isfinite(volume(common.Shape())) && volume(common.Shape()) <= budget;
+}
 bool sameVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
                 std::stop_token stop) {
     for (const bool reverse : {false, true}) {
@@ -183,11 +240,10 @@ const PreviewFrame &OcctPreviewAccess::frame(const application::SingleBendPrevie
                                              std::size_t index) {
     return dynamic_cast<const CadPreview &>(preview).frames.at(index);
 }
-application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr document,
-                                                               std::size_t bendIndex,
-                                                               core::BendTarget target,
-                                                               bool fixedSecond,
-                                                               std::stop_token stop) const {
+static application::BendPreviewResult buildPreview(DocumentPtr document, std::size_t bendIndex,
+                                                   core::BendTarget target, bool fixedSecond,
+                                                   std::stop_token stop,
+                                                   std::optional<core::PressTools> toolParameters) {
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -266,21 +322,66 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
         }
         auto preview = std::make_shared<CadPreview>();
         preview->geometry = model;
+        if (toolParameters) {
+            const auto placement =
+                simulation::flatToolSetup(model, *toolParameters, analysis.lengthToleranceMm);
+            if (const auto *issue = std::get_if<simulation::ToolSetupIssue>(&placement)) {
+                const auto code = *issue == simulation::ToolSetupIssue::ToolTooShort
+                                      ? BendPreviewErrorCode::ToolTooShort
+                                  : *issue == simulation::ToolSetupIssue::MissingLeftSupport
+                                      ? BendPreviewErrorCode::MissingLeftSupport
+                                  : *issue == simulation::ToolSetupIssue::MissingRightSupport
+                                      ? BendPreviewErrorCode::MissingRightSupport
+                                      : BendPreviewErrorCode::UnsupportedParameters;
+                return BendPreviewError{code, "Initial tool setup parameters/support rejected"};
+            }
+            preview->setup = std::get<simulation::FlatToolSetup>(placement);
+            basis = {{-simulation::bendAllowanceMm(model) / 2.0, model.thicknessMm,
+                      (toolParameters->lengthMm - model.widthMm) / 2.0},
+                     {1, 0, 0},
+                     {0, 1, 0},
+                     {0, 0, 1}};
+        }
         Bnd_Box envelope;
-        constexpr std::size_t intervals = 20;
+        const std::size_t intervals = toolParameters ? 0 : 20;
         for (std::size_t i = 0; i <= intervals; ++i) {
             if (stop.stop_requested()) {
                 return cancelled();
             }
-            auto frame = i == intervals
-                             ? std::move(finalFrame)
-                             : makeFrame(model, basis,
-                                         static_cast<double>(i) / static_cast<double>(intervals));
+            auto frame =
+                !toolParameters && i == intervals
+                    ? std::move(finalFrame)
+                    : makeFrame(model, basis,
+                                intervals ? static_cast<double>(i) / static_cast<double>(intervals)
+                                          : 0.0);
             const double materialVolume = volume(frame.shape);
             if (!std::isfinite(materialVolume) ||
                 std::abs(materialVolume - expectedVolume) > budget) {
                 return BendPreviewError{BendPreviewErrorCode::Failed,
                                         "Intermediate state changed material volume"};
+            }
+            if (preview->setup) {
+                frame.tools = makeTools(*preview->setup, model.thicknessMm);
+                for (const auto &[a, b] : {std::pair{frame.shape, frame.tools[0]},
+                                           std::pair{frame.shape, frame.tools[1]},
+                                           std::pair{frame.tools[0], frame.tools[1]}}) {
+                    if (stop.stop_requested()) {
+                        return cancelled();
+                    }
+                    if (!disjointVolumes(a, b, analysis.lengthToleranceMm, budget)) {
+                        return BendPreviewError{
+                            BendPreviewErrorCode::Failed,
+                            "Initial setup has a tool/material intersection or failed check"};
+                    }
+                }
+                BRep_Builder builder;
+                TopoDS_Compound assembly;
+                builder.MakeCompound(assembly);
+                builder.Add(assembly, frame.shape);
+                for (const auto &tool : frame.tools) {
+                    builder.Add(assembly, tool);
+                }
+                frame.shape = assembly;
             }
             BRepMesh_IncrementalMesh mesh(frame.shape, 0.05, false, 0.35, false);
             if (!mesh.IsDone()) {
@@ -303,5 +404,18 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
     } catch (const std::exception &error) {
         return BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
     }
+}
+application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr document,
+                                                               std::size_t bendIndex,
+                                                               core::BendTarget target,
+                                                               bool fixedSecond,
+                                                               std::stop_token stop) const {
+    return buildPreview(std::move(document), bendIndex, target, fixedSecond, stop, {});
+}
+application::BendPreviewResult
+SingleBendPreviewBuilder::buildToolSetup(DocumentPtr document, std::size_t bendIndex,
+                                         core::BendTarget target, core::PressTools tools,
+                                         std::stop_token stop) const {
+    return buildPreview(std::move(document), bendIndex, target, false, stop, tools);
 }
 } // namespace bending::cad

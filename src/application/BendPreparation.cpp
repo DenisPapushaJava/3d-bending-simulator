@@ -56,7 +56,8 @@ bool validBendPreparations(const std::vector<BendPreparation> &entries) {
             distance(a.axisStart, a.axisEnd) <= 0.0 ||
             (entry.review != BendReview::Pending && entry.review != BendReview::Confirmed &&
              entry.review != BendReview::Excluded) ||
-            (entry.target && !core::validBendTarget(*entry.target))) {
+            (entry.target && !core::validBendTarget(*entry.target)) ||
+            (entry.tools && !core::validPressTools(*entry.tools))) {
             return false;
         }
     }

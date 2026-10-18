@@ -125,6 +125,21 @@ bool DocumentSession::setBendTarget(std::size_t recognizedIndex,
     return true;
 }
 
+bool DocumentSession::setBendTools(std::size_t recognizedIndex,
+                                   std::optional<core::PressTools> tools) {
+    const auto *entry = bend(recognizedIndex);
+    if (!document_ || active_ || !entry || entry->review != BendReview::Confirmed ||
+        (tools && !core::validPressTools(*tools))) {
+        return false;
+    }
+    if (entry->tools != tools) {
+        bends_[*bendBindings_.byRecognizedBend[recognizedIndex]].tools = tools;
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+
 ThicknessValidation DocumentSession::setManualThickness(double valueMm) {
     if (!document_ || active_) {
         return ThicknessValidation::Invalid;

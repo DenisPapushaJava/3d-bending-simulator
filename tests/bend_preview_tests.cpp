@@ -3,10 +3,13 @@
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/PreviewAccess.h"
 
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
@@ -92,6 +95,73 @@ void check(const application::BendPreviewPtr &result, double sourceVolume) {
 }
 void test(const std::filesystem::path &path) {
     const auto right = load(fixtures::bentStrip(), path);
+    const core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
+    const auto buildSetup = [&](core::PressTools parameters) {
+        return cad::SingleBendPreviewBuilder{}.buildToolSetup(right, 0, {std::numbers::pi / 2, 4},
+                                                              parameters, {});
+    };
+    for (const double dieDegrees : {30.0, 90.0, 120.0}) {
+        auto parameters = tools;
+        parameters.dieAngleRadians = dieDegrees * std::numbers::pi / 180;
+        const auto result = buildSetup(parameters);
+        if (const auto *failure = std::get_if<application::BendPreviewError>(&result)) {
+            throw std::runtime_error("Tool setup failed: " + failure->detail);
+        }
+        const auto setup = std::get<application::BendPreviewPtr>(result);
+        require(setup->frameCount() == 1 && setup->toolSetup(), "Setup missing static metadata");
+        const auto &frame = cad::OcctPreviewAccess::frame(*setup, 0);
+        double materialVolume = 0;
+        for (const auto &region : frame.regions) {
+            materialVolume += volume(region);
+            BRepExtrema_DistShapeShape distance(region, frame.tools[1]);
+            require(distance.IsDone() && distance.Value() >= 10 - 1e-5,
+                    "Punch penetrates clearance");
+        }
+        require(std::abs(materialVolume - right->metadata().volumeMm3) < 1e-5,
+                "Setup changed material volume");
+        BRepExtrema_DistShapeShape leftContact(frame.regions[0], frame.tools[0]);
+        BRepExtrema_DistShapeShape rightContact(frame.regions[2], frame.tools[0]);
+        require(leftContact.IsDone() && rightContact.IsDone() && leftContact.Value() < 1e-5 &&
+                    rightContact.Value() < 1e-5,
+                "Flat flanges do not contact die shoulders");
+        for (const auto &tool : frame.tools) {
+            require(BRepCheck_Analyzer(tool).IsValid() && volume(tool) > 0, "Invalid setup tool");
+        }
+        Bnd_Box bounds;
+        BRepBndLib::Add(frame.tools[0], bounds, false);
+        double x0, y0, z0, x1, y1, z1;
+        bounds.Get(x0, y0, z0, x1, y1, z1);
+        require(std::abs(x0 + 48) < 1e-5 && std::abs(x1 - 48) < 1e-5 && std::abs(y1) < 1e-5 &&
+                    std::abs(z0) < 1e-5 && std::abs(z1 - 100) < 1e-5,
+                "Incorrect tool machine coordinates");
+        const double depth = 24 / std::tan(parameters.dieAngleRadians / 2);
+        const double expectedDieVolume = (96 * (depth + 24) - 48 * depth / 2) * 100;
+        require(std::abs(volume(frame.tools[0]) - expectedDieVolume) < 1e-4,
+                "Incorrect V profile volume");
+    }
+    for (double angle : {10.0, 120.0}) {
+        auto parameters = tools;
+        parameters.punchAngleRadians = angle * std::numbers::pi / 180.0;
+        parameters.noseRadiusMm = 12;
+        require(std::holds_alternative<application::BendPreviewPtr>(buildSetup(parameters)),
+                "Boundary punch profile failed");
+    }
+    auto small = tools;
+    small.openingMm = 1;
+    small.noseRadiusMm = 0.1;
+    small.clearanceMm = 0.1;
+    require(std::holds_alternative<application::BendPreviewPtr>(buildSetup(small)),
+            "Small profile or clearance failed");
+    auto badTools = tools;
+    badTools.lengthMm = 79;
+    require(std::get<application::BendPreviewError>(buildSetup(badTools)).code ==
+                application::BendPreviewErrorCode::ToolTooShort,
+            "Short tool was rendered as a checked setup");
+    badTools = tools;
+    badTools.openingMm = 80;
+    require(std::get<application::BendPreviewError>(buildSetup(badTools)).code ==
+                application::BendPreviewErrorCode::MissingLeftSupport,
+            "Unsupported blank was rendered as a checked setup");
     for (bool fixedSecond : {false, true}) {
         const auto result = preview(right, fixedSecond);
         check(result, right->metadata().volumeMm3);

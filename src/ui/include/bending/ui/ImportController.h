@@ -26,6 +26,7 @@ class ImportController final : public QObject {
     application::ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
     bool setBendReview(std::size_t recognizedIndex, application::BendReview review);
+    bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     void saveProject(std::filesystem::path path,
                      std::shared_ptr<const application::ProjectWriter> writer);
@@ -34,7 +35,8 @@ class ImportController final : public QObject {
     [[nodiscard]] const application::DocumentSession &session() const;
     [[nodiscard]] bool hasWork() const;
     bool prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
-                            std::shared_ptr<const application::SingleBendPreviewBuilder> builder);
+                            std::shared_ptr<const application::SingleBendPreviewBuilder> builder,
+                            bool toolSetup = false);
     void discardBendPreview();
     [[nodiscard]] application::BendPreviewPtr bendPreview() const;
     [[nodiscard]] const std::optional<application::BendPreviewError> &bendPreviewError() const;

@@ -215,6 +215,19 @@ bool ImportController::setBendReview(std::size_t recognizedIndex, BendReview rev
     emit stateChanged();
     return result;
 }
+bool ImportController::setBendTools(std::size_t recognizedIndex,
+                                    std::optional<core::PressTools> tools) {
+    if (impl_->stopping || hasWork()) {
+        return false;
+    }
+    const auto before = impl_->session.editRevision();
+    const bool result = impl_->session.setBendTools(recognizedIndex, tools);
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidatePreview();
+    }
+    emit stateChanged();
+    return result;
+}
 bool ImportController::setBendTarget(std::size_t recognizedIndex,
                                      std::optional<core::BendTarget> target) {
     if (impl_->stopping || hasWork()) {
@@ -286,12 +299,14 @@ void ImportController::saveProject(std::filesystem::path path,
     emit stateChanged();
 }
 bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
-                                          std::shared_ptr<const SingleBendPreviewBuilder> builder) {
+                                          std::shared_ptr<const SingleBendPreviewBuilder> builder,
+                                          bool toolSetup) {
     if (impl_->stopping || hasWork() || !builder || !impl_->session.document()) {
         return false;
     }
     const auto *entry = impl_->session.bend(recognizedIndex);
-    if (!entry || entry->review != BendReview::Confirmed || !entry->target) {
+    if (!entry || entry->review != BendReview::Confirmed || !entry->target ||
+        (toolSetup && !entry->tools)) {
         return false;
     }
     const auto &metadata = impl_->session.document()->metadata();
@@ -309,6 +324,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     const auto revision = state->session.revision();
     const auto editRevision = state->session.editRevision();
     const auto target = *entry->target;
+    const auto tools = toolSetup ? entry->tools : std::nullopt;
     state->stop = std::stop_source{};
     const auto stop = state->stop.get_token();
     state->running = true;
@@ -316,11 +332,13 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     QMetaObject::invokeMethod(
         state->worker,
         [state, document, revision, editRevision, id, target, recognizedIndex, fixedSecond, stop,
-         builder = std::move(builder)] {
+         tools, builder = std::move(builder)] {
             BendPreviewResult result =
                 BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
             try {
-                result = builder->build(document, recognizedIndex, target, fixedSecond, stop);
+                result =
+                    tools ? builder->buildToolSetup(document, recognizedIndex, target, *tools, stop)
+                          : builder->build(document, recognizedIndex, target, fixedSecond, stop);
             } catch (const std::exception &error) {
                 result = BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
             } catch (...) {
@@ -338,7 +356,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         editRevision == state->session.editRevision() &&
                         !state->session.activeRequest()) {
                         if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
-                            if (*preview && (*preview)->frameCount() >= 2) {
+                            if (*preview &&
+                                ((*preview)->toolSetup() ? (*preview)->frameCount() == 1
+                                                         : (*preview)->frameCount() >= 2)) {
                                 state->preview = *preview;
                             } else {
                                 state->previewError =
