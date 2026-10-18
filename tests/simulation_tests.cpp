@@ -110,6 +110,15 @@ int main() {
         require(std::get<ToolSetupIssue>(flatToolSetup(model, tooShort, 1e-5)) ==
                     ToolSetupIssue::ToolTooShort,
                 "Short tools accepted");
+        tooShort = tools;
+        tooShort.punchLengthMm = 79;
+        require(std::get<ToolSetupIssue>(flatToolSetup(model, tooShort, 1e-5)) ==
+                    ToolSetupIssue::ToolTooShort,
+                "Short upper tool accepted with a long die");
+        auto independent = tools;
+        independent.punchLengthMm = 200;
+        require(std::holds_alternative<FlatToolSetup>(flatToolSetup(model, independent, 1e-5)),
+                "Unequal sufficient tool lengths rejected");
         auto wide = tools;
         wide.openingMm = 80;
         require(std::get<ToolSetupIssue>(flatToolSetup(model, wide, 1e-5)) ==

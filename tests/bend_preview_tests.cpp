@@ -222,7 +222,7 @@ void checkReturnSweep(const application::BendPreviewPtr &result) {
     Bnd_Box box;
     BRepBndLib::AddOptimal(formed.tools[1], box, false, false);
     const double halfWidth = box.CornerMax().X();
-    const double addedVolume = 2 * halfWidth * report.liftMm * tools.lengthMm;
+    const double addedVolume = 2 * halfWidth * report.liftMm * core::punchLengthMm(tools);
     require(std::abs(volume(sweep) - volume(formed.tools[1]) - addedVolume) < 1e-4,
             "Return envelope is not the exact translational sweep");
     for (double fraction : {0.0, 0.137, 0.382, 0.5, 0.749, 1.0}) {
@@ -490,7 +490,19 @@ void testProfiled(const std::filesystem::path &path) {
         }
     }
     const core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
-    checkReturnSweep(checkMotion(document, tools));
+    auto independent = tools;
+    independent.lengthMm = 140;
+    independent.punchLengthMm = 120;
+    const auto independentMotion = checkMotion(document, independent);
+    const auto &independentFrame = cad::OcctPreviewAccess::frame(*independentMotion, 0);
+    for (std::size_t i = 0; i < 2; ++i) {
+        Bnd_Box bounds;
+        BRepBndLib::AddOptimal(independentFrame.tools[i], bounds, false, false);
+        require(std::abs(bounds.CornerMin().Z() - (i == 0 ? 0 : 10)) < 1e-5 &&
+                    std::abs(bounds.CornerMax().Z() - (i == 0 ? 140 : 130)) < 1e-5,
+                "Independent tool lengths are not centred correctly");
+    }
+    checkReturnSweep(independentMotion);
     for (int i = 1; i <= sourceFaces.Extent(); ++i) {
         TopLoc_Location location;
         require(BRep_Tool::Triangulation(TopoDS::Face(sourceFaces(i)), location) ==

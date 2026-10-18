@@ -235,6 +235,10 @@ class OcctCanvas final : public QWidget {
         }
     }
 
+    void setCutoutsVisible(bool visible) {
+        cutoutsVisible_ = visible;
+        setHighlights(highlights_, revision_);
+    }
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
         setHighlights({indices, {}, false}, revision);
     }
@@ -302,7 +306,17 @@ class OcctCanvas final : public QWidget {
                             new Prs3d_LineAspect(Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB),
                                                  Aspect_TOL_SOLID, 3.0));
                     }
-                    for (const auto i : highlights_.cutouts) {
+                }
+                auto cutouts = highlights_.cutouts;
+                if (document_ && cutoutsVisible_) {
+                    const auto &known = document_->metadata().closedCutouts.boundaryFaces;
+                    cutouts.insert(cutouts.end(), known.begin(), known.end());
+                }
+                if (cutoutsVisible_) {
+                    for (const auto i : cutouts) {
+                        if (i == 0 || i > static_cast<std::size_t>(faces_.Extent())) {
+                            continue;
+                        }
                         const auto &face = faces_(static_cast<int>(i));
                         presentation_->SetCustomColor(
                             face, Quantity_Color(1.0, 0.025, 0.20, Quantity_TOC_RGB));
@@ -640,6 +654,7 @@ class OcctCanvas final : public QWidget {
     Handle(AIS_Shape) evidence_;
     Handle(AIS_Shape) support_;
     FaceHighlights highlights_;
+    bool cutoutsVisible_ = true;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
     std::size_t previewFrame_ = 0;
@@ -755,6 +770,11 @@ void ViewerWidget::clearDocument(quint64 revision) {
     emit selectionChanged(revision, 0);
 }
 
+void ViewerWidget::setCutoutsVisible(bool visible) {
+    if (impl_->canvas) {
+        impl_->canvas->setCutoutsVisible(visible);
+    }
+}
 void ViewerWidget::highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
     if (impl_->canvas) {
         impl_->canvas->highlightFaces(indices, revision);

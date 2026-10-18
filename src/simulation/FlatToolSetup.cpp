@@ -11,7 +11,8 @@ FlatToolSetupResult flatToolSetup(const SingleBend &model, core::PressTools tool
         lengthToleranceMm > 0.01) {
         return ToolSetupIssue::InvalidParameters;
     }
-    if (tools.lengthMm + lengthToleranceMm < model.widthMm) {
+    if (tools.lengthMm + lengthToleranceMm < model.widthMm ||
+        core::punchLengthMm(tools) + lengthToleranceMm < model.widthMm) {
         return ToolSetupIssue::ToolTooShort;
     }
     const double halfZone = bendAllowanceMm(model) / 2.0;

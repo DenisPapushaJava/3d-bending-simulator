@@ -340,9 +340,12 @@ TopoDS_Shape makePunch(const core::PressTools &t, double tip, double extension =
     } else {
         wire.Add(BRepBuilderAPI_MakeEdge(rightTop, leftTop).Edge());
     }
+    gp_Trsf center;
+    center.SetTranslation(gp_Vec(0, 0, (t.lengthMm - core::punchLengthMm(t)) / 2));
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(),
-                                 gp_Vec(0, 0, t.lengthMm))
-        .Shape();
+                                 gp_Vec(0, 0, core::punchLengthMm(t)))
+        .Shape()
+        .Moved(TopLoc_Location(center));
 }
 std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, double thickness) {
     const auto &t = setup.tools;

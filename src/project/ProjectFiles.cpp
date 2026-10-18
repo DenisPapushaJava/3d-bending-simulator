@@ -1,4 +1,5 @@
 #include "bending/project/ProjectFiles.h"
+#include "ToolJson.h"
 
 #include <QCryptographicHash>
 #include <QFile>
@@ -52,6 +53,8 @@ bool readPoint(const QJsonValue &value, PointMm &point) {
 }
 QString reviewName(BendReview review) {
     switch (review) {
+    case BendReview::Automatic:
+        return QStringLiteral("automatic");
     case BendReview::Pending:
         return QStringLiteral("pending");
     case BendReview::Confirmed:
@@ -70,9 +73,13 @@ QJsonValue toolsJson(const std::optional<core::PressTools> &tools) {
                        {QStringLiteral("punchAngleRadians"), tools->punchAngleRadians},
                        {QStringLiteral("noseRadiusMm"), tools->noseRadiusMm},
                        {QStringLiteral("lengthMm"), tools->lengthMm},
-                       {QStringLiteral("clearanceMm"), tools->clearanceMm}};
+                       {QStringLiteral("clearanceMm"), tools->clearanceMm},
+                       {QStringLiteral("punchLengthMm"), tools->punchLengthMm
+                                                             ? QJsonValue(*tools->punchLengthMm)
+                                                             : QJsonValue(QJsonValue::Null)}};
 }
-bool readTools(const QJsonValue &value, std::optional<core::PressTools> &tools) {
+bool readTools(const QJsonValue &value, std::optional<core::PressTools> &tools,
+               bool separateLengths) {
     if (value.isNull()) {
         return true;
     }
@@ -92,6 +99,16 @@ bool readTools(const QJsonValue &value, std::optional<core::PressTools> &tools) 
             return false;
         }
         *destination = number.toDouble();
+    }
+    const auto upperLength = parameters.value(QStringLiteral("punchLengthMm"));
+    if (separateLengths) {
+        if (upperLength.isDouble()) {
+            candidate.punchLengthMm = upperLength.toDouble();
+        } else if (!upperLength.isNull()) {
+            return false;
+        }
+    } else if (parameters.contains(QStringLiteral("punchLengthMm"))) {
+        return false;
     }
     if (!core::validPressTools(candidate)) {
         return false;
@@ -117,15 +134,17 @@ QJsonArray bendsJson(const std::vector<BendPreparation> &bends) {
                               {QStringLiteral("angleRadians"), bend.target->angleRadians},
                               {QStringLiteral("innerRadiusMm"), bend.target->innerRadiusMm}})
                         : QJsonValue(QJsonValue::Null);
-        values.append(QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
-                                  {QStringLiteral("review"), reviewName(bend.review)},
-                                  {QStringLiteral("geometry"), geometry},
-                                  {QStringLiteral("target"), target},
-                                  {QStringLiteral("tools"), toolsJson(bend.tools)}});
+        values.append(
+            QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
+                        {QStringLiteral("review"), reviewName(bend.review)},
+                        {QStringLiteral("geometry"), geometry},
+                        {QStringLiteral("target"), target},
+                        {QStringLiteral("tools"), toolsJson(bend.tools)},
+                        {QStringLiteral("catalogTools"), assignmentJson(bend.catalogTools)}});
     }
     return values;
 }
-bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, bool withTools) {
+bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int version) {
     if (!value.isArray() || value.toArray().size() > 512) {
         return false;
     }
@@ -141,7 +160,9 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, boo
         BendPreparation bend{};
         bend.id = object.value(QStringLiteral("id")).toString().toStdString();
         const auto review = object.value(QStringLiteral("review")).toString();
-        if (review == QStringLiteral("pending")) {
+        if (review == QStringLiteral("automatic") && version >= 4) {
+            bend.review = BendReview::Automatic;
+        } else if (review == QStringLiteral("pending")) {
             bend.review = BendReview::Pending;
         } else if (review == QStringLiteral("confirmed")) {
             bend.review = BendReview::Confirmed;
@@ -182,8 +203,14 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, boo
         } else if (!target.isNull()) {
             return false;
         }
-        if (withTools ? !readTools(object.value(QStringLiteral("tools")), bend.tools)
-                      : object.contains(QStringLiteral("tools"))) {
+        if (version >= 3
+                ? !readTools(object.value(QStringLiteral("tools")), bend.tools, version >= 4)
+                : object.contains(QStringLiteral("tools"))) {
+            return false;
+        }
+        if (version >= 4
+                ? !readAssignment(object.value(QStringLiteral("catalogTools")), bend.catalogTools)
+                : object.contains(QStringLiteral("catalogTools"))) {
             return false;
         }
         bends.push_back(std::move(bend));
@@ -226,10 +253,10 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
         return invalid("Unknown project format");
     }
     const auto version = root.value(QStringLiteral("version"));
-    if (!version.isDouble() ||
-        (version.toDouble() != 1.0 && version.toDouble() != 2.0 && version.toDouble() != 3.0)) {
+    if (!version.isDouble() || (version.toDouble() != 1.0 && version.toDouble() != 2.0 &&
+                                version.toDouble() != 3.0 && version.toDouble() != 4.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1, 2 and 3",
+                           "Supported project format versions are 1, 2, 3 and 4",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -271,7 +298,8 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     }
     std::vector<BendPreparation> bends;
     if (version.toDouble() >= 2.0) {
-        if (!readBends(root.value(QStringLiteral("bends")), bends, version.toDouble() == 3.0)) {
+        if (!readBends(root.value(QStringLiteral("bends")), bends,
+                       static_cast<int>(version.toDouble()))) {
             return invalid("Invalid saved bend preparations");
         }
     } else if (root.contains(QStringLiteral("bends"))) {
@@ -314,7 +342,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
     const QByteArray bytes(source.data(), static_cast<qsizetype>(source.size()));
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 3},
+        {QStringLiteral("version"), 4},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},
