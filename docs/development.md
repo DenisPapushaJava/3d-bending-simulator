@@ -472,3 +472,16 @@ Core **4/4**, dev **17/17**, Docker Ubuntu Release/Werror **21/21**, DEB и за
 BENDING_GUIDED_SNAPSHOT="$PWD/out/profiles" BENDING_TOOL_PROFILE_SNAPSHOT="$PWD/out/profiles-large.png" ./build/dev/bin/workflow_tests --graphics
 QT_SCALE_FACTOR=2 BENDING_TOOL_PROFILE_SNAPSHOT="$PWD/out/profiles-large-2x.png" ./build/dev/bin/workflow_tests --graphics
 ```
+
+### Размерные аннотации — D033
+
+2026-10-18: «Размеры» / Ctrl+D внутри native canvas. В CAD — X/Y/Z и измерения выбранного гиба; в подготовленном просмотре — прямые участки A/B, ширина, текущие угол/R/t. Мировые привязки готовятся вместе с телом кадра; размерные объекты не участвуют в выборе и не меняют проект. [Смысл размеров](model-dimensions.md).
+
+Core **4/4**, dev **17/17**, Docker Ubuntu Release/Werror **21/21**, DEB и запуск распакованного пакета offscreen/Xvfb. Native Linux/NVIDIA/X11 **DPR 1/2**: просмотрены CAD, плоское, промежуточное и сформированное состояния, проекции спереди/сверху. Проверены отсутствие dirty/invalidation при переключении, сброс измерений выбора, защита ревизии, восстановление после native recreation, значения при отводе и закрытие документа. Привязки кадра проверяются по длинам модели и координатам контактного состояния. Windows — CI текущего PR; интерактивный Windows/GPU остаётся отдельной проверкой.
+
+```bash
+BENDING_DIMENSIONS_SNAPSHOT="$PWD/out/dimensions" ./build/dev/bin/workflow_tests --graphics
+QT_SCALE_FACTOR=2 BENDING_DIMENSIONS_SNAPSHOT="$PWD/out/dimensions-2x" ./build/dev/bin/workflow_tests --graphics
+```
+
+Получаются `-cad/-flat/-motion/-formed/-front/-top.png`, только локальные снимки собственного учебного примера. `captureImage()` по-прежнему возвращает OCCT framebuffer для анализа цветов/выбора; `captureImage(true)` включает native Qt-кнопку для снимка интерфейса. Не включать субпиксельные цвета Qt-текста в счётчики окрашенных CAD-граней.

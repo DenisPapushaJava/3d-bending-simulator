@@ -84,6 +84,14 @@ void check(const application::BendPreviewPtr &result, double sourceVolume) {
     double fixedVolume = 0;
     for (std::size_t i = 0; i < result->frameCount(); ++i) {
         const auto &frame = cad::OcctPreviewAccess::frame(*result, i);
+        require(frame.dimensions &&
+                    std::abs(frame.dimensions->fixed[0].Distance(frame.dimensions->fixed[1]) -
+                             result->model().fixedFlangeMm) < 1.0e-6 &&
+                    std::abs(frame.dimensions->moving[0].Distance(frame.dimensions->moving[1]) -
+                             result->model().movingFlangeMm) < 1.0e-6 &&
+                    std::abs(frame.dimensions->widthVector.Magnitude() - result->model().widthMm) <
+                        1.0e-6,
+                "World-space dimension attachments changed flange measurements");
         require(std::abs(volume(frame.shape) - sourceVolume) < 1.0e-4,
                 "Intermediate volume differs from CAD");
         if (i == 0) {
@@ -120,6 +128,12 @@ application::BendPreviewPtr checkMotion(application::DocumentPtr document, core:
     for (std::size_t i = 0; i < motion->frameCount(); ++i) {
         const auto &frame = cad::OcctPreviewAccess::frame(*motion, i);
         const auto *state = motion->pressState(i);
+        require(frame.dimensions && state &&
+                    frame.dimensions->angleRadians == state->section.angleRadians &&
+                    frame.dimensions->innerRadiusMm == state->section.innerRadiusMm &&
+                    std::abs(frame.dimensions->fixed[0].X() - state->section.fixed[0].x) < 1.0e-6 &&
+                    std::abs(frame.dimensions->fixed[0].Y() - state->section.fixed[0].y) < 1.0e-6,
+                "Dimension anchors do not follow the contact state");
         require(state && BRepCheck_Analyzer(frame.shape).IsValid(), "Invalid press frame");
         double total = 0;
         for (const auto &region : frame.regions) {

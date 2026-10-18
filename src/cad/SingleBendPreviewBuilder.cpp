@@ -281,6 +281,12 @@ PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBa
         return prism(points, extrusion);
     };
     PreviewFrame frame;
+    frame.dimensions = BendDimensionAnchors{{position(state.fixed[0]), position(state.fixed[1])},
+                                            {position(state.moving[0]), position(state.moving[3])},
+                                            position(state.innerArc[1]),
+                                            extrusion,
+                                            state.angleRadians,
+                                            state.innerRadiusMm};
     frame.regions[0] = flange(state.fixed);
     frame.regions[2] = flange(state.moving);
     if (state.angleRadians == 0.0) {

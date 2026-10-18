@@ -1253,8 +1253,11 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
                                   QStringLiteral(".png")),
                         "Cannot save opening diagnostic screenshot");
             }
-            require(cutoutPixels(ordinary) > 20 && cutoutPixels(highlighted) > 20,
-                    "Opening walls were not highlighted separately");
+            if (cutoutPixels(ordinary) <= 20 || cutoutPixels(highlighted) <= 20) {
+                throw std::runtime_error(std::string("Opening walls missing in ") + name + ": " +
+                                         std::to_string(cutoutPixels(ordinary)) + "/" +
+                                         std::to_string(cutoutPixels(highlighted)));
+            }
             QEvent change(QEvent::WinIdChange);
             QApplication::sendEvent(viewer->findChild<QWidget *>(QStringLiteral("cadCanvas")),
                                     &change);
@@ -1469,6 +1472,53 @@ void testGuidedWorkflow(bool graphics) {
         toggle->click();
     }
     snapshot("part");
+    auto *dimensions = viewer->findChild<QToolButton *>(QStringLiteral("showDimensions"));
+    const auto dimensionSnapshot = [&](const char *suffix) {
+        const auto output = qEnvironmentVariable("BENDING_DIMENSIONS_SNAPSHOT");
+        if (graphics && !output.isEmpty()) {
+            require(viewer->captureImage(true).save(output + QLatin1Char('-') +
+                                                    QString::fromLatin1(suffix) +
+                                                    QStringLiteral(".png")),
+                    "Cannot save dimensions snapshot");
+        }
+    };
+    if (graphics) {
+        require(dimensions && dimensions->isVisible() && dimensions->isEnabled() &&
+                    !dimensions->isChecked(),
+                "Missing in-scene dimensions toggle");
+        const auto edit = controller.session().editRevision();
+        click(dimensions, dimensions->rect().center());
+        require(viewer->dimensionsVisible() &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("R 8 мм")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("t 6 мм")) &&
+                    !controller.session().modified() && controller.session().editRevision() == edit,
+                "Dimensions lost selected CAD bend or modified project");
+        dimensionSnapshot("cad");
+        viewer->setDimensionsVisible(false);
+        const auto hidden = viewer->captureImage();
+        viewer->setDimensionsVisible(true);
+        require(differences(hidden, viewer->captureImage()) > 100, "Measurements did not render");
+        // Stale requests cannot replace measurements from the current document.
+        viewer->highlightFaces({}, controller.session().revision() + 1);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")),
+                "Stale selection removed bend dimensions");
+        viewer->highlightFaces({}, controller.session().revision());
+        require(!dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("X ")),
+                "Clearing selection retained old bend dimensions");
+        const auto &bend = controller.session().document()->metadata().bendAnalysis.bends.front();
+        viewer->highlightBend(bend, controller.session().revision());
+        auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+        QEvent change(QEvent::WinIdChange);
+        QApplication::sendEvent(canvas, &change);
+        canvas->update();
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady() && dimensions->isChecked() &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")),
+                "Native recreation lost dimension mode/selected bend");
+        viewer->setDimensionsVisible(false);
+    }
     click(stage(1), stage(1)->rect().center());
     require(tabs->currentIndex() == 3 && stage(1)->isChecked(), "Tool stage did not open");
     punch->setCurrentIndex(punch->findText(QStringLiteral("ST1801M"), Qt::MatchContains));
@@ -1553,6 +1603,41 @@ void testGuidedWorkflow(bool graphics) {
             "Guided check lost catalogue snapshot/separate lengths");
     slider->setValue(24);
     snapshot("check");
+    if (graphics) {
+        const auto preview = controller.bendPreview();
+        const auto edit = controller.session().editRevision();
+        viewer->setDimensionsVisible(true);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("A прям.")) &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("X ")),
+                "Preview retained source CAD bounds or omitted flange sizes");
+        dimensionSnapshot("motion");
+        const auto bending = dimensions->accessibleDescription();
+        slider->setValue(0);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("плоско")) &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("R 8 мм")),
+                "Flat frame retained final bend radius");
+        dimensionSnapshot("flat");
+        slider->setValue(40);
+        require(dimensions->accessibleDescription() != bending &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Поворот 90°")),
+                "Measurements did not follow forming state");
+        dimensionSnapshot("formed");
+        const auto formed = dimensions->accessibleDescription();
+        viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("A прям.")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("B прям.")),
+                "Front projection lost flange measurements");
+        dimensionSnapshot("front");
+        viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
+        dimensionSnapshot("top");
+        viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+        slider->setValue(60);
+        require(dimensions->accessibleDescription() == formed,
+                "Punch return changed formed-sheet dimensions");
+        require(controller.bendPreview() == preview && controller.session().editRevision() == edit,
+                "Dimension toggle invalidated calculation");
+        viewer->setDimensionsVisible(false);
+    }
     // Pending UI edits must invalidate the old successful result even before commit.
     stage(1)->click();
     groove->setCurrentIndex(2);
@@ -1595,6 +1680,11 @@ void testGuidedWorkflow(bool graphics) {
     require(!controller.bendPreview() && !check->isEnabled(),
             "Excluded bend kept simulation active");
     controller.closeDocument();
+    if (graphics) {
+        require(!dimensions->isEnabled() &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")),
+                "Closed document retained measurements");
+    }
     window.close();
 }
 
