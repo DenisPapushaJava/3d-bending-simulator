@@ -148,6 +148,14 @@ class OcctCanvas final : public QWidget {
                         candidate->SetCustomColor(regionFaces(face), colors[region]);
                     }
                 }
+                const std::array<Quantity_Color, 2> toolColors{
+                    Quantity_Color(0.30, 0.36, 0.44, Quantity_TOC_RGB),
+                    Quantity_Color(0.64, 0.70, 0.77, Quantity_TOC_RGB)};
+                for (std::size_t tool = 0; tool < frame.tools.size(); ++tool) {
+                    if (!frame.tools[tool].IsNull()) {
+                        candidate->SetCustomColor(frame.tools[tool], toolColors[tool]);
+                    }
+                }
                 context_->Display(candidate, AIS_Shaded, -1, false);
                 if (!presentation_.IsNull()) {
                     context_->Remove(presentation_, false);
@@ -159,7 +167,12 @@ class OcctCanvas final : public QWidget {
                 }
                 context_->ClearSelected(false);
                 if (entering) {
-                    view_->SetProj(V3d_XposYnegZpos);
+                    if (preview->toolSetup()) {
+                        view_->SetProj(1.0, 0.5, 3.0);
+                        view_->SetUp(0.0, 1.0, 0.0);
+                    } else {
+                        view_->SetProj(V3d_XposYnegZpos);
+                    }
                     fitPreview(*preview);
                 }
                 view_->ZFitAll();
@@ -306,6 +319,20 @@ class OcctCanvas final : public QWidget {
 
     void setOrientation(ViewerWidget::Orientation orientation) {
         guarded([&] {
+            if (preview_ && preview_->toolSetup()) {
+                const auto projection = orientation == ViewerWidget::Orientation::Top ? V3d_Ypos
+                                        : orientation == ViewerWidget::Orientation::Front
+                                            ? V3d_Zpos
+                                            : V3d_XposYposZpos;
+                if (orientation == ViewerWidget::Orientation::Isometric) {
+                    view_->SetProj(1.0, 0.5, 3.0);
+                    view_->SetUp(0.0, 1.0, 0.0);
+                } else {
+                    view_->SetProj(projection, true);
+                }
+                fitAll();
+                return;
+            }
             const auto projection = orientation == ViewerWidget::Orientation::Top ? V3d_Zpos
                                     : orientation == ViewerWidget::Orientation::Front
                                         ? V3d_Yneg

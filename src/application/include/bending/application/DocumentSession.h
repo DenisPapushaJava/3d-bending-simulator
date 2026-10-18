@@ -24,6 +24,7 @@ class DocumentSession final {
     [[nodiscard]] ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
     bool setBendReview(std::size_t recognizedIndex, BendReview review);
+    bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     [[nodiscard]] const std::vector<BendPreparation> &bends() const {
         return bends_;

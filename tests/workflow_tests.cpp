@@ -782,6 +782,107 @@ void testSingleBendWorkflow(bool graphics) {
         require(differences(flat, viewer->captureImage()) > 500,
                 "Fixed-side choice did not change initial placement");
     }
+    window.findChild<QAction *>(QStringLiteral("toolSetupAction"))->trigger();
+    require(tabs->currentIndex() == 3, "Tool toolbar action did not open editor");
+    auto *applyTools = window.findChild<QPushButton *>(QStringLiteral("applyToolSetup"));
+    auto *clearTools = window.findChild<QPushButton *>(QStringLiteral("clearToolSetup"));
+    auto *toolStatus = window.findChild<QLabel *>(QStringLiteral("toolSetupStatus"));
+    auto *opening = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolOpening"));
+    auto *length = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolLength"));
+    require(applyTools && clearTools && toolStatus && opening && length && applyTools->isEnabled(),
+            "Missing tool setup editor");
+    length->setValue(50);
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreviewError() &&
+                controller.bendPreviewError()->code == BendPreviewErrorCode::ToolTooShort &&
+                !controller.bendPreview() && !slider->isEnabled(),
+            "Short tool accepted in UI");
+    length->setValue(100);
+    opening->setValue(100);
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreviewError() &&
+                controller.bendPreviewError()->code == BendPreviewErrorCode::MissingLeftSupport,
+            "Missing shoulder support accepted in UI");
+    opening->setValue(48);
+    applyTools->click();
+    waitUntil(finished);
+    if (controller.bendPreviewError()) {
+        throw std::runtime_error(controller.bendPreviewError()->detail);
+    }
+    require(controller.bendPreview() && controller.bendPreview()->toolSetup() &&
+                controller.bendPreview()->frameCount() == 1 && !slider->isEnabled() &&
+                !play->isEnabled() && clearTools->isEnabled() && controller.session().modified() &&
+                controller.session().document() == source &&
+                controller.session().revision() == revision &&
+                toolStatus->text().contains(QStringLiteral("Начальная установка проверена")),
+            "Setup mode, source or feedback incorrect");
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady(); });
+        QApplication::processEvents();
+        const auto image = viewer->captureImage();
+        require(differences(flat, image) > 500, "Tools did not appear in framebuffer");
+        auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+        QEvent change(QEvent::WinIdChange);
+        QApplication::sendEvent(canvas, &change);
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady() && differences(image, viewer->captureImage()) < 200,
+                "Setup lost after native recreation");
+        const auto output = qEnvironmentVariable("BENDING_TOOL_SETUP_SNAPSHOT");
+        if (!output.isEmpty()) {
+            auto shot = window.grab().toImage();
+            QPainter painter(&shot);
+            painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                              viewer->captureImage());
+            painter.end();
+            require(shot.save(output), "Cannot save tool setup snapshot");
+        }
+    }
+    auto *modeHint = window.findChild<QLabel *>(QStringLiteral("setupPlaybackHint"));
+    auto *kinematics = window.findChild<QPushButton *>(QStringLiteral("showKinematics"));
+    require(modeHint && modeHint->isVisible() &&
+                modeHint->text().contains(QStringLiteral("ещё не реализована")) && kinematics &&
+                kinematics->isVisible() && kinematics->isEnabled() && !slider->isVisible() &&
+                !play->isVisible(),
+            "Static setup looks like a playable operation");
+    const auto setupSnapshot = controller.bendPreview();
+    const auto staticImage = graphics ? viewer->captureImage() : QImage{};
+    int setupBeats = 0;
+    QTimer setupHeartbeat;
+    QObject::connect(&setupHeartbeat, &QTimer::timeout, [&] { ++setupBeats; });
+    setupHeartbeat.start(25);
+    waitUntil([&] { return setupBeats >= 12; });
+    setupHeartbeat.stop();
+    require(controller.bendPreview() == setupSnapshot && slider->value() == 0 &&
+                (!graphics || differences(staticImage, viewer->captureImage()) == 0),
+            "Static setup flashed or started playing by itself");
+    controller.saveProject(path, files);
+    waitUntil(finished);
+    require(!controller.session().modified() && controller.bendPreview()->toolSetup(),
+            "Saving lost setup or remained dirty");
+    const auto editRevision = controller.session().editRevision();
+    applyTools->click();
+    waitUntil(finished);
+    require(!controller.session().modified() && controller.session().editRevision() == editRevision,
+            "Identical tools dirtied project");
+    kinematics->click();
+    waitUntil(finished);
+    require(controller.bendPreview() && !controller.bendPreview()->toolSetup() &&
+                tabs->currentIndex() == 2 && slider->isVisible() && play->isVisible() &&
+                !modeHint->isVisible() && !kinematics->isVisible() && slider->isEnabled() &&
+                play->isEnabled() && controller.session().bend(0)->tools &&
+                !controller.session().modified(),
+            "Shortcut did not prepare playable kinematics or erased tools");
+    play->click();
+    waitUntil([&] { return slider->value() > 0; });
+    play->click();
+    returnToCad->click();
+    require(!controller.bendPreview() && controller.session().bend(0)->tools &&
+                !controller.session().modified(),
+            "Return erased saved tools");
+    prepare->click();
+    waitUntil(finished);
     controller.setBendTarget(0, bending::core::BendTarget{std::numbers::pi / 3, 8});
     require(!controller.bendPreview() && !slider->isEnabled(),
             "Changed target retained old states");
@@ -796,8 +897,26 @@ void testSingleBendWorkflow(bool graphics) {
     list->setCurrentIndex(list->model()->index(0, 0));
     require(!prepare->isEnabled() && !controller.bendPreview(),
             "Multi-bend solid enabled single-bend preview");
+    controller.open(path);
+    waitUntil(finished);
+    list->setCurrentIndex(list->model()->index(0, 0));
+    tabs->setCurrentIndex(3);
+    require(controller.session().bend(0)->tools && opening->value() == 48 &&
+                length->value() == 100 && !controller.session().modified() &&
+                !controller.bendPreview(),
+            "Saved setup not restored as parameters");
+    applyTools->click();
+    waitUntil(finished);
+    require(controller.bendPreview() && controller.bendPreview()->toolSetup() &&
+                !controller.session().modified(),
+            "Restored setup not reproducible");
+    clearTools->click();
+    require(!controller.session().bend(0)->tools && !controller.bendPreview() &&
+                controller.session().modified(),
+            "Clear retained setup");
     controller.closeDocument();
-    require(!slider->isEnabled() && !play->isEnabled() && !returnToCad->isEnabled(),
+    require(!applyTools->isEnabled() && !slider->isEnabled() && !play->isEnabled() &&
+                !returnToCad->isEnabled(),
             "Close retained playback");
     window.close();
 }

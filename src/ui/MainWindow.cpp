@@ -26,6 +26,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QStatusBar>
 #include <QTabWidget>
@@ -319,7 +320,7 @@ class MainWindow::Impl {
                 QStringLiteral("3D-просмотр недоступен: %1").arg(viewer->errorString()));
         } else if (controller->bendPreview()) {
             window->statusBar()->showMessage(QStringLiteral(
-                "Кинематический просмотр · ПКМ: вращение · СКМ: перенос · Колесо: масштаб"));
+                "Просмотр операции · ПКМ: вращение · СКМ: перенос · Колесо: масштаб"));
         } else {
             window->statusBar()->showMessage(
                 document ? QStringLiteral("Деталь загружена · ПКМ: вращение · СКМ: перенос · "
@@ -371,11 +372,15 @@ class MainWindow::Impl {
         displayedPreview = preview;
         previewDisplayError.clear();
         const double progressValue =
-            static_cast<double>(index) / static_cast<double>(preview->frameCount() - 1);
-        frameLabel->setText(QStringLiteral("%1% · поворот %2°")
-                                .arg(number(progressValue * 100.0),
-                                     number(progressValue * preview->model().angleRadians * 180.0 /
-                                            std::numbers::pi)));
+            preview->frameCount() > 1
+                ? static_cast<double>(index) / static_cast<double>(preview->frameCount() - 1)
+                : 0.0;
+        frameLabel->setText(preview->toolSetup()
+                                ? QStringLiteral("Начальное положение · статичный просмотр")
+                                : QStringLiteral("%1% · поворот %2°")
+                                      .arg(number(progressValue * 100.0),
+                                           number(progressValue * preview->model().angleRadians *
+                                                  180.0 / std::numbers::pi)));
     }
     void refreshPreview() {
         const auto &session = controller->session();
@@ -396,6 +401,33 @@ class MainWindow::Impl {
                                    entry->review == BendReview::Confirmed && entry->target &&
                                    !controller->hasWork());
         fixedSide->setEnabled(document && !controller->hasWork());
+        const bool toolEditable =
+            entry && entry->review == BendReview::Confirmed && !controller->hasWork();
+        for (auto *field : toolFields) {
+            field->setEnabled(toolEditable);
+        }
+        applyTools->setEnabled(toolEditable && previewBuilder && supported && matchingThickness &&
+                               entry->target);
+        clearTools->setEnabled(toolEditable && entry->tools.has_value());
+        const auto entryId = entry ? entry->id : std::string{};
+        const auto savedTools = entry ? entry->tools : std::nullopt;
+        if (toolsDocumentRevision != session.revision() || toolsEntryId != entryId ||
+            shownTools != savedTools) {
+            toolsDocumentRevision = session.revision();
+            toolsEntryId = entryId;
+            shownTools = savedTools;
+            const auto t = savedTools.value_or(core::PressTools{
+                48, std::numbers::pi / 2.0, 85.0 * std::numbers::pi / 180.0, 2, 100, 10});
+            const std::array<double, 6> values{t.openingMm,
+                                               t.dieAngleRadians * 180.0 / std::numbers::pi,
+                                               t.punchAngleRadians * 180.0 / std::numbers::pi,
+                                               t.noseRadiusMm,
+                                               t.lengthMm,
+                                               t.clearanceMm};
+            for (std::size_t i = 0; i < toolFields.size(); ++i) {
+                toolFields[i]->setValue(values[i]);
+            }
+        }
         const auto preview = controller->bendPreview();
         if (!preview) {
             previewDisplayError.clear();
@@ -414,20 +446,35 @@ class MainWindow::Impl {
             bendFrame->setValue(0);
             showPreviewFrame();
         }
-        bendFrame->setEnabled(preview && !controller->hasWork() && previewDisplayError.isEmpty());
-        playBend->setEnabled(preview && !controller->hasWork() && previewDisplayError.isEmpty());
+        const bool staticSetup = preview && preview->toolSetup();
+        previewControls->setCurrentIndex(staticSetup ? 1 : 0);
+        playBend->setVisible(!staticSetup);
+        showKinematics->setVisible(staticSetup);
+        showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
+        bendFrame->setEnabled(preview && !preview->toolSetup() && !controller->hasWork() &&
+                              previewDisplayError.isEmpty());
+        playBend->setEnabled(preview && !preview->toolSetup() && !controller->hasWork() &&
+                             previewDisplayError.isEmpty());
         returnToCad->setEnabled(preview || controller->isPreparingPreview());
-        if (!preview || controller->hasWork()) {
+        if (!preview || preview->toolSetup() || controller->hasWork()) {
             stopPlayback();
         }
         if (controller->isPreparingPreview()) {
             previewStatus->setText(
-                QStringLiteral("Проверяем восстановление всей детали и готовим 21 состояние…"));
+                QStringLiteral("Проверяем восстановление всей детали и готовим геометрию…"));
         } else if (const auto &failure = controller->bendPreviewError()) {
             previewStatus->setText(
                 failure->code == BendPreviewErrorCode::TargetMismatch
                     ? QStringLiteral("Для первого просмотра целевые угол и радиус должны совпадать "
                                      "с STEP. Верните параметры из CAD.")
+                : failure->code == BendPreviewErrorCode::ToolTooShort
+                    ? QStringLiteral("Инструмент короче ширины заготовки. Увеличьте рабочую длину.")
+                : failure->code == BendPreviewErrorCode::MissingLeftSupport
+                    ? QStringLiteral("Под левой полкой нет опоры: край не перекрывает плечо "
+                                     "матрицы. Уменьшите раскрытие V.")
+                : failure->code == BendPreviewErrorCode::MissingRightSupport
+                    ? QStringLiteral("Под правой полкой нет опоры: край не перекрывает плечо "
+                                     "матрицы. Уменьшите раскрытие V.")
                 : failure->code == BendPreviewErrorCode::UnsupportedParameters
                     ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
                                      "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
@@ -441,6 +488,19 @@ class MainWindow::Impl {
         } else if (!previewDisplayError.isEmpty()) {
             previewStatus->setText(
                 QStringLiteral("Не удалось показать состояние: %1").arg(previewDisplayError));
+        } else if (preview && preview->toolSetup()) {
+            const auto &setup = *preview->toolSetup();
+            previewStatus->setText(
+                QStringLiteral("Начальная установка проверена\nПоказано одно неподвижное "
+                               "положение.\nПерекрытие плеч матрицы: слева %1 "
+                               "мм, справа %2 мм.\n"
+                               "Зазор до пуансона: %3 мм. Объёмных пересечений не обнаружено в "
+                               "пределах допуска.\n\n"
+                               "Проверено только это положение. Движение, рабочий контакт при "
+                               "гибке, траектории установки и извлечения ещё не проверяются.")
+                    .arg(number(setup.leftOverlapMm), number(setup.rightOverlapMm),
+                         number(setup.tools.clearanceMm)));
+            previewStatus->setToolTip({});
         } else if (preview) {
             const auto &m = preview->model();
             previewStatus->setText(
@@ -466,6 +526,8 @@ class MainWindow::Impl {
                                      "параметры из CAD, затем подготовьте просмотр."));
             frameLabel->setText(QStringLiteral("Исходная CAD-форма"));
         }
+        toolStatus->setText(previewStatus->text());
+        toolStatus->setToolTip(previewStatus->toolTip());
     }
 
     void showThicknessEvidence(bool updateInput) {
@@ -766,8 +828,18 @@ class MainWindow::Impl {
     QComboBox *fixedSide = nullptr;
     QPushButton *preparePreview = nullptr;
     QLabel *previewStatus = nullptr;
+    std::array<QDoubleSpinBox *, 6> toolFields{};
+    QPushButton *applyTools = nullptr;
+    QPushButton *clearTools = nullptr;
+    QLabel *toolStatus = nullptr;
+    std::uint64_t toolsDocumentRevision = 0;
+    std::string toolsEntryId;
+    std::optional<core::PressTools> shownTools;
     QSlider *bendFrame = nullptr;
     QPushButton *playBend = nullptr;
+    QPushButton *showKinematics = nullptr;
+    QLabel *setupPlaybackHint = nullptr;
+    QStackedWidget *previewControls = nullptr;
     QPushButton *returnToCad = nullptr;
     QLabel *frameLabel = nullptr;
     QTimer *playback = nullptr;
@@ -885,8 +957,18 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     toolbar->addSeparator();
     for (const auto *label : {"Деталь", "Инструмент", "Порядок", "Проверка"}) {
         auto *action = toolbar->addAction(QString::fromUtf8(label));
-        action->setEnabled(false);
-        action->setToolTip(QStringLiteral("Запланировано для следующих этапов"));
+        if (QString::fromUtf8(label) == QStringLiteral("Инструмент")) {
+            action->setObjectName(QStringLiteral("toolSetupAction"));
+            action->setEnabled(impl_->previewBuilder != nullptr);
+            action->setToolTip(QStringLiteral("Параметры инструмента и начальная установка"));
+            connect(action, &QAction::triggered, this, [this] {
+                impl_->propertyTabs->setCurrentIndex(3);
+                impl_->propertyTabs->parentWidget()->show();
+            });
+        } else {
+            action->setEnabled(false);
+            action->setToolTip(QStringLiteral("Запланировано для следующих этапов"));
+        }
     }
     impl_->camera = addToolBar(QStringLiteral("Камера"));
     impl_->camera->setObjectName(QStringLiteral("cameraToolbar"));
@@ -1070,10 +1152,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->targetRadius->setSuffix(QStringLiteral(" мм"));
     targetLayout->addRow(QStringLiteral("Внутренний радиус:"), impl_->targetRadius);
     auto *targetHint = new QLabel(
-        QStringLiteral("0° — плоский лист, 90° — прямой сгиб. Поддерживаемое задание: 1–179°. "
-                       "Это целевая форма, не угол хода пресса.\n\n"
-                       "Подтверждение зоны разрешает применить задание. Инструмент, направление, "
-                       "развёртка и движение будут заданы на следующем этапе."),
+        QStringLiteral(
+            "0° — плоский лист, 90° — прямой сгиб. Поддерживаемое задание: 1–179°. "
+            "Это целевая форма, не угол хода пресса.\n\n"
+            "Подтверждение зоны разрешает применить задание. Для одной простой зоны доступны "
+            "кинематический просмотр и начальная установка инструмента на соседних вкладках."),
         bendPanel);
     targetHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     targetHint->setWordWrap(true);
@@ -1140,7 +1223,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *kinematicHint = new QLabel(
         QStringLiteral("Модель сохраняет толщину и длину средней поверхности. Это геометрическая "
                        "кинематика.\n\n"
-                       "Инструмент, контакты, столкновения, усилие и пружинение не рассчитываются. "
+                       "Здесь инструмент и контакт не участвуют. Начальная установка доступна на "
+                       "вкладке «Инструмент». Усилие и пружинение не рассчитываются. "
                        "Это не технологическая развёртка для производства.\n\nВыбор полки и кадра "
                        "относится к просмотру и не сохраняется в проекте."),
         operationPanel);
@@ -1153,6 +1237,86 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     operationScroll->setMinimumWidth(300);
     operationScroll->setWidget(operationPanel);
     impl_->propertyTabs->addTab(operationScroll, QStringLiteral("Операция"));
+    auto *toolPanel = new QWidget(this);
+    auto *toolLayout = new QVBoxLayout(toolPanel);
+    auto *toolHint =
+        new QLabel(QStringLiteral("Начальное положение на V-матрице · без движения\n\n"
+                                  "Параметрические прямые инструменты с закруглённым носиком "
+                                  "пуансона и острыми плечами матрицы. "
+                                  "Поля ниже — учебный пример; изменения применяются кнопкой. "
+                                  "Подбор инструмента по материалу и "
+                                  "проверка хода пресса ещё не реализованы. "
+                                  "Середина зоны сгиба центрируется над V-пазом. Оси: X — поперёк "
+                                  "паза, Y — вверх, Z — вдоль инструмента."),
+                   toolPanel);
+    toolHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    toolHint->setWordWrap(true);
+    toolLayout->addWidget(toolHint);
+    auto *toolForm = new QFormLayout;
+    const std::array<QString, 6> toolLabels{
+        QStringLiteral("Раскрытие V, мм:"),   QStringLiteral("Угол паза, °:"),
+        QStringLiteral("Угол пуансона, °:"),  QStringLiteral("Радиус носика, мм:"),
+        QStringLiteral("Рабочая длина, мм:"), QStringLiteral("Начальный зазор, мм:")};
+    const std::array<const char *, 6> toolNames{"toolOpening",    "toolDieAngle", "toolPunchAngle",
+                                                "toolNoseRadius", "toolLength",   "toolClearance"};
+    const std::array<double, 6> toolMin{1, 30, 10, 0.1, 1, 0.1};
+    const std::array<double, 6> toolMax{1000, 120, 120, 250, 100000, 1000};
+    for (std::size_t i = 0; i < toolLabels.size(); ++i) {
+        auto *field = new QDoubleSpinBox(toolPanel);
+        field->setObjectName(QLatin1String(toolNames[i]));
+        field->setAccessibleName(toolLabels[i]);
+        field->setDecimals(3);
+        field->setRange(toolMin[i], toolMax[i]);
+        field->setKeyboardTracking(false);
+        impl_->toolFields[i] = field;
+        toolForm->addRow(toolLabels[i], field);
+    }
+    toolLayout->addLayout(toolForm);
+    impl_->applyTools =
+        new QPushButton(QStringLiteral("Применить и показать положение"), toolPanel);
+    impl_->applyTools->setObjectName(QStringLiteral("applyToolSetup"));
+    toolLayout->addWidget(impl_->applyTools);
+    impl_->clearTools = new QPushButton(QStringLiteral("Удалить настройку инструмента"), toolPanel);
+    impl_->clearTools->setObjectName(QStringLiteral("clearToolSetup"));
+    toolLayout->addWidget(impl_->clearTools);
+    impl_->toolStatus = new QLabel(toolPanel);
+    impl_->toolStatus->setObjectName(QStringLiteral("toolSetupStatus"));
+    impl_->toolStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    impl_->toolStatus->setWordWrap(true);
+    impl_->toolStatus->setTextFormat(Qt::PlainText);
+    impl_->toolStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    toolLayout->addWidget(impl_->toolStatus);
+    toolLayout->addStretch();
+    auto *toolScroll = new QScrollArea(this);
+    toolScroll->setWidgetResizable(true);
+    toolScroll->setMinimumWidth(300);
+    toolScroll->setWidget(toolPanel);
+    impl_->propertyTabs->addTab(toolScroll, QStringLiteral("Инструмент"));
+    connect(impl_->applyTools, &QPushButton::clicked, this, [this] {
+        const auto row = impl_->bendList->currentIndex().row();
+        const auto &f = impl_->toolFields;
+        const core::PressTools tools{f[0]->value(),
+                                     f[1]->value() * std::numbers::pi / 180.0,
+                                     f[2]->value() * std::numbers::pi / 180.0,
+                                     f[3]->value(),
+                                     f[4]->value(),
+                                     f[5]->value()};
+        if (!core::validPressTools(tools)) {
+            impl_->toolStatus->setText(
+                QStringLiteral("Проверьте параметры: радиус носика должен быть не больше V/4."));
+            return;
+        }
+        if (row >= 0 && impl_->controller->setBendTools(static_cast<std::size_t>(row), tools)) {
+            impl_->controller->prepareBendPreview(static_cast<std::size_t>(row), false,
+                                                  impl_->previewBuilder, true);
+        }
+    });
+    connect(impl_->clearTools, &QPushButton::clicked, this, [this] {
+        const auto row = impl_->bendList->currentIndex().row();
+        if (row >= 0) {
+            impl_->controller->setBendTools(static_cast<std::size_t>(row), std::nullopt);
+        }
+    });
     addDock(QStringLiteral("propertiesDock"), QStringLiteral("Параметры"), impl_->propertyTabs,
             Qt::RightDockWidgetArea);
     auto *sequence = new QWidget(this);
@@ -1160,19 +1324,36 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->frameLabel = new QLabel(sequence);
     impl_->frameLabel->setObjectName(QStringLiteral("bendFrameLabel"));
     sequenceLayout->addWidget(impl_->frameLabel);
+    impl_->setupPlaybackHint = new QLabel(
+        QStringLiteral("Гибка с инструментом ещё не реализована. Здесь показано одно начальное "
+                       "положение. Для анимации детали подготовьте движение без инструмента."),
+        sequence);
+    impl_->setupPlaybackHint->setObjectName(QStringLiteral("setupPlaybackHint"));
+    impl_->setupPlaybackHint->setWordWrap(true);
+
     impl_->bendFrame = new QSlider(Qt::Horizontal, sequence);
     impl_->bendFrame->setObjectName(QStringLiteral("bendFrame"));
     impl_->bendFrame->setAccessibleName(QStringLiteral("Промежуточное состояние сгиба"));
     impl_->bendFrame->setRange(0, 20);
     impl_->bendFrame->setTickPosition(QSlider::TicksBelow);
     impl_->bendFrame->setTickInterval(5);
-    sequenceLayout->addWidget(impl_->bendFrame);
+    impl_->previewControls = new QStackedWidget(sequence);
+    impl_->previewControls->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    impl_->previewControls->addWidget(impl_->bendFrame);
+    impl_->previewControls->addWidget(impl_->setupPlaybackHint);
+    sequenceLayout->addWidget(impl_->previewControls);
     auto *playLayout = new QHBoxLayout;
     impl_->playBend = new QPushButton(QStringLiteral("Воспроизвести"), sequence);
     impl_->playBend->setObjectName(QStringLiteral("playBend"));
     impl_->returnToCad = new QPushButton(QStringLiteral("Вернуться к STEP"), sequence);
     impl_->returnToCad->setObjectName(QStringLiteral("returnToCad"));
     playLayout->addWidget(impl_->playBend);
+    impl_->showKinematics =
+        new QPushButton(QStringLiteral("Подготовить движение без инструмента"), sequence);
+    impl_->showKinematics->setObjectName(QStringLiteral("showKinematics"));
+    connect(impl_->showKinematics, &QPushButton::clicked, impl_->preparePreview,
+            &QPushButton::click);
+    playLayout->addWidget(impl_->showKinematics);
     playLayout->addWidget(impl_->returnToCad);
     playLayout->addStretch();
     sequenceLayout->addLayout(playLayout);
