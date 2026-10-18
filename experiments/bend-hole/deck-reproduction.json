@@ -1,0 +1,50 @@
+{
+  "generator_sha256": "aa5c8340185c66c875b9f27cfcd4738cfaa17d2d6fe39fd878b2861f99a0813a",
+  "cases": {
+    "beam": {
+      "expected": "72c107ce412cd17e0922bfcd881bf9fe32e401459224c36216200fd375b61945",
+      "regenerated": "72c107ce412cd17e0922bfcd881bf9fe32e401459224c36216200fd375b61945",
+      "identical": true
+    },
+    "center-coarse": {
+      "expected": "8dff2f5bcdd85d4652271da3adafa0048d48867f4a100bb316bb24af57d9f612",
+      "regenerated": "8dff2f5bcdd85d4652271da3adafa0048d48867f4a100bb316bb24af57d9f612",
+      "identical": true
+    },
+    "center-fine": {
+      "expected": "edd9c884e3fca35b6e202fd1265a6560c590f136ccec73cd8d76526fc39a7db2",
+      "regenerated": "edd9c884e3fca35b6e202fd1265a6560c590f136ccec73cd8d76526fc39a7db2",
+      "identical": true
+    },
+    "center-medium": {
+      "expected": "55b8bdea97af7efce0813dcf22b2b49eac41cf38e384b8a60398c563115405d5",
+      "regenerated": "55b8bdea97af7efce0813dcf22b2b49eac41cf38e384b8a60398c563115405d5",
+      "identical": true
+    },
+    "control": {
+      "expected": "212af792a14b7366046319a824cb6648839c40f9f251600bcc19180015b042a8",
+      "regenerated": "212af792a14b7366046319a824cb6648839c40f9f251600bcc19180015b042a8",
+      "identical": true
+    },
+    "offset": {
+      "expected": "609bf720af48b0819c05f1d2f53ee9afdffd3ef3a05b228d3879657408d259e5",
+      "regenerated": "609bf720af48b0819c05f1d2f53ee9afdffd3ef3a05b228d3879657408d259e5",
+      "identical": true
+    },
+    "small-step": {
+      "expected": "26268c21129cefd23d694e372b17e3457707ef8357026b9d1873be8b9f95d1d6",
+      "regenerated": "26268c21129cefd23d694e372b17e3457707ef8357026b9d1873be8b9f95d1d6",
+      "identical": true
+    },
+    "stiff-contact": {
+      "expected": "ad525068e736a0aea11c65753ed92e76441c0b8ffff2c70d66939989d28c573d",
+      "regenerated": "ad525068e736a0aea11c65753ed92e76441c0b8ffff2c70d66939989d28c573d",
+      "identical": true
+    },
+    "unloading": {
+      "expected": "684ebbd004df70ed08893b820257758b523983f131e3a3b60beeb053b6d8a30f",
+      "regenerated": "684ebbd004df70ed08893b820257758b523983f131e3a3b60beeb053b6d8a30f",
+      "identical": true
+    }
+  }
+}
