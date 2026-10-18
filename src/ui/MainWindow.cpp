@@ -405,8 +405,7 @@ class MainWindow::Impl {
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
         bool supported = document && row == 0 &&
                          document->metadata().bendAnalysis.bends.size() == 1 &&
-                         !document->metadata().bendAnalysis.bends[0].trimmedEnds &&
-                         document->metadata().faceCount == 10;
+                         !document->metadata().bendAnalysis.bends[0].trimmedEnds;
         bool matchingThickness = true;
         if (supported && session.manualThicknessMm()) {
             matchingThickness = std::abs(*session.manualThicknessMm() -
@@ -501,8 +500,9 @@ class MainWindow::Impl {
                                      "Конформный контакт пока не поддерживается.")
                 : failure->code == BendPreviewErrorCode::SupportNotProven
                     ? QStringLiteral(
-                          "Не удалось подтвердить опору обеих полок на всём ходе. Измените "
-                          "раскрытие V; начальную установку можно проверить отдельно.")
+                          "Не удалось подтвердить сплошной участок опоры обеих полок: проверьте "
+                          "отверстия/контур около сгиба и раскрытие V. Для движения участок "
+                          "опоры проверяется на всём ходе.")
                 : failure->code == BendPreviewErrorCode::ToolIntersection
                     ? QStringLiteral("Не удалось подтвердить отсутствие пересечения с инструментом "
                                      "в положении %1. Проверьте параметры.")
@@ -515,9 +515,11 @@ class MainWindow::Impl {
                     ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
                                      "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
                 : failure->code == BendPreviewErrorCode::UnsupportedGeometry
-                    ? QStringLiteral("Геометрия не поддерживается первым сценарием. Нужна одна "
-                                     "прямая зона и две прямоугольные полки без вырезов/подрезки; "
-                                     "исходная деталь доступна для просмотра.")
+                    ? QStringLiteral(
+                          "Геометрия не поддерживается первым сценарием. Нужна одна "
+                          "целая прямая зона и две плоские полки в пределах ширины сгиба. "
+                          "Отверстия и контур полок сохраняются; геометрия всей детали "
+                          "должна пройти проверку восстановления.")
                     : QStringLiteral("Не удалось подготовить кинематический просмотр. Исходная "
                                      "деталь сохранена."));
             previewStatus->setToolTip(text(failure->detail));
@@ -553,7 +555,8 @@ class MainWindow::Impl {
             const auto &m = preview->model();
             previewStatus->setText(
                 QStringLiteral(
-                    "Заготовка: %1 × %2 × %3 мм\nНеподвижная полка: %4 мм\nПодвижная полка: %5 "
+                    "Заготовка (габарит): %1 × %2 × %3 мм\nГабарит неподвижной полки: %4 "
+                    "мм\nГабарит подвижной полки: %5 "
                     "мм\nДуга средней поверхности: %6 мм\n\nСиняя — неподвижная полка; оранжевая — "
                     "зона сгиба; зелёная — подвижная полка.")
                     .arg(number(simulation::blankLengthMm(m)), number(m.widthMm),
@@ -565,7 +568,8 @@ class MainWindow::Impl {
                 !document ? QStringLiteral("Откройте учебную деталь bend-90-6mm.step.")
                 : !supported ? QStringLiteral(
                                    "Выберите единственный прямой сгиб детали с двумя "
-                                   "прямоугольными полками. Многогибовые детали и подрезанные "
+                                   "плоскими полками. Отверстия и скошенные края полок допустимы. "
+                                   "Многогибовые детали и подрезанные "
                                    "торцы пока поддерживаются только для просмотра исходного STEP.")
                 : !matchingThickness
                     ? QStringLiteral("Ручная толщина отличается от геометрии. Для просмотра "

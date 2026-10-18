@@ -23,6 +23,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QSlider>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
@@ -1030,6 +1031,126 @@ void testSingleBendWorkflow(bool graphics) {
             "Close retained playback");
     window.close();
 }
+void testProfiledBendWorkflow(bool graphics) {
+    using namespace bending::application;
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    const auto builder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files, builder);
+    window.resize(1360, 1000);
+    window.show();
+    auto &controller = window.importController();
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    auto *list = window.findChild<QListView *>(QStringLiteral("bendList"));
+    auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
+    auto *mode = window.findChild<QComboBox *>(QStringLiteral("toolPreviewMode"));
+    auto *apply = window.findChild<QPushButton *>(QStringLiteral("applyToolSetup"));
+    auto *slider = window.findChild<QSlider *>(QStringLiteral("bendFrame"));
+    auto *play = window.findChild<QPushButton *>(QStringLiteral("playBend"));
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    QStringList sources{QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                        QStringLiteral("/profiled-bend-6mm.step")};
+    if (const auto external = qEnvironmentVariable("BENDING_PROFILED_STEP"); !external.isEmpty()) {
+        sources.push_back(external);
+    }
+    for (int sample = 0; sample < sources.size(); ++sample) {
+        controller.closeDocument();
+        window.openStep(sources[sample]);
+        waitUntil(finished);
+        require(controller.session().document() &&
+                    controller.session().document()->metadata().faceCount > 10,
+                "Profiled workflow did not open a detailed solid");
+        list->setCurrentIndex(list->model()->index(0, 0));
+        controller.setBendReview(0, BendReview::Confirmed);
+        window.findChild<QPushButton *>(QStringLiteral("applyBendTarget"))->click();
+        const auto original = controller.session().document();
+        const auto revision = controller.session().revision();
+        tabs->setCurrentIndex(3);
+        mode->setCurrentIndex(0);
+        require(apply->isEnabled(), "Detailed flanges disabled tool preparation");
+        apply->click();
+        waitUntil(finished);
+        if (controller.bendPreviewError()) {
+            throw std::runtime_error("Profiled workflow: " + controller.bendPreviewError()->detail);
+        }
+        require(controller.bendPreview() && controller.bendPreview()->pressMotion() &&
+                    slider->maximum() == 40 && play->isEnabled(),
+                "Detailed flanges have no playable motion");
+        const auto snapshot = [&](const char *suffix) {
+            const auto output = qEnvironmentVariable("BENDING_PROFILED_SNAPSHOT");
+            if (graphics && !output.isEmpty()) {
+                waitUntil([&] { return viewer->isReady(); });
+                QCoreApplication::processEvents();
+                auto shot = window.grab().toImage();
+                QPainter painter(&shot);
+                painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                                  viewer->captureImage());
+                painter.end();
+                require(shot.save(output + QStringLiteral("-%1-").arg(sample) +
+                                  QString::fromLatin1(suffix) + QStringLiteral(".png")),
+                        "Cannot save profiled snapshot");
+            }
+        };
+        snapshot("start");
+        slider->setValue(20);
+        const auto half = graphics ? viewer->captureImage() : QImage{};
+        snapshot("half");
+        slider->setValue(40);
+        snapshot("final");
+        if (graphics) {
+            require(differences(half, viewer->captureImage()) > 100,
+                    "Detailed geometry did not move in the viewer");
+        }
+        play->click();
+        waitUntil([&] { return slider->value() > 0 && slider->value() < 40; });
+        play->click();
+        require(controller.session().document() == original &&
+                    controller.session().revision() == revision,
+                "Profiled playback replaced source CAD");
+        window.findChild<QPushButton *>(QStringLiteral("returnToCad"))->click();
+        tabs->setCurrentIndex(2);
+        window.findChild<QComboBox *>(QStringLiteral("fixedBendSide"))->setCurrentIndex(1);
+        window.findChild<QPushButton *>(QStringLiteral("prepareBendPreview"))->click();
+        waitUntil(finished);
+        require(controller.bendPreview() && !controller.bendPreview()->toolSetup() &&
+                    slider->maximum() == 20,
+                "Profiled kinematic view failed");
+        window.findChild<QPushButton *>(QStringLiteral("returnToCad"))->click();
+        tabs->setCurrentIndex(3);
+        mode->setCurrentIndex(1);
+        apply->click();
+        waitUntil(finished);
+        require(controller.bendPreview() && controller.bendPreview()->frameCount() == 1 &&
+                    !controller.bendPreview()->pressMotion(),
+                "Profiled static setup failed");
+        QTemporaryDir temporary;
+        const auto destination = temporary.path() + QStringLiteral("/profiled.bend");
+#ifdef _WIN32
+        const auto path = std::filesystem::path(destination.toStdWString());
+#else
+        const auto path = std::filesystem::path(destination.toUtf8().toStdString());
+#endif
+        controller.saveProject(path, files);
+        waitUntil(finished);
+        require(!controller.session().modified(), "Profiled project was not saved");
+        controller.closeDocument();
+        window.openStep(destination);
+        waitUntil(finished);
+        list->setCurrentIndex(list->model()->index(0, 0));
+        tabs->setCurrentIndex(3);
+        mode->setCurrentIndex(0);
+        require(apply->isEnabled() && controller.session().bend(0)->tools.has_value(),
+                "Saved detailed part lost its target/tools");
+        apply->click();
+        waitUntil(finished);
+        require(controller.bendPreview() && controller.bendPreview()->pressMotion() &&
+                    !controller.session().modified(),
+                "Saved detailed part motion was not reproducible");
+    }
+    controller.closeDocument();
+    window.close();
+}
 void testTrimmedBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
@@ -1111,6 +1232,7 @@ int main(int argc, char *argv[]) {
         testBendPreparationWorkflow(graphics);
         testSingleBendWorkflow(graphics);
         testTrimmedBendWorkflow(graphics);
+        testProfiledBendWorkflow(graphics);
         const auto external = qEnvironmentVariable("BENDING_THICKNESS_STEP");
         bool validExpected = false;
         const auto expected = qEnvironmentVariable("BENDING_THICKNESS_MM").toDouble(&validExpected);

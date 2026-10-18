@@ -1,13 +1,17 @@
 #include "BendFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
+#include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
 
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
@@ -16,8 +20,10 @@
 #include <STEPControl_Writer.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <numbers>
@@ -306,7 +312,15 @@ void test(const std::filesystem::path &path) {
     require(oblique->metadata().faceCount == 10 &&
                 oblique->metadata().bendAnalysis.bends.size() == 1,
             "Negative fixture does not exercise reconstruction proof");
-    reject(oblique);
+    // A nonrectangular free edge is now retained, rather than replaced by an area/W strip.
+    check(preview(oblique, false), oblique->metadata().volumeMm3);
+    check(preview(oblique, true), oblique->metadata().volumeMm3);
+    const auto boss = load(
+        BRepAlgoAPI_Fuse(fixtures::bentStrip(), BRepPrimAPI_MakeBox(gp_Pnt(5.5, -20, 30), 2, 5, 5))
+            .Shape(),
+        path);
+    require(boss->metadata().bendAnalysis.bends.size() == 1, "Boss fixture lost its local bend");
+    reject(boss);
     const auto straightCut =
         BRepPrimAPI_MakeHalfSpace(
             BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, -20, 0), gp_Dir(0, 1, 0))).Face(),
@@ -337,12 +351,110 @@ void test(const std::filesystem::path &path) {
                     .code == application::BendPreviewErrorCode::Cancelled,
             "Cancelled preview published geometry");
 }
+void testProfiled(const std::filesystem::path &path) {
+    const auto document = load(fixtures::profiledBend(), path);
+    require(document->metadata().faceCount > 10 &&
+                document->metadata().bendAnalysis.bends.size() == 1,
+            "Profiled fixture must retain one full bend and detailed flanges");
+    const auto &source =
+        cad::OcctDocumentAccess::shape(dynamic_cast<const cad::CadDocument &>(*document));
+    TopTools_IndexedMapOfShape sourceFaces;
+    TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
+    std::vector<Handle(Poly_Triangulation)> meshes;
+    for (int i = 1; i <= sourceFaces.Extent(); ++i) {
+        TopLoc_Location location;
+        meshes.push_back(BRep_Tool::Triangulation(TopoDS::Face(sourceFaces(i)), location));
+    }
+    for (bool second : {false, true}) {
+        const auto result = preview(document, second);
+        check(result, document->metadata().volumeMm3);
+        require(std::abs(result->model().fixedFlangeMm - 30) < 1e-5 &&
+                    std::abs(result->model().movingFlangeMm - 30) < 1e-5,
+                "Perforation changed flange envelope lengths");
+        for (std::size_t i = 0; i < result->frameCount(); ++i) {
+            const auto &frame = cad::OcctPreviewAccess::frame(*result, i);
+            TopTools_IndexedMapOfShape frameFaces;
+            TopExp::MapShapes(frame.shape, TopAbs_FACE, frameFaces);
+            int cones = 0, holes = 0;
+            for (int j = 1; j <= frameFaces.Extent(); ++j) {
+                require(!sourceFaces.Contains(frameFaces(j)), "Frame shares mutable source faces");
+                const BRepAdaptor_Surface surface(TopoDS::Face(frameFaces(j)));
+                cones += surface.GetType() == GeomAbs_Cone ? 1 : 0;
+                if (surface.GetType() == GeomAbs_Cylinder &&
+                    (std::abs(surface.Cylinder().Radius() - 1.5) < 1e-5 ||
+                     std::abs(surface.Cylinder().Radius() - 2.5) < 1e-5)) {
+                    ++holes;
+                }
+            }
+            require(cones >= 1 && holes >= 2, "A frame filled a hole or lost its countersink");
+        }
+        const auto &last = cad::OcctPreviewAccess::frame(*result, 20).shape;
+        for (bool reverse : {false, true}) {
+            BRepAlgoAPI_Cut residual;
+            TopTools_ListOfShape arguments, tools;
+            arguments.Append(reverse ? last : source);
+            tools.Append(reverse ? source : last);
+            residual.SetArguments(arguments);
+            residual.SetTools(tools);
+            residual.SetNonDestructive(true);
+            residual.Build();
+            require(residual.IsDone() && !residual.HasErrors() && volume(residual.Shape()) < 1e-4,
+                    "Profiled endpoint does not match the original STEP");
+        }
+    }
+    const core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
+    checkMotion(document, tools);
+    for (int i = 1; i <= sourceFaces.Extent(); ++i) {
+        TopLoc_Location location;
+        require(BRep_Tool::Triangulation(TopoDS::Face(sourceFaces(i)), location) ==
+                    meshes[static_cast<std::size_t>(i - 1)],
+                "Preview changed the source triangulation");
+    }
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(3, -8, 11), gp_Dir(1, 2, 3)), 1.1);
+    const auto rotated =
+        load(BRepBuilderAPI_Transform(fixtures::profiledBend(), rotation, true), path, "INCH");
+    check(preview(rotated, true), rotated->metadata().volumeMm3);
+    checkMotion(rotated, tools);
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(), gp_Dir(1, 0, 0)));
+    const auto mirrored =
+        load(BRepBuilderAPI_Transform(fixtures::profiledBend(), mirror, true), path);
+    check(preview(mirrored, false), mirrored->metadata().volumeMm3);
+    const auto interrupted =
+        load(BRepAlgoAPI_Cut(
+                 fixtures::bentStrip(8, 6),
+                 BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(7, -12, 40), gp_Dir(1, 0, 0)), 2, 8)),
+             path);
+    check(preview(interrupted, false), interrupted->metadata().volumeMm3);
+    const auto &bend = interrupted->metadata().bendAnalysis.bends.at(0);
+    for (bool motion : {false, true}) {
+        const auto rejected =
+            motion ? cad::SingleBendPreviewBuilder{}.buildToolMotion(
+                         interrupted, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {})
+                   : cad::SingleBendPreviewBuilder{}.buildToolSetup(
+                         interrupted, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {});
+        require(std::get<application::BendPreviewError>(rejected).code ==
+                    application::BendPreviewErrorCode::SupportNotProven,
+                "A flange envelope was mistaken for intact support material");
+    }
+    if (const auto *external = std::getenv("BENDING_PROFILED_STEP")) {
+        const auto imported = cad::StepImporter{}.load(external, {}, {});
+        const auto local = application::resultDocument(imported);
+        require(local != nullptr, "Cannot load local profiled STEP");
+        check(preview(local, false), local->metadata().volumeMm3);
+        check(preview(local, true), local->metadata().volumeMm3);
+        checkMotion(local, tools);
+        std::cout << "Private profiled STEP: both fixed sides and 41 tool states passed\n";
+    }
+}
 } // namespace
 int main() {
     try {
         STEPControl_Controller::Init();
         Temporary temporary;
         test(temporary.path / "part.step");
+        testProfiled(temporary.path / "profiled.step");
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

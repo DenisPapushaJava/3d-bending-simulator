@@ -5,6 +5,8 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -14,6 +16,7 @@
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
 
+#include <array>
 #include <cmath>
 #include <numbers>
 
@@ -68,6 +71,28 @@ inline TopoDS_Shape trimmedBend() {
     const auto plane = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(-1, 0, 1))).Face();
     const auto below = BRepPrimAPI_MakeHalfSpace(plane, gp_Pnt(0, 0, -10)).Solid();
     return BRepAlgoAPI_Cut(bentStrip(), below).Shape();
+}
+// Independently designed MIT fixture: two perforated flanges, a countersink and
+// a clipped free corner. The bend and its full-width support strips are intact.
+inline TopoDS_Shape profiledBend() {
+    auto shape = bentStrip(8, 6);
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
+                                       gp_Ax2(gp_Pnt(7, -26, 25), gp_Dir(1, 0, 0)), 1.5, 8))
+                .Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCone(
+                                       gp_Ax2(gp_Pnt(14, -26, 25), gp_Dir(-1, 0, 0)), 3, 1.5, 1.5))
+                .Shape();
+    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
+                                       gp_Ax2(gp_Pnt(-26, 7, 50), gp_Dir(0, 1, 0)), 2.5, 8))
+                .Shape();
+    BRepBuilderAPI_MakeWire corner;
+    const std::array<gp_Pnt, 3> points{gp_Pnt(7, -30, 0), gp_Pnt(7, -27, 0), gp_Pnt(7, -30, 3)};
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        corner.Add(BRepBuilderAPI_MakeEdge(points[i], points[(i + 1) % points.size()]));
+    }
+    return BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(corner.Wire()),
+                                                        gp_Vec(8, 0, 0)))
+        .Shape();
 }
 inline TopoDS_Shape channel() {
     BRepBuilderAPI_MakeWire wire;
