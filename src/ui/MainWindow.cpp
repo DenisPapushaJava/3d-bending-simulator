@@ -26,6 +26,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QStatusBar>
 #include <QTabWidget>
@@ -375,7 +376,7 @@ class MainWindow::Impl {
                 ? static_cast<double>(index) / static_cast<double>(preview->frameCount() - 1)
                 : 0.0;
         frameLabel->setText(preview->toolSetup()
-                                ? QStringLiteral("Установка · плоская заготовка")
+                                ? QStringLiteral("Начальное положение · статичный просмотр")
                                 : QStringLiteral("%1% · поворот %2°")
                                       .arg(number(progressValue * 100.0),
                                            number(progressValue * preview->model().angleRadians *
@@ -445,6 +446,11 @@ class MainWindow::Impl {
             bendFrame->setValue(0);
             showPreviewFrame();
         }
+        const bool staticSetup = preview && preview->toolSetup();
+        previewControls->setCurrentIndex(staticSetup ? 1 : 0);
+        playBend->setVisible(!staticSetup);
+        showKinematics->setVisible(staticSetup);
+        showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
         bendFrame->setEnabled(preview && !preview->toolSetup() && !controller->hasWork() &&
                               previewDisplayError.isEmpty());
         playBend->setEnabled(preview && !preview->toolSetup() && !controller->hasWork() &&
@@ -485,7 +491,8 @@ class MainWindow::Impl {
         } else if (preview && preview->toolSetup()) {
             const auto &setup = *preview->toolSetup();
             previewStatus->setText(
-                QStringLiteral("Начальная установка проверена\nПерекрытие плеч матрицы: слева %1 "
+                QStringLiteral("Начальная установка проверена\nПоказано одно неподвижное "
+                               "положение.\nПерекрытие плеч матрицы: слева %1 "
                                "мм, справа %2 мм.\n"
                                "Зазор до пуансона: %3 мм. Объёмных пересечений не обнаружено в "
                                "пределах допуска.\n\n"
@@ -830,6 +837,9 @@ class MainWindow::Impl {
     std::optional<core::PressTools> shownTools;
     QSlider *bendFrame = nullptr;
     QPushButton *playBend = nullptr;
+    QPushButton *showKinematics = nullptr;
+    QLabel *setupPlaybackHint = nullptr;
+    QStackedWidget *previewControls = nullptr;
     QPushButton *returnToCad = nullptr;
     QLabel *frameLabel = nullptr;
     QTimer *playback = nullptr;
@@ -1230,7 +1240,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *toolPanel = new QWidget(this);
     auto *toolLayout = new QVBoxLayout(toolPanel);
     auto *toolHint =
-        new QLabel(QStringLiteral("Начальная установка на V-матрице\n\n"
+        new QLabel(QStringLiteral("Начальное положение на V-матрице · без движения\n\n"
                                   "Параметрические прямые инструменты с закруглённым носиком "
                                   "пуансона и острыми плечами матрицы. "
                                   "Поля ниже — учебный пример; изменения применяются кнопкой. "
@@ -1263,7 +1273,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     }
     toolLayout->addLayout(toolForm);
     impl_->applyTools =
-        new QPushButton(QStringLiteral("Применить и показать установку"), toolPanel);
+        new QPushButton(QStringLiteral("Применить и показать положение"), toolPanel);
     impl_->applyTools->setObjectName(QStringLiteral("applyToolSetup"));
     toolLayout->addWidget(impl_->applyTools);
     impl_->clearTools = new QPushButton(QStringLiteral("Удалить настройку инструмента"), toolPanel);
@@ -1314,19 +1324,36 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->frameLabel = new QLabel(sequence);
     impl_->frameLabel->setObjectName(QStringLiteral("bendFrameLabel"));
     sequenceLayout->addWidget(impl_->frameLabel);
+    impl_->setupPlaybackHint = new QLabel(
+        QStringLiteral("Гибка с инструментом ещё не реализована. Здесь показано одно начальное "
+                       "положение. Для анимации детали подготовьте движение без инструмента."),
+        sequence);
+    impl_->setupPlaybackHint->setObjectName(QStringLiteral("setupPlaybackHint"));
+    impl_->setupPlaybackHint->setWordWrap(true);
+
     impl_->bendFrame = new QSlider(Qt::Horizontal, sequence);
     impl_->bendFrame->setObjectName(QStringLiteral("bendFrame"));
     impl_->bendFrame->setAccessibleName(QStringLiteral("Промежуточное состояние сгиба"));
     impl_->bendFrame->setRange(0, 20);
     impl_->bendFrame->setTickPosition(QSlider::TicksBelow);
     impl_->bendFrame->setTickInterval(5);
-    sequenceLayout->addWidget(impl_->bendFrame);
+    impl_->previewControls = new QStackedWidget(sequence);
+    impl_->previewControls->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    impl_->previewControls->addWidget(impl_->bendFrame);
+    impl_->previewControls->addWidget(impl_->setupPlaybackHint);
+    sequenceLayout->addWidget(impl_->previewControls);
     auto *playLayout = new QHBoxLayout;
     impl_->playBend = new QPushButton(QStringLiteral("Воспроизвести"), sequence);
     impl_->playBend->setObjectName(QStringLiteral("playBend"));
     impl_->returnToCad = new QPushButton(QStringLiteral("Вернуться к STEP"), sequence);
     impl_->returnToCad->setObjectName(QStringLiteral("returnToCad"));
     playLayout->addWidget(impl_->playBend);
+    impl_->showKinematics =
+        new QPushButton(QStringLiteral("Подготовить движение без инструмента"), sequence);
+    impl_->showKinematics->setObjectName(QStringLiteral("showKinematics"));
+    connect(impl_->showKinematics, &QPushButton::clicked, impl_->preparePreview,
+            &QPushButton::click);
+    playLayout->addWidget(impl_->showKinematics);
     playLayout->addWidget(impl_->returnToCad);
     playLayout->addStretch();
     sequenceLayout->addLayout(playLayout);

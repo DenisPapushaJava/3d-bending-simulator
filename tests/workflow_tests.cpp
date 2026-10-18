@@ -839,6 +839,24 @@ void testSingleBendWorkflow(bool graphics) {
             require(shot.save(output), "Cannot save tool setup snapshot");
         }
     }
+    auto *modeHint = window.findChild<QLabel *>(QStringLiteral("setupPlaybackHint"));
+    auto *kinematics = window.findChild<QPushButton *>(QStringLiteral("showKinematics"));
+    require(modeHint && modeHint->isVisible() &&
+                modeHint->text().contains(QStringLiteral("ещё не реализована")) && kinematics &&
+                kinematics->isVisible() && kinematics->isEnabled() && !slider->isVisible() &&
+                !play->isVisible(),
+            "Static setup looks like a playable operation");
+    const auto setupSnapshot = controller.bendPreview();
+    const auto staticImage = graphics ? viewer->captureImage() : QImage{};
+    int setupBeats = 0;
+    QTimer setupHeartbeat;
+    QObject::connect(&setupHeartbeat, &QTimer::timeout, [&] { ++setupBeats; });
+    setupHeartbeat.start(25);
+    waitUntil([&] { return setupBeats >= 12; });
+    setupHeartbeat.stop();
+    require(controller.bendPreview() == setupSnapshot && slider->value() == 0 &&
+                (!graphics || differences(staticImage, viewer->captureImage()) == 0),
+            "Static setup flashed or started playing by itself");
     controller.saveProject(path, files);
     waitUntil(finished);
     require(!controller.session().modified() && controller.bendPreview()->toolSetup(),
@@ -848,16 +866,23 @@ void testSingleBendWorkflow(bool graphics) {
     waitUntil(finished);
     require(!controller.session().modified() && controller.session().editRevision() == editRevision,
             "Identical tools dirtied project");
+    kinematics->click();
+    waitUntil(finished);
+    require(controller.bendPreview() && !controller.bendPreview()->toolSetup() &&
+                tabs->currentIndex() == 2 && slider->isVisible() && play->isVisible() &&
+                !modeHint->isVisible() && !kinematics->isVisible() && slider->isEnabled() &&
+                play->isEnabled() && controller.session().bend(0)->tools &&
+                !controller.session().modified(),
+            "Shortcut did not prepare playable kinematics or erased tools");
+    play->click();
+    waitUntil([&] { return slider->value() > 0; });
+    play->click();
     returnToCad->click();
     require(!controller.bendPreview() && controller.session().bend(0)->tools &&
                 !controller.session().modified(),
             "Return erased saved tools");
-    tabs->setCurrentIndex(2);
     prepare->click();
     waitUntil(finished);
-    require(controller.bendPreview() && !controller.bendPreview()->toolSetup() &&
-                slider->isEnabled(),
-            "Kinematics retained static tools");
     controller.setBendTarget(0, bending::core::BendTarget{std::numbers::pi / 3, 8});
     require(!controller.bendPreview() && !slider->isEnabled(),
             "Changed target retained old states");
