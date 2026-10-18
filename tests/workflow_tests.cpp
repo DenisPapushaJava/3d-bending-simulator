@@ -699,12 +699,18 @@ void testSingleBendWorkflow(bool graphics) {
     auto *slider = window.findChild<QSlider *>(QStringLiteral("bendFrame"));
     auto *side = window.findChild<QComboBox *>(QStringLiteral("fixedBendSide"));
     auto *play = window.findChild<QPushButton *>(QStringLiteral("playBend"));
+    auto *speed = window.findChild<QSlider *>(QStringLiteral("bendPlaybackSpeed"));
+    auto *speedValue = window.findChild<QLabel *>(QStringLiteral("bendPlaybackSpeedValue"));
+    auto *playback = window.findChild<QTimer *>(QStringLiteral("bendPlaybackTimer"));
     auto *returnToCad = window.findChild<QPushButton *>(QStringLiteral("returnToCad"));
     auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
     auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
     require(prepare && status && slider && side && play && returnToCad && !prepare->isEnabled() &&
                 !slider->isEnabled(),
             "Missing or active empty operation controls");
+    require(speed && speedValue && playback && !speed->isEnabled() &&
+                speedValue->text() == QStringLiteral("1×"),
+            "Missing speed control or incorrect initial speed");
     window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/bend-90-6mm.step"));
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
@@ -792,10 +798,39 @@ void testSingleBendWorkflow(bool graphics) {
     QApplication::sendEvent(slider, &previous);
     require(slider->value() == 19, "Operation slider is not keyboard accessible");
     slider->setValue(10);
+    const auto previewBeforeSpeedChange = controller.bendPreview();
+    const auto editBeforeSpeedChange = controller.session().editRevision();
+    speed->setValue(4);
+    require(slider->value() == 10 && !playback->isActive() && playback->interval() == 75 &&
+                speedValue->text() == QStringLiteral("2×"),
+            "Paused speed change started playback or changed position");
+    int previousFrame = slider->value();
+    bool orderedFrames = true;
+    const auto frameConnection = QObject::connect(slider, &QSlider::valueChanged, [&](int frame) {
+        orderedFrames = orderedFrames && frame == previousFrame + 1;
+        previousFrame = frame;
+    });
     play->click();
     waitUntil([&] { return slider->value() > 10; });
+    const auto runningFrame = slider->value();
+    speed->setFocus();
+    QKeyEvent fastest(QEvent::KeyPress, Qt::Key_End, Qt::NoModifier);
+    QApplication::sendEvent(speed, &fastest);
+    require(playback->isActive() && slider->value() == runningFrame && playback->interval() == 50 &&
+                speedValue->text() == QStringLiteral("3×"),
+            "Live speed change paused/restarted the animation or did not reach 3x");
+    waitUntil([&] { return slider->value() > runningFrame; });
     play->click();
+    QObject::disconnect(frameConnection);
+    const auto pausedFrame = slider->value();
+    speed->setValue(0);
     require(play->text() == QStringLiteral("Воспроизвести"), "Playback did not pause");
+    require(orderedFrames && !playback->isActive() && playback->interval() == 150 &&
+                slider->value() == pausedFrame && speedValue->text() == QStringLiteral("1×") &&
+                controller.bendPreview() == previewBeforeSpeedChange &&
+                controller.session().editRevision() == editBeforeSpeedChange &&
+                !controller.session().modified(),
+            "Speed control skipped frames, resumed playback or invalidated the project");
     returnToCad->click();
     require(!controller.bendPreview() && !slider->isEnabled() &&
                 controller.session().document() == source && !controller.session().modified(),
@@ -845,6 +880,8 @@ void testSingleBendWorkflow(bool graphics) {
                 controller.session().revision() == revision &&
                 toolStatus->text().contains(QStringLiteral("Начальная установка проверена")),
             "Setup mode, source or feedback incorrect");
+    require(!speed->isVisible() && !speed->isEnabled(),
+            "Static setup displayed an active animation speed control");
     if (graphics) {
         waitUntil([&] { return viewer->isReady(); });
         QApplication::processEvents();

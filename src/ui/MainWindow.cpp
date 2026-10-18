@@ -486,12 +486,14 @@ class MainWindow::Impl {
         const bool staticSetup = preview && preview->toolSetup() && !preview->pressMotion();
         previewControls->setCurrentIndex(staticSetup ? 1 : 0);
         playBend->setVisible(!staticSetup);
+        playbackSpeedControls->setVisible(!staticSetup);
         showKinematics->setVisible(staticSetup);
         showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
         bendFrame->setEnabled(preview && !staticSetup && !controller->hasWork() &&
                               previewDisplayError.isEmpty());
         playBend->setEnabled(preview && !staticSetup && !controller->hasWork() &&
                              previewDisplayError.isEmpty());
+        playbackSpeedControls->setEnabled(playBend->isEnabled());
         returnToCad->setEnabled(preview || controller->isPreparingPreview());
         if (!preview || staticSetup || controller->hasWork()) {
             stopPlayback();
@@ -1065,6 +1067,9 @@ class MainWindow::Impl {
     std::optional<core::PressTools> shownTools;
     QSlider *bendFrame = nullptr;
     QPushButton *playBend = nullptr;
+    QWidget *playbackSpeedControls = nullptr;
+    QSlider *playbackSpeed = nullptr;
+    QLabel *playbackSpeedValue = nullptr;
     QPushButton *showKinematics = nullptr;
     QLabel *setupPlaybackHint = nullptr;
     QStackedWidget *previewControls = nullptr;
@@ -1677,11 +1682,46 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->showKinematics, &QPushButton::clicked, impl_->preparePreview,
             &QPushButton::click);
     playLayout->addWidget(impl_->showKinematics);
+    impl_->playbackSpeedControls = new QWidget(sequence);
+    auto *speedLayout = new QHBoxLayout(impl_->playbackSpeedControls);
+    speedLayout->setContentsMargins(8, 0, 8, 0);
+    auto *speedTitle = new QLabel(QStringLiteral("Скорость"), impl_->playbackSpeedControls);
+    impl_->playbackSpeed = new QSlider(Qt::Horizontal, impl_->playbackSpeedControls);
+    impl_->playbackSpeed->setObjectName(QStringLiteral("bendPlaybackSpeed"));
+    impl_->playbackSpeed->setAccessibleName(QStringLiteral("Скорость воспроизведения"));
+    impl_->playbackSpeed->setRange(0, 8); // 1x to 3x, in quarter steps.
+    impl_->playbackSpeed->setPageStep(2);
+    impl_->playbackSpeed->setTickPosition(QSlider::TicksBelow);
+    impl_->playbackSpeed->setTickInterval(1);
+    impl_->playbackSpeed->setMinimumWidth(80);
+    impl_->playbackSpeed->setMaximumWidth(160);
+    speedTitle->setBuddy(impl_->playbackSpeed);
+    impl_->playbackSpeedValue = new QLabel(QStringLiteral("1×"), impl_->playbackSpeedControls);
+    impl_->playbackSpeedValue->setObjectName(QStringLiteral("bendPlaybackSpeedValue"));
+    impl_->playbackSpeedValue->setMinimumWidth(40);
+    speedLayout->addWidget(speedTitle);
+    speedLayout->addWidget(impl_->playbackSpeed);
+    speedLayout->addWidget(impl_->playbackSpeedValue);
+    playLayout->addWidget(impl_->playbackSpeedControls);
     playLayout->addWidget(impl_->returnToCad);
     playLayout->addStretch();
     sequenceLayout->addLayout(playLayout);
     impl_->playback = new QTimer(this);
+    impl_->playback->setObjectName(QStringLiteral("bendPlaybackTimer"));
     impl_->playback->setInterval(150);
+    const auto updatePlaybackSpeed = [this](int step) {
+        const double multiplier = 1.0 + static_cast<double>(step) / 4.0;
+        const auto value = number(multiplier) + QStringLiteral("×");
+        impl_->playback->setInterval(qRound(150.0 / multiplier));
+        impl_->playbackSpeedValue->setText(value);
+        const auto description = QStringLiteral("Скорость показа %1. Диапазон 1×–3×, шаг 0,25×. "
+                                                "Скорость пресса не рассчитывается.")
+                                     .arg(value);
+        impl_->playbackSpeed->setToolTip(description);
+        impl_->playbackSpeed->setAccessibleDescription(description);
+    };
+    connect(impl_->playbackSpeed, &QSlider::valueChanged, this, updatePlaybackSpeed);
+    updatePlaybackSpeed(impl_->playbackSpeed->value());
     connect(impl_->bendFrame, &QSlider::valueChanged, this, [this] { impl_->showPreviewFrame(); });
     connect(impl_->playback, &QTimer::timeout, this, [this] {
         if (impl_->bendFrame->value() >= impl_->bendFrame->maximum()) {
