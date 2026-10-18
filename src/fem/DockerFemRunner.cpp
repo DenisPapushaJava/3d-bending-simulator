@@ -231,6 +231,19 @@ class DockerFemRunner::Impl final : public QObject {
             failSoon(QStringLiteral("Не удалось создать каталог результатов: %1").arg(directory));
             return;
         }
+        const auto backend = QDir(directory).filePath(QStringLiteral("backend"));
+        if (!QDir().mkdir(backend)) {
+            failSoon(QStringLiteral("Не удалось создать снимок FEM-backend."));
+            return;
+        }
+        for (const auto *name :
+             {"gui_job.py", "bend_hole.py", "results.py", "report.py", "viewer.html"}) {
+            const auto fileName = QLatin1String(name);
+            if (!QFile::copy(QDir(scripts).filePath(fileName), QDir(backend).filePath(fileName))) {
+                failSoon(QStringLiteral("Не удалось скопировать FEM-backend: %1").arg(fileName));
+                return;
+            }
+        }
         parameterJson = {{QStringLiteral("hole"), holeName(parameters.hole)},
                          {QStringLiteral("mesh"), meshName(parameters.mesh)},
                          {QStringLiteral("unload"), parameters.unload}};
@@ -260,7 +273,7 @@ class DockerFemRunner::Impl final : public QObject {
                          QStringLiteral("--name"),
                          container,
                          QStringLiteral("--mount"),
-                         QStringLiteral("type=bind,src=%1,dst=/opt/bending,readonly").arg(scripts),
+                         QStringLiteral("type=bind,src=%1,dst=/opt/bending,readonly").arg(backend),
                          QStringLiteral("--mount"),
                          QStringLiteral("type=bind,src=%1,dst=/work").arg(directory)};
 #ifdef Q_OS_UNIX

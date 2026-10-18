@@ -61,14 +61,23 @@ int main(int argc, char **argv) {
         for (const auto *scenario : {"valid", "mismatch", "missing", "nonfinite", "exit"}) {
             qputenv("BENDING_FEM_STUB_SCENARIO", scenario);
             start();
+            if (QByteArray(scenario) == "valid") {
+                QFile source(QDir(scripts).filePath(QStringLiteral("gui_job.py")));
+                require(source.open(QIODevice::Append), "Cannot edit source fixture");
+                source.write("# later development edit");
+            }
             waitUntil([&] { return outcome.has_value(); });
             require(QFile::exists(state + QStringLiteral(".removed")), "Container not removed");
             const bool valid = QByteArray(scenario) == "valid";
             require((outcome->status == FemOutcomeStatus::Completed) == valid,
                     "Invalid protocol result accepted");
             require(outcome->result.has_value() == valid, "Failure published a result");
-            if (valid)
+            if (valid) {
                 require(outcome->result->unloadedAngleDeg.has_value(), "Unloading result missing");
+                require(std::filesystem::file_size(outcome->result->directory / "backend" /
+                                                   "gui_job.py") == 0,
+                        "Running job did not capture its own backend sources");
+            }
         }
         qputenv("BENDING_FEM_STUB_SCENARIO", "wait");
         start();
