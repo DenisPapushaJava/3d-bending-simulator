@@ -368,7 +368,18 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                      ? (*preview)->toolSetup() && (*preview)->pressMotion() &&
                                            (*preview)->frameCount() >= 2 &&
                                            (*preview)->pressState(0) &&
-                                           (*preview)->pressState((*preview)->frameCount() - 1)
+                                           (*preview)->pressState(0)->phase ==
+                                               simulation::PressPhase::Approach &&
+                                           (*preview)->pressState((*preview)->frameCount() - 1) &&
+                                           (*preview)
+                                                   ->pressState((*preview)->frameCount() - 1)
+                                                   ->phase == simulation::PressPhase::Retracting &&
+                                           (*preview)->punchRetraction() &&
+                                           std::isfinite((*preview)->punchRetraction()->liftMm) &&
+                                           (*preview)->punchRetraction()->liftMm > 0 &&
+                                           std::isfinite(
+                                               (*preview)->punchRetraction()->finalClearanceMm) &&
+                                           (*preview)->punchRetraction()->finalClearanceMm > 0
                                      : !(*preview)->toolSetup() && !(*preview)->pressMotion() &&
                                            (*preview)->frameCount() >= 2);
                             if (matchingMode) {

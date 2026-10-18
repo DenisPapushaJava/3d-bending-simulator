@@ -47,6 +47,11 @@ class CadPreview final : public SingleBendPreview {
     std::optional<simulation::FlatToolSetup> setup;
     std::optional<simulation::PressMotion> motion;
     std::vector<simulation::PressState> states;
+    std::optional<PunchRetractionCheck> retraction;
+    TopoDS_Shape sweep;
+    const PunchRetractionCheck *punchRetraction() const noexcept override {
+        return retraction ? &*retraction : nullptr;
+    }
     const simulation::PressMotion *pressMotion() const noexcept override {
         return motion ? &*motion : nullptr;
     }
@@ -230,6 +235,35 @@ PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &ba
     }
     return makeSectionFrame(model, basis, *state);
 }
+// The profile width is nondecreasing with Y. Its exact upward translational
+// sweep is the original profile plus the vertical strip above its full-width top.
+TopoDS_Shape makePunch(const core::PressTools &t, double tip, double extension = 0.0) {
+    const double halfAngle = t.punchAngleRadians / 2.0;
+    const double tangentX = t.noseRadiusMm * std::cos(halfAngle);
+    const double tangentY = tip + t.noseRadiusMm * (1.0 - std::sin(halfAngle));
+    const double topY = tip + t.openingMm;
+    const double topX =
+        (t.openingMm - t.noseRadiusMm) * std::tan(halfAngle) + t.noseRadiusMm / std::cos(halfAngle);
+    const gp_Pnt leftTop(-topX, topY, 0), rightTop(topX, topY, 0);
+    const gp_Pnt left(-tangentX, tangentY, 0), right(tangentX, tangentY, 0);
+    BRepBuilderAPI_MakeWire wire;
+    wire.Add(BRepBuilderAPI_MakeEdge(leftTop, left).Edge());
+    wire.Add(
+        BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(left, gp_Pnt(0, tip, 0), right).Value()).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(right, rightTop).Edge());
+    if (extension > 0) {
+        const gp_Vec lift(0, extension, 0);
+        wire.Add(BRepBuilderAPI_MakeEdge(rightTop, rightTop.Translated(lift)).Edge());
+        wire.Add(
+            BRepBuilderAPI_MakeEdge(rightTop.Translated(lift), leftTop.Translated(lift)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(leftTop.Translated(lift), leftTop).Edge());
+    } else {
+        wire.Add(BRepBuilderAPI_MakeEdge(rightTop, leftTop).Edge());
+    }
+    return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(),
+                                 gp_Vec(0, 0, t.lengthMm))
+        .Shape();
+}
 std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, double thickness) {
     const auto &t = setup.tools;
     const double v = t.openingMm;
@@ -243,23 +277,7 @@ std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, do
                       {v, bottom, 0},
                       {-v, bottom, 0}},
                      extrusion);
-    const double halfAngle = t.punchAngleRadians / 2.0;
-    const double tip = thickness + t.clearanceMm;
-    const double tangentX = t.noseRadiusMm * std::cos(halfAngle);
-    const double tangentY = tip + t.noseRadiusMm * (1.0 - std::sin(halfAngle));
-    const double topY = tip + v;
-    const double topX =
-        (v - t.noseRadiusMm) * std::tan(halfAngle) + t.noseRadiusMm / std::cos(halfAngle);
-    const gp_Pnt leftTop(-topX, topY, 0), rightTop(topX, topY, 0);
-    const gp_Pnt left(-tangentX, tangentY, 0), right(tangentX, tangentY, 0);
-    BRepBuilderAPI_MakeWire wire;
-    wire.Add(BRepBuilderAPI_MakeEdge(leftTop, left).Edge());
-    wire.Add(
-        BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(left, gp_Pnt(0, tip, 0), right).Value()).Edge());
-    wire.Add(BRepBuilderAPI_MakeEdge(right, rightTop).Edge());
-    wire.Add(BRepBuilderAPI_MakeEdge(rightTop, leftTop).Edge());
-    auto punch =
-        BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), extrusion).Shape();
+    const auto punch = makePunch(t, thickness + t.clearanceMm);
     for (const auto &shape : {die, punch}) {
         if (!BRepCheck_Analyzer(shape).IsValid() || !std::isfinite(volume(shape)) ||
             volume(shape) <= 0.0) {
@@ -311,6 +329,10 @@ bool sameVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, 
 const PreviewFrame &OcctPreviewAccess::frame(const application::SingleBendPreview &preview,
                                              std::size_t index) {
     return dynamic_cast<const CadPreview &>(preview).frames.at(index);
+}
+const TopoDS_Shape &
+OcctPreviewAccess::retractionSweep(const application::SingleBendPreview &preview) {
+    return dynamic_cast<const CadPreview &>(preview).sweep;
 }
 static application::BendPreviewResult buildPreview(DocumentPtr document, std::size_t bendIndex,
                                                    core::BendTarget target, bool fixedSecond,
@@ -511,7 +533,8 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
             initialTools = makeTools(*preview->setup, model.thicknessMm);
         }
         Bnd_Box envelope;
-        const std::size_t intervals = withMotion ? 40 : toolParameters ? 0 : 20;
+        constexpr std::size_t formingIntervals = 40;
+        const std::size_t intervals = withMotion ? formingIntervals + 20 : toolParameters ? 0 : 20;
         for (std::size_t i = 0; i <= intervals; ++i) {
             if (stop.stop_requested()) {
                 return cancelled();
@@ -536,7 +559,7 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                 return BendPreviewError{BendPreviewErrorCode::Failed,
                                         "Intermediate state changed material volume"};
             }
-            if (withMotion && i == intervals) {
+            if (withMotion && i == formingIntervals) {
                 // Independently place the already verified CAD reconstruction into the machine
                 // frame. The contact section must be congruent with it, not merely have the same
                 // volume.
@@ -557,6 +580,32 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                     return BendPreviewError{
                         BendPreviewErrorCode::Failed,
                         "Contact endpoint differs from the verified STEP reconstruction", i};
+                }
+            }
+            if (withMotion && i == formingIntervals) {
+                const double tip = preview->states.back().punchTipYmm;
+                const double lift = model.thicknessMm + toolParameters->clearanceMm - tip;
+                if (!std::isfinite(lift) || lift <= analysis.lengthToleranceMm) {
+                    return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
+                                            "Invalid vertical punch return distance", i};
+                }
+                preview->sweep = makePunch(*toolParameters, tip, lift);
+                if (!BRepCheck_Analyzer(preview->sweep).IsValid() ||
+                    !std::isfinite(volume(preview->sweep)) || volume(preview->sweep) <= 0.0) {
+                    return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
+                                            "Invalid vertical punch return envelope", i};
+                }
+                for (const auto &obstacle : {frame.shape, initialTools[0]}) {
+                    if (stop.stop_requested()) {
+                        return cancelled();
+                    }
+                    if (!disjointVolumes(preview->sweep, obstacle, analysis.lengthToleranceMm,
+                                         budget)) {
+                        return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
+                                                "Punch return swept volume intersects sheet/die "
+                                                "or its Boolean check failed",
+                                                i};
+                    }
                 }
             }
             if (preview->setup) {
@@ -603,11 +652,26 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                     const double expectedGap = state.phase == simulation::PressPhase::Approach
                                                    ? state.punchTipYmm - model.thicknessMm
                                                    : 0.0;
-                    if (!punchContact.IsDone() ||
-                        std::abs(punchContact.Value() - expectedGap) > analysis.lengthToleranceMm) {
-                        return BendPreviewError{BendPreviewErrorCode::ContactLost,
+                    if (!punchContact.IsDone() || !std::isfinite(punchContact.Value()) ||
+                        (state.phase != simulation::PressPhase::Retracting &&
+                         std::abs(punchContact.Value() - expectedGap) >
+                             analysis.lengthToleranceMm)) {
+                        return BendPreviewError{state.phase == simulation::PressPhase::Retracting
+                                                    ? BendPreviewErrorCode::RetractionNotProven
+                                                    : BendPreviewErrorCode::ContactLost,
                                                 "Punch contact/clearance mismatch", i};
                     }
+                }
+                if (withMotion && i == intervals) {
+                    BRepExtrema_DistShapeShape distance(frame.shape, frame.tools[1]);
+                    if (!distance.IsDone() || !std::isfinite(distance.Value()) ||
+                        distance.Value() <= analysis.lengthToleranceMm) {
+                        return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
+                                                "Final punch separation not confirmed", i};
+                    }
+                    const double home = model.thicknessMm + toolParameters->clearanceMm;
+                    preview->retraction = PunchRetractionCheck{
+                        home - preview->states[formingIntervals].punchTipYmm, distance.Value()};
                 }
                 BRep_Builder builder;
                 TopoDS_Compound assembly;

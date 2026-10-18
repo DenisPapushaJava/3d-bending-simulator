@@ -262,13 +262,16 @@ void testSaveRace() {
 }
 class TestPreview final : public SingleBendPreview {
   public:
-    explicit TestPreview(bool tools = false, bool motion = false)
-        : withTools_(tools), withMotion_(motion) {}
+    explicit TestPreview(bool tools = false, bool motion = false, bool certified = true)
+        : withTools_(tools), withMotion_(motion), certified_(certified) {}
     const bending::simulation::PressMotion *pressMotion() const noexcept override {
         return withMotion_ ? &motion_ : nullptr;
     }
-    const bending::simulation::PressState *pressState(std::size_t) const noexcept override {
-        return withMotion_ ? &state_ : nullptr;
+    const bending::simulation::PressState *pressState(std::size_t index) const noexcept override {
+        return withMotion_ ? (index == 0 ? &state_ : &returned_) : nullptr;
+    }
+    const PunchRetractionCheck *punchRetraction() const noexcept override {
+        return withMotion_ && certified_ ? &retraction_ : nullptr;
     }
     const bending::simulation::FlatToolSetup *toolSetup() const noexcept override {
         return withTools_ ? &setup_ : nullptr;
@@ -277,7 +280,7 @@ class TestPreview final : public SingleBendPreview {
         return model_;
     }
     std::size_t frameCount() const noexcept override {
-        return withMotion_ ? 41 : withTools_ ? 1 : 21;
+        return withMotion_ ? 61 : withTools_ ? 1 : 21;
     }
     BoundsMm bounds() const noexcept override {
         return {{-30, -2, 0}, {50, 40, 80}};
@@ -286,8 +289,12 @@ class TestPreview final : public SingleBendPreview {
   private:
     bool withTools_;
     bool withMotion_;
+    bool certified_;
     bending::simulation::PressMotion motion_{};
     bending::simulation::PressState state_{};
+    bending::simulation::PressState returned_{
+        {}, bending::simulation::PressPhase::Retracting, 12, 0, 1};
+    PunchRetractionCheck retraction_{10, 5};
     bending::simulation::FlatToolSetup setup_{};
     bending::simulation::SingleBend model_{2, 4, 1.5, 80, 30, 30};
 };
@@ -300,7 +307,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
         }
-        return BendPreviewPtr(std::make_shared<TestPreview>(true, true));
+        return BendPreviewPtr(std::make_shared<TestPreview>(true, true, !omitRetraction.load()));
     }
     BendPreviewResult buildToolSetup(DocumentPtr document, std::size_t index,
                                      bending::core::BendTarget target, bending::core::PressTools,
@@ -338,6 +345,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     mutable std::atomic<bool> entered{false};
     mutable bool released = true;
     std::atomic<bool> fail{false};
+    std::atomic<bool> omitRetraction{false};
 };
 void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     const auto importer = std::make_shared<GatedImporter>();
@@ -374,6 +382,19 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     require(controller.bendPreview() && !controller.bendPreviewError() &&
                 controller.session().document() == source,
             "Preview replaced source document");
+    if (mode == BendPreviewMode::ToolMotion) {
+        builder->omitRetraction = true;
+        prepare();
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "Incomplete forward-only motion was published as a verified full cycle");
+        builder->omitRetraction = false;
+        prepare();
+        waitUntil(finished);
+        require(controller.bendPreview() && !controller.bendPreviewError(),
+                "Complete cycle did not recover");
+    }
     const auto revision = controller.session().editRevision();
     controller.discardBendPreview();
     require(!controller.bendPreview() && controller.session().editRevision() == revision,

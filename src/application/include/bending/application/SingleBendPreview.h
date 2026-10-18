@@ -13,6 +13,12 @@
 
 namespace bending::application {
 enum class BendPreviewMode { Kinematic, ToolSetup, ToolMotion };
+// Published only after a continuous swept-volume check of the complete vertical
+// punch return. Clearance is the actual final minimum distance to the sheet.
+struct PunchRetractionCheck {
+    double liftMm;
+    double finalClearanceMm;
+};
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
@@ -20,6 +26,9 @@ class SingleBendPreview {
         return nullptr;
     }
     [[nodiscard]] virtual const simulation::PressState *pressState(std::size_t) const noexcept {
+        return nullptr;
+    }
+    [[nodiscard]] virtual const PunchRetractionCheck *punchRetraction() const noexcept {
         return nullptr;
     }
     [[nodiscard]] virtual const simulation::SingleBend &model() const noexcept = 0;
@@ -43,6 +52,7 @@ enum class BendPreviewErrorCode {
     SupportNotProven,
     ToolIntersection,
     ContactLost,
+    RetractionNotProven,
     Cancelled,
     Failed
 };
