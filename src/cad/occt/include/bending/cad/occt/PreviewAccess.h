@@ -16,5 +16,8 @@ class OcctPreviewAccess final {
   public:
     [[nodiscard]] static const PreviewFrame &frame(const application::SingleBendPreview &preview,
                                                    std::size_t index);
+    // Exact occupied volume over the vertical punch return; null without tool motion.
+    [[nodiscard]] static const TopoDS_Shape &
+    retractionSweep(const application::SingleBendPreview &preview);
 };
 } // namespace bending::cad

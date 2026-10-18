@@ -385,7 +385,9 @@ class MainWindow::Impl {
             frameLabel->setText(
                 QStringLiteral("%1 · %2% · поворот %3° · ход пуансона %4 мм")
                     .arg(state->phase == simulation::PressPhase::Approach ? QStringLiteral("Подвод")
-                                                                          : QStringLiteral("Гибка"),
+                         : state->phase == simulation::PressPhase::Retracting
+                             ? QStringLiteral("Отвод пуансона")
+                             : QStringLiteral("Гибка"),
                          number(progressValue * 100.0),
                          number(state->section.angleRadians * 180.0 / std::numbers::pi),
                          number(state->punchTravelMm)));
@@ -511,6 +513,10 @@ class MainWindow::Impl {
                     ? QStringLiteral("Не удалось подтвердить рабочий контакт в положении %1. "
                                      "Просмотр движения не подготовлен.")
                           .arg(failure->frameIndex.value_or(0) + 1)
+                : failure->code == BendPreviewErrorCode::RetractionNotProven
+                    ? QStringLiteral(
+                          "Не удалось подтвердить свободный отвод пуансона. "
+                          "Полный цикл не подготовлен; проверьте инструмент и геометрию.")
                 : failure->code == BendPreviewErrorCode::UnsupportedParameters
                     ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
                                      "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
@@ -526,17 +532,18 @@ class MainWindow::Impl {
         } else if (!previewDisplayError.isEmpty()) {
             previewStatus->setText(
                 QStringLiteral("Не удалось показать состояние: %1").arg(previewDisplayError));
-        } else if (preview && preview->pressMotion()) {
+        } else if (preview && preview->pressMotion() && preview->punchRetraction()) {
+            const auto &report = *preview->punchRetraction();
             previewStatus->setText(
-                QStringLiteral(
-                    "Движение с инструментом подготовлено\nПроверенных положений: %1\nПодвод "
-                    "пуансона → гибка на двух опорах. "
-                    "Нажмите «Воспроизвести» или используйте ползунок.\n\n"
-                    "Контакты и объёмные пересечения проверены в этих положениях. "
-                    "Непрерывная траектория между ними "
-                    "не проверена. Постоянная средняя поверхность — геометрическое "
-                    "допущение; усилие и пружинение не рассчитываются.")
-                    .arg(preview->frameCount()));
+                QStringLiteral("Цикл с инструментом подготовлен\nПоложений просмотра: %1\n"
+                               "Подвод → гибка на двух опорах → отвод пуансона. "
+                               "Нажмите «Воспроизвести» или используйте ползунок.\n\n"
+                               "Отвод вверх: %2 мм\nКонечный минимальный зазор до детали: %3 мм\n\n"
+                               "Подвод и гибка проверены по кадрам. Весь отвод пуансона проверен "
+                               "непрерывно по проходящему объёму. "
+                               "Усилие, пружинение и извлечение детали не рассчитываются.")
+                    .arg(preview->frameCount())
+                    .arg(number(report.liftMm), number(report.finalClearanceMm)));
             previewStatus->setToolTip({});
         } else if (preview && preview->toolSetup()) {
             const auto &setup = *preview->toolSetup();
@@ -1292,15 +1299,16 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->propertyTabs->addTab(operationScroll, QStringLiteral("Операция"));
     auto *toolPanel = new QWidget(this);
     auto *toolLayout = new QVBoxLayout(toolPanel);
-    auto *toolHint =
-        new QLabel(QStringLiteral("Один сгиб на V-матрице\n\n"
-                                  "Параметрические пуансон и матрица. В режиме гибки пуансон "
-                                  "опускается, обе полки движутся на опорах. "
-                                  "Проверяются контакты и пересечения в 41 положении. "
-                                  "Усилие и пружинение не рассчитываются. "
-                                  "Поля содержат учебные значения; изменения применяются кнопкой. "
-                                  "Оси: X поперёк паза, Y вверх, Z вдоль инструмента."),
-                   toolPanel);
+    auto *toolHint = new QLabel(
+        QStringLiteral(
+            "Один сгиб на V-матрице\n\n"
+            "Параметрические пуансон и матрица. В режиме гибки пуансон "
+            "опускается, обе полки движутся на опорах, затем пуансон возвращается вверх. "
+            "Подвод/гибка проверяются по кадрам, отвод — непрерывно. "
+            "Усилие и пружинение не рассчитываются. "
+            "Поля содержат учебные значения; изменения применяются кнопкой. "
+            "Оси: X поперёк паза, Y вверх, Z вдоль инструмента."),
+        toolPanel);
     toolHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     toolHint->setWordWrap(true);
     toolLayout->addWidget(toolHint);

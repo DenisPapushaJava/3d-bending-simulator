@@ -105,14 +105,16 @@ int main() {
         const auto motion = std::get<PressMotion>(preparePressMotion(pressModel, tools, 1e-5));
         close(pressMotionState(pressModel, motion, 0)->punchTipYmm, 16,
               "Wrong initial tip clearance");
-        close(pressMotionState(pressModel, motion, 0.2)->punchTipYmm, 6,
+        close(pressMotionState(pressModel, motion, 0.2 * pressBendingEndProgress)->punchTipYmm, 6,
               "Approach did not contact flat sheet");
-        close(pressMotionState(pressModel, motion, 0.6)->section.angleRadians, std::numbers::pi / 4,
-              "Wrong middle angle");
-        const auto end = *pressMotionState(pressModel, motion, 1);
+        close(pressMotionState(pressModel, motion, 0.6 * pressBendingEndProgress)
+                  ->section.angleRadians,
+              std::numbers::pi / 4, "Wrong middle angle");
+        const auto end = *pressMotionState(pressModel, motion, pressBendingEndProgress);
         close(*end.section.innerRadiusMm, 8, "Press end radius differs from CAD");
         close(end.punchTravelMm, 10 + 24 - 14 * (std::sqrt(2.0) - 1), "Wrong final punch travel");
         double lastTravel = -1;
+        auto lastPhase = PressPhase::Approach;
         for (int i = 0; i <= 1000; ++i) {
             const auto state =
                 *pressMotionState(pressModel, motion, static_cast<double>(i) / 1000.0);
@@ -129,8 +131,22 @@ int main() {
             require(state.supportDistanceMm > 0 && state.supportDistanceMm < 30 &&
                         state.supportDistanceMm <= motion.maximumSupportDistanceMm + 1e-8,
                     "Shoulder contact left the straight flanges or violated certified bound");
-            require(state.punchTravelMm >= lastTravel - 1e-8,
-                    "Punch reversed during forward stroke");
+            require(state.phase != lastPhase || (state.phase == PressPhase::Retracting
+                                                     ? state.punchTravelMm <= lastTravel + 1e-8
+                                                     : state.punchTravelMm >= lastTravel - 1e-8),
+                    "Punch reversed inside a stroke phase");
+            require(state.punchTravelMm <= end.punchTravelMm + 1e-8,
+                    "Punch passed the bottom of its stroke");
+            lastPhase = state.phase;
+            if (state.phase == PressPhase::Retracting) {
+                close(section.angleRadians, pressModel.angleRadians, "Retraction changed angle");
+                for (std::size_t k = 0; k < 3; ++k) {
+                    close(section.innerArc[k].x, end.section.innerArc[k].x,
+                          "Retraction moved sheet X");
+                    close(section.innerArc[k].y, end.section.innerArc[k].y,
+                          "Retraction moved sheet Y");
+                }
+            }
             lastTravel = state.punchTravelMm;
             if (state.phase == PressPhase::Bending) {
                 close(state.punchTipYmm, section.innerArc[1].y, "Punch lost central contact");
@@ -140,6 +156,18 @@ int main() {
                                  section.innerArc[j].y - section.outerArc[j].y),
                       6, "Press changed sheet thickness");
             }
+        }
+        const auto returned = *pressMotionState(pressModel, motion, 1);
+        require(returned.phase == PressPhase::Retracting && end.phase == PressPhase::Bending,
+                "Wrong stroke boundary phases");
+        close(returned.punchTravelMm, 0, "Punch did not return home");
+        close(returned.punchTipYmm, 16, "Wrong return height");
+        for (double boundary : {0.2 * pressBendingEndProgress, pressBendingEndProgress}) {
+            const auto before = *pressMotionState(pressModel, motion, boundary - 1e-10);
+            const auto after = *pressMotionState(pressModel, motion, boundary + 1e-10);
+            require(std::abs(before.punchTipYmm - after.punchTipYmm) < 1e-7 &&
+                        std::abs(before.section.angleRadians - after.section.angleRadians) < 1e-7,
+                    "Phase transition is discontinuous");
         }
         auto badPress = tools;
         badPress.dieAngleRadians = 100 * std::numbers::pi / 180;

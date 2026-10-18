@@ -926,7 +926,7 @@ void testSingleBendWorkflow(bool graphics) {
             std::to_string(controller.bendPreviewError()->frameIndex.value_or(0)));
     }
     require(controller.bendPreview() && controller.bendPreview()->pressMotion() &&
-                slider->maximum() == 40 && slider->isVisible() && slider->isEnabled() &&
+                slider->maximum() == 60 && slider->isVisible() && slider->isEnabled() &&
                 play->isVisible() && play->isEnabled() && !modeHint->isVisible() &&
                 !controller.session().modified(),
             "Press mode is not playable or dirtied project");
@@ -972,15 +972,22 @@ void testSingleBendWorkflow(bool graphics) {
             "Stale press revision accepted");
     }
     slider->setValue(40);
-    pressSnapshot("final");
+    pressSnapshot("formed");
     slider->setFocus();
     QApplication::sendEvent(slider, &previous);
     require(slider->value() == 39, "Press slider keyboard failed");
     play->click();
-    waitUntil([&] { return slider->value() == 40; });
+    waitUntil([&] { return slider->value() == 60; });
+    pressSnapshot("final");
+    require(controller.bendPreview()->punchRetraction() &&
+                window.findChild<QLabel *>(QStringLiteral("bendFrameLabel"))
+                    ->text()
+                    .contains(QStringLiteral("Отвод пуансона")) &&
+                status->text().contains(QStringLiteral("непрерывно")),
+            "Return phase or continuous-check report is missing from UI");
     waitUntil([&] { return play->text() == QStringLiteral("Воспроизвести"); });
     play->click();
-    waitUntil([&] { return slider->value() > 0 && slider->value() < 40; });
+    waitUntil([&] { return slider->value() > 0 && slider->value() < 60; });
     play->click();
     require(controller.session().document() == pressSource &&
                 controller.session().revision() == pressRevision &&
@@ -1075,7 +1082,7 @@ void testProfiledBendWorkflow(bool graphics) {
             throw std::runtime_error("Profiled workflow: " + controller.bendPreviewError()->detail);
         }
         require(controller.bendPreview() && controller.bendPreview()->pressMotion() &&
-                    slider->maximum() == 40 && play->isEnabled(),
+                    slider->maximum() == 60 && play->isEnabled(),
                 "Detailed flanges have no playable motion");
         const auto snapshot = [&](const char *suffix) {
             const auto output = qEnvironmentVariable("BENDING_PROFILED_SNAPSHOT");
@@ -1097,13 +1104,20 @@ void testProfiledBendWorkflow(bool graphics) {
         const auto half = graphics ? viewer->captureImage() : QImage{};
         snapshot("half");
         slider->setValue(40);
+        snapshot("formed");
+        slider->setValue(60);
         snapshot("final");
+        require(controller.bendPreview()->punchRetraction() &&
+                    window.findChild<QLabel *>(QStringLiteral("bendFrameLabel"))
+                        ->text()
+                        .contains(QStringLiteral("Отвод пуансона")),
+                "Profiled return phase is missing");
         if (graphics) {
             require(differences(half, viewer->captureImage()) > 100,
                     "Detailed geometry did not move in the viewer");
         }
         play->click();
-        waitUntil([&] { return slider->value() > 0 && slider->value() < 40; });
+        waitUntil([&] { return slider->value() > 0 && slider->value() < 60; });
         play->click();
         require(controller.session().document() == original &&
                     controller.session().revision() == revision,
