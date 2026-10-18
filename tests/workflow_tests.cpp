@@ -1206,30 +1206,23 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
         require(source && source->metadata().bendAnalysis.interiorContourDiagnostics.size() == 1,
                 "Opening diagnostic missing from imported document");
         const auto &analysis = source->metadata().bendAnalysis;
-        const auto row = static_cast<int>(analysis.bends.size());
-        require(list->model()->rowCount() == row + 1 &&
-                    list->model()->index(row, 0).data().toString().contains(QStringLiteral("D01")),
-                "Opening diagnostic missing from the list");
-        if (row > 0) {
-            list->setCurrentIndex(list->model()->index(0, 0));
-            require(controller.setBendReview(0, BendReview::Confirmed),
-                    "Complete bend cannot be reviewed");
-            applyTarget->click();
-        }
+        const auto count = static_cast<int>(analysis.bends.size());
+        require(source->metadata().closedCutouts.status == ClosedCutoutStatus::Filled &&
+                    list->model()->rowCount() == count && count > 0,
+                "Approximate bend list missing");
+        list->setCurrentIndex(list->model()->index(0, 0));
+        require(review->isEnabled() && details->text().contains(QStringLiteral("Красные грани")),
+                "Approximate bend was not editable/explained");
+        require(controller.setBendReview(0, BendReview::Confirmed),
+                "Cannot confirm approximate bend");
+        applyTarget->click();
         const auto edits = controller.session().editRevision();
-        list->setCurrentIndex(list->model()->index(row, 0));
-        require(
-            details->text().contains(QStringLiteral("Внутренний вырез")) && !review->isEnabled() &&
-                !applyTarget->isEnabled() && !prepare->isEnabled() && !applyTools->isEnabled() &&
-                !controller.session().bend(static_cast<std::size_t>(row)) &&
-                !controller.setBendReview(static_cast<std::size_t>(row), BendReview::Confirmed) &&
-                !controller.prepareBendPreview(static_cast<std::size_t>(row), false, builder) &&
-                controller.session().editRevision() == edits,
-            "Diagnostic was editable or created a fake bend operation");
+        require(prepare->isEnabled() == (count == 1) && applyTools->isEnabled() == (count == 1),
+                "Multiple bends bypassed single bend limit");
         require(window.findChild<QLabel *>(QStringLiteral("bendPreviewStatus"))
                     ->text()
-                    .contains(QStringLiteral("внутренний вырез")),
-                "Preview did not explain the opening limit");
+                    .contains(QStringLiteral("ПРИБЛИЖЕНИЕ")),
+                "Missing approximation warning");
         if (graphics) {
             waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
             require(viewer->isReady(), "Opening diagnostic graphics unavailable");
@@ -1269,6 +1262,32 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
                     "Stale diagnostic face IDs were applied");
             viewer->highlightBendDiagnostic(diagnostic, controller.session().revision());
         }
+        if (count == 1) {
+            prepare->click();
+            waitUntil(finished);
+            require(controller.bendPreview() && controller.bendPreview()->ignoresClosedCutouts(),
+                    "Cannot prepare approximate bend");
+            auto *slider = window.findChild<QSlider *>(QStringLiteral("bendFrame"));
+            slider->setValue(10);
+            auto *play = window.findChild<QPushButton *>(QStringLiteral("playBend"));
+            play->click();
+            waitUntil([&] { return slider->value() == 20; });
+            waitUntil([&] { return play->text() == QStringLiteral("Воспроизвести"); });
+            if (graphics) {
+                const auto output = qEnvironmentVariable("BENDING_OPENING_SNAPSHOT");
+                if (!output.isEmpty()) {
+                    auto shot = window.grab().toImage();
+                    QPainter painter(&shot);
+                    painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                                      viewer->captureImage());
+                    painter.end();
+                    require(shot.save(output + QLatin1Char('-') + QString::fromLatin1(name) +
+                                      QStringLiteral("-bent.png")),
+                            "Cannot save cutout animation");
+                }
+            }
+            window.findChild<QPushButton *>(QStringLiteral("returnToCad"))->click();
+        }
         require(controller.session().document() == source &&
                     controller.session().editRevision() == edits,
                 "Diagnostic selection changed the source or project");
@@ -1290,14 +1309,15 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
                     reopened->metadata().bendAnalysis.interiorContourDiagnostics.size() == 1 &&
                     controller.session().bends().size() == analysis.bends.size(),
                 "Project lost opening evidence or persisted it as an operation");
-        if (row > 0) {
+        if (count > 0) {
             require(controller.session().bend(0)->review == BendReview::Confirmed &&
                         controller.session().bend(0)->target,
                     "Diagnostic selection/reopen overwrote the separate complete bend");
         }
-        list->setCurrentIndex(list->model()->index(row, 0));
-        require(!review->isEnabled() && !applyTarget->isEnabled(),
-                "Reopened diagnostic became an operation");
+        list->setCurrentIndex(list->model()->index(0, 0));
+        require(review->isEnabled() && applyTarget->isEnabled() &&
+                    reopened->metadata().closedCutouts.status == ClosedCutoutStatus::Filled,
+                "Reopened approximation lost its editable bend");
         controller.closeDocument();
     }
     window.close();

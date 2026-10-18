@@ -22,6 +22,42 @@ int main() {
     using namespace bending::simulation;
     try {
         const SingleBend model{2, 4, std::numbers::pi / 2, 80, 30, 40};
+        // Interior cutout vertices follow the same continuous geometric section;
+        // endpoints, flanges and obtuse-angle unwrapping are independently checked.
+        for (double degrees : {5., 90., 120., 175.}) {
+            auto m = model;
+            m.angleRadians = degrees * std::numbers::pi / 180;
+            for (double progress : {0., 1.0e-12, 0.5, 1.}) {
+                const auto target = *singleBendSection(m, progress);
+                const auto finalSection = *singleBendSection(m, 1);
+                for (std::size_t j = 0; j < 3; ++j) {
+                    for (bool outer : {false, true}) {
+                        const auto source =
+                            outer ? finalSection.outerArc[j] : finalSection.innerArc[j];
+                        const auto expected = outer ? target.outerArc[j] : target.innerArc[j];
+                        const auto actual = mapBendPoint(m, source, target).value();
+                        close(actual.x, expected.x, "Mapped arc X mismatch");
+                        close(actual.y, expected.y, "Mapped arc Y mismatch");
+                    }
+                }
+                for (std::size_t j = 0; j < 4; ++j) {
+                    const auto actual = mapBendPoint(m, finalSection.moving[j], target).value();
+                    close(actual.x, target.moving[j].x, "Mapped moving flange X mismatch");
+                    close(actual.y, target.moving[j].y, "Mapped moving flange Y mismatch");
+                }
+                auto placed = target;
+                for (auto &p : placed.fixed) {
+                    p = {10 - p.y, 20 + p.x};
+                }
+                const auto source = finalSection.innerArc[1];
+                const auto actual = mapBendPoint(m, source, placed).value();
+                close(actual.x, 10 - target.innerArc[1].y, "Placed mapping X mismatch");
+                close(actual.y, 20 + target.innerArc[1].x, "Placed mapping Y mismatch");
+            }
+        }
+        require(!mapBendPoint(model, {std::numeric_limits<double>::quiet_NaN(), 0},
+                              *singleBendSection(model, 0)),
+                "Nonfinite vertex accepted");
         close(blankLengthMm(model), 70 + 5 * std::numbers::pi / 2, "Wrong developed length");
         const auto flat = singleBendSection(model, 0).value();
         require(!flat.innerRadiusMm, "Flat state has a finite radius");

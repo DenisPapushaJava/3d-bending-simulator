@@ -135,16 +135,19 @@ class OcctCanvas final : public QWidget {
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
-                candidate = new AIS_ColoredShape(frame.shape);
+                candidate = new AIS_ColoredShape(frame.displayShape.IsNull() ? frame.shape
+                                                                             : frame.displayShape);
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(true);
                 const std::array<Quantity_Color, 3> colors{
                     Quantity_Color(0.15, 0.48, 0.65, Quantity_TOC_RGB),
                     Quantity_Color(1.0, 0.25, 0.04, Quantity_TOC_RGB),
                     Quantity_Color(0.16, 0.70, 0.51, Quantity_TOC_RGB)};
-                for (std::size_t region = 0; region < frame.regions.size(); ++region) {
+                const auto &regions =
+                    frame.displayShape.IsNull() ? frame.regions : frame.displayRegions;
+                for (std::size_t region = 0; region < regions.size(); ++region) {
                     TopTools_IndexedMapOfShape regionFaces;
-                    TopExp::MapShapes(frame.regions[region], TopAbs_FACE, regionFaces);
+                    TopExp::MapShapes(regions[region], TopAbs_FACE, regionFaces);
                     for (int face = 1; face <= regionFaces.Extent(); ++face) {
                         candidate->SetCustomColor(regionFaces(face), colors[region]);
                     }

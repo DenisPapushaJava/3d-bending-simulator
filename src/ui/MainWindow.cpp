@@ -235,6 +235,7 @@ class MainWindow::Impl {
         automaticThickness->setEnabled(editable && session.manualThicknessMm().has_value());
         pairs->setEnabled(editable && pairs->count() > 0);
         showPair->setEnabled(editable && viewer->isReady() && pairs->count() > 0);
+        showCutouts->setEnabled(editable && viewer->isReady());
         saveAction->setEnabled(editable && writer != nullptr);
         saveAsAction->setEnabled(editable && writer != nullptr);
         if (document) {
@@ -381,8 +382,11 @@ class MainWindow::Impl {
             preview->frameCount() > 1
                 ? static_cast<double>(index) / static_cast<double>(preview->frameCount() - 1)
                 : 0.0;
+        const auto approximation =
+            preview->ignoresClosedCutouts() ? QStringLiteral("Проверка без вырезов · ") : QString{};
         if (const auto *state = preview->pressState(index)) {
             frameLabel->setText(
+                approximation +
                 QStringLiteral("%1 · %2% · поворот %3° · ход пуансона %4 мм")
                     .arg(state->phase == simulation::PressPhase::Approach ? QStringLiteral("Подвод")
                          : state->phase == simulation::PressPhase::Retracting
@@ -393,12 +397,13 @@ class MainWindow::Impl {
                          number(state->punchTravelMm)));
             return;
         }
-        frameLabel->setText(preview->toolSetup()
-                                ? QStringLiteral("Начальное положение · статичный просмотр")
-                                : QStringLiteral("%1% · поворот %2°")
-                                      .arg(number(progressValue * 100.0),
-                                           number(progressValue * preview->model().angleRadians *
-                                                  180.0 / std::numbers::pi)));
+        frameLabel->setText(approximation +
+                            (preview->toolSetup()
+                                 ? QStringLiteral("Начальное положение · статичный просмотр")
+                                 : QStringLiteral("%1% · поворот %2°")
+                                       .arg(number(progressValue * 100.0),
+                                            number(progressValue * preview->model().angleRadians *
+                                                   180.0 / std::numbers::pi))));
     }
     void refreshPreview() {
         const auto &session = controller->session();
@@ -406,7 +411,8 @@ class MainWindow::Impl {
         const auto row = bendList->currentIndex().row();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
         const bool hasInteriorContours =
-            document && !document->metadata().bendAnalysis.interiorContourDiagnostics.empty();
+            document && !document->metadata().bendAnalysis.interiorContourDiagnostics.empty() &&
+            document->metadata().closedCutouts.status != ClosedCutoutStatus::Filled;
         bool supported = document && !hasInteriorContours && row == 0 &&
                          document->metadata().bendAnalysis.bends.size() == 1 &&
                          !document->metadata().bendAnalysis.bends[0].trimmedEnds;
@@ -595,6 +601,14 @@ class MainWindow::Impl {
                                      "параметры из CAD, затем подготовьте просмотр."));
             frameLabel->setText(QStringLiteral("Исходная CAD-форма"));
         }
+        if (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
+            previewStatus->setText(
+                QStringLiteral(
+                    "ПРИБЛИЖЕНИЕ: отверстия видимы и перемещаются геометрически. "
+                    "Опоры, пересечения и зазор проверяются по копии с заполненными вырезами. "
+                    "Реальная опора у вырезов и деформация отверстий не проверены.\n\n") +
+                previewStatus->text());
+        }
         toolStatus->setText(previewStatus->text());
         toolStatus->setToolTip(previewStatus->toolTip());
     }
@@ -670,12 +684,25 @@ class MainWindow::Impl {
     }
     void fillBends() {
         bendModel->clear();
+        cutoutNotice->clear();
+        showCutouts->hide();
         const auto &document = controller->session().document();
         if (!document) {
             bendSummary->setText(QStringLiteral("Сгибы: откройте деталь"));
             return;
         }
         const auto &analysis = document->metadata().bendAnalysis;
+        const auto &cutouts = document->metadata().closedCutouts;
+        if (cutouts.status == ClosedCutoutStatus::Filled) {
+            cutoutNotice->setText(QStringLiteral(
+                "Приближение: замкнутые вырезы игнорируются. "
+                "Отверстия видны в анимации; проверки используют заполненную копию."));
+        } else if (cutouts.status != ClosedCutoutStatus::None) {
+            cutoutNotice->setText(QStringLiteral(
+                "Не удалось надёжно заполнить замкнутые вырезы. "
+                "Просмотр исходного CAD доступен; поддержка движения не подтверждена."));
+        }
+        showCutouts->setVisible(!cutouts.boundaryFaces.empty());
         switch (analysis.status) {
         case BendRecognitionStatus::Completed:
             bendSummary->setText(
@@ -710,7 +737,8 @@ class MainWindow::Impl {
                     "\nНе привязано сохранённых записей: %1. Подробности на вкладке «Сгиб».")
                     .arg(controller->session().bendBindings().unresolved.size()));
         }
-        if (!analysis.interiorContourDiagnostics.empty()) {
+        if (!analysis.interiorContourDiagnostics.empty() &&
+            cutouts.status != ClosedCutoutStatus::Filled) {
             bendSummary->setText(
                 bendSummary->text() +
                 QStringLiteral(
@@ -724,6 +752,9 @@ class MainWindow::Impl {
                                       .arg(i + 1, 2, 10, QLatin1Char('0'))
                                       .arg(number(bend.angleRadians * 180.0 / std::numbers::pi),
                                            number(bend.innerRadiusMm), number(bend.lengthMm)));
+            if (cutouts.status == ClosedCutoutStatus::Filled) {
+                item->setText(item->text() + QStringLiteral(" · приближение"));
+            }
             if (bend.trimmedEnds) {
                 item->setText(item->text() + QStringLiteral(" · подрезка"));
             }
@@ -732,7 +763,9 @@ class MainWindow::Impl {
             item->setEditable(false);
             bendModel->appendRow(item);
         }
-        for (std::size_t i = 0; i < analysis.interiorContourDiagnostics.size(); ++i) {
+        for (std::size_t i = 0; cutouts.status != ClosedCutoutStatus::Filled &&
+                                i < analysis.interiorContourDiagnostics.size();
+             ++i) {
             auto *item = new QStandardItem(
                 QStringLiteral("D%1 · Контур в зоне сгиба").arg(i + 1, 2, 10, QLatin1Char('0')));
             item->setData(item->text(), Qt::UserRole);
@@ -868,6 +901,13 @@ class MainWindow::Impl {
                 document->metadata().bendAnalysis.lengthToleranceMm) {
             description += QStringLiteral("\nРучная толщина отличается от толщины этой зоны.");
         }
+        if (document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
+            description += QStringLiteral("\n\nКрасные грани — распознанные замкнутые вырезы. "
+                                          "В анимации вырезы остаются видимыми. Для проверок они "
+                                          "заполнены в отдельной копии. "
+                                          "Исходная CAD-форма не изменяется. Влияние вырезов на "
+                                          "материал и реальную опору не оценивается.");
+        }
         bendProperties->setText(description);
         if (highlight || shownBendEditRevision != session.editRevision() || shownTargetRow != row) {
             shownBendEditRevision = session.editRevision();
@@ -892,7 +932,12 @@ class MainWindow::Impl {
                 : QStringLiteral("Задание не задано. В полях предложены измерения CAD."));
         updateTargetButtons();
         if (highlight && !controller->hasWork()) {
-            viewer->highlightBend(bend, session.revision());
+            if (document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
+                viewer->highlightBendDiagnostic(
+                    {bend, document->metadata().closedCutouts.boundaryFaces}, session.revision());
+            } else {
+                viewer->highlightBend(bend, session.revision());
+            }
             propertyTabs->setCurrentIndex(1);
         }
     }
@@ -983,6 +1028,8 @@ class MainWindow::Impl {
     bool showingFailure = false;
     QLabel *error = nullptr;
     QPlainTextEdit *diagnostics = nullptr;
+    QLabel *cutoutNotice = nullptr;
+    QPushButton *showCutouts = nullptr;
     QToolBar *camera = nullptr;
     QAction *closeAction = nullptr;
     QAction *cancelAction = nullptr;
@@ -1125,6 +1172,24 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->bendSummary->setWordWrap(true);
     impl_->bendSummary->setTextFormat(Qt::PlainText);
     leftLayout->addWidget(impl_->bendSummary);
+    impl_->cutoutNotice = new QLabel(leftPanel);
+    impl_->cutoutNotice->setObjectName(QStringLiteral("cutoutNotice"));
+    impl_->cutoutNotice->setWordWrap(true);
+    impl_->cutoutNotice->setTextFormat(Qt::PlainText);
+    impl_->cutoutNotice->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    impl_->cutoutNotice->setStyleSheet(QStringLiteral("color:#85530C;"));
+    leftLayout->addWidget(impl_->cutoutNotice);
+    impl_->showCutouts = new QPushButton(QStringLiteral("Подсветить вырезы"), leftPanel);
+    impl_->showCutouts->setObjectName(QStringLiteral("showIgnoredCutouts"));
+    leftLayout->addWidget(impl_->showCutouts);
+    connect(impl_->showCutouts, &QPushButton::clicked, this, [this] {
+        const auto &session = impl_->controller->session();
+        if (session.document() && !impl_->controller->hasWork()) {
+            impl_->controller->discardBendPreview();
+            impl_->viewer->highlightFaces(
+                session.document()->metadata().closedCutouts.boundaryFaces, session.revision());
+        }
+    });
     impl_->bendList = new QListView(leftPanel);
     impl_->bendList->setObjectName(QStringLiteral("bendList"));
     impl_->bendList->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);

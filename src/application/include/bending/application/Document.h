@@ -66,6 +66,13 @@ struct FaceInfo {
     double areaMm2;
     SurfaceKind surface;
 };
+enum class ClosedCutoutStatus { None, Filled, Unsupported, Failed };
+// Result for a separate approximation; IDs always refer to original CAD faces.
+struct ClosedCutouts {
+    ClosedCutoutStatus status = ClosedCutoutStatus::None;
+    std::vector<std::size_t> boundaryFaces;
+    double addedVolumeMm3 = 0.0;
+};
 struct DocumentMetadata {
     std::filesystem::path sourcePath;
     std::vector<std::string> sourceLengthUnits;
@@ -79,6 +86,7 @@ struct DocumentMetadata {
     double meshAngleRadians = 0.0;
     ThicknessAnalysis thickness{};
     BendAnalysis bendAnalysis{};
+    ClosedCutouts closedCutouts{};
 };
 
 // Immutable snapshot shared by the session and its presenter after worker preparation ends.

@@ -33,4 +33,8 @@ struct BendSection {
 // Progress in [0,1]; the fixed flange stays stationary at every intermediate state.
 [[nodiscard]] std::optional<BendSection> singleBendSection(const SingleBend &model,
                                                            double progress) noexcept;
+// Move a point of the imported final section into a prepared section. This is a
+// geometric mapping for display, including cutout walls; it predicts no material response.
+[[nodiscard]] std::optional<Point2Mm> mapBendPoint(const SingleBend &model, Point2Mm source,
+                                                   const BendSection &target) noexcept;
 } // namespace bending::simulation
