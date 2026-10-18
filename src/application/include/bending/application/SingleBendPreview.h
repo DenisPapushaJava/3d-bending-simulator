@@ -42,6 +42,7 @@ class SingleBendPreview {
 using BendPreviewPtr = std::shared_ptr<const SingleBendPreview>;
 enum class BendPreviewErrorCode {
     UnsupportedGeometry,
+    BendZoneInteriorContours,
     UnsupportedParameters,
     TargetMismatch,
     ToolTooShort,

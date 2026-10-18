@@ -377,6 +377,21 @@ void test(const std::filesystem::path &path) {
     };
     reject(load(fixtures::channel(), path));
     reject(load(fixtures::trimmedBend(), path));
+    for (const auto &shape : {fixtures::bendWithZoneOpening(), fixtures::bendWithZoneOpening(false),
+                              fixtures::channelWithZoneOpening()}) {
+        const auto interrupted = load(shape, path);
+        const auto &candidate =
+            interrupted->metadata().bendAnalysis.interiorContourDiagnostics.at(0).candidate;
+        const core::BendTarget target{candidate.angleRadians, candidate.innerRadiusMm};
+        const cad::SingleBendPreviewBuilder builder;
+        for (const auto &result : {builder.build(interrupted, 0, target, false, {}),
+                                   builder.buildToolSetup(interrupted, 0, target, tools, {}),
+                                   builder.buildToolMotion(interrupted, 0, target, tools, {})}) {
+            require(std::get<application::BendPreviewError>(result).code ==
+                        application::BendPreviewErrorCode::BendZoneInteriorContours,
+                    "Interrupted bend was animated or lost its diagnostic reason");
+        }
+    }
     reject(load(BRepPrimAPI_MakePrism(
                     BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(), gp_Dir(0, 0, 1)), 0, 20, 0, 20).Face(),
                     gp_Vec(0, 0, 2))

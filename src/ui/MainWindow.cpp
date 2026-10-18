@@ -405,7 +405,9 @@ class MainWindow::Impl {
         const auto &document = session.document();
         const auto row = bendList->currentIndex().row();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
-        bool supported = document && row == 0 &&
+        const bool hasInteriorContours =
+            document && !document->metadata().bendAnalysis.interiorContourDiagnostics.empty();
+        bool supported = document && !hasInteriorContours && row == 0 &&
                          document->metadata().bendAnalysis.bends.size() == 1 &&
                          !document->metadata().bendAnalysis.bends[0].trimmedEnds;
         bool matchingThickness = true;
@@ -520,6 +522,10 @@ class MainWindow::Impl {
                 : failure->code == BendPreviewErrorCode::UnsupportedParameters
                     ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
                                      "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
+                : failure->code == BendPreviewErrorCode::BendZoneInteriorContours
+                    ? QStringLiteral("В зоне сгиба обнаружены внутренние контуры отверстия или "
+                                     "кармана. Эта геометрия пока не поддерживается для движения. "
+                                     "Выберите диагностику D слева для подсветки.")
                 : failure->code == BendPreviewErrorCode::UnsupportedGeometry
                     ? QStringLiteral(
                           "Геометрия не поддерживается первым сценарием. Нужна одна "
@@ -573,6 +579,10 @@ class MainWindow::Impl {
         } else {
             previewStatus->setText(
                 !document ? QStringLiteral("Откройте учебную деталь bend-90-6mm.step.")
+                : hasInteriorContours
+                    ? QStringLiteral("В зоне сгиба обнаружен внутренний вырез. Выберите "
+                                     "диагностику D слева. Отверстия и карманы внутри самой "
+                                     "зоны пока не поддерживаются для движения.")
                 : !supported ? QStringLiteral(
                                    "Выберите единственный прямой сгиб детали с двумя "
                                    "плоскими полками. Отверстия и скошенные края полок допустимы. "
@@ -673,10 +683,9 @@ class MainWindow::Impl {
                                "сгибов. Полнота распознавания и технологичность не проверены.")
                     .arg(analysis.bends.size()));
             if (analysis.unrecognizedCylindricalFaces > 0) {
-                bendSummary->setText(
-                    bendSummary->text() +
-                    QStringLiteral("\nЦилиндрических граней вне найденных зон: %1.")
-                        .arg(analysis.unrecognizedCylindricalFaces));
+                bendSummary->setText(bendSummary->text() +
+                                     QStringLiteral("\nДругих цилиндрических граней: %1.")
+                                         .arg(analysis.unrecognizedCylindricalFaces));
             }
             break;
         case BendRecognitionStatus::LimitReached:
@@ -701,6 +710,13 @@ class MainWindow::Impl {
                     "\nНе привязано сохранённых записей: %1. Подробности на вкладке «Сгиб».")
                     .arg(controller->session().bendBindings().unresolved.size()));
         }
+        if (!analysis.interiorContourDiagnostics.empty()) {
+            bendSummary->setText(
+                bendSummary->text() +
+                QStringLiteral(
+                    "\nЗон с внутренними вырезами: %1. Выберите D для просмотра причины.")
+                    .arg(analysis.interiorContourDiagnostics.size()));
+        }
         for (std::size_t i = 0; i < analysis.bends.size(); ++i) {
             const auto &bend = analysis.bends[i];
             auto *item =
@@ -716,14 +732,26 @@ class MainWindow::Impl {
             item->setEditable(false);
             bendModel->appendRow(item);
         }
+        for (std::size_t i = 0; i < analysis.interiorContourDiagnostics.size(); ++i) {
+            auto *item = new QStandardItem(
+                QStringLiteral("D%1 · Контур в зоне сгиба").arg(i + 1, 2, 10, QLatin1Char('0')));
+            item->setData(item->text(), Qt::UserRole);
+            item->setEditable(false);
+            bendModel->appendRow(item);
+        }
     }
     void updateBendReviews() {
         const auto &session = controller->session();
         for (int row = 0; row < bendModel->rowCount(); ++row) {
             auto *item = bendModel->item(row);
             const auto *entry = session.bend(static_cast<std::size_t>(row));
-            const auto status =
-                entry ? reviewText(entry->review) : QStringLiteral("Нет однозначной привязки");
+            const auto &document = session.document();
+            const bool diagnosticRow =
+                document &&
+                static_cast<std::size_t>(row) >= document->metadata().bendAnalysis.bends.size();
+            const auto status = diagnosticRow ? QStringLiteral("Движение недоступно")
+                                : entry ? reviewText(entry->review)
+                                        : QStringLiteral("Нет однозначной привязки");
             item->setText(item->data(Qt::UserRole).toString() + QLatin1Char('\n') + status);
             item->setToolTip(item->text());
         }
@@ -773,6 +801,39 @@ class MainWindow::Impl {
             targetAngle->setValue(90.0);
             targetRadius->setValue(0.0);
             shownBendEditRevision.reset();
+            if (document && row >= 0 &&
+                static_cast<std::size_t>(row) >= document->metadata().bendAnalysis.bends.size()) {
+                const auto &analysis = document->metadata().bendAnalysis;
+                const auto diagnosticIndex = static_cast<std::size_t>(row) - analysis.bends.size();
+                if (diagnosticIndex < analysis.interiorContourDiagnostics.size()) {
+                    const auto &diagnostic = analysis.interiorContourDiagnostics[diagnosticIndex];
+                    const auto &candidate = diagnostic.candidate;
+                    bendProperties->setText(
+                        QStringLiteral(
+                            "D%1 · Внутренний вырез в зоне сгиба\n\n"
+                            "На цилиндрической поверхности обнаружены замкнутые внутренние "
+                            "контуры: "
+                            "отверстие или карман прерывает предполагаемую зону сгиба.\n\n"
+                            "Параметры внешней границы по CAD:\nПоворот: %2°\nВнутренний радиус: "
+                            "%3 мм\n"
+                            "Расстояние между цилиндрами: %4 мм\nГабарит вдоль оси: %5 мм\n\n"
+                            "Оранжевая заливка — предполагаемая зона; красные поверхности — "
+                            "границы выреза.\n\n"
+                            "Подтверждение и движение недоступны. Деформация отверстия, усилие и "
+                            "риск трещин не рассчитываются. Это ограничение текущего алгоритма; "
+                            "оно не доказывает невозможность изготовления.")
+                            .arg(diagnosticIndex + 1, 2, 10, QLatin1Char('0'))
+                            .arg(number(candidate.angleRadians * 180.0 / std::numbers::pi),
+                                 number(candidate.innerRadiusMm), number(candidate.thicknessMm),
+                                 number(candidate.lengthMm)));
+                    bendTargetStatus->setText(QStringLiteral(
+                        "Диагностика геометрии. Задание операции здесь не создаётся."));
+                    if (highlight && !controller->hasWork()) {
+                        viewer->highlightBendDiagnostic(diagnostic, session.revision());
+                        propertyTabs->setCurrentIndex(1);
+                    }
+                }
+            }
             return;
         }
         const auto &bend = document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)];

@@ -10,6 +10,7 @@
 namespace bending::application {
 class Document;
 struct RecognizedBend;
+struct BendInteriorContourDiagnostic;
 class SingleBendPreview;
 } // namespace bending::application
 namespace bending::viewer {
@@ -37,6 +38,8 @@ class ViewerWidget final : public QWidget {
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
     // Distinguishes the bend zone from its adjacent planar flanges.
     void highlightBend(const application::RecognizedBend &bend, quint64 revision);
+    void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
+                                 quint64 revision);
     [[nodiscard]] QString
     presentBendPreview(std::shared_ptr<const application::SingleBendPreview> preview,
                        std::size_t frameIndex, quint64 documentRevision);
