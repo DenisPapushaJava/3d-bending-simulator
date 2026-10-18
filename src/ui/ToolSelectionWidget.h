@@ -14,6 +14,7 @@ class QPushButton;
 
 namespace bending::ui {
 // UI drafts and local preferences; only MainWindow commits a choice to DocumentSession.
+class ToolProfilesWidget;
 class ToolSelectionWidget final : public QWidget {
   public:
     ToolSelectionWidget(core::ToolCatalog catalog, QWidget *parent);
@@ -52,6 +53,9 @@ class ToolSelectionWidget final : public QWidget {
     QLineEdit *machine_;
     QWidget *catalogPanel_;
     QWidget *manualPanel_;
+    QWidget *catalogDetails_;
+    ToolProfilesWidget *profiles_;
+    QPushButton *enlargeProfiles_;
     std::array<QDoubleSpinBox *, 7> fields_{};
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;

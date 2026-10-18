@@ -9,6 +9,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
+#include <QDialog>
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
@@ -1494,6 +1495,39 @@ void testGuidedWorkflow(bool graphics) {
     waitUntil([&] { return sources->height() >= sources->heightForWidth(sources->width()); });
     require(!sources->text().isEmpty(), "Preset provenance missing");
     sourcesToggle->setChecked(false);
+    auto *profile = window.findChild<QWidget *>(QStringLiteral("toolProfilesPreview"));
+    auto *enlarge = window.findChild<QPushButton *>(QStringLiteral("enlargeToolProfiles"));
+    require(profile && enlarge && enlarge->isEnabled() &&
+                profile->accessibleDescription().contains(QStringLiteral("525")),
+            "Missing working profile preview");
+    const auto v35 = profile->grab().toImage();
+    groove->setCurrentIndex(2);
+    require(v35 != profile->grab().toImage() &&
+                profile->accessibleDescription().contains(QStringLiteral("V 22")),
+            "Groove did not update profile");
+    groove->setCurrentIndex(3);
+    bool popupOkay = false;
+    QTimer::singleShot(50, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog)
+            return;
+        auto *large = dialog->findChild<QWidget *>(QStringLiteral("enlargedToolProfiles"));
+        popupOkay = large && large->width() > profile->width() &&
+                    large->accessibleDescription().contains(QStringLiteral("V 35"));
+        const auto output = qEnvironmentVariable("BENDING_TOOL_PROFILE_SNAPSHOT");
+        if (!output.isEmpty())
+            popupOkay = popupOkay && dialog->grab().save(output);
+        dialog->reject();
+    });
+    enlarge->click();
+    require(popupOkay && !controller.session().modified(),
+            "Enlarged section unavailable or changed project");
+    const int selectedPunch = punch->currentIndex();
+    punch->setCurrentIndex(0);
+    require(!enlarge->isEnabled() &&
+                !profile->accessibleDescription().contains(QStringLiteral("525")),
+            "Incomplete pair retained stale profile");
+    punch->setCurrentIndex(selectedPunch);
     snapshot("tools");
     stage(2)->click();
     require(tabs->currentIndex() == 4 &&

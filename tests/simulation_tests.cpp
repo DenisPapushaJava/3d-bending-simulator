@@ -1,6 +1,7 @@
 #include "bending/simulation/FlatToolSetup.h"
 #include "bending/simulation/PressMotion.h"
 #include "bending/simulation/SingleBend.h"
+#include "bending/simulation/ToolProfiles.h"
 
 #include <cmath>
 #include <iostream>
@@ -100,6 +101,32 @@ int main() {
         }
         const bending::core::PressTools tools{
             48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
+        const auto profiles = toolProfiles(tools).value();
+        close(profiles.grooveDepthMm, 24, "Profile groove depth changed");
+        close(profiles.die[1].x, -24, "Wrong left shoulder");
+        close(profiles.die[3].x, 24, "Wrong right shoulder");
+        close(profiles.die[5].y, -48, "Wrong idealized die bottom");
+        for (const auto angle : {10., 26., 85., 120.}) {
+            auto parameters = tools;
+            parameters.punchAngleRadians = angle * std::numbers::pi / 180;
+            const auto p = toolProfiles(parameters).value();
+            const auto &arc = p.nose;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const double a = arc.startRadians + arc.sweepRadians * static_cast<double>(i) / 2;
+                const auto &expected = p.punch[i + 1];
+                close(arc.center.x + arc.radiusMm * std::cos(a), expected.x,
+                      "Nose arc X differs from CAD points");
+                close(arc.center.y + arc.radiusMm * std::sin(a), expected.y,
+                      "Nose arc Y differs from CAD points");
+            }
+            const auto tangent = p.punch[1], top = p.punch[0];
+            close((tangent.x - arc.center.x) * (top.x - tangent.x) +
+                      (tangent.y - arc.center.y) * (top.y - tangent.y),
+                  0, "Punch side not tangent to nose");
+        }
+        auto invalidProfile = tools;
+        invalidProfile.noseRadiusMm = 13;
+        require(!toolProfiles(invalidProfile), "Invalid working profile fabricated");
         const auto setup = std::get<FlatToolSetup>(flatToolSetup(model, tools, 1e-5));
         close(setup.grooveDepthMm, 24, "Wrong V depth");
         close(setup.sheetLeftMm, -30 - 5 * std::numbers::pi / 4, "Bend zone not centred");

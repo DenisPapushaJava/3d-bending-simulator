@@ -1,6 +1,9 @@
 #include "ToolSelectionWidget.h"
+#include "ToolProfilesWidget.h"
 
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -67,31 +70,34 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         c->addItem(title(catalog_[i]), static_cast<int>(i));
     }
     catalogLayout->addLayout(form);
-    favorites_ = new QComboBox(catalogPanel_);
+    catalogDetails_ = new QWidget(this);
+    auto *detailsLayout = new QVBoxLayout(catalogDetails_);
+    detailsLayout->setContentsMargins(0, 0, 0, 0);
+    favorites_ = new QComboBox(catalogDetails_);
     favorites_->setObjectName(QStringLiteral("favoriteToolPairs"));
     favorites_->setAccessibleName(QStringLiteral("Избранные пары инструмента"));
     favorites_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     favorites_->setMinimumContentsLength(16);
-    catalogLayout->addWidget(favorites_);
-    favorite_ = new QPushButton(QStringLiteral("В избранное"), catalogPanel_);
+    detailsLayout->addWidget(favorites_);
+    favorite_ = new QPushButton(QStringLiteral("В избранное"), catalogDetails_);
     favorite_->setObjectName(QStringLiteral("favoriteToolPair"));
-    catalogLayout->addWidget(favorite_);
-    details_ = wrapped(catalogPanel_);
+    detailsLayout->addWidget(favorite_);
+    details_ = wrapped(catalogDetails_);
     details_->setObjectName(QStringLiteral("toolPresetDetails"));
     details_->setStyleSheet(QStringLiteral("background:#E5F3F3;color:#1C2938;border:1px solid "
                                            "#087F83;border-radius:4px;padding:12px;"));
-    catalogLayout->addWidget(details_);
-    auto *sourcesGroup = new QToolButton(catalogPanel_);
+    detailsLayout->addWidget(details_);
+    auto *sourcesGroup = new QToolButton(catalogDetails_);
     sourcesGroup->setObjectName(QStringLiteral("toolSourcesToggle"));
     sourcesGroup->setText(QStringLiteral("Источники и ограничения ▸"));
     sourcesGroup->setCheckable(true);
     sourcesGroup->setMinimumHeight(32);
-    sources_ = wrapped(catalogPanel_);
+    sources_ = wrapped(catalogDetails_);
     sources_->setObjectName(QStringLiteral("toolPresetSources"));
     sources_->hide();
     connect(sourcesGroup, &QToolButton::toggled, sources_, &QWidget::setVisible);
-    catalogLayout->addWidget(sourcesGroup);
-    catalogLayout->addWidget(sources_);
+    detailsLayout->addWidget(sourcesGroup);
+    detailsLayout->addWidget(sources_);
     layout->addWidget(catalogPanel_);
     manualPanel_ = new QWidget(this);
     auto *manualForm = new QFormLayout(manualPanel_);
@@ -125,6 +131,45 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     auto *clearanceForm = new QFormLayout;
     clearanceForm->addRow(labels[5], fields_[5]);
     layout->addWidget(manualPanel_);
+    profiles_ = new ToolProfilesWidget(this);
+    profiles_->setObjectName(QStringLiteral("toolProfilesPreview"));
+    layout->addWidget(profiles_);
+    enlargeProfiles_ = new QPushButton(QStringLiteral("Открыть сечения крупно…"), this);
+    enlargeProfiles_->setObjectName(QStringLiteral("enlargeToolProfiles"));
+    layout->addWidget(enlargeProfiles_);
+    auto *profileScope = wrapped(this);
+    profileScope->setText(
+        QStringLiteral("Рабочая модель · общий масштаб. Полный заводской профиль не показан."));
+    profileScope->setMinimumHeight(profileScope->heightForWidth(240));
+    layout->insertWidget(layout->indexOf(profiles_), profileScope);
+    layout->addWidget(catalogDetails_);
+    connect(enlargeProfiles_, &QPushButton::clicked, this, [this] {
+        const auto tools = parameters();
+        if (!tools)
+            return;
+        QDialog dialog(this);
+        dialog.setObjectName(QStringLiteral("toolProfilesDialog"));
+        dialog.setWindowTitle(QStringLiteral("Рабочие сечения инструмента"));
+        dialog.resize(720, 520);
+        dialog.setMinimumSize(440, 360);
+        auto *dialogLayout = new QVBoxLayout(&dialog);
+        auto *view = new ToolProfilesWidget(&dialog, true);
+        view->setObjectName(QStringLiteral("enlargedToolProfiles"));
+        view->setTools(tools);
+        dialogLayout->addWidget(view, 1);
+        auto *note = wrapped(&dialog);
+        note->setText(QStringLiteral(
+            "Сечения идеализированных тел, используемых в 3D-проверке. Масштаб одинаковый, размеры "
+            "в мм. Высота клина условная и зависит от V. Корпуса, поднутрения и крепления не "
+            "показаны. Это просмотр геометрии, не результат проверки совместимости."));
+        note->setMinimumHeight(note->heightForWidth(400));
+        dialogLayout->addWidget(note);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+        buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("Закрыть"));
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        dialogLayout->addWidget(buttons);
+        dialog.exec();
+    });
     layout->addLayout(clearanceForm);
     machine_ = new QLineEdit(this);
     machine_->setObjectName(QStringLiteral("workshopMachine"));
@@ -315,6 +360,10 @@ void ToolSelectionWidget::refreshFavorites() {
 void ToolSelectionWidget::updateDetails() {
     catalogPanel_->setVisible(usesCatalog());
     manualPanel_->setVisible(!usesCatalog());
+    catalogDetails_->setVisible(usesCatalog());
+    const auto tools = parameters();
+    profiles_->setTools(tools);
+    enlargeProfiles_->setEnabled(tools.has_value());
     const auto a = assignment();
     favorite_->setEnabled(a.has_value());
     favorite_->setText(std::find(favoritePairs_.begin(), favoritePairs_.end(), currentPair()) ==
