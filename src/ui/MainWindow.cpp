@@ -542,6 +542,16 @@ class MainWindow::Impl {
         fixedSide->setEnabled(document && !controller->hasWork());
         toolMode->setEnabled(document && !controller->hasWork());
         const bool toolEditable = entry && included(entry->review) && !controller->hasWork();
+        std::optional<core::ToolSelectionRequest> selectionRequest;
+        if (document && entry && included(entry->review) && matchingThickness && row >= 0 &&
+            static_cast<std::size_t>(row) < document->metadata().bendAnalysis.bends.size()) {
+            const auto &bend =
+                document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)];
+            if (const auto target = session.bendTarget(static_cast<std::size_t>(row)))
+                selectionRequest = core::ToolSelectionRequest{
+                    bend.thicknessMm, target->angleRadians, target->innerRadiusMm, bend.lengthMm};
+        }
+        toolSelection->setSelectionRequest(selectionRequest);
         toolSelection->setEnabled(toolEditable);
         applyTools->setEnabled(toolEditable && previewBuilder && supported && matchingThickness &&
                                session.bendTarget(static_cast<std::size_t>(row)).has_value());
@@ -2096,5 +2106,10 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     }
     impl_->controller->closeDocument();
     QMainWindow::closeEvent(event);
+}
+void MainWindow::setToolCatalogLoader(
+    std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
+        loader) {
+    impl_->toolSelection->loadCatalog = std::move(loader);
 }
 } // namespace bending::ui

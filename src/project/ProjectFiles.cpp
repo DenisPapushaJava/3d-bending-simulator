@@ -253,10 +253,11 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
         return invalid("Unknown project format");
     }
     const auto version = root.value(QStringLiteral("version"));
-    if (!version.isDouble() || (version.toDouble() != 1.0 && version.toDouble() != 2.0 &&
-                                version.toDouble() != 3.0 && version.toDouble() != 4.0)) {
+    if (!version.isDouble() ||
+        (version.toDouble() != 1.0 && version.toDouble() != 2.0 && version.toDouble() != 3.0 &&
+         version.toDouble() != 4.0 && version.toDouble() != 5.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1, 2, 3 and 4",
+                           "Supported project format versions are 1 through 5",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -342,7 +343,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
     const QByteArray bytes(source.data(), static_cast<qsizetype>(source.size()));
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 4},
+        {QStringLiteral("version"), 5},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},

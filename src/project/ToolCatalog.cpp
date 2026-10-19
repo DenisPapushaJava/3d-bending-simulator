@@ -27,9 +27,9 @@ bool readNumber(const QJsonValue &value, std::optional<double> &out) {
     return true;
 }
 ToolCatalogResult readFile(QFile &file) {
-    constexpr qint64 limit = 1024 * 1024;
+    constexpr qint64 limit = 4 * 1024 * 1024;
     if (!file.open(QIODevice::ReadOnly) || file.size() <= 0 || file.size() > limit) {
-        return std::string("Cannot read catalogue or size exceeds 1 MiB");
+        return std::string("Cannot read catalogue or size exceeds 4 MiB");
     }
     const auto bytes = file.read(limit + 1);
     if (file.error() != QFileDevice::NoError || bytes.size() > limit) {
@@ -42,8 +42,8 @@ ToolCatalogResult readFile(QFile &file) {
     }
     const auto root = json.object();
     if (root.value("format") != QStringLiteral("bending-tool-catalog") ||
-        root.value("version").toDouble(-1) != 1 || !root.value("tools").isArray() ||
-        root.value("tools").toArray().size() > 512) {
+        (root.value("version").toDouble(-1) != 1 && root.value("version").toDouble(-1) != 2) ||
+        !root.value("tools").isArray() || root.value("tools").toArray().size() > 512) {
         return std::string("Unsupported catalogue format/version");
     }
     core::ToolCatalog tools;
@@ -65,6 +65,21 @@ QJsonObject presetJson(const core::ToolPreset &t) {
     for (double v : t.openingsMm) {
         openings.append(v);
     }
+    QJsonValue drawing(QJsonValue::Null);
+    if (t.drawing) {
+        const auto point = [](core::DrawingPoint p) { return QJsonArray{p.x, p.y}; };
+        QJsonArray edges;
+        for (const auto &e : t.drawing->edges)
+            edges.append(QJsonObject{
+                {"start", point(e.start)},
+                {"end", point(e.end)},
+                {"center", e.center ? QJsonValue(point(*e.center)) : QJsonValue(QJsonValue::Null)},
+                {"sweepRadians", e.sweepRadians}});
+        drawing = QJsonObject{{"sourceFile", QString::fromStdString(t.drawing->sourceFile)},
+                              {"sha256", QString::fromStdString(t.drawing->sha256)},
+                              {"millimeters", t.drawing->millimeters},
+                              {"edges", edges}};
+    }
     return {{"id", QString::fromStdString(t.id)},
             {"manufacturer", QString::fromStdString(t.manufacturer)},
             {"code", QString::fromStdString(t.code)},
@@ -76,7 +91,9 @@ QJsonObject presetJson(const core::ToolPreset &t) {
             {"openingsMm", openings},
             {"source", QString::fromStdString(t.source)},
             {"notes", QString::fromStdString(t.notes)},
-            {"teaching", t.teaching}};
+            {"teaching", t.teaching},
+            {"parametersConfirmed", t.parametersConfirmed},
+            {"drawing", drawing}};
 }
 bool readPreset(const QJsonObject &o, core::ToolPreset &t) {
     for (const auto &[name, destination] : {std::pair{"id", &t.id},
@@ -103,6 +120,51 @@ bool readPreset(const QJsonObject &o, core::ToolPreset &t) {
     t.angleRadians = o.value("angleRadians").toDouble();
     t.lengthMm = o.value("lengthMm").toDouble();
     t.teaching = o.value("teaching").toBool();
+    t.parametersConfirmed = true;
+    if (o.contains("parametersConfirmed")) {
+        if (!o.value("parametersConfirmed").isBool())
+            return false;
+        t.parametersConfirmed = o.value("parametersConfirmed").toBool();
+    }
+    t.drawing.reset();
+    if (o.contains("drawing") && !o.value("drawing").isNull()) {
+        if (!o.value("drawing").isObject())
+            return false;
+        const auto d = o.value("drawing").toObject();
+        if (!d.value("sourceFile").isString() || !d.value("sha256").isString() ||
+            !d.value("millimeters").isBool() || !d.value("edges").isArray() ||
+            d.value("edges").toArray().size() > 512)
+            return false;
+        core::ToolDrawing drawing;
+        drawing.sourceFile = d.value("sourceFile").toString().toStdString();
+        drawing.sha256 = d.value("sha256").toString().toStdString();
+        drawing.millimeters = d.value("millimeters").toBool();
+        const auto point = [](QJsonValue value, core::DrawingPoint &p) {
+            const auto a = value.toArray();
+            if (!value.isArray() || a.size() != 2 || !a[0].isDouble() || !a[1].isDouble())
+                return false;
+            p = {a[0].toDouble(), a[1].toDouble()};
+            return true;
+        };
+        for (const auto &item : d.value("edges").toArray()) {
+            const auto edge = item.toObject();
+            core::DrawingEdge e;
+            if (!item.isObject() || !point(edge.value("start"), e.start) ||
+                !point(edge.value("end"), e.end) || !edge.value("sweepRadians").isDouble())
+                return false;
+            e.sweepRadians = edge.value("sweepRadians").toDouble();
+            if (!edge.value("center").isNull()) {
+                core::DrawingPoint c;
+                if (!point(edge.value("center"), c))
+                    return false;
+                e.center = c;
+            }
+            drawing.edges.push_back(e);
+        }
+        if (!core::validToolDrawing(drawing))
+            return false;
+        t.drawing = std::move(drawing);
+    }
     t.openingsMm.clear();
     if (o.value("openingsMm").toArray().size() > 16) {
         return false;
