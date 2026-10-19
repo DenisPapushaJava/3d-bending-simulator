@@ -11,6 +11,7 @@ class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QToolButton;
 
 namespace bending::ui {
 // UI drafts and local preferences; only MainWindow commits a choice to DocumentSession.
@@ -23,6 +24,8 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] std::optional<core::PressTools> parameters() const;
     [[nodiscard]] std::optional<core::ToolAssignment> assignment() const;
     [[nodiscard]] bool usesCatalog() const;
+    [[nodiscard]] QString summary() const;
+    [[nodiscard]] QString shortSummary() const;
     void rememberChoice();
     std::function<void()> onChanged;
 
@@ -54,6 +57,7 @@ class ToolSelectionWidget final : public QWidget {
     QWidget *catalogPanel_;
     QWidget *manualPanel_;
     QWidget *catalogDetails_;
+    QToolButton *detailsToggle_;
     ToolProfilesWidget *profiles_;
     QPushButton *enlargeProfiles_;
     std::array<QDoubleSpinBox *, 7> fields_{};

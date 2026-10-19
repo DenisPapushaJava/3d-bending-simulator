@@ -457,7 +457,9 @@ void testBendWorkflow(bool graphics) {
             "Selected bend measurements missing");
     require(!controller.session().modified(), "Bend selection dirtied project");
     auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
-    require(tabs && tabs->currentIndex() == 1, "Bend selection did not reveal measurements");
+    require(tabs && tabs->currentIndex() == 0, "Bend selection unexpectedly left the part task");
+    window.findChild<QPushButton *>(QStringLiteral("editSelectedBend"))->click();
+    require(tabs->currentIndex() == 1, "Cannot open selected bend parameters");
     if (graphics) {
         const auto first = viewer->captureImage();
         require(warmPixels(first) > 100 && warmPixels(first) < first.width() * first.height() / 5,
@@ -655,6 +657,7 @@ void testBendPreparationWorkflow(bool graphics) {
     controller.open(path);
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
+    window.findChild<QPushButton *>(QStringLiteral("editSelectedBend"))->click();
     auto *bindingWarning = window.findChild<QLabel *>(QStringLiteral("bendBindingWarning"));
     auto *summary = window.findChild<QLabel *>(QStringLiteral("bendSummary"));
     require(bindingWarning->isVisible() &&
@@ -672,6 +675,7 @@ void testBendPreparationWorkflow(bool graphics) {
     controller.open(path);
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
+    window.findChild<QPushButton *>(QStringLiteral("editSelectedBend"))->click();
     require(!controller.session().bend(0) && !review->isEnabled() && !apply->isEnabled() &&
                 bindingWarning->isVisible() &&
                 status->text().contains(QStringLiteral("не привязаны")),
@@ -832,9 +836,14 @@ void testSingleBendWorkflow(bool graphics) {
                 !controller.session().modified(),
             "Speed control skipped frames, resumed playback or invalidated the project");
     returnToCad->click();
-    require(!controller.bendPreview() && !slider->isEnabled() &&
+    require(controller.bendPreview() == previewBeforeSpeedChange && !slider->isEnabled() &&
                 controller.session().document() == source && !controller.session().modified(),
-            "Return to CAD changed project");
+            "Inspecting source invalidated the prepared result");
+    window.findChild<QToolButton *>(QStringLiteral("processStage2"))->click();
+    require(controller.bendPreview() == previewBeforeSpeedChange && slider->isEnabled() &&
+                slider->value() == pausedFrame && !playback->isActive(),
+            "Returning to the result recalculated/reset playback");
+    returnToCad->click();
     side->setCurrentIndex(1);
     prepare->click();
     waitUntil(finished);
@@ -878,7 +887,9 @@ void testSingleBendWorkflow(bool graphics) {
                 !play->isEnabled() && clearTools->isEnabled() && controller.session().modified() &&
                 controller.session().document() == source &&
                 controller.session().revision() == revision &&
-                toolStatus->text().contains(QStringLiteral("Начальная установка проверена")),
+                window.findChild<QLabel *>(QStringLiteral("bendCheckSummary"))
+                    ->text()
+                    .contains(QStringLiteral("Начальная установка проверена")),
             "Setup mode, source or feedback incorrect");
     require(!speed->isVisible() && !speed->isEnabled(),
             "Static setup displayed an active animation speed control");
@@ -942,9 +953,9 @@ void testSingleBendWorkflow(bool graphics) {
     waitUntil([&] { return slider->value() > 0; });
     play->click();
     returnToCad->click();
-    require(!controller.bendPreview() && controller.session().bend(0)->tools &&
+    require(controller.bendPreview() && controller.session().bend(0)->tools &&
                 !controller.session().modified(),
-            "Return erased saved tools");
+            "Inspecting CAD erased the result or saved tools");
     prepare->click();
     waitUntil(finished);
     controller.setBendTarget(0, bending::core::BendTarget{std::numbers::pi / 3, 8});
@@ -1478,7 +1489,7 @@ void testGuidedWorkflow(bool graphics) {
         auto image = window.grab().toImage();
         QPainter painter(&image);
         painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
-                          viewer->captureImage());
+                          viewer->captureImage(true));
         painter.end();
         require(image.save(output + QLatin1Char('-') + QString::fromLatin1(suffix) +
                            QStringLiteral(".png")),
@@ -1495,8 +1506,12 @@ void testGuidedWorkflow(bool graphics) {
             "Import required manual preparation");
     require(toggle->isChecked() && toggle->isVisible() && stage(0)->isChecked(),
             "Import did not retain detail stage/automatic cutouts");
-    for (int i = 0; i < 4; ++i) {
-        require(stage(i) && stage(i)->height() >= 64 && stage(i)->width() >= 180 &&
+    require(!stage(3) && !window.findChild<QDockWidget *>(QStringLiteral("projectDock")) &&
+                !window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->isVisible() &&
+                !window.findChild<QListView *>(QStringLiteral("bendList"))->isVisible(),
+            "Single-bend task retained unnecessary panels/stages");
+    for (int i = 0; i < 3; ++i) {
+        require(stage(i) && stage(i)->height() >= 80 && stage(i)->width() >= 180 &&
                     stage(i)->shortcut() == QKeySequence(QStringLiteral("Alt+%1").arg(i + 1)),
                 "Process navigation is too small or lacks shortcuts");
     }
@@ -1567,6 +1582,9 @@ void testGuidedWorkflow(bool graphics) {
                 ->text()
                 .contains(QStringLiteral("525")),
             "ST1801M length corrupted");
+    auto *toolDetails = window.findChild<QToolButton *>(QStringLiteral("toolDetailsToggle"));
+    require(toolDetails && !toolDetails->isChecked(), "Tool details expanded by default");
+    toolDetails->click();
     auto *favorite = window.findChild<QPushButton *>(QStringLiteral("favoriteToolPair"));
     favorite->click();
     require(window.findChild<QComboBox *>(QStringLiteral("favoriteToolPairs"))->count() == 2 &&
@@ -1615,17 +1633,27 @@ void testGuidedWorkflow(bool graphics) {
                 !profile->accessibleDescription().contains(QStringLiteral("525")),
             "Incomplete pair retained stale profile");
     punch->setCurrentIndex(selectedPunch);
+    toolDetails->click();
+    QApplication::processEvents();
+    require(tabs->widget(3)->rect().contains(
+                QRect(apply->mapTo(tabs->widget(3), QPoint()), apply->size())),
+            "Primary check action is outside the visible tool task");
     snapshot("tools");
     stage(2)->click();
-    require(tabs->currentIndex() == 4 &&
-                window.findChild<QLabel *>(QStringLiteral("bendOrderStatus"))
-                    ->text()
-                    .contains(QStringLiteral("Одна операция")),
-            "Single operation order missing");
-    stage(3)->click();
-    require(tabs->currentIndex() == 2 && stage(3)->isChecked(), "Check stage missing");
+    require(tabs->currentIndex() == 2 && stage(2)->isChecked(), "Check stage missing");
     auto *check = window.findChild<QPushButton *>(QStringLiteral("checkBend"));
     require(check->isEnabled(), "Automatic CAD target did not enable check");
+    stage(1)->click();
+    punch->setCurrentIndex(0);
+    stage(2)->click();
+    require(!check->isEnabled() && window.findChild<QLabel *>(QStringLiteral("bendCheckSummary"))
+                                       ->text()
+                                       .contains(QStringLiteral("Выберите пуансон")),
+            "Incomplete pair enabled check without an explanation");
+    window.findChild<QPushButton *>(QStringLiteral("resolveCheckProblem"))->click();
+    require(tabs->currentIndex() == 3, "Missing-tool action did not open tool selection");
+    punch->setCurrentIndex(selectedPunch);
+    stage(2)->click();
     check->click();
     waitUntil(finished);
     if (controller.bendPreviewError())
@@ -1675,6 +1703,24 @@ void testGuidedWorkflow(bool graphics) {
                 "Dimension toggle invalidated calculation");
         viewer->setDimensionsVisible(false);
     }
+    play->click();
+    const int beforeLeaving = slider->value();
+    waitUntil([&] { return slider->value() > beforeLeaving; });
+    stage(1)->click();
+    require(!window.findChild<QTimer *>(QStringLiteral("bendPlaybackTimer"))->isActive(),
+            "Leaving check kept playback running with hidden controls");
+    stage(2)->click();
+    const auto checkedPreview = controller.bendPreview();
+    const auto checkedEdit = controller.session().editRevision();
+    const auto checkedFrame = slider->value();
+    stage(0)->click();
+    require(controller.bendPreview() == checkedPreview && !play->isEnabled() &&
+                !window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->isVisible(),
+            "Part navigation recalculated the result or kept transport controls");
+    window.findChild<QPushButton *>(QStringLiteral("partPrimaryAction"))->click();
+    require(controller.bendPreview() == checkedPreview && slider->value() == checkedFrame &&
+                play->isEnabled() && controller.session().editRevision() == checkedEdit,
+            "Primary result action did not reuse the current calculation");
     // Pending UI edits must invalidate the old successful result even before commit.
     stage(1)->click();
     groove->setCurrentIndex(2);
@@ -1711,6 +1757,15 @@ void testGuidedWorkflow(bool graphics) {
                     0 &&
                 !restored.importController().session().modified(),
             "Snapshot depends on local catalogue");
+    const auto restoredEdit = restored.importController().session().editRevision();
+    auto *restoredPrimary = restored.findChild<QPushButton *>(QStringLiteral("partPrimaryAction"));
+    require(restoredPrimary->text() == QStringLiteral("Проверить гибку"),
+            "Saved pair did not allow direct check from the part task");
+    restoredPrimary->click();
+    waitUntil([&] { return !restored.importController().hasWork(); });
+    require(restored.importController().bendPreview() &&
+                restored.importController().session().editRevision() == restoredEdit,
+            "Direct check required reassigning saved tools or changed project");
     restored.importController().closeDocument();
     restored.close();
     controller.setBendReview(0, BendReview::Excluded);
@@ -1740,6 +1795,10 @@ int main(int argc, char *argv[]) {
     try {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
         testGuidedWorkflow(graphics);
+        if (app.arguments().contains(QStringLiteral("--guided-only"))) {
+            std::cout << "Guided bending workflow passed\n";
+            return 0;
+        }
         testWorkflow(graphics);
         testProjectWorkflow(graphics);
         testBendWorkflow(graphics);

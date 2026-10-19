@@ -40,6 +40,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     : QWidget(parent), catalog_(std::move(catalog)) {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
+    layout->setAlignment(Qt::AlignTop);
     mode_ = new QComboBox(this);
     mode_->setObjectName(QStringLiteral("toolSourceMode"));
     mode_->setAccessibleName(QStringLiteral("Источник параметров инструмента"));
@@ -138,11 +139,17 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     enlargeProfiles_->setObjectName(QStringLiteral("enlargeToolProfiles"));
     layout->addWidget(enlargeProfiles_);
     auto *profileScope = wrapped(this);
-    profileScope->setText(
-        QStringLiteral("Рабочая модель · общий масштаб. Полный заводской профиль не показан."));
+    profileScope->setText(QStringLiteral("Упрощённые рабочие сечения · общий масштаб"));
     profileScope->setMinimumHeight(profileScope->heightForWidth(240));
     layout->insertWidget(layout->indexOf(profiles_), profileScope);
+    detailsToggle_ = new QToolButton(this);
+    detailsToggle_->setObjectName(QStringLiteral("toolDetailsToggle"));
+    detailsToggle_->setText(QStringLiteral("Избранное и данные инструмента ▸"));
+    detailsToggle_->setCheckable(true);
+    detailsToggle_->setMinimumHeight(30);
+    layout->addWidget(detailsToggle_);
     layout->addWidget(catalogDetails_);
+    connect(detailsToggle_, &QToolButton::toggled, this, [this] { updateDetails(); });
     connect(enlargeProfiles_, &QPushButton::clicked, this, [this] {
         const auto tools = parameters();
         if (!tools)
@@ -170,20 +177,32 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         dialogLayout->addWidget(buttons);
         dialog.exec();
     });
-    layout->addLayout(clearanceForm);
-    machine_ = new QLineEdit(this);
+    auto *setup = new QWidget(this);
+    auto *setupLayout = new QVBoxLayout(setup);
+    setupLayout->setContentsMargins(0, 0, 0, 0);
+    setupLayout->addLayout(clearanceForm);
+    auto *setupToggle = new QToolButton(this);
+    setupToggle->setText(QStringLiteral("Параметры установки ▸"));
+    setupToggle->setObjectName(QStringLiteral("toolSetupOptionsToggle"));
+    setupToggle->setCheckable(true);
+    setupToggle->setMinimumHeight(30);
+    layout->addWidget(setupToggle);
+    layout->addWidget(setup);
+    setup->hide();
+    connect(setupToggle, &QToolButton::toggled, setup, &QWidget::setVisible);
+    machine_ = new QLineEdit(setup);
     machine_->setObjectName(QStringLiteral("workshopMachine"));
     machine_->setAccessibleName(QStringLiteral("Название станка мастерской"));
     machine_->setPlaceholderText(QStringLiteral("Название станка (необязательно)"));
     machine_->setMaxLength(256);
     machine_->setToolTip(
         QStringLiteral("Название для проекта. Геометрия и крепления станка пока не проверяются."));
-    layout->addWidget(machine_);
+    setupLayout->addWidget(machine_);
     auto *scope = wrapped(this);
     scope->setText(
         QStringLiteral("Проверяется идеализированная рабочая зона: клин и V-паз. Корпуса, "
                        "поднутрения, держатели, станок и допустимая нагрузка не проверяются."));
-    layout->addWidget(scope);
+    setupLayout->addWidget(scope);
     connect(mode_, &QComboBox::currentIndexChanged, this, [this] { changed(); });
     connect(punch_, &QComboBox::currentIndexChanged, this, [this] { changed(); });
     connect(die_, &QComboBox::currentIndexChanged, this, [this] {
@@ -360,7 +379,8 @@ void ToolSelectionWidget::refreshFavorites() {
 void ToolSelectionWidget::updateDetails() {
     catalogPanel_->setVisible(usesCatalog());
     manualPanel_->setVisible(!usesCatalog());
-    catalogDetails_->setVisible(usesCatalog());
+    detailsToggle_->setVisible(usesCatalog());
+    catalogDetails_->setVisible(usesCatalog() && detailsToggle_->isChecked());
     const auto tools = parameters();
     profiles_->setTools(tools);
     enlargeProfiles_->setEnabled(tools.has_value());
@@ -400,6 +420,31 @@ void ToolSelectionWidget::changed() {
     updateDetails();
     if (onChanged)
         onChanged();
+}
+QString ToolSelectionWidget::summary() const {
+    const auto tools = parameters();
+    if (!tools)
+        return QStringLiteral("Пара не выбрана");
+    if (const auto a = assignment()) {
+        return text(a->punch.code + " / " + a->die.code) +
+               QStringLiteral(" · V %1 мм%2")
+                   .arg(tools->openingMm)
+                   .arg(a->punch.teaching || a->die.teaching ? QStringLiteral(" · учебная пара")
+                                                             : QString{});
+    }
+    return QStringLiteral("Вручную · V %1 мм · R %2 мм")
+        .arg(tools->openingMm)
+        .arg(tools->noseRadiusMm);
+}
+QString ToolSelectionWidget::shortSummary() const {
+    const auto tools = parameters();
+    if (!tools)
+        return QStringLiteral("Выбрать пару");
+    const auto a = assignment();
+    return (a && (a->punch.teaching || a->die.teaching) ? QStringLiteral("Учебная пара")
+            : a                                         ? text(a->die.code)
+                                                        : QStringLiteral("Вручную")) +
+           QStringLiteral(" · V %1").arg(tools->openingMm);
 }
 void ToolSelectionWidget::rememberChoice() {
     const auto a = assignment();
