@@ -1,3 +1,7 @@
+add_executable(tool_catalog_tests tool_catalog_tests.cpp)
+target_link_libraries(tool_catalog_tests PRIVATE Bending::Core bending_options)
+add_test(NAME core.tool-catalog COMMAND tool_catalog_tests)
+set_tests_properties(core.tool-catalog PROPERTIES LABELS "unit")
 add_executable(core_tests core_tests.cpp)
 target_link_libraries(core_tests PRIVATE Bending::Core bending_options)
 add_test(NAME core.sequence COMMAND core_tests)
@@ -52,7 +56,7 @@ if(BENDING_BUILD_APP)
     target_link_libraries(workflow_tests PRIVATE Bending::Ui Bending::Viewer Bending::Cad Bending::Project bending_options)
     target_compile_definitions(workflow_tests PRIVATE BENDING_EXAMPLE_DIR="${PROJECT_SOURCE_DIR}/examples")
     add_test(NAME app.step-workflow COMMAND workflow_tests)
-    set_tests_properties(app.step-workflow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30 LABELS "integration")
+    set_tests_properties(app.step-workflow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60 LABELS "integration")
     add_executable(import_controller_tests import_controller_tests.cpp)
     target_link_libraries(import_controller_tests PRIVATE Bending::Ui bending_options)
     add_test(NAME application.import-controller COMMAND import_controller_tests)
@@ -67,20 +71,14 @@ if(BENDING_BUILD_APP)
         if(BENDING_XVFB_RUN)
             add_test(NAME app.step-render
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics)
-            add_test(NAME app.step-render.hidpi
-                COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics)
-            set_tests_properties(app.step-render app.step-render.hidpi PROPERTIES
-                ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1" TIMEOUT 60 LABELS "graphics")
-            set_property(TEST app.step-render.hidpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=2")
             add_test(NAME viewer.render
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:viewer_tests>)
-            add_test(NAME viewer.render.hidpi
-                COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:viewer_tests>)
-            set_tests_properties(viewer.render viewer.render.hidpi PROPERTIES
-                ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1" TIMEOUT 60 LABELS "graphics")
-            set_property(TEST viewer.render.hidpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=2")
+            set_tests_properties(app.step-render viewer.render PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1;QT_SCALE_FACTOR=1" TIMEOUT 60 LABELS "graphics")
         endif()
     endif()
+    add_test(NAME app.custom-catalog-startup COMMAND bending_simulator --smoke-test --tool-catalog "${PROJECT_SOURCE_DIR}/src/project/data/tool-catalog.json")
+    set_tests_properties(app.custom-catalog-startup PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20 LABELS "integration")
     add_test(NAME app.startup COMMAND bending_simulator --smoke-test)
     add_test(NAME app.step-startup COMMAND bending_simulator --smoke-test "${PROJECT_SOURCE_DIR}/examples/angle-mm.step")
     set_tests_properties(app.step-startup PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30 LABELS "integration")

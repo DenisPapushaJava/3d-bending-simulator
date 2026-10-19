@@ -1,6 +1,7 @@
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
+#include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
@@ -8,6 +9,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
+#include <QDialog>
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
@@ -22,6 +24,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QSettings>
 #include <QSlider>
 #include <QStringList>
 #include <QTabWidget>
@@ -29,11 +32,13 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 
 #include <cmath>
 #include <functional>
 #include <iostream>
 #include <numbers>
+#include <source_location>
 #include <stdexcept>
 
 namespace {
@@ -42,14 +47,17 @@ void require(bool value, const char *message) {
         throw std::runtime_error(message);
     }
 }
-void waitUntil(const std::function<bool()> &condition) {
+void waitUntil(const std::function<bool()> &condition,
+               std::source_location location = std::source_location::current()) {
     QElapsedTimer elapsed;
     elapsed.start();
     while (!condition() && elapsed.elapsed() < 10000) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         QThread::msleep(5);
     }
-    require(condition(), "Workflow wait timed out");
+    if (!condition())
+        throw std::runtime_error(std::string("Workflow wait timed out at line ") +
+                                 std::to_string(location.line()));
     // Worker completion precedes Qt's deferred dock/layout and native resize events.
     QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
@@ -211,6 +219,7 @@ void testWorkflow(bool graphics) {
         require(faceProperties->text().contains(QStringLiteral("Площадь:")) &&
                     faceProperties->text().contains(QStringLiteral("мм²")),
                 "Selected face properties are missing");
+        window.findChild<QToolButton *>(QStringLiteral("measurementsToggle"))->setChecked(true);
         waitUntil([&] {
             return faceProperties->height() >=
                    faceProperties->heightForWidth(faceProperties->width());
@@ -448,7 +457,9 @@ void testBendWorkflow(bool graphics) {
             "Selected bend measurements missing");
     require(!controller.session().modified(), "Bend selection dirtied project");
     auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
-    require(tabs && tabs->currentIndex() == 1, "Bend selection did not reveal measurements");
+    require(tabs && tabs->currentIndex() == 0, "Bend selection unexpectedly left the part task");
+    window.findChild<QPushButton *>(QStringLiteral("editSelectedBend"))->click();
+    require(tabs->currentIndex() == 1, "Cannot open selected bend parameters");
     if (graphics) {
         const auto first = viewer->captureImage();
         require(warmPixels(first) > 100 && warmPixels(first) < first.width() * first.height() / 5,
@@ -556,7 +567,7 @@ void testBendPreparationWorkflow(bool graphics) {
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
     const auto id = controller.session().bend(0)->id;
-    require(review->currentIndex() == 0 && !apply->isEnabled() && !controller.session().modified(),
+    require(review->currentIndex() == 3 && apply->isEnabled() && !controller.session().modified(),
             "Selection created a target before confirmation");
     const auto chooseReview = [&](int index) {
         review->setCurrentIndex(index);
@@ -646,12 +657,13 @@ void testBendPreparationWorkflow(bool graphics) {
     controller.open(path);
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
+    window.findChild<QPushButton *>(QStringLiteral("editSelectedBend"))->click();
     auto *bindingWarning = window.findChild<QLabel *>(QStringLiteral("bendBindingWarning"));
     auto *summary = window.findChild<QLabel *>(QStringLiteral("bendSummary"));
     require(bindingWarning->isVisible() &&
                 bindingWarning->text().contains(QString::fromStdString(unresolvedId)) &&
                 summary->text().contains(QStringLiteral("Не привязано")) &&
-                review->currentIndex() == 0 && !controller.session().bend(0)->target,
+                review->currentIndex() == 3 && !controller.session().bend(0)->target,
             "Unmatched saved target hidden or incorrectly applied in UI");
     auto ambiguous = controller.session().bends();
     const auto boundIndex = *controller.session().bendBindings().byRecognizedBend[0];
@@ -663,6 +675,7 @@ void testBendPreparationWorkflow(bool graphics) {
     controller.open(path);
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
+    window.findChild<QPushButton *>(QStringLiteral("editSelectedBend"))->click();
     require(!controller.session().bend(0) && !review->isEnabled() && !apply->isEnabled() &&
                 bindingWarning->isVisible() &&
                 status->text().contains(QStringLiteral("не привязаны")),
@@ -690,16 +703,23 @@ void testSingleBendWorkflow(bool graphics) {
     auto *slider = window.findChild<QSlider *>(QStringLiteral("bendFrame"));
     auto *side = window.findChild<QComboBox *>(QStringLiteral("fixedBendSide"));
     auto *play = window.findChild<QPushButton *>(QStringLiteral("playBend"));
+    auto *speed = window.findChild<QSlider *>(QStringLiteral("bendPlaybackSpeed"));
+    auto *speedValue = window.findChild<QLabel *>(QStringLiteral("bendPlaybackSpeedValue"));
+    auto *playback = window.findChild<QTimer *>(QStringLiteral("bendPlaybackTimer"));
     auto *returnToCad = window.findChild<QPushButton *>(QStringLiteral("returnToCad"));
     auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
     auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
     require(prepare && status && slider && side && play && returnToCad && !prepare->isEnabled() &&
                 !slider->isEnabled(),
             "Missing or active empty operation controls");
+    require(speed && speedValue && playback && !speed->isEnabled() &&
+                speedValue->text() == QStringLiteral("1×"),
+            "Missing speed control or incorrect initial speed");
     window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/bend-90-6mm.step"));
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
-    require(!prepare->isEnabled(), "Unconfirmed zone enabled preview");
+    require(prepare->isEnabled() && !controller.session().bend(0)->target,
+            "Automatic CAD target did not enable preview");
     controller.setBendReview(0, BendReview::Confirmed);
     window.findChild<QPushButton *>(QStringLiteral("applyBendTarget"))->click();
     QTemporaryDir temporary;
@@ -782,14 +802,48 @@ void testSingleBendWorkflow(bool graphics) {
     QApplication::sendEvent(slider, &previous);
     require(slider->value() == 19, "Operation slider is not keyboard accessible");
     slider->setValue(10);
+    const auto previewBeforeSpeedChange = controller.bendPreview();
+    const auto editBeforeSpeedChange = controller.session().editRevision();
+    speed->setValue(4);
+    require(slider->value() == 10 && !playback->isActive() && playback->interval() == 75 &&
+                speedValue->text() == QStringLiteral("2×"),
+            "Paused speed change started playback or changed position");
+    int previousFrame = slider->value();
+    bool orderedFrames = true;
+    const auto frameConnection = QObject::connect(slider, &QSlider::valueChanged, [&](int frame) {
+        orderedFrames = orderedFrames && frame == previousFrame + 1;
+        previousFrame = frame;
+    });
     play->click();
     waitUntil([&] { return slider->value() > 10; });
+    const auto runningFrame = slider->value();
+    speed->setFocus();
+    QKeyEvent fastest(QEvent::KeyPress, Qt::Key_End, Qt::NoModifier);
+    QApplication::sendEvent(speed, &fastest);
+    require(playback->isActive() && slider->value() == runningFrame && playback->interval() == 50 &&
+                speedValue->text() == QStringLiteral("3×"),
+            "Live speed change paused/restarted the animation or did not reach 3x");
+    waitUntil([&] { return slider->value() > runningFrame; });
     play->click();
+    QObject::disconnect(frameConnection);
+    const auto pausedFrame = slider->value();
+    speed->setValue(0);
     require(play->text() == QStringLiteral("Воспроизвести"), "Playback did not pause");
+    require(orderedFrames && !playback->isActive() && playback->interval() == 150 &&
+                slider->value() == pausedFrame && speedValue->text() == QStringLiteral("1×") &&
+                controller.bendPreview() == previewBeforeSpeedChange &&
+                controller.session().editRevision() == editBeforeSpeedChange &&
+                !controller.session().modified(),
+            "Speed control skipped frames, resumed playback or invalidated the project");
     returnToCad->click();
-    require(!controller.bendPreview() && !slider->isEnabled() &&
+    require(controller.bendPreview() == previewBeforeSpeedChange && !slider->isEnabled() &&
                 controller.session().document() == source && !controller.session().modified(),
-            "Return to CAD changed project");
+            "Inspecting source invalidated the prepared result");
+    window.findChild<QToolButton *>(QStringLiteral("processStage2"))->click();
+    require(controller.bendPreview() == previewBeforeSpeedChange && slider->isEnabled() &&
+                slider->value() == pausedFrame && !playback->isActive(),
+            "Returning to the result recalculated/reset playback");
+    returnToCad->click();
     side->setCurrentIndex(1);
     prepare->click();
     waitUntil(finished);
@@ -833,8 +887,12 @@ void testSingleBendWorkflow(bool graphics) {
                 !play->isEnabled() && clearTools->isEnabled() && controller.session().modified() &&
                 controller.session().document() == source &&
                 controller.session().revision() == revision &&
-                toolStatus->text().contains(QStringLiteral("Начальная установка проверена")),
+                window.findChild<QLabel *>(QStringLiteral("bendCheckSummary"))
+                    ->text()
+                    .contains(QStringLiteral("Начальная установка проверена")),
             "Setup mode, source or feedback incorrect");
+    require(!speed->isVisible() && !speed->isEnabled(),
+            "Static setup displayed an active animation speed control");
     if (graphics) {
         waitUntil([&] { return viewer->isReady(); });
         QApplication::processEvents();
@@ -895,9 +953,9 @@ void testSingleBendWorkflow(bool graphics) {
     waitUntil([&] { return slider->value() > 0; });
     play->click();
     returnToCad->click();
-    require(!controller.bendPreview() && controller.session().bend(0)->tools &&
+    require(controller.bendPreview() && controller.session().bend(0)->tools &&
                 !controller.session().modified(),
-            "Return erased saved tools");
+            "Inspecting CAD erased the result or saved tools");
     prepare->click();
     waitUntil(finished);
     controller.setBendTarget(0, bending::core::BendTarget{std::numbers::pi / 3, 8});
@@ -1243,12 +1301,19 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
                                   QStringLiteral(".png")),
                         "Cannot save opening diagnostic screenshot");
             }
-            require(cutoutPixels(ordinary) == 0 && cutoutPixels(highlighted) > 20,
-                    "Opening walls were not highlighted separately");
+            if (cutoutPixels(ordinary) <= 20 || cutoutPixels(highlighted) <= 20) {
+                throw std::runtime_error(std::string("Opening walls missing in ") + name + ": " +
+                                         std::to_string(cutoutPixels(ordinary)) + "/" +
+                                         std::to_string(cutoutPixels(highlighted)));
+            }
             QEvent change(QEvent::WinIdChange);
             QApplication::sendEvent(viewer->findChild<QWidget *>(QStringLiteral("cadCanvas")),
                                     &change);
-            waitUntil([&] { return viewer->isReady(); });
+            window.raise();
+            window.activateWindow();
+            viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"))->repaint();
+            waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+            require(viewer->isReady(), viewer->errorString().toStdString().c_str());
             const auto recreated = viewer->captureImage();
             // Reinitialization fits the camera again; compare roles at that same camera.
             viewer->highlightBendDiagnostic(diagnostic, controller.session().revision());
@@ -1389,14 +1454,351 @@ void testTrimmedBendWorkflow(bool graphics) {
     }
     controller.closeDocument();
 }
+void testGuidedWorkflow(bool graphics) {
+    using namespace bending;
+    using namespace application;
+    const auto files = std::make_shared<project::ProjectFiles>();
+    const auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
+    auto catalog = project::builtInToolCatalog();
+    require(std::holds_alternative<core::ToolCatalog>(catalog), "Missing bundled catalogue");
+    ui::MainWindow window({"test", cad::kernelVersion()}, files, files, builder,
+                          std::get<core::ToolCatalog>(catalog));
+    window.resize(1366, 768);
+    window.show();
+    auto &controller = window.importController();
+    auto *viewer = window.findChild<viewer::ViewerWidget *>();
+    auto *tabs = window.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
+    auto *punch = window.findChild<QComboBox *>(QStringLiteral("punchPreset"));
+    auto *die = window.findChild<QComboBox *>(QStringLiteral("diePreset"));
+    auto *groove = window.findChild<QComboBox *>(QStringLiteral("dieGroove"));
+    auto *apply = window.findChild<QPushButton *>(QStringLiteral("applyToolSetup"));
+    auto *play = window.findChild<QPushButton *>(QStringLiteral("playBend"));
+    auto *slider = window.findChild<QSlider *>(QStringLiteral("bendFrame"));
+    auto *toggle = window.findChild<QPushButton *>(QStringLiteral("showIgnoredCutouts"));
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    const auto stage = [&](int i) {
+        return window.findChild<QToolButton *>(QStringLiteral("processStage%1").arg(i));
+    };
+    const auto snapshot = [&](const char *suffix) {
+        const auto output = qEnvironmentVariable("BENDING_GUIDED_SNAPSHOT");
+        if (!graphics || output.isEmpty())
+            return;
+        QApplication::processEvents();
+        auto image = window.grab().toImage();
+        QPainter painter(&image);
+        painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                          viewer->captureImage(true));
+        painter.end();
+        require(image.save(output + QLatin1Char('-') + QString::fromLatin1(suffix) +
+                           QStringLiteral(".png")),
+                "Cannot save guided snapshot");
+    };
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                    QStringLiteral("/bend-zone-hole-6mm.step"));
+    waitUntil(finished);
+    require(controller.session().bend(0)->review == BendReview::Automatic &&
+                !controller.session().bend(0)->target && controller.session().bendTarget(0) &&
+                !controller.session().modified() &&
+                window.findChild<QListView *>(QStringLiteral("bendList"))->currentIndex().row() ==
+                    0,
+            "Import required manual preparation");
+    require(toggle->isChecked() && toggle->isVisible() && stage(0)->isChecked(),
+            "Import did not retain detail stage/automatic cutouts");
+    require(!stage(3) && !window.findChild<QDockWidget *>(QStringLiteral("projectDock")) &&
+                !window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->isVisible() &&
+                !window.findChild<QListView *>(QStringLiteral("bendList"))->isVisible(),
+            "Single-bend task retained unnecessary panels/stages");
+    for (int i = 0; i < 3; ++i) {
+        require(stage(i) && stage(i)->height() >= 80 && stage(i)->width() >= 180 &&
+                    stage(i)->shortcut() == QKeySequence(QStringLiteral("Alt+%1").arg(i + 1)),
+                "Process navigation is too small or lacks shortcuts");
+    }
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady(); });
+        require(cutoutPixels(viewer->captureImage()) > 20, "Cutouts not highlighted on import");
+        toggle->click();
+        require(cutoutPixels(viewer->captureImage()) == 0,
+                "Cutout toggle did not hide independent layer");
+        toggle->click();
+    }
+    snapshot("part");
+    auto *dimensions = viewer->findChild<QToolButton *>(QStringLiteral("showDimensions"));
+    const auto dimensionSnapshot = [&](const char *suffix) {
+        const auto output = qEnvironmentVariable("BENDING_DIMENSIONS_SNAPSHOT");
+        if (graphics && !output.isEmpty()) {
+            require(viewer->captureImage(true).save(output + QLatin1Char('-') +
+                                                    QString::fromLatin1(suffix) +
+                                                    QStringLiteral(".png")),
+                    "Cannot save dimensions snapshot");
+        }
+    };
+    if (graphics) {
+        require(dimensions && dimensions->isVisible() && dimensions->isEnabled() &&
+                    !dimensions->isChecked(),
+                "Missing in-scene dimensions toggle");
+        const auto edit = controller.session().editRevision();
+        click(dimensions, dimensions->rect().center());
+        require(viewer->dimensionsVisible() &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("R 8 мм")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("t 6 мм")) &&
+                    !controller.session().modified() && controller.session().editRevision() == edit,
+                "Dimensions lost selected CAD bend or modified project");
+        dimensionSnapshot("cad");
+        viewer->setDimensionsVisible(false);
+        const auto hidden = viewer->captureImage();
+        viewer->setDimensionsVisible(true);
+        require(differences(hidden, viewer->captureImage()) > 100, "Measurements did not render");
+        // Stale requests cannot replace measurements from the current document.
+        viewer->highlightFaces({}, controller.session().revision() + 1);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")),
+                "Stale selection removed bend dimensions");
+        viewer->highlightFaces({}, controller.session().revision());
+        require(!dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("X ")),
+                "Clearing selection retained old bend dimensions");
+        const auto &bend = controller.session().document()->metadata().bendAnalysis.bends.front();
+        viewer->highlightBend(bend, controller.session().revision());
+        auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+        QEvent change(QEvent::WinIdChange);
+        QApplication::sendEvent(canvas, &change);
+        canvas->update();
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady() && dimensions->isChecked() &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")),
+                "Native recreation lost dimension mode/selected bend");
+        viewer->setDimensionsVisible(false);
+    }
+    click(stage(1), stage(1)->rect().center());
+    require(tabs->currentIndex() == 3 && stage(1)->isChecked(), "Tool stage did not open");
+    punch->setCurrentIndex(punch->findText(QStringLiteral("ST1801M"), Qt::MatchContains));
+    die->setCurrentIndex(die->findText(QStringLiteral("ST2401S"), Qt::MatchContains));
+    require(punch->currentIndex() > 0 && die->currentIndex() > 0 && groove->count() == 4,
+            "Missing real presets/four grooves");
+    groove->setCurrentIndex(3);
+    require(window.findChild<QLabel *>(QStringLiteral("toolPresetDetails"))
+                ->text()
+                .contains(QStringLiteral("525")),
+            "ST1801M length corrupted");
+    auto *toolDetails = window.findChild<QToolButton *>(QStringLiteral("toolDetailsToggle"));
+    require(toolDetails && !toolDetails->isChecked(), "Tool details expanded by default");
+    toolDetails->click();
+    auto *favorite = window.findChild<QPushButton *>(QStringLiteral("favoriteToolPair"));
+    favorite->click();
+    require(window.findChild<QComboBox *>(QStringLiteral("favoriteToolPairs"))->count() == 2 &&
+                !controller.session().modified(),
+            "Local favorite changed project or was not saved");
+    auto *presetDetails = window.findChild<QLabel *>(QStringLiteral("toolPresetDetails"));
+    waitUntil([&] {
+        return presetDetails->height() >= presetDetails->heightForWidth(presetDetails->width());
+    });
+    auto *sourcesToggle = window.findChild<QToolButton *>(QStringLiteral("toolSourcesToggle"));
+    sourcesToggle->setChecked(true);
+    auto *sources = window.findChild<QLabel *>(QStringLiteral("toolPresetSources"));
+    waitUntil([&] { return sources->height() >= sources->heightForWidth(sources->width()); });
+    require(!sources->text().isEmpty(), "Preset provenance missing");
+    sourcesToggle->setChecked(false);
+    auto *profile = window.findChild<QWidget *>(QStringLiteral("toolProfilesPreview"));
+    auto *enlarge = window.findChild<QPushButton *>(QStringLiteral("enlargeToolProfiles"));
+    require(profile && enlarge && enlarge->isEnabled() &&
+                profile->accessibleDescription().contains(QStringLiteral("525")),
+            "Missing working profile preview");
+    const auto v35 = profile->grab().toImage();
+    groove->setCurrentIndex(2);
+    require(v35 != profile->grab().toImage() &&
+                profile->accessibleDescription().contains(QStringLiteral("V 22")),
+            "Groove did not update profile");
+    groove->setCurrentIndex(3);
+    bool popupOkay = false;
+    QTimer::singleShot(50, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog)
+            return;
+        auto *large = dialog->findChild<QWidget *>(QStringLiteral("enlargedToolProfiles"));
+        popupOkay = large && large->width() > profile->width() &&
+                    large->accessibleDescription().contains(QStringLiteral("V 35"));
+        const auto output = qEnvironmentVariable("BENDING_TOOL_PROFILE_SNAPSHOT");
+        if (!output.isEmpty())
+            popupOkay = popupOkay && dialog->grab().save(output);
+        dialog->reject();
+    });
+    enlarge->click();
+    require(popupOkay && !controller.session().modified(),
+            "Enlarged section unavailable or changed project");
+    const int selectedPunch = punch->currentIndex();
+    punch->setCurrentIndex(0);
+    require(!enlarge->isEnabled() &&
+                !profile->accessibleDescription().contains(QStringLiteral("525")),
+            "Incomplete pair retained stale profile");
+    punch->setCurrentIndex(selectedPunch);
+    toolDetails->click();
+    QApplication::processEvents();
+    require(tabs->widget(3)->rect().contains(
+                QRect(apply->mapTo(tabs->widget(3), QPoint()), apply->size())),
+            "Primary check action is outside the visible tool task");
+    snapshot("tools");
+    stage(2)->click();
+    require(tabs->currentIndex() == 2 && stage(2)->isChecked(), "Check stage missing");
+    auto *check = window.findChild<QPushButton *>(QStringLiteral("checkBend"));
+    require(check->isEnabled(), "Automatic CAD target did not enable check");
+    stage(1)->click();
+    punch->setCurrentIndex(0);
+    stage(2)->click();
+    require(!check->isEnabled() && window.findChild<QLabel *>(QStringLiteral("bendCheckSummary"))
+                                       ->text()
+                                       .contains(QStringLiteral("Выберите пуансон")),
+            "Incomplete pair enabled check without an explanation");
+    window.findChild<QPushButton *>(QStringLiteral("resolveCheckProblem"))->click();
+    require(tabs->currentIndex() == 3, "Missing-tool action did not open tool selection");
+    punch->setCurrentIndex(selectedPunch);
+    stage(2)->click();
+    check->click();
+    waitUntil(finished);
+    if (controller.bendPreviewError())
+        throw std::runtime_error("Guided catalogue check: " +
+                                 controller.bendPreviewError()->detail);
+    require(controller.bendPreview() && controller.bendPreview()->pressMotion() &&
+                play->isEnabled() && slider->maximum() == 60 &&
+                controller.session().bend(0)->catalogTools &&
+                controller.session().bend(0)->tools->lengthMm == 835 &&
+                core::punchLengthMm(*controller.session().bend(0)->tools) == 525 &&
+                !controller.session().bend(0)->target,
+            "Guided check lost catalogue snapshot/separate lengths");
+    slider->setValue(24);
+    snapshot("check");
+    if (graphics) {
+        const auto preview = controller.bendPreview();
+        const auto edit = controller.session().editRevision();
+        viewer->setDimensionsVisible(true);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("A прям.")) &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("X ")),
+                "Preview retained source CAD bounds or omitted flange sizes");
+        dimensionSnapshot("motion");
+        const auto bending = dimensions->accessibleDescription();
+        slider->setValue(0);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("плоско")) &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("R 8 мм")),
+                "Flat frame retained final bend radius");
+        dimensionSnapshot("flat");
+        slider->setValue(40);
+        require(dimensions->accessibleDescription() != bending &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Поворот 90°")),
+                "Measurements did not follow forming state");
+        dimensionSnapshot("formed");
+        const auto formed = dimensions->accessibleDescription();
+        viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
+        require(dimensions->accessibleDescription().contains(QStringLiteral("A прям.")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("B прям.")),
+                "Front projection lost flange measurements");
+        dimensionSnapshot("front");
+        viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
+        dimensionSnapshot("top");
+        viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+        slider->setValue(60);
+        require(dimensions->accessibleDescription() == formed,
+                "Punch return changed formed-sheet dimensions");
+        require(controller.bendPreview() == preview && controller.session().editRevision() == edit,
+                "Dimension toggle invalidated calculation");
+        viewer->setDimensionsVisible(false);
+    }
+    play->click();
+    const int beforeLeaving = slider->value();
+    waitUntil([&] { return slider->value() > beforeLeaving; });
+    stage(1)->click();
+    require(!window.findChild<QTimer *>(QStringLiteral("bendPlaybackTimer"))->isActive(),
+            "Leaving check kept playback running with hidden controls");
+    stage(2)->click();
+    const auto checkedPreview = controller.bendPreview();
+    const auto checkedEdit = controller.session().editRevision();
+    const auto checkedFrame = slider->value();
+    stage(0)->click();
+    require(controller.bendPreview() == checkedPreview && !play->isEnabled() &&
+                !window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->isVisible(),
+            "Part navigation recalculated the result or kept transport controls");
+    window.findChild<QPushButton *>(QStringLiteral("partPrimaryAction"))->click();
+    require(controller.bendPreview() == checkedPreview && slider->value() == checkedFrame &&
+                play->isEnabled() && controller.session().editRevision() == checkedEdit,
+            "Primary result action did not reuse the current calculation");
+    // Pending UI edits must invalidate the old successful result even before commit.
+    stage(1)->click();
+    groove->setCurrentIndex(2);
+    require(!controller.bendPreview() && !play->isEnabled(),
+            "Draft selection retained an outdated successful check");
+    groove->setCurrentIndex(3);
+    apply->click();
+    waitUntil(finished);
+    require(controller.bendPreview() && controller.bendPreview()->pressMotion(),
+            "Second check failed");
+    QTemporaryDir temp;
+    const auto filename = temp.path() + QStringLiteral("/catalogue.bend");
+#ifdef _WIN32
+    const auto path = std::filesystem::path(filename.toStdWString());
+#else
+    const auto path = std::filesystem::path(filename.toStdString());
+#endif
+    controller.saveProject(path, files);
+    waitUntil(finished);
+    require(!controller.session().modified(), "Guided save failed");
+    // Open without the bundled catalogue: the saved definitions are sufficient.
+    ui::MainWindow restored({"test", cad::kernelVersion()}, files, files, builder);
+    restored.show();
+    restored.openStep(filename);
+    waitUntil([&] {
+        return !restored.importController().hasWork() &&
+               restored.importController().session().document();
+    });
+    require(restored.findChild<QComboBox *>(QStringLiteral("punchPreset"))
+                    ->currentText()
+                    .contains(QStringLiteral("ST1801M")) &&
+                restored.findChild<QComboBox *>(QStringLiteral("dieGroove"))->currentIndex() == 3 &&
+                restored.findChild<QComboBox *>(QStringLiteral("toolSourceMode"))->currentIndex() ==
+                    0 &&
+                !restored.importController().session().modified(),
+            "Snapshot depends on local catalogue");
+    const auto restoredEdit = restored.importController().session().editRevision();
+    auto *restoredPrimary = restored.findChild<QPushButton *>(QStringLiteral("partPrimaryAction"));
+    require(restoredPrimary->text() == QStringLiteral("Проверить гибку"),
+            "Saved pair did not allow direct check from the part task");
+    restoredPrimary->click();
+    waitUntil([&] { return !restored.importController().hasWork(); });
+    require(restored.importController().bendPreview() &&
+                restored.importController().session().editRevision() == restoredEdit,
+            "Direct check required reassigning saved tools or changed project");
+    restored.importController().closeDocument();
+    restored.close();
+    controller.setBendReview(0, BendReview::Excluded);
+    require(!controller.bendPreview() && !check->isEnabled(),
+            "Excluded bend kept simulation active");
+    controller.closeDocument();
+    if (graphics) {
+        require(!dimensions->isEnabled() &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")),
+                "Closed document retained measurements");
+    }
+    window.close();
+}
+
 } // namespace
 int main(int argc, char *argv[]) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
+    QTemporaryDir settingsFolder;
+    require(settingsFolder.isValid(), "No settings directory");
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsFolder.path());
+    QCoreApplication::setOrganizationName(QStringLiteral("Bending workflow tests"));
+    QCoreApplication::setApplicationName(QStringLiteral("Workflow"));
     QApplication::setStyle(QStringLiteral("Fusion"));
     app.setQuitOnLastWindowClosed(false);
     try {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
+        testGuidedWorkflow(graphics);
+        if (app.arguments().contains(QStringLiteral("--guided-only"))) {
+            std::cout << "Guided bending workflow passed\n";
+            return 0;
+        }
         testWorkflow(graphics);
         testProjectWorkflow(graphics);
         testBendWorkflow(graphics);

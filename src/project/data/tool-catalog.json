@@ -1,0 +1,162 @@
+{
+  "format": "bending-tool-catalog",
+  "version": 1,
+  "tools": [
+    {
+      "id": "s-tool-st2401s",
+      "manufacturer": "S-Tool",
+      "code": "ST2401S",
+      "kind": "die",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 835,
+      "heightMm": 60,
+      "noseRadiusMm": null,
+      "openingsMm": [
+        10,
+        16,
+        22,
+        35
+      ],
+      "source": "https://tools-tool.ru/#rec2224090821",
+      "notes": "Опубликовано сечение 60×60. Плечи и полный корпус в текущей модели заменены условным V-профилем.",
+      "teaching": false
+    },
+    {
+      "id": "s-tool-st2401m",
+      "manufacturer": "S-Tool",
+      "code": "ST2401M",
+      "kind": "die",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 415,
+      "heightMm": 60,
+      "noseRadiusMm": null,
+      "openingsMm": [
+        10,
+        16,
+        22,
+        35
+      ],
+      "source": "https://tools-tool.ru/#rec2224090821",
+      "notes": "Опубликовано сечение 60×60. Плечи и полный корпус в текущей модели заменены условным V-профилем.",
+      "teaching": false
+    },
+    {
+      "id": "s-tool-st1801m",
+      "manufacturer": "S-Tool",
+      "code": "ST1801M",
+      "kind": "punch",
+      "angleRadians": 0.4537856055185257,
+      "lengthMm": 525,
+      "heightMm": 145,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "Параметры изделия из пользовательского документа, 2026-10-18",
+      "notes": "Полный профиль не подтверждён. L525 записана явно; суффикс M не заменяет длину.",
+      "teaching": false
+    },
+    {
+      "id": "s-tool-st3408s",
+      "manufacturer": "S-Tool",
+      "code": "ST3408S",
+      "kind": "die",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 835,
+      "heightMm": 120,
+      "noseRadiusMm": null,
+      "openingsMm": [
+        8
+      ],
+      "source": "Параметры изделия из пользовательского документа, 2026-10-18",
+      "notes": "Указано R0,8, но роль радиуса без чертежа не подтверждена. Расчёт использует острые плечи условного V-паза.",
+      "teaching": false
+    },
+    {
+      "id": "s-tool-st3412s",
+      "manufacturer": "S-Tool",
+      "code": "ST3412S",
+      "kind": "die",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 835,
+      "heightMm": 120,
+      "noseRadiusMm": null,
+      "openingsMm": [
+        12
+      ],
+      "source": "Параметры изделия из пользовательского документа, 2026-10-18",
+      "notes": "Указано R0,8, но роль радиуса без чертежа не подтверждена. Расчёт использует острые плечи условного V-паза.",
+      "teaching": false
+    },
+    {
+      "id": "s-tool-st1405s",
+      "manufacturer": "S-Tool",
+      "code": "ST1405S",
+      "kind": "punch",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 835,
+      "heightMm": 130,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "Параметры изделия из пользовательского документа, 2026-10-18",
+      "notes": "Полный профиль не подтверждён; показана условная рабочая зона.",
+      "teaching": false
+    },
+    {
+      "id": "tecnostamp-011545s",
+      "manufacturer": "Tecnostamp",
+      "code": "011.545S",
+      "kind": "punch",
+      "angleRadians": 0.4537856055185257,
+      "lengthMm": 835,
+      "heightMm": 145,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "https://www.tecnostamp.it/img/image_site/09/TECNOSTAMP_catalogo.pdf#page=19",
+      "notes": "Кандидат профиля 11.545 Amada–Promecam, соответствие алиаса требует сверки. В источниках 95/100 т/м: нагрузка не подтверждена. Поднутрение/хвостовик в условной модели не воспроизводятся.",
+      "teaching": false
+    },
+    {
+      "id": "tecnostamp-011545m",
+      "manufacturer": "Tecnostamp",
+      "code": "011.545M",
+      "kind": "punch",
+      "angleRadians": 0.4537856055185257,
+      "lengthMm": 415,
+      "heightMm": 145,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "https://www.tecnostamp.it/img/image_site/09/TECNOSTAMP_catalogo.pdf#page=19",
+      "notes": "Кандидат профиля 11.545 Amada–Promecam, соответствие алиаса требует сверки. В источниках 95/100 т/м: нагрузка не подтверждена. Поднутрение/хвостовик в условной модели не воспроизводятся.",
+      "teaching": false
+    },
+    {
+      "id": "teaching-punch-85",
+      "manufacturer": "Учебный",
+      "code": "Клин 85° R2",
+      "kind": "punch",
+      "angleRadians": 1.4835298641951802,
+      "lengthMm": 100,
+      "heightMm": null,
+      "noseRadiusMm": 2,
+      "openingsMm": [],
+      "source": "Собственная параметрическая модель проекта, MIT",
+      "notes": "Условный профиль, без держателя.",
+      "teaching": true
+    },
+    {
+      "id": "teaching-die-v48",
+      "manufacturer": "Учебный",
+      "code": "V48 90°",
+      "kind": "die",
+      "angleRadians": 1.5707963267948966,
+      "lengthMm": 100,
+      "heightMm": null,
+      "noseRadiusMm": null,
+      "openingsMm": [
+        48
+      ],
+      "source": "Собственная параметрическая модель проекта, MIT",
+      "notes": "Условный профиль с острыми плечами, без станка.",
+      "teaching": true
+    }
+  ]
+}

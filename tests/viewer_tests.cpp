@@ -65,6 +65,10 @@ int main(int argc, char *argv[]) {
             QCoreApplication::processEvents();
             require(!widget.isReady() && !widget.errorString().isEmpty(),
                     "Unsupported platform must report unavailable rendering");
+            widget.setCutoutsVisible(false);
+            widget.setCutoutsVisible(true);
+            widget.setDimensionsVisible(true);
+            widget.setDimensionsVisible(false);
             widget.fitAll();
             widget.setOrientation(Viewer::Orientation::Top);
             require(widget.captureImage().isNull(),

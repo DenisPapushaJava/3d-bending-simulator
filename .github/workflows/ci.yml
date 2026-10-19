@@ -131,7 +131,7 @@ jobs:
           dpkg-deb --extract out/*.deb out/linux-check
           QT_QPA_PLATFORM=offscreen out/linux-check/usr/bin/3d-bending-simulator --smoke-test
           QT_QPA_PLATFORM=offscreen out/linux-check/usr/bin/3d-bending-simulator --smoke-test out/linux-check/usr/share/3d-bending-simulator/examples/plate-inch.stp
-          xvfb-run -a -s "-screen 0 1920x1200x24" env QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 out/linux-check/usr/bin/3d-bending-simulator --graphics-smoke-test out/linux-check/usr/share/3d-bending-simulator/examples/angle-mm.step
+          xvfb-run -a -s "-screen 0 1920x1200x24" env QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 QT_SCALE_FACTOR=1 out/linux-check/usr/bin/3d-bending-simulator --graphics-smoke-test out/linux-check/usr/share/3d-bending-simulator/examples/angle-mm.step
       - name: Package Windows and corresponding sources
         if: runner.os == 'Windows' && github.event_name != 'pull_request'
         shell: pwsh

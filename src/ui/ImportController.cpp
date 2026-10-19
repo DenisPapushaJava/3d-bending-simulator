@@ -228,6 +228,18 @@ bool ImportController::setBendTools(std::size_t recognizedIndex,
     emit stateChanged();
     return result;
 }
+bool ImportController::setBendToolAssignment(std::size_t index, core::ToolAssignment assignment) {
+    if (impl_->stopping || hasWork()) {
+        return false;
+    }
+    const auto before = impl_->session.editRevision();
+    const bool result = impl_->session.setBendToolAssignment(index, std::move(assignment));
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidatePreview();
+    }
+    emit stateChanged();
+    return result;
+}
 bool ImportController::setBendTarget(std::size_t recognizedIndex,
                                      std::optional<core::BendTarget> target) {
     if (impl_->stopping || hasWork()) {
@@ -305,7 +317,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
         return false;
     }
     const auto *entry = impl_->session.bend(recognizedIndex);
-    if (!entry || entry->review != BendReview::Confirmed || !entry->target ||
+    if (!entry || !included(entry->review) || !impl_->session.bendTarget(recognizedIndex) ||
         (mode != BendPreviewMode::Kinematic && !entry->tools)) {
         return false;
     }
@@ -323,7 +335,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     const auto document = state->session.document();
     const auto revision = state->session.revision();
     const auto editRevision = state->session.editRevision();
-    const auto target = *entry->target;
+    const auto target = *state->session.bendTarget(recognizedIndex);
     const auto tools = mode == BendPreviewMode::Kinematic ? std::nullopt : entry->tools;
     state->stop = std::stop_source{};
     const auto stop = state->stop.get_token();

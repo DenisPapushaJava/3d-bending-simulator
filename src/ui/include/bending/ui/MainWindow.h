@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/core/ToolCatalog.h"
 #include <QMainWindow>
 
 #include "bending/application/DocumentImporter.h"
@@ -21,7 +22,8 @@ class MainWindow final : public QMainWindow {
   public:
     MainWindow(RuntimeInfo runtime, std::shared_ptr<const application::DocumentImporter> importer,
                std::shared_ptr<const application::ProjectWriter> writer = {},
-               std::shared_ptr<const application::SingleBendPreviewBuilder> previewBuilder = {});
+               std::shared_ptr<const application::SingleBendPreviewBuilder> previewBuilder = {},
+               core::ToolCatalog catalog = {});
     ~MainWindow() override;
     void openStep(const QString &path);
     [[nodiscard]] ImportController &importController() const;

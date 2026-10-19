@@ -249,7 +249,7 @@ void testSaveRace() {
     require(controller.session().document()->metadata().sourcePath == "new.step" &&
                 controller.session().projectPath().empty() &&
                 !controller.session().manualThicknessMm() &&
-                controller.session().bend(0)->review == BendReview::Pending &&
+                controller.session().bend(0)->review == BendReview::Automatic &&
                 !controller.session().bend(0)->target,
             "Late save rebound a new document to an old project");
     writer->entered = false;
@@ -374,8 +374,9 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     };
     controller.open("part.step");
     waitUntil(finished);
-    require(!controller.prepareBendPreview(0, false, builder, mode),
-            "Unconfirmed bend was simulated");
+    require(controller.setBendReview(0, BendReview::Pending) &&
+                !controller.prepareBendPreview(0, false, builder, mode),
+            "Pending bend was simulated");
     const auto source = controller.session().document();
     prepare();
     waitUntil(finished);

@@ -28,8 +28,11 @@ class ViewerWidget final : public QWidget {
     [[nodiscard]] bool isReady() const;
     [[nodiscard]] QString errorString() const;
     // Captures the OCCT framebuffer, including native surfaces QWidget::grab cannot capture.
-    [[nodiscard]] QImage captureImage();
+    [[nodiscard]] QImage captureImage(bool includeControls = false);
     void fitAll();
+    void setCutoutsVisible(bool visible);
+    void setDimensionsVisible(bool visible);
+    [[nodiscard]] bool dimensionsVisible() const;
     void setOrientation(Orientation orientation);
     // Empty result means accepted. Geometry is prepared by the importer before publication.
     [[nodiscard]] QString presentDocument(std::shared_ptr<const application::Document> document,

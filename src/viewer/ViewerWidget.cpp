@@ -1,4 +1,5 @@
 #include "bending/viewer/ViewerWidget.h"
+#include "Dimensions.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
 
@@ -27,9 +28,11 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QResizeEvent>
 #include <QStackedLayout>
 #include <QTimer>
+#include <QToolButton>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -53,6 +56,7 @@ struct FaceHighlights {
     std::vector<std::size_t> flanges;
     bool bend = false;
     std::vector<std::size_t> cutouts{};
+    std::optional<application::RecognizedBend> measuredBend{};
 };
 
 class OcctCanvas final : public QWidget {
@@ -64,6 +68,25 @@ class OcctCanvas final : public QWidget {
         setAttribute(Qt::WA_NoSystemBackground);
         setMouseTracking(true);
         setFocusPolicy(Qt::StrongFocus);
+        dimensionsButton_ = new QToolButton(this);
+        dimensionsButton_->setObjectName(QStringLiteral("showDimensions"));
+        dimensionsButton_->setAttribute(Qt::WA_NativeWindow);
+        dimensionsButton_->setText(QStringLiteral("Размеры"));
+        dimensionsButton_->setAccessibleName(QStringLiteral("Показать или скрыть размеры модели"));
+        dimensionsButton_->setCheckable(true);
+        dimensionsButton_->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
+        dimensionsButton_->setMinimumSize(104, 34);
+        dimensionsButton_->setEnabled(false);
+        dimensionsButton_->setStyleSheet(QStringLiteral(
+            "QToolButton {background:#F7F9FB;color:#1C2938;border:1px solid #DCE3E9;"
+            "border-radius:5px;padding:6px 12px;}"
+            "QToolButton:hover {background:#E5F3F3;}"
+            "QToolButton:checked {background:#087F83;color:white;border-color:#087F83;}"
+            "QToolButton:focus {border:2px solid #4DADFF;}"
+            "QToolButton:disabled {background:#34404E;color:#9AABB9;border-color:#526171;}"));
+        connect(dimensionsButton_, &QToolButton::toggled, this,
+                [this](bool visible) { setDimensionsVisible(visible); });
+        updateDimensionButton();
     }
 
     ~OcctCanvas() override {
@@ -95,8 +118,9 @@ class OcctCanvas final : public QWidget {
                 if (!presentation_.IsNull()) {
                     context_->Remove(presentation_, false);
                 }
+                removeDimensions();
                 view_->SetProj(V3d_XposYnegZpos);
-                view_->FitAll(0.1, false);
+                view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
                 view_->ZFitAll();
                 context_->ClearSelected(false);
                 view_->Redraw();
@@ -180,7 +204,9 @@ class OcctCanvas final : public QWidget {
                     fitPreview(*preview);
                 }
                 view_->ZFitAll();
-                view_->Redraw();
+                if (!dimensionsVisible_) {
+                    view_->Redraw();
+                }
             } catch (const Standard_Failure &error) {
                 restore(candidate);
                 return failureText(error);
@@ -194,6 +220,7 @@ class OcctCanvas final : public QWidget {
         support_.Nullify();
         preview_ = std::move(preview);
         previewFrame_ = index;
+        refreshDimensions();
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -223,6 +250,8 @@ class OcctCanvas final : public QWidget {
         presentation_.Nullify();
         evidence_.Nullify();
         support_.Nullify();
+        dimensions_.objects.clear();
+        dimensions_.labels.clear();
         highlights_ = {};
         shape_.Nullify();
         faces_.Clear();
@@ -230,11 +259,30 @@ class OcctCanvas final : public QWidget {
         preview_.reset();
         revision_ = revision;
         diagnostic_ = false;
+        updateDimensionButton();
         if (onSelection) {
             onSelection(revision_, 0);
         }
     }
 
+    void setCutoutsVisible(bool visible) {
+        cutoutsVisible_ = visible;
+        setHighlights(highlights_, revision_);
+    }
+    bool dimensionsVisible() const {
+        return dimensionsVisible_;
+    }
+    void setDimensionsVisible(bool visible) {
+        if (dimensionsVisible_ == visible) {
+            return;
+        }
+        dimensionsVisible_ = visible;
+        dimensionsButton_->setChecked(visible);
+        refreshDimensions();
+        if (visible) {
+            fitAll();
+        }
+    }
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
         setHighlights({indices, {}, false}, revision);
     }
@@ -242,7 +290,9 @@ class OcctCanvas final : public QWidget {
     void highlightBend(const application::RecognizedBend &bend, quint64 revision) {
         setHighlights({{bend.innerFace, bend.outerFace},
                        std::vector<std::size_t>(bend.flangeFaces.begin(), bend.flangeFaces.end()),
-                       true},
+                       true,
+                       {},
+                       bend},
                       revision);
     }
 
@@ -252,7 +302,8 @@ class OcctCanvas final : public QWidget {
         setHighlights({{bend.innerFace, bend.outerFace},
                        std::vector<std::size_t>(bend.flangeFaces.begin(), bend.flangeFaces.end()),
                        true,
-                       diagnostic.boundaryFaces},
+                       diagnostic.boundaryFaces,
+                       bend},
                       revision);
     }
 
@@ -302,7 +353,17 @@ class OcctCanvas final : public QWidget {
                             new Prs3d_LineAspect(Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB),
                                                  Aspect_TOL_SOLID, 3.0));
                     }
-                    for (const auto i : highlights_.cutouts) {
+                }
+                auto cutouts = highlights_.cutouts;
+                if (document_ && cutoutsVisible_) {
+                    const auto &known = document_->metadata().closedCutouts.boundaryFaces;
+                    cutouts.insert(cutouts.end(), known.begin(), known.end());
+                }
+                if (cutoutsVisible_) {
+                    for (const auto i : cutouts) {
+                        if (i == 0 || i > static_cast<std::size_t>(faces_.Extent())) {
+                            continue;
+                        }
                         const auto &face = faces_(static_cast<int>(i));
                         presentation_->SetCustomColor(
                             face, Quantity_Color(1.0, 0.025, 0.20, Quantity_TOC_RGB));
@@ -326,6 +387,7 @@ class OcctCanvas final : public QWidget {
                                 3.0);
             view_->Redraw();
         });
+        refreshDimensions();
     }
 
     void fitAll() {
@@ -336,9 +398,10 @@ class OcctCanvas final : public QWidget {
             if (preview_) {
                 fitPreview(*preview_);
             } else {
-                view_->FitAll(0.1, false);
+                view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
             }
             view_->ZFitAll();
+            refreshDimensions();
             view_->Redraw();
         });
     }
@@ -368,7 +431,7 @@ class OcctCanvas final : public QWidget {
         });
     }
 
-    QImage captureImage() {
+    QImage captureImage(bool includeControls) {
         QImage result;
         guarded([&] {
             Image_PixMap pixels;
@@ -386,6 +449,11 @@ class OcctCanvas final : public QWidget {
                 }
             }
         });
+        if (!result.isNull() && includeControls) {
+            result.setDevicePixelRatio(devicePixelRatioF());
+            QPainter painter(&result);
+            painter.drawPixmap(dimensionsButton_->pos(), dimensionsButton_->grab());
+        }
         return result;
     }
 
@@ -412,6 +480,9 @@ class OcctCanvas final : public QWidget {
     }
 
     void resizeEvent(QResizeEvent *) override {
+        dimensionsButton_->adjustSize();
+        dimensionsButton_->move(qMax(12, width() - dimensionsButton_->width() - 12), 12);
+        refreshDimensions();
         guarded([&] { view_->Redraw(); });
     }
 
@@ -455,6 +526,10 @@ class OcctCanvas final : public QWidget {
             } else if (event->buttons() == Qt::NoButton && !preview_) {
                 context_->MoveTo(position.x(), position.y(), view_, false);
             }
+            if (event->buttons().testFlag(Qt::RightButton) ||
+                event->buttons().testFlag(Qt::MiddleButton)) {
+                refreshDimensions();
+            }
             view_->Redraw();
         });
         lastPosition_ = position;
@@ -470,6 +545,7 @@ class OcctCanvas final : public QWidget {
             const double steps =
                 qBound(-8.0, static_cast<double>(event->angleDelta().y()) / 120.0, 8.0);
             view_->SetZoom(std::exp(steps * 0.15));
+            refreshDimensions();
             view_->Redraw();
         });
         event->accept();
@@ -504,6 +580,55 @@ class OcctCanvas final : public QWidget {
         return result;
     }
 
+    void removeDimensions() {
+        for (const auto &object : dimensions_.objects) {
+            context_->Remove(object, false);
+        }
+        dimensions_ = {};
+    }
+    void updateDimensionButton() {
+        dimensionsButton_->setEnabled(ready_ && document_ != nullptr);
+        const auto description = dimensions_.labels.join(QStringLiteral("\n"));
+        const auto scope = preview_
+                               ? QStringLiteral("Размеры текущего положения. A/B — прямые участки "
+                                                "полок от касания зоны, по их габаритам.")
+                               : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
+                                                "измерения исходной модели.");
+        dimensionsButton_->setToolTip(
+            QStringLiteral("Показать / скрыть размеры · Ctrl+D\n%1\n%2").arg(scope, description));
+        dimensionsButton_->setAccessibleDescription(scope + QLatin1Char('\n') + description);
+    }
+    void refreshDimensions() {
+        if (!dimensionsVisible_ && dimensions_.objects.empty()) {
+            updateDimensionButton();
+            return;
+        }
+        guarded([&] {
+            removeDimensions();
+            if (dimensionsVisible_ && document_) {
+                const auto separation = view_->Convert(qRound(50.0 * devicePixelRatioF()));
+                double dx, dy, dz, ux, uy, uz;
+                view_->Proj(dx, dy, dz);
+                view_->Up(ux, uy, uz);
+                const auto up = gp_Vec(ux, uy, uz).Normalized() * separation;
+                const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
+                const DimensionLayout layout{right, up};
+                dimensions_ =
+                    preview_
+                        ? previewDimensions(cad::OcctPreviewAccess::frame(*preview_, previewFrame_),
+                                            preview_->model(), 14.0 * devicePixelRatioF(), layout)
+                        : documentDimensions(document_->metadata(), faces_,
+                                             highlights_.measuredBend, 14.0 * devicePixelRatioF(),
+                                             layout);
+                for (const auto &object : dimensions_.objects) {
+                    context_->Display(object, 0, -1, false);
+                }
+            }
+            view_->Redraw();
+        });
+        updateDimensionButton();
+    }
+
     void restore(const Handle(AIS_Shape) & candidate) {
         try {
             if (!candidate.IsNull()) {
@@ -514,6 +639,7 @@ class OcctCanvas final : public QWidget {
                                   preview_ ? -1 : AIS_Shape::SelectionMode(TopAbs_FACE), false);
             }
             view_->Redraw();
+            refreshDimensions();
         } catch (const Standard_Failure &error) {
             fail(QString::fromUtf8(error.GetMessageString()));
         }
@@ -527,7 +653,7 @@ class OcctCanvas final : public QWidget {
         Bnd_Box box;
         box.Add(gp_Pnt(bounds.minimum.x, bounds.minimum.y, bounds.minimum.z));
         box.Add(gp_Pnt(bounds.maximum.x, bounds.maximum.y, bounds.maximum.z));
-        view_->FitAll(box, 0.1, false);
+        view_->FitAll(box, dimensionsVisible_ ? 0.3 : 0.1, false);
         view_->ZFitAll();
     }
 
@@ -579,6 +705,7 @@ class OcctCanvas final : public QWidget {
             view_->MustBeResized();
 
             ready_ = true;
+            updateDimensionButton();
             if (preview_) {
                 // Rebuild native resources from the same immutable worker snapshot.
                 const auto preview = preview_;
@@ -606,6 +733,7 @@ class OcctCanvas final : public QWidget {
 
     void fail(const QString &message) {
         ready_ = false;
+        updateDimensionButton();
         if (onError) {
             onError(message.isEmpty() ? QStringLiteral("Ошибка графического контекста OCCT")
                                       : message);
@@ -624,6 +752,7 @@ class OcctCanvas final : public QWidget {
         presentation_.Nullify();
         evidence_.Nullify();
         support_.Nullify();
+        dimensions_ = {};
         context_.Nullify();
         view_.Nullify();
         scene_.Nullify();
@@ -640,6 +769,10 @@ class OcctCanvas final : public QWidget {
     Handle(AIS_Shape) evidence_;
     Handle(AIS_Shape) support_;
     FaceHighlights highlights_;
+    bool cutoutsVisible_ = true;
+    bool dimensionsVisible_ = false;
+    QToolButton *dimensionsButton_ = nullptr;
+    DimensionAnnotations dimensions_;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
     std::size_t previewFrame_ = 0;
@@ -716,8 +849,8 @@ QString ViewerWidget::errorString() const {
     return impl_->error;
 }
 
-QImage ViewerWidget::captureImage() {
-    return impl_->canvas ? impl_->canvas->captureImage() : QImage{};
+QImage ViewerWidget::captureImage(bool includeControls) {
+    return impl_->canvas ? impl_->canvas->captureImage(includeControls) : QImage{};
 }
 
 void ViewerWidget::fitAll() {
@@ -755,6 +888,19 @@ void ViewerWidget::clearDocument(quint64 revision) {
     emit selectionChanged(revision, 0);
 }
 
+void ViewerWidget::setCutoutsVisible(bool visible) {
+    if (impl_->canvas) {
+        impl_->canvas->setCutoutsVisible(visible);
+    }
+}
+void ViewerWidget::setDimensionsVisible(bool visible) {
+    if (impl_->canvas) {
+        impl_->canvas->setDimensionsVisible(visible);
+    }
+}
+bool ViewerWidget::dimensionsVisible() const {
+    return impl_->canvas && impl_->canvas->dimensionsVisible();
+}
 void ViewerWidget::highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
     if (impl_->canvas) {
         impl_->canvas->highlightFaces(indices, revision);
