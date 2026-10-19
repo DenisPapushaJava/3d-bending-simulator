@@ -71,18 +71,10 @@ if(BENDING_BUILD_APP)
         if(BENDING_XVFB_RUN)
             add_test(NAME app.step-render
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics)
-            add_test(NAME app.step-render.hidpi
-                COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics)
-            set_tests_properties(app.step-render app.step-render.hidpi PROPERTIES
-                ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1" TIMEOUT 60 LABELS "graphics")
-            set_property(TEST app.step-render.hidpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=2")
             add_test(NAME viewer.render
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:viewer_tests>)
-            add_test(NAME viewer.render.hidpi
-                COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:viewer_tests>)
-            set_tests_properties(viewer.render viewer.render.hidpi PROPERTIES
-                ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1" TIMEOUT 60 LABELS "graphics")
-            set_property(TEST viewer.render.hidpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=2")
+            set_tests_properties(app.step-render viewer.render PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1;QT_SCALE_FACTOR=1" TIMEOUT 60 LABELS "graphics")
         endif()
     endif()
     add_test(NAME app.custom-catalog-startup COMMAND bending_simulator --smoke-test --tool-catalog "${PROJECT_SOURCE_DIR}/src/project/data/tool-catalog.json")

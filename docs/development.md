@@ -2,6 +2,8 @@
 
 Дата: 2026-10-17. Создан технический каркас, а не работающий симулятор гибки.
 
+Актуальная политика проверок — **D035, 2026-10-19**: автоматическая графика только при 100%, без HiDPI-дублей. Для небольших правок локально выбираются затронутые тесты; полный прогон, контейнер и native GPU не повторяются подряд без причины. Повышенный масштаб — только по прямой просьбе пользователя. Приведённые ниже исторические результаты DPR 1/2 описывают уже выполненные проверки и не требуют их повторения.
+
 ## Начальный набор
 
 - C++20, CMake 3.24+, Ninja.
@@ -112,6 +114,10 @@ ctest --preset core
 
 ## Проверки перед коммитом
 
+Для небольшого изменения выбрать затронутые проверки. Например, после правки управления воспроизведением достаточно сборки `dev` и `ctest --preset dev -R '^app.step-workflow$'`; дополнительная графика при 100% нужна, если меняется отрисовка/компоновка. Не запускать один и тот же полный workflow последовательно offscreen, native GPU, Docker и ещё на повышенном масштабе. Изменения viewer/native-контекста требуют целевого графического прогона; изменение геометрии — соответствующих CAD/simulation-тестов. HiDPI-прогоны исключены из обычной работы.
+
+Полный Release-набор и упаковку выполняет CI. Следующая последовательность предназначена для согласованной полной локальной проверки или разбора проблем CI, а не для каждого небольшого коммита:
+
 ```bash
 python3 scripts/version.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -176,14 +182,13 @@ ctest --preset dev -L integration
 # Настоящий контекст и framebuffer в графическом сеансе:
 ./build/dev/bin/3d-bending-simulator --graphics-smoke-test
 ./build/dev/bin/viewer_tests
-QT_SCALE_FACTOR=2 ./build/dev/bin/viewer_tests
 # Необязательный снимок только сцены, не всего рабочего стола:
 BENDING_VIEWER_SNAPSHOT="$PWD/out/viewer-demo.png" ./build/dev/bin/viewer_tests
 ```
 
 `viewer_tests` проверяет непустое изображение геометрии, выбор реальной грани, проекции и изменение кадра при вращении/переносе/масштабировании, физический размер framebuffer, resize, hide/show, minimize/restore и новое создание ресурсов. Это сценарии реального OCCT, а не макеты результатов. Публичный метод `captureImage()` читает OCCT framebuffer: обычный QWidget::grab не предназначен для захвата такого нативного дочернего окна.
 
-При наличии `xvfb-run` CMake регистрирует `viewer.render` и `viewer.render.hidpi` с меткой `graphics`. Они запускают отдельный X11-сервер с Mesa software OpenGL при DPR 1/2. Скрипт установки/Docker включает Xvfb/xauth/Mesa. В Windows CI проверяются сборка, недоступный offscreen backend и упаковка; для проверки OpenGL-драйвера нужен отдельный интерактивный запуск.
+При наличии `xvfb-run` CMake регистрирует `viewer.render` и `app.step-render` с меткой `graphics`, оба с `QT_SCALE_FACTOR=1`. Они запускают отдельный X11-сервер с Mesa software OpenGL при обычном масштабе 100%. HiDPI-дубли удалены из регистрации, дополнительных DPI-пресетов нет. Скрипт установки/Docker включает Xvfb/xauth/Mesa. В Windows CI проверяются сборка, недоступный offscreen backend и упаковка; для проверки OpenGL-драйвера нужен отдельный интерактивный запуск.
 
 M1.1: локально прошли сценарии на NVIDIA GTX 1650 / OpenGL 4.6 при Qt 6.4.2 и OCCT 7.6.3. Локальный оффскрин-набор содержит 5 тестов; Linux с Xvfb — 7. Переход между настоящими мониторами/DPI и интерактивный Windows/GPU остаются открытыми. Отрицательная проверка `app.graphics-unavailable` гарантирует, что графическая диагностика не сообщает успех без поддерживаемого backend.
 
@@ -320,7 +325,6 @@ BENDING_RECOGNITION_STEP="/absolute/path/to/part.step" BENDING_RECOGNITION_COUNT
 
 ```bash
 BENDING_PREPARATION_SNAPSHOT="$PWD/out/bend-preparation.png" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 # Необязательный локальный файл: данные остаются во временном каталоге проверки.
 BENDING_RECOGNITION_STEP="/absolute/path/to/part.step" BENDING_RECOGNITION_COUNT=4 \
   ./build/dev/bin/project_tests
@@ -338,7 +342,6 @@ Windows/MSVC/OCCT 7.9 и сборка комплектов проверяютс�
 
 ```bash
 BENDING_KINEMATIC_SNAPSHOT="$PWD/out/single-bend" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 # Создаются -flat.png, -half.png, -final.png только в локальном игнорируемом out.
 ```
 
@@ -355,7 +358,6 @@ Windows/MSVC/OCCT 7.9 повторяется штатным CI зависимо�
 
 ```bash
 BENDING_TOOL_SETUP_SNAPSHOT="$PWD/out/press-tool-setup.png" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 ```
 
 Проверено одно начальное положение, без хода/рабочих контактов, траекторий установки/извлечения и физики. Положительное перекрытие плеч не считается технологическим запасом. Параметры учебного инструмента не рекомендуются автоматически по толщине/материалу.
@@ -374,7 +376,6 @@ QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 
 ```bash
 BENDING_PRESS_MOTION_SNAPSHOT="$PWD/out/press-motion" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 # Создаются -start.png, -half.png, -final.png для собственного учебного примера.
 ```
 
@@ -388,7 +389,6 @@ QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 
 ```bash
 BENDING_PROFILED_SNAPSHOT="$PWD/out/profiled" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 # Необязательная локальная проверка: BENDING_PROFILED_STEP=/абсолютный/путь/к/детали.step
 # Эту переменную поддерживают bend_preview_tests и workflow_tests; файл не копируется в examples.
 ```
@@ -403,7 +403,6 @@ Core **3/3**, dev **14/14**, Docker Ubuntu 24.04 Release/Werror **18/18** и DEB
 
 ```bash
 BENDING_PRESS_MOTION_SNAPSHOT="$PWD/out/return" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 # Снимки -start/-half/-formed/-final.png: formed — кадр 40, final — кадр 60.
 # BENDING_PROFILED_STEP дополнительно включает локальную деталь с контурами/отверстиями.
 ```
@@ -418,7 +417,6 @@ QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 
 ```bash
 BENDING_OPENING_SNAPSHOT="$PWD/out/opening" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 ./build/dev/bin/workflow_tests --graphics
 ```
 
 Диагностика не обещается для открытых вырезов, разделённых цилиндров и произвольных перфораций. Деформация отверстий, усилие и трещины не вычисляются. Интерактивный Windows/GPU остаётся непроверенным. VERSION, формат проекта, библиотеки и набор CI-задач прежние.
@@ -437,7 +435,6 @@ Native Linux/NVIDIA/X11 DPR **1 и 2**: исходная подсветка, о�
 
 ```bash
 BENDING_OPENING_SNAPSHOT="$PWD/out/cutouts" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 BENDING_OPENING_SNAPSHOT="$PWD/out/cutouts-2x" ./build/dev/bin/workflow_tests --graphics
 # -имя.step.png — исходная диагностика; -имя.step-bent.png — видимая согнутая поверхность.
 ```
 
@@ -455,7 +452,6 @@ Core без Qt/OCCT/Werror — **4/4**; dev — **17/17**. Docker Ubuntu 24.04 R
 
 ```bash
 BENDING_GUIDED_SNAPSHOT="$PWD/out/guided" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 BENDING_GUIDED_SNAPSHOT="$PWD/out/guided-2x" ./build/dev/bin/workflow_tests --graphics
 # -part.png, -tools.png, -check.png — только окно программы и его framebuffer.
 ./build/dev/bin/3d-bending-simulator --tool-catalog /путь/tools.json examples/bend-90-6mm.step
 ```
@@ -470,7 +466,6 @@ Core **4/4**, dev **17/17**, Docker Ubuntu Release/Werror **21/21**, DEB и за
 
 ```bash
 BENDING_GUIDED_SNAPSHOT="$PWD/out/profiles" BENDING_TOOL_PROFILE_SNAPSHOT="$PWD/out/profiles-large.png" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 BENDING_TOOL_PROFILE_SNAPSHOT="$PWD/out/profiles-large-2x.png" ./build/dev/bin/workflow_tests --graphics
 ```
 
 ### Размерные аннотации — D033
@@ -481,7 +476,6 @@ Core **4/4**, dev **17/17**, Docker Ubuntu Release/Werror **21/21**, DEB и за
 
 ```bash
 BENDING_DIMENSIONS_SNAPSHOT="$PWD/out/dimensions" ./build/dev/bin/workflow_tests --graphics
-QT_SCALE_FACTOR=2 BENDING_DIMENSIONS_SNAPSHOT="$PWD/out/dimensions-2x" ./build/dev/bin/workflow_tests --graphics
 ```
 
 Получаются `-cad/-flat/-motion/-formed/-front/-top.png`, только локальные снимки собственного учебного примера. `captureImage()` по-прежнему возвращает OCCT framebuffer для анализа цветов/выбора; `captureImage(true)` включает native Qt-кнопку для снимка интерфейса. Не включать субпиксельные цвета Qt-текста в счётчики окрашенных CAD-граней.
@@ -491,3 +485,9 @@ QT_SCALE_FACTOR=2 BENDING_DIMENSIONS_SNAPSHOT="$PWD/out/dimensions-2x" ./build/d
 2026-10-19: ползунок «Скорость» 1×–3×, шаг 0,25×, только UI-таймер. Dev **17/17**; native Linux/GPU **DPR 1/2**, снимки панели просмотрены. Расширен существующий workflow: изменение на паузе, ускорение во время показа до 3× с клавиатуры, интервалы 150/75/50 мс при 1×/2×/3×, последовательный показ без пропуска/возврата кадров, сохранность preview/editRevision и скрытое управление в статике. Сборка/SDK/формат проекта не менялись; Windows/Linux проверяются штатным CI текущего PR. Интерактивный Windows/GPU остаётся непроверенным.
 
 Для визуальной проверки панели применим прежний `BENDING_PRESS_MOTION_SNAPSHOT`: снимки `-start/-half/-formed/-final.png` включают управление скоростью, исходный CAD не изменяется.
+
+### Сокращение графических прогонов — D035
+
+2026-10-19: удалены два `.hidpi`-теста и команды повышенного масштаба из обычных примеров запуска; 100% явно задан для оставшихся графических CTest и запуска DEB в CI. Приложение и его поддержка DPR не менялись.
+
+Локально выполнены только configure и проверка списка/окружения CTest: Linux Release — **19** тестов, из них два `graphics` с `QT_SCALE_FACTOR=1`; native dev без Xvfb — **17**, HiDPI-дублей нет. Повторные полные native/Docker-прогоны не выполнялись; Release, упаковку и обе ОС проверяет штатный CI этой правки.
