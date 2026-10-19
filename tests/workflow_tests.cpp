@@ -1461,6 +1461,28 @@ void testGuidedWorkflow(bool graphics) {
     const auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
     auto catalog = project::builtInToolCatalog();
     require(std::holds_alternative<core::ToolCatalog>(catalog), "Missing bundled catalogue");
+    const auto privateCatalog = qEnvironmentVariable("BENDING_TEST_TOOL_CATALOG");
+    if (!privateCatalog.isEmpty()) {
+#ifdef _WIN32
+        const auto catalogPath = std::filesystem::path(privateCatalog.toStdWString());
+#else
+        const auto catalogPath = std::filesystem::path(privateCatalog.toUtf8().constData());
+#endif
+        catalog = project::readToolCatalog(catalogPath);
+        require(std::holds_alternative<core::ToolCatalog>(catalog),
+                "Private test catalogue failed");
+    } else {
+        // Own analytic fixture only; private manufacturer's contours are never committed.
+        for (auto &tool : std::get<core::ToolCatalog>(catalog))
+            if (tool.code == "ST1405S" || tool.code == "ST3412S")
+                tool.drawing = core::ToolDrawing{
+                    "own-test-contour.dxf",
+                    std::string(64, 'a'),
+                    true,
+                    {{{0, 0}, {2, 0}, {}, 0},
+                     {{2, 0}, {0, 2}, core::DrawingPoint{0, 0}, std::numbers::pi / 2},
+                     {{0, 2}, {0, 0}, {}, 0}}};
+    }
     ui::MainWindow window({"test", cad::kernelVersion()}, files, files, builder,
                           std::get<core::ToolCatalog>(catalog));
     window.resize(1366, 768);
@@ -1573,11 +1595,42 @@ void testGuidedWorkflow(bool graphics) {
     }
     click(stage(1), stage(1)->rect().center());
     require(tabs->currentIndex() == 3 && stage(1)->isChecked(), "Tool stage did not open");
+    auto *recommend = window.findChild<QPushButton *>(QStringLiteral("recommendTools"));
+    require(recommend && recommend->isEnabled(), "No tool selection for recognized bend");
+    const auto beforeSelection = controller.session().editRevision();
+    recommend->click();
+    auto *recommendation = window.findChild<QLabel *>(QStringLiteral("toolRecommendation"));
+    require(recommendation && recommendation->text().contains(QStringLiteral("Предварительно")) &&
+                !punch->currentText().contains(QStringLiteral("учебный")) &&
+                !die->currentText().contains(QStringLiteral("учебный")) &&
+                controller.session().editRevision() == beforeSelection,
+            "Suggestion is missing, teaching, or prematurely committed");
+    punch->setCurrentIndex(punch->findText(QStringLiteral("ST1405S"), Qt::MatchContains));
+    die->setCurrentIndex(die->findText(QStringLiteral("ST3412S"), Qt::MatchContains));
+    auto *drawings = window.findChild<QPushButton *>(QStringLiteral("showToolDrawings"));
+    require(drawings && !drawings->isHidden(), "Source drawings are inaccessible");
+    bool drawingDialogOkay = false;
+    QTimer::singleShot(50, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog)
+            return;
+        const auto views = dialog->findChildren<QWidget *>(QStringLiteral("toolDrawingCanvas"));
+        drawingDialogOkay = views.size() == 2 && views[0]->width() > 100 &&
+                            views[0]->height() > 100 && !views[0]->grab().isNull();
+        const auto output = qEnvironmentVariable("BENDING_DRAWING_SNAPSHOT");
+        if (!output.isEmpty())
+            drawingDialogOkay = drawingDialogOkay && dialog->grab().save(output);
+        dialog->reject();
+    });
+    drawings->click();
+    require(drawingDialogOkay && controller.session().editRevision() == beforeSelection,
+            "Drawing dialog failed or edited project");
     punch->setCurrentIndex(punch->findText(QStringLiteral("ST1801M"), Qt::MatchContains));
     die->setCurrentIndex(die->findText(QStringLiteral("ST2401S"), Qt::MatchContains));
     require(punch->currentIndex() > 0 && die->currentIndex() > 0 && groove->count() == 4,
             "Missing real presets/four grooves");
     groove->setCurrentIndex(3);
+    require(recommendation->isHidden(), "Manual change retained stale recommendation");
     require(window.findChild<QLabel *>(QStringLiteral("toolPresetDetails"))
                 ->text()
                 .contains(QStringLiteral("525")),

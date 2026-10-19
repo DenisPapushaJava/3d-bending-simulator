@@ -191,7 +191,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 4, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 5, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -372,8 +372,8 @@ void testCatalogProject() {
     const auto bundled = project::builtInToolCatalog();
     require(std::holds_alternative<core::ToolCatalog>(bundled), "Bundled catalogue unreadable");
     const auto &catalog = std::get<core::ToolCatalog>(bundled);
-    require(catalog.size() == 10 && std::count_if(catalog.begin(), catalog.end(),
-                                                  [](const auto &t) { return !t.teaching; }) == 8,
+    require(catalog.size() == 17 && std::count_if(catalog.begin(), catalog.end(),
+                                                  [](const auto &t) { return !t.teaching; }) == 15,
             "Wrong catalogue contents");
     const auto find = [&](const std::string &id) -> const core::ToolPreset & {
         const auto it =
@@ -381,8 +381,15 @@ void testCatalogProject() {
         require(it != catalog.end(), "Missing preset");
         return *it;
     };
-    const core::ToolAssignment assignment{find("s-tool-st1801m"), find("s-tool-st2401s"), 3, 10,
-                                          "Test machine"};
+    core::ToolAssignment assignment{find("s-tool-st1801m"), find("s-tool-st2401s"), 3, 10,
+                                    "Test machine"};
+    assignment.punch.drawing =
+        core::ToolDrawing{"own.dxf",
+                          std::string(64, 'a'),
+                          true,
+                          {{{0, 0}, {2, 0}, {}, 0},
+                           {{2, 0}, {0, 2}, core::DrawingPoint{0, 0}, std::numbers::pi / 2},
+                           {{0, 2}, {0, 0}, {}, 0}}};
     require(assignment.punch.lengthMm == 525 &&
                 assignment.die.openingsMm == std::vector<double>{10, 16, 22, 35},
             "Catalogue facts changed");
@@ -406,6 +413,30 @@ void testCatalogProject() {
             "Snapshot save failed");
     const auto bytes = read(path);
     const auto root = QJsonDocument::fromJson(bytes).object();
+    {
+        auto legacyRoot = root;
+        legacyRoot.insert(QStringLiteral("version"), 4);
+        auto legacyBends = legacyRoot.value(QStringLiteral("bends")).toArray();
+        auto legacyBend = legacyBends[0].toObject();
+        auto pair = legacyBend.value(QStringLiteral("catalogTools")).toObject();
+        for (const auto &key : {QStringLiteral("punch"), QStringLiteral("die")}) {
+            auto tool = pair.value(key).toObject();
+            tool.remove(QStringLiteral("drawing"));
+            tool.remove(QStringLiteral("parametersConfirmed"));
+            pair.insert(key, tool);
+        }
+        legacyBend.insert(QStringLiteral("catalogTools"), pair);
+        legacyBends[0] = legacyBend;
+        legacyRoot.insert(QStringLiteral("bends"), legacyBends);
+        write(path, QJsonDocument(legacyRoot).toJson());
+        DocumentSession legacy;
+        legacy.complete(legacy.beginImport(nativePath(path)), files.load(nativePath(path), {}, {}));
+        require(legacy.document() && legacy.bend(0)->catalogTools &&
+                    !legacy.bend(0)->catalogTools->punch.drawing &&
+                    legacy.bend(0)->catalogTools->punch.parametersConfirmed,
+                "Legacy v4 catalogue without drawing no longer opens");
+        write(path, bytes);
+    }
     session.complete(session.beginImport(nativePath(path)), files.load(nativePath(path), {}, {}));
     require(!session.modified() && session.bend(0)->catalogTools == assignment &&
                 session.bend(0)->tools == core::toolParameters(assignment) &&
@@ -458,6 +489,25 @@ void testCatalogProject() {
                 catalog,
             "External catalogue differs");
     auto catalogRoot = QJsonDocument::fromJson(catalogBytes).object();
+    {
+        auto legacyCatalog = catalogRoot;
+        legacyCatalog.insert(QStringLiteral("version"), 1);
+        QJsonArray legacyTools;
+        for (const auto &item : legacyCatalog.value(QStringLiteral("tools")).toArray()) {
+            auto tool = item.toObject();
+            if (tool.value(QStringLiteral("parametersConfirmed")).isBool() &&
+                !tool.value(QStringLiteral("parametersConfirmed")).toBool())
+                continue;
+            tool.remove(QStringLiteral("drawing"));
+            tool.remove(QStringLiteral("parametersConfirmed"));
+            legacyTools.append(tool);
+        }
+        legacyCatalog.insert(QStringLiteral("tools"), legacyTools);
+        write(catalogPath, QJsonDocument(legacyCatalog).toJson());
+        require(std::holds_alternative<core::ToolCatalog>(
+                    project::readToolCatalog(nativePath(catalogPath))),
+                "Legacy catalogue v1 no longer reads");
+    }
     auto defs = catalogRoot.value(QStringLiteral("tools")).toArray();
     defs.append(defs[0]);
     catalogRoot.insert(QStringLiteral("tools"), defs);

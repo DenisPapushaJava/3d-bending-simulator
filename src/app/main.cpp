@@ -6,6 +6,7 @@
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <QSettings>
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -83,8 +84,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     auto tools = std::get<bending::core::ToolCatalog>(std::move(catalogue));
-    if (parser.isSet(toolCatalogOption)) {
-        const auto argument = parser.value(toolCatalogOption);
+    const auto savedCatalog =
+        (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
+            ? QString{}
+            : QSettings().value(QStringLiteral("tools/catalogPath")).toString();
+    if (parser.isSet(toolCatalogOption) || !savedCatalog.isEmpty()) {
+        const auto argument =
+            parser.isSet(toolCatalogOption) ? parser.value(toolCatalogOption) : savedCatalog;
 #ifdef _WIN32
         const auto path = std::filesystem::path(argument.toStdWString());
 #else
@@ -92,17 +98,21 @@ int main(int argc, char *argv[]) {
 #endif
         const auto extra = bending::project::readToolCatalog(path);
         if (const auto *error = std::get_if<std::string>(&extra)) {
-            qCritical() << "Custom tool catalogue failed:" << QString::fromStdString(*error);
-            return 1;
+            if (parser.isSet(toolCatalogOption)) {
+                qCritical() << "Custom tool catalogue failed:" << QString::fromStdString(*error);
+                return 1;
+            }
+            qWarning() << "Saved tool catalogue unavailable:" << QString::fromStdString(*error);
         }
-        for (const auto &preset : std::get<bending::core::ToolCatalog>(extra)) {
-            const auto it = std::find_if(tools.begin(), tools.end(),
-                                         [&](const auto &t) { return t.id == preset.id; });
-            if (it == tools.end())
-                tools.push_back(preset);
-            else
-                *it = preset;
-        }
+        if (const auto *additional = std::get_if<bending::core::ToolCatalog>(&extra))
+            for (const auto &preset : *additional) {
+                const auto it = std::find_if(tools.begin(), tools.end(),
+                                             [&](const auto &t) { return t.id == preset.id; });
+                if (it == tools.end())
+                    tools.push_back(preset);
+                else
+                    *it = preset;
+            }
         if (!bending::core::validToolCatalog(tools)) {
             qCritical() << "Merged tool catalogue is invalid";
             return 1;
@@ -110,6 +120,7 @@ int main(int argc, char *argv[]) {
     }
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
+    window.setToolCatalogLoader(bending::project::readToolCatalog);
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());
