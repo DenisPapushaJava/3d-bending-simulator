@@ -11,7 +11,6 @@
 #include <QCommandLineParser>
 #include <QDebug>
 #include <QDir>
-#include <QDockWidget>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QPalette>
@@ -139,8 +138,8 @@ int main(int argc, char *argv[]) {
             }
             if (parser.isSet(smokeTest) && !parser.isSet(graphicsTest)) {
                 timer->stop();
-                const bool ready = window.isVisible() && window.centralWidget() != nullptr &&
-                                   window.findChildren<QDockWidget *>().size() == 3;
+                const bool ready =
+                    window.isVisible() && window.centralWidget() != nullptr && viewer != nullptr;
                 app.exit(ready ? 0 : 1);
             } else if (viewer && viewer->isReady()) {
                 timer->stop();
