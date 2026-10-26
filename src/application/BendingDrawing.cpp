@@ -5,7 +5,9 @@
 namespace bending::application {
 std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept {
     double fit = 100;
-    constexpr std::array<DrawingPoint, 3> available{{{134, 48}, {134, 48}, {104, 48}}};
+    std::array<DrawingPoint, 3> available{{{134, 48}, {134, 48}, {104, 48}}};
+    if (!drawing.details.empty() && drawing.details.size() == drawing.bends.size())
+        available[0].x = 112; // Compact overview: keep room for dimensions at the left frame.
     for (std::size_t i = 0; i < available.size(); ++i) {
         const auto &v = drawing.views[i];
         double w = v.maximum.x - v.minimum.x;

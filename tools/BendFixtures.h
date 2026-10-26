@@ -26,7 +26,7 @@ inline gp_Pnt polar(double radius, double angle, double x = 0.0, double y = 0.0)
 }
 inline TopoDS_Shape bentStrip(double radius = 4.0, double thickness = 2.0,
                               double angle = std::numbers::pi / 2.0, double length = 80.0,
-                              bool flanges = true) {
+                              bool flanges = true, double flangeLength = 30.0) {
     const auto inner0 = polar(radius, 0.0);
     const auto outer0 = polar(radius + thickness, 0.0);
     const auto inner1 = polar(radius, angle);
@@ -42,8 +42,8 @@ inline TopoDS_Shape bentStrip(double radius = 4.0, double thickness = 2.0,
         wire.Add(BRepBuilderAPI_MakeEdge(a, b).Edge());
     };
     if (flanges) {
-        const auto a = inner0.Translated(gp_Vec(0, -30, 0));
-        const auto b = outer0.Translated(gp_Vec(0, -30, 0));
+        const auto a = inner0.Translated(gp_Vec(0, -flangeLength, 0));
+        const auto b = outer0.Translated(gp_Vec(0, -flangeLength, 0));
         line(inner0, a);
         line(a, b);
         line(b, outer0);
@@ -52,7 +52,7 @@ inline TopoDS_Shape bentStrip(double radius = 4.0, double thickness = 2.0,
     }
     wire.Add(arc(radius + thickness));
     if (flanges) {
-        const gp_Vec tangent(-30 * std::sin(angle), 30 * std::cos(angle), 0);
+        const gp_Vec tangent(-flangeLength * std::sin(angle), flangeLength * std::cos(angle), 0);
         const auto a = outer1.Translated(tangent);
         const auto b = inner1.Translated(tangent);
         line(outer1, a);

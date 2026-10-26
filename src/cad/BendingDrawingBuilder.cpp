@@ -4,12 +4,14 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Section.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GCPnts_QuasiUniformDeflection.hxx>
@@ -18,11 +20,14 @@
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
 #include <IntAna_QuadQuadGeo.hxx>
+#include <ShapeAnalysis_FreeBounds.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_HSequenceOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Wire.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 
@@ -188,6 +193,54 @@ bool homogeneous(const TopoDS_Shape &shape, const Frame &f, double low, double h
     }
     return true;
 }
+DrawingView sectionView(const TopoDS_Shape &shape, const Frame &frame, gp_Pnt station,
+                        gp_Pnt corner, double radius, std::size_t &budget, std::stop_token stop) {
+    if (stop.stop_requested())
+        throw DrawingError{"Cancelled", true};
+    BRepAlgoAPI_Section section(shape, gp_Pln(station, frame.normal), false);
+    section.Build();
+    if (!section.IsDone())
+        throw std::runtime_error("Cannot build an enlarged bend section");
+    gp_Trsf placement;
+    placement.SetTransformation(gp_Ax3(gp_Pnt(0, 0, 0), frame.normal, frame.u));
+    const auto moved = BRepBuilderAPI_Transform(section.Shape(), placement, true).Shape();
+    Handle(TopTools_HSequenceOfShape) edges = new TopTools_HSequenceOfShape;
+    for (TopExp_Explorer e(moved, TopAbs_EDGE); e.More(); e.Next())
+        edges->Append(e.Current());
+    Handle(TopTools_HSequenceOfShape) wires = new TopTools_HSequenceOfShape;
+    ShapeAnalysis_FreeBounds::ConnectEdgesToWires(edges, 1e-5, false, wires);
+    DrawingView result;
+    const auto center = project(corner, frame);
+    result.minimum = {center.x - radius, center.y - radius};
+    result.maximum = {center.x + radius, center.y + radius};
+    for (int i = 1; i <= wires->Length(); ++i) {
+        const auto wire = TopoDS::Wire(wires->Value(i));
+        if (!BRep_Tool::IsClosed(wire))
+            throw std::runtime_error("An enlarged bend section has an open contour");
+        std::vector<DrawingPoint> loop;
+        for (BRepTools_WireExplorer e(wire); e.More(); e.Next()) {
+            DrawingView edge;
+            contours(e.Current(), false, edge, budget, stop);
+            for (auto &path : edge.paths) {
+                if (e.Current().Orientation() == TopAbs_REVERSED)
+                    std::reverse(path.points.begin(), path.points.end());
+                if (!loop.empty() && std::hypot(loop.back().x - path.points.front().x,
+                                                loop.back().y - path.points.front().y) > 1e-5)
+                    throw std::runtime_error("An enlarged section has disconnected edges");
+                loop.insert(loop.end(), path.points.begin(), path.points.end());
+                result.paths.push_back(std::move(path));
+            }
+        }
+        if (!loop.empty()) {
+            if (std::hypot(loop.front().x - loop.back().x, loop.front().y - loop.back().y) > 1e-5)
+                throw std::runtime_error("An enlarged section contour is not closed");
+            result.sectionLoops.push_back(std::move(loop));
+        }
+    }
+    if (result.sectionLoops.empty())
+        throw std::runtime_error("An enlarged bend section is empty");
+    return result;
+}
 } // namespace
 DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest request,
                                            std::stop_token stop) const {
@@ -323,9 +376,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                   {top.minimum.x, top.maximum.y},
                                   top.maximum.y - top.minimum.y,
                                   ""});
-        int bendId = 0, diagnosticId = 0;
+        const double baseScale = drawingScale(*drawing).value_or(1);
         const auto addBend = [&](const RecognizedBend &bend, bool diagnostic) {
-            const int id = diagnostic ? ++diagnosticId : ++bendId;
             const gp_Vec axisVector(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
                                     gp_Pnt(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z));
             std::size_t best = 0;
@@ -333,69 +385,152 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 if (std::abs(axisVector.Dot(gp_Vec(frames[i].normal))) >
                     std::abs(axisVector.Dot(gp_Vec(frames[best].normal))))
                     best = i;
-            if (drawing->views[best].labels.size() < 8) {
-                const auto inner = TopoDS::Face(faces(static_cast<int>(bend.innerFace)));
-                double u0, u1, v0, v1;
-                BRepTools::UVBounds(inner, u0, u1, v0, v1);
-                const auto at = BRepAdaptor_Surface(inner).Value((u0 + u1) / 2, (v0 + v1) / 2);
-                const auto label =
-                    std::string(diagnostic ? "D" : "B") + (id < 10 ? "0" : "") + std::to_string(id);
-                drawing->views[best].labels.push_back({project(at, frames[best]), label});
-            }
-            DrawingBend row{
-                bend.angleRadians, bend.innerRadiusMm, bend.thicknessMm, bend.lengthMm, {},
-                diagnostic,        bend.trimmedEnds};
+            const auto inner = TopoDS::Face(faces(static_cast<int>(bend.innerFace)));
+            double u0, u1, v0, v1;
+            BRepTools::UVBounds(inner, u0, u1, v0, v1);
+            const auto at = BRepAdaptor_Surface(inner).Value((u0 + u1) / 2, (v0 + v1) / 2);
+            bool noted = false;
+            DrawingBend row{bend.angleRadians,
+                            bend.innerRadiusMm,
+                            bend.thicknessMm,
+                            bend.lengthMm,
+                            {},
+                            diagnostic,
+                            bend.trimmedEnds,
+                            {}};
             if (!diagnostic) {
-                const gp_Dir axis(
-                    gp_Vec(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
-                           gp_Pnt(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z)));
+                const gp_Dir axis(axisVector);
+                std::array<std::optional<FlangeSize>, 2> measured;
                 for (std::size_t i = 0; i < 2; ++i) {
-                    const auto fi = bend.flangeFaces[i * 2 + 1];
-                    const auto other = bend.flangeFaces[(1 - i) * 2 + 1];
-                    const auto otherFace = TopoDS::Face(faces(static_cast<int>(other)));
-                    BRepAdaptor_Surface os(otherFace);
-                    if (os.GetType() != GeomAbs_Plane)
-                        continue;
-                    const auto measured =
-                        flangeSize(TopoDS::Face(faces(static_cast<int>(fi))), os.Plane(), axis);
-                    if (!measured)
-                        continue;
-                    row.outerFlangeMm[i] = measured->value;
-                    if (!drawing->bends.empty())
-                        continue;
-                    for (const std::size_t k : {best, (best + 1) % 3, (best + 2) % 3}) {
-                        const auto direction = gp_Vec(measured->corner, measured->end);
-                        if (std::abs(direction.Normalized().Dot(gp_Vec(frames[k].normal))) > 1e-7)
-                            continue;
-                        drawing->views[k].dimensions.push_back(
-                            {project(measured->corner, frames[k]),
-                             project(measured->end, frames[k]), measured->value,
-                             "H" + std::to_string(i + 1)});
-                        break;
+                    const auto other =
+                        TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[(1 - i) * 2 + 1])));
+                    BRepAdaptor_Surface os(other);
+                    if (os.GetType() == GeomAbs_Plane)
+                        measured[i] = flangeSize(
+                            TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[i * 2 + 1]))),
+                            os.Plane(), axis);
+                    if (measured[i])
+                        row.outerFlangeMm[i] = measured[i]->value;
+                }
+                if (measured[0] && measured[1]) {
+                    const auto first = gp_Vec(measured[0]->corner, measured[0]->end).Normalized();
+                    const auto second = gp_Vec(measured[1]->corner, measured[1]->end).Normalized();
+                    const double angle = std::acos(std::clamp(first.Dot(second), -1., 1.));
+                    if (angle > 1e-5 && angle < std::numbers::pi - 1e-5 &&
+                        std::abs(angle + bend.angleRadians - std::numbers::pi) < 1e-5)
+                        row.interiorAngleRadians = angle;
+                }
+                const bool trueProfile = std::abs(axis.Dot(frames[best].normal)) > 1 - 1e-7;
+                const bool enlarged = row.interiorAngleRadians &&
+                                      ((bend.innerRadiusMm + bend.thicknessMm) * baseScale < 1.5 ||
+                                       !trueProfile || metadata.bendAnalysis.bends.size() > 1);
+                auto profileFrame = frames[best];
+                std::optional<DrawingView> detail;
+                const gp_Pnt station = gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z)
+                                           .Translated(axisVector * .5);
+                if (enlarged) {
+                    if (drawing->details.size() >= 24)
+                        throw std::runtime_error("At most 24 enlarged bend profiles are supported");
+                    if (!trueProfile) {
+                        const gp_Vec horizontal =
+                            gp_Vec(profileFrame.u) -
+                            gp_Vec(axis) * gp_Vec(profileFrame.u).Dot(gp_Vec(axis));
+                        profileFrame = {gp_Dir(horizontal),
+                                        gp_Dir(gp_Vec(axis).Crossed(horizontal)), axis};
                     }
-                    if (i == 0) {
-                        const auto innerFace =
-                            TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[0])));
-                        BRepAdaptor_Surface innerSurface(innerFace);
-                        if (innerSurface.GetType() == GeomAbs_Plane) {
-                            const auto pln = innerSurface.Plane();
-                            const double distance = gp_Vec(pln.Location(), measured->end)
-                                                        .Dot(gp_Vec(pln.Axis().Direction()));
-                            const auto innerEnd = measured->end.Translated(
-                                -gp_Vec(pln.Axis().Direction()) * distance);
-                            BRepClass_FaceClassifier inside(innerFace, innerEnd, 1e-5);
-                            if (std::abs(gp_Vec(pln.Axis().Direction())
-                                             .Dot(gp_Vec(frames[best].normal))) < 1e-7 &&
-                                std::abs(std::abs(distance) - bend.thicknessMm) < 1e-5 &&
-                                (inside.State() == TopAbs_ON || inside.State() == TopAbs_IN))
-                                drawing->views[best].dimensions.push_back(
-                                    {project(innerEnd, frames[best]),
-                                     project(measured->end, frames[best]), std::abs(distance),
-                                     "t"});
-                        }
+                    const double radius =
+                        std::max(12., std::min(measured[0]->value, measured[1]->value) +
+                                          (bend.innerRadiusMm + bend.thicknessMm));
+                    detail = sectionView(shape, profileFrame, station, measured[0]->corner, radius,
+                                         budget, stop);
+                }
+                auto &profile = detail ? *detail : drawing->views[best];
+                if (row.interiorAngleRadians && (detail || trueProfile))
+                    profile.angles.push_back({project(measured[0]->corner, profileFrame),
+                                              project(measured[0]->end, profileFrame),
+                                              project(measured[1]->end, profileFrame),
+                                              *row.interiorAngleRadians,
+                                              (bend.innerRadiusMm + bend.thicknessMm) /
+                                                      std::sin(*row.interiorAngleRadians / 2) -
+                                                  bend.innerRadiusMm});
+                bool thicknessAdded = false;
+                for (std::size_t i = 0; i < 2; ++i) {
+                    if (!measured[i])
+                        continue;
+                    const auto &m = *measured[i];
+                    auto endPoint = m.end;
+                    if (detail) {
+                        endPoint.Translate(gp_Vec(axis) * gp_Vec(m.end, station).Dot(gp_Vec(axis)));
+                        const auto outer =
+                            TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[i * 2 + 1])));
+                        BRepClass_FaceClassifier onSection(outer, endPoint, 1e-5);
+                        if (onSection.State() != TopAbs_IN && onSection.State() != TopAbs_ON)
+                            continue;
+                    }
+                    const auto end = project(m.end, profileFrame);
+                    const bool insideDetail =
+                        !detail || std::hypot(end.x - (profile.minimum.x + profile.maximum.x) / 2,
+                                              end.y - (profile.minimum.y + profile.maximum.y) / 2) <
+                                       (profile.maximum.x - profile.minimum.x) * .49;
+                    if (!insideDetail)
+                        continue;
+                    if (detail || drawing->bends.empty()) {
+                        const auto direction = gp_Vec(m.corner, m.end).Normalized();
+                        if (std::abs(direction.Dot(gp_Vec(profileFrame.normal))) < 1e-7)
+                            profile.dimensions.push_back({project(m.corner, profileFrame), end,
+                                                          m.value, "H" + std::to_string(i + 1)});
+                    }
+                    if (thicknessAdded || (!detail && !drawing->bends.empty()))
+                        continue;
+                    const auto innerFace =
+                        TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[i * 2])));
+                    BRepAdaptor_Surface innerSurface(innerFace);
+                    if (innerSurface.GetType() != GeomAbs_Plane)
+                        continue;
+                    const auto pln = innerSurface.Plane();
+                    const double distance =
+                        gp_Vec(pln.Location(), endPoint).Dot(gp_Vec(pln.Axis().Direction()));
+                    const auto innerEnd =
+                        endPoint.Translated(-gp_Vec(pln.Axis().Direction()) * distance);
+                    BRepClass_FaceClassifier inside(innerFace, innerEnd, 1e-5);
+                    if (std::abs(gp_Vec(pln.Axis().Direction()).Dot(gp_Vec(profileFrame.normal))) <
+                            1e-7 &&
+                        std::abs(std::abs(distance) - bend.thicknessMm) < 1e-5 &&
+                        (inside.State() == TopAbs_ON || inside.State() == TopAbs_IN)) {
+                        profile.dimensions.push_back(
+                            {project(innerEnd, profileFrame), end, std::abs(distance), "t"});
+                        thicknessAdded = true;
                     }
                 }
+                auto noteAnchor = at;
+                if (detail) {
+                    noteAnchor.Translate(gp_Vec(axis) * gp_Vec(at, station).Dot(gp_Vec(axis)));
+                    BRepClass_FaceClassifier inSection(inner, noteAnchor, 1e-5);
+                    if (inSection.State() != TopAbs_IN && inSection.State() != TopAbs_ON)
+                        throw std::runtime_error(
+                            "The bend midpoint section misses the measured radius");
+                }
+                profile.bendNotes.push_back(
+                    {project(noteAnchor, profileFrame), drawing->bends.size()});
+                noted = true;
+                if (detail) {
+                    const std::string designation =
+                        "А" + std::to_string(drawing->details.size() + 1);
+                    const double radius = (detail->maximum.x - detail->minimum.x) / 2;
+                    drawing->views[best].labels.push_back({project(at, frames[best]), designation});
+                    drawing->views[best].detailCircles.push_back(
+                        {project(at, frames[best]), radius});
+                    if (best != 0) {
+                        drawing->views[0].labels.push_back({project(at, frames[0]), designation});
+                        drawing->views[0].detailCircles.push_back({project(at, frames[0]), radius});
+                    }
+                    drawing->details.push_back(
+                        {std::move(*detail), drawing->bends.size(), designation});
+                }
             }
+            if (!noted)
+                drawing->views[best].bendNotes.push_back(
+                    {project(at, frames[best]), drawing->bends.size()});
             drawing->bends.push_back(row);
         };
         for (const auto &bend : metadata.bendAnalysis.bends)

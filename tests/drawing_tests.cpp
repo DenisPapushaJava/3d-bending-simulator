@@ -75,6 +75,10 @@ void geometry(const QString &folder) {
                 std::abs(*drawing->thicknessMm - 6) < 1e-5,
             "Bend facts lost");
     const auto &b = drawing->bends[0];
+    require(b.interiorAngleRadians &&
+                std::abs(*b.interiorAngleRadians - std::numbers::pi / 2) < 1e-5 &&
+                drawing->views[2].angles.size() == 1,
+            "A right-angle profile lost its angular dimension");
     require(drawing->views[2].dimensions.size() == 3 &&
                 std::any_of(
                     drawing->views[2].dimensions.begin(), drawing->views[2].dimensions.end(),
@@ -111,6 +115,28 @@ void geometry(const QString &folder) {
     auto disabled = application::DrawingRequest{};
     disabled.allowBreaks = false;
     require(!build(longDoc, disabled)->views[0].omittedX, "Break opt-out ignored");
+    const auto acute = build(
+        load(fixtures::bentStrip(4, 2, 2 * std::numbers::pi / 3, 2000), folder + "/acute.step"),
+        disabled);
+    require(acute->bends.size() == 1 && acute->bends[0].interiorAngleRadians &&
+                std::abs(*acute->bends[0].interiorAngleRadians - std::numbers::pi / 3) < 1e-5 &&
+                std::abs(acute->bends[0].turnRadians - 2 * std::numbers::pi / 3) < 1e-5,
+            "A 120 degree bend turn was confused with the 60 degree interior angle");
+    require(acute->details.size() == 1 && !acute->details[0].view.sectionLoops.empty() &&
+                acute->details[0].view.angles.size() == 1 &&
+                ui::DrawingSheet::pageCount(*acute) == 1,
+            "A small bend in a large part has no enlarged section");
+    require(!ui::DrawingSheet::preview(*acute, {}, 0).isNull(),
+            "Enlarged non-right-angle section cannot be laid out");
+    require(ui::DrawingSheet::writePdf(folder + "/acute.pdf", *acute, {}).isEmpty(),
+            "Enlarged section PDF failed");
+    const auto wider =
+        build(load(fixtures::bentStrip(4, 2, 2 * std::numbers::pi / 3, 2000, true, 100),
+                   folder + "/wide-flanges.step"),
+              disabled);
+    require(wider->details.size() == 1 && wider->details[0].view.dimensions.size() == 3 &&
+                wider->details[0].view.bendNotes.size() == 1,
+            "The detail crop dropped valid flange or thickness dimensions");
     const auto holed = BRepAlgoAPI_Cut(fixtures::bentStrip(8, 6, std::numbers::pi / 2, 2000),
                                        BRepPrimAPI_MakeCylinder(
                                            gp_Ax2(gp_Pnt(-20, 7, 1000), gp_Dir(0, 1, 0)), 2, 8))
@@ -164,10 +190,22 @@ void geometry(const QString &folder) {
     if (!path.isEmpty())
         require(ui::DrawingSheet::writePdf(path, *shortened, title).isEmpty(),
                 "Long demo PDF failed");
-    auto many = *drawing;
-    for (int i = 0; i < 30; ++i)
-        many.bends.push_back(b);
-    require(ui::DrawingSheet::pageCount(many) == 3, "Pagination lost rows");
+    const auto channel = build(load(fixtures::channel(), folder + "/channel.step"));
+    require(channel->bends.size() == 2 && channel->details.size() == 2 &&
+                ui::DrawingSheet::pageCount(*channel) == 1 &&
+                !ui::DrawingSheet::preview(*channel, {}).isNull(),
+            "Two bend profiles did not share the overview sheet");
+    auto many = *acute;
+    for (std::size_t i = 1; i < 31; ++i) {
+        many.bends.push_back(acute->bends[0]);
+        auto detail = acute->details[0];
+        detail.bendIndex = i;
+        detail.designation = "А" + std::to_string(i + 1);
+        for (auto &[point, index] : detail.view.bendNotes)
+            index = i;
+        many.details.push_back(std::move(detail));
+    }
+    require(ui::DrawingSheet::pageCount(many) == 8, "Pagination lost enlarged profiles");
     require(ui::DrawingSheet::writePdf(folder + "/many.pdf", many, title).isEmpty(),
             "Multi-page PDF failed");
     title.quantity = 0;

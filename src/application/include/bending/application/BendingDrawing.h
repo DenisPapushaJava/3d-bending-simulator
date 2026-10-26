@@ -22,6 +22,13 @@ struct DrawingDimension {
     double valueMm = 0;
     std::string label; // Semantic ID, not an editable measured value.
 };
+struct DrawingAngle {
+    DrawingPoint vertex;
+    DrawingPoint first;
+    DrawingPoint second;
+    double radians = 0;
+    double minimumRadiusMm = 0; // Keep the dimension arc outside the material.
+};
 struct DrawingView {
     std::vector<DrawingPath> paths;
     DrawingPoint minimum;
@@ -33,6 +40,10 @@ struct DrawingView {
         omittedX; // Verified homogeneous span; dimensions stay full.
     std::vector<std::pair<DrawingPoint, double>> circleCenters;
     std::vector<std::pair<DrawingPoint, std::string>> labels;
+    std::vector<DrawingAngle> angles;
+    std::vector<std::vector<DrawingPoint>> sectionLoops;
+    std::vector<std::pair<DrawingPoint, double>> detailCircles;
+    std::vector<std::pair<DrawingPoint, std::size_t>> bendNotes;
 };
 struct DrawingBend {
     double turnRadians;
@@ -42,6 +53,12 @@ struct DrawingBend {
     std::array<std::optional<double>, 2> outerFlangeMm;
     bool diagnostic = false;
     bool trimmedEnds = false;
+    std::optional<double> interiorAngleRadians;
+};
+struct DrawingDetail {
+    DrawingView view;
+    std::size_t bendIndex;
+    std::string designation;
 };
 struct DrawingRequest {
     std::optional<std::size_t> baseFace;
@@ -63,6 +80,7 @@ struct BendingDrawing {
     std::optional<double> declaredThicknessMm;
     std::size_t unrecognizedCylindricalFaces = 0;
     std::string sourceName;
+    std::vector<DrawingDetail> details;
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
 struct DrawingError {
