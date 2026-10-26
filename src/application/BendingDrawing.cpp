@@ -1,0 +1,37 @@
+#include "bending/application/BendingDrawing.h"
+#include <algorithm>
+#include <cmath>
+
+namespace bending::application {
+std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept {
+    double fit = 100;
+    constexpr std::array<DrawingPoint, 3> available{{{134, 48}, {134, 48}, {104, 48}}};
+    for (std::size_t i = 0; i < available.size(); ++i) {
+        const auto &v = drawing.views[i];
+        double w = v.maximum.x - v.minimum.x;
+        const double h = v.maximum.y - v.minimum.y;
+        if (!std::isfinite(w) || !std::isfinite(h) || w <= 0 || h <= 0 || v.paths.empty())
+            return {};
+        if (v.omittedX) {
+            if (!std::isfinite((*v.omittedX)[0]) || !std::isfinite((*v.omittedX)[1]) ||
+                (*v.omittedX)[0] <= v.minimum.x || (*v.omittedX)[1] >= v.maximum.x ||
+                (*v.omittedX)[0] >= (*v.omittedX)[1])
+                return {};
+            w -= (*v.omittedX)[1] - (*v.omittedX)[0];
+        }
+        fit = std::min({fit, (available[i].x - (v.omittedX ? 8 : 0)) / w, available[i].y / h});
+    }
+    return standardDrawingScale(fit);
+}
+std::optional<double> standardDrawingScale(double fit) noexcept {
+    if (!std::isfinite(fit) || fit <= 0)
+        return {};
+    constexpr std::array scales{100., 50., 40.,     20., 10.,  5.,    4.,      2.5,    2.,
+                                1.,   .5,  .4,      .25, .2,   .1,    1. / 15, .05,    .04,
+                                .025, .02, 1. / 75, .01, .005, .0025, .002,    .00125, .001};
+    for (const double scale : scales)
+        if (scale <= fit + 1e-12)
+            return scale;
+    return {};
+}
+} // namespace bending::application

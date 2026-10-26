@@ -1,4 +1,5 @@
 #include "bending/ui/MainWindow.h"
+#include "DrawingDialog.h"
 #include "ProcessStepButton.h"
 #include "ToolSelectionWidget.h"
 
@@ -313,13 +314,19 @@ class MainWindow::Impl {
         showSelectedBend(false);
         camera->setEnabled(viewer->isReady() && document != nullptr);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
-        const bool cancellable =
-            session.activeRequest().has_value() || controller->isPreparingPreview();
+        if (drawingAction)
+            drawingAction->setEnabled(document && drawingBuilder && !controller->hasWork());
+        const bool cancellable = session.activeRequest().has_value() ||
+                                 controller->isPreparingPreview() ||
+                                 controller->isPreparingDrawing();
         cancelAction->setVisible(cancellable);
         cancelAction->setEnabled(cancellable);
         progress->setVisible(session.activeRequest().has_value() || controller->isSaving() ||
-                             controller->isPreparingPreview());
-        if (controller->isPreparingPreview()) {
+                             controller->isPreparingPreview() || controller->isPreparingDrawing());
+        if (controller->isPreparingDrawing()) {
+            window->statusBar()->showMessage(
+                QStringLiteral("Подготовка проекций и размеров листа…"));
+        } else if (controller->isPreparingPreview()) {
             window->statusBar()->showMessage(
                 QStringLiteral("Восстановление заготовки и подготовка состояний сгиба…"));
         } else if (controller->isSaving()) {
@@ -1195,6 +1202,10 @@ class MainWindow::Impl {
     QPushButton *applyBendTarget = nullptr;
     QPushButton *resetBendTarget = nullptr;
     std::shared_ptr<const SingleBendPreviewBuilder> previewBuilder;
+    std::shared_ptr<const BendingDrawingBuilder> drawingBuilder;
+    QAction *drawingAction = nullptr;
+    std::optional<std::size_t> drawingBase;
+    std::uint64_t drawingBaseRevision = 0;
     application::BendPreviewPtr displayedPreview;
     QString previewDisplayError;
     QComboBox *fixedSide = nullptr;
@@ -1350,6 +1361,21 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->controller->closeDocument();
         }
     });
+    impl_->drawingAction = fileMenu->addAction(QStringLiteral("Лист гибки / PDF…"));
+    impl_->drawingAction->setObjectName(QStringLiteral("bendingDrawingAction"));
+    impl_->drawingAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+    impl_->drawingAction->setEnabled(false);
+    connect(impl_->drawingAction, &QAction::triggered, this, [this] {
+        const auto &session = impl_->controller->session();
+        if (!impl_->drawingBuilder || !session.document() || impl_->controller->hasWork())
+            return;
+        impl_->stopPlayback();
+        DrawingDialog dialog(*impl_->controller, impl_->drawingBuilder,
+                             impl_->drawingBaseRevision == session.revision() ? impl_->drawingBase
+                                                                              : std::nullopt,
+                             this);
+        dialog.exec();
+    });
     fileMenu->addSeparator();
     auto *exit = fileMenu->addAction(QStringLiteral("Выход"));
     exit->setShortcut(QKeySequence::Quit);
@@ -1361,6 +1387,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     toolbar->setMovable(false);
     toolbar->addAction(open);
     toolbar->addAction(impl_->saveAction);
+    toolbar->addAction(impl_->drawingAction);
     toolbar->addAction(impl_->cancelAction);
     auto *toolSetupAction = viewMenu->addAction(QStringLiteral("Инструмент"));
     toolSetupAction->setObjectName(QStringLiteral("toolSetupAction"));
@@ -2063,11 +2090,16 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     static_cast<std::size_t>(index) <= session.document()->faces().size()) {
                     const auto &face =
                         session.document()->faces()[static_cast<std::size_t>(index - 1)];
+                    impl_->drawingBase = face.surface == SurfaceKind::Plane
+                                             ? std::optional{face.index}
+                                             : std::nullopt;
+                    impl_->drawingBaseRevision = session.revision();
                     impl_->selection->setText(
                         QStringLiteral("Грань №%1\nПоверхность: %2\nПлощадь: %3 мм²")
                             .arg(face.index)
                             .arg(surfaceName(face.surface), number(face.areaMm2)));
                 } else {
+                    impl_->drawingBase.reset();
                     impl_->selection->setText(
                         QStringLiteral("Грань не выбрана. Нажмите ЛКМ на модели."));
                 }
@@ -2111,5 +2143,10 @@ void MainWindow::setToolCatalogLoader(
     std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
         loader) {
     impl_->toolSelection->loadCatalog = std::move(loader);
+}
+void MainWindow::setDrawingBuilder(
+    std::shared_ptr<const application::BendingDrawingBuilder> builder) {
+    impl_->drawingBuilder = std::move(builder);
+    impl_->refresh();
 }
 } // namespace bending::ui

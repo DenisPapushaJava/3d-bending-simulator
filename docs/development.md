@@ -511,3 +511,17 @@ QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR=1 \
 Добавлены параметрический отбор в core, контуры в JSON/`.bend` v5, импорт мастерской и просмотр исходных чертежей. Локально: `core`/CTest **4/4**, `dev`/CTest **17/17**, Python **5/5**, запуск с приватным каталогом всех пяти DXF. После добавления проверки чтения старого v4 и диалога контуров повторены только `project.portable-file`, `app.custom-catalog-startup` и guided/GPU при 100%; полный набор CAD повторно не запускался. Нативный сценарий использовал фактические локальные профили ST1405/ST3412, снимки просмотрены.
 
 Для узкой проверки диалога на собственных данных можно задать `BENDING_TEST_TOOL_CATALOG=/абсолютный/путь/tools.json` и `BENDING_DRAWING_SNAPSHOT=/абсолютный/путь/dialog.png` при запуске `workflow_tests --graphics --guided-only`. Без внешнего каталога тест использует собственный синтетический контур. Это локальная проверка чтения/рисования, не сертификат контакта реального профиля. Повышенный масштаб не применяется. Windows/GPU вручную не проверялся; сборку Release и упаковку проверяет штатный CI новой фичи.
+
+### Справочный лист и PDF — D038, 2026-10-27
+
+Добавлены HLR-проекции/TKHLR, SDK-независимый снимок листа, общий CAD-worker, векторный PDF и встроенный OFL-шрифт. Локально собраны `core` и `dev`; CTest **5/5** и **19/19**, Python **5/5**. Новые `application.drawing-layout` и `app.bending-drawing` проверяют масштаб/разрывы, поворот STEP, истинные наружные размеры, толщину на профиле, скрытые линии/центровые, отказ разрыва при отверстии, количество, A3/PDF/font embedding, таблицу и stale/cancel/cache. После уточнений размещения/ориентации повторены только эти затронутые сценарии.
+
+```bash
+QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=1 \
+  BENDING_DRAWING_OUTPUT="$PWD/output/pdf/bending-sheet-demo.pdf" \
+  BENDING_DRAWING_LONG_OUTPUT="$PWD/output/pdf/bending-sheet-long.pdf" \
+  BENDING_DRAWING_DIALOG_SNAPSHOT="$PWD/out/drawing-dialog.png" \
+  ./build/dev/bin/drawing_tests
+```
+
+Необязательный `BENDING_TEST_DRAWING_PART=/абсолютный/путь/деталь.STEP` добавляет локальную проверку пользовательского файла без включения его в набор. С такой переменной успешно проверен `01-36728 ind a6.STEP`. PDF растрированы Poppler и просмотрены; текст/количество и A3 проверены отдельно. Это CPU/B-Rep и векторная печать, не GPU-проверка; viewer не менялся, повторный native/GPU и повышенный масштаб не запускались. Release, обе ОС и Linux DEB проверяет штатный CI фичи; Windows/GPU вручную не проверен.

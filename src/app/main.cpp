@@ -1,4 +1,5 @@
 #include "bending/Version.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
@@ -121,6 +122,7 @@ int main(int argc, char *argv[]) {
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
     window.setToolCatalogLoader(bending::project::readToolCatalog);
+    window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());
