@@ -13,14 +13,19 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListView>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
@@ -33,6 +38,7 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QUrl>
 
 #include <cmath>
 #include <functional>
@@ -118,6 +124,125 @@ int warmMaskChanges(const QImage &a, const QImage &b) {
         }
     }
     return count;
+}
+bool dropUrls(QWidget *target, const QList<QUrl> &urls,
+              Qt::DropActions actions = Qt::CopyAction | Qt::MoveAction) {
+    QMimeData mime;
+    mime.setUrls(urls);
+    const QPoint at(20, 20);
+    QDragEnterEvent enter(at, actions, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(target, &enter);
+    if (!enter.isAccepted())
+        return false;
+    require(enter.dropAction() == Qt::CopyAction, "File drag retained a destructive action");
+    QDragMoveEvent move(at, actions, &mime, Qt::LeftButton, Qt::ShiftModifier);
+    QApplication::sendEvent(target, &move);
+    require(move.isAccepted() && move.dropAction() == Qt::CopyAction,
+            "File drag lost Copy action while moving across the window");
+    QDropEvent drop(QPointF(at), actions, &mime, Qt::LeftButton, Qt::ShiftModifier);
+    QApplication::sendEvent(target, &drop);
+    require(!drop.isAccepted() || drop.dropAction() == Qt::CopyAction,
+            "File drop requested moving the source file");
+    return drop.isAccepted();
+}
+void testFileDrop(bool graphics) {
+    QTemporaryDir temporary;
+    require(temporary.isValid(), "No drop test folder");
+    const auto folder = temporary.path() + QStringLiteral("/Детали с пробелами #1");
+    require(QDir().mkpath(folder), "Cannot create Unicode drop folder");
+    const auto file = folder + QStringLiteral("/Пластина.StP");
+    require(QFile::copy(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/plate-inch.stp"),
+                        file),
+            "Cannot copy file drop fixture");
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.resize(1280, 820);
+    window.show();
+    auto &controller = window.importController();
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    require(viewer && window.acceptDrops(), "File drop is not enabled");
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady(), "Drop test has no native graphics context");
+    }
+    auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+    auto *target = canvas ? canvas : static_cast<QWidget *>(viewer);
+    require(dropUrls(target, {QUrl::fromLocalFile(file)}), "Drop on CAD scene was not accepted");
+    waitUntil([&] { return !controller.hasWork() && controller.session().document(); });
+    const auto first = controller.session().document();
+    require(first->metadata().sourceLengthUnits == std::vector<std::string>{"INCH"} &&
+                std::abs(first->metadata().volumeMm3 - 12000.) < 1e-4 && QFile::exists(file),
+            "Unicode STEP drop lost geometry, units or source file");
+    const auto revision = controller.session().revision();
+    const auto directory = folder + QStringLiteral("/directory.step");
+    require(QDir().mkpath(directory), "Cannot create fake STEP directory");
+    const auto pdf = folder + QStringLiteral("/drawing.pdf");
+    QFile unsupported(pdf);
+    require(unsupported.open(QIODevice::WriteOnly), "Cannot create unsupported drop fixture");
+    unsupported.close();
+    window.findChild<QToolButton *>(QStringLiteral("measurementsToggle"))->setChecked(true);
+    auto *editor = window.findChild<QDoubleSpinBox *>(QStringLiteral("thicknessInput"))
+                       ->findChild<QLineEdit *>();
+    require(editor != nullptr, "No child editor for drop test");
+    const auto editorText = editor->text();
+    for (const auto &urls :
+         QList<QList<QUrl>>{{QUrl::fromLocalFile(pdf)},
+                            {QUrl::fromLocalFile(directory)},
+                            {QUrl::fromLocalFile(folder + QStringLiteral("/missing.step"))},
+                            {QUrl(QStringLiteral("https://example.com/part.step"))},
+                            {QUrl::fromLocalFile(file), QUrl::fromLocalFile(pdf)}})
+        require(!dropUrls(editor, urls), "Unsupported file drop was accepted by a child editor");
+    require(!dropUrls(&window, {QUrl::fromLocalFile(file)}, Qt::MoveAction) &&
+                !controller.hasWork() && controller.session().revision() == revision &&
+                controller.session().document() == first && editor->text() == editorText,
+            "Rejected drop changed the document, editor or pending request");
+    controller.setManualThickness(2);
+    const auto project = folder + QStringLiteral("/Проект.BeNd");
+#ifdef _WIN32
+    const auto nativeProject = std::filesystem::path(project.toStdWString());
+#else
+    const auto nativeProject = std::filesystem::path(project.toStdString());
+#endif
+    controller.saveProject(nativeProject, files);
+    waitUntil([&] { return !controller.hasWork(); });
+    require(QFile::exists(project) && controller.saveError().isEmpty() &&
+                !controller.session().modified(),
+            "Cannot prepare portable project drop");
+    const auto next = QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/plate-mm.step");
+    require(dropUrls(editor, {QUrl::fromLocalFile(next)}),
+            "Drop on a child editor did not open the file");
+    waitUntil([&] { return !controller.hasWork() && controller.session().revision() > revision; });
+    controller.setManualThickness(2);
+    require(controller.session().modified(), "Drop fixture did not become modified");
+    const auto edited = controller.session().document();
+    const auto editedRevision = controller.session().editRevision();
+    QTimer::singleShot(0, [] {
+        auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        require(dialog != nullptr, "Dirty drop skipped the existing unsaved-parameters prompt");
+        dialog->button(QMessageBox::Cancel)->click();
+    });
+    require(dropUrls(target, {QUrl::fromLocalFile(project)}),
+            "Project drop did not reach the guard");
+    require(controller.session().document() == edited, "Cancelled drop replaced the document");
+    require(controller.session().editRevision() == editedRevision,
+            "Cancelled drop changed edit revision");
+    require(controller.session().manualThicknessMm() == 2,
+            "Cancelled drop changed manual thickness");
+    require(!controller.hasWork(), "Cancelled drop started background work");
+    QTimer::singleShot(0, [] {
+        auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        require(dialog != nullptr, "Missing discard prompt on replacement drop");
+        dialog->button(QMessageBox::Discard)->click();
+    });
+    require(dropUrls(target, {QUrl::fromLocalFile(project)}), "Portable project drop was rejected");
+    waitUntil([&] { return !controller.hasWork(); });
+    require(controller.session().document() != edited,
+            "Approved project drop did not replace the document");
+    require(controller.session().manualThicknessMm() == 2 && !controller.session().modified() &&
+                QFile::exists(project),
+            "Project drop did not restore saved parameters or removed its source");
+    controller.closeDocument();
+    window.close();
 }
 void testWorkflow(bool graphics) {
     const auto examples = QString::fromUtf8(BENDING_EXAMPLE_DIR);
@@ -1847,11 +1972,18 @@ int main(int argc, char *argv[]) {
     app.setQuitOnLastWindowClosed(false);
     try {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
+        if (app.arguments().contains(QStringLiteral("--file-drop-only"))) {
+            testFileDrop(graphics);
+            std::cout << "File drop workflow passed\n";
+            return 0;
+        }
         testGuidedWorkflow(graphics);
         if (app.arguments().contains(QStringLiteral("--guided-only"))) {
             std::cout << "Guided bending workflow passed\n";
             return 0;
         }
+        if (graphics)
+            testFileDrop(true);
         testWorkflow(graphics);
         testProjectWorkflow(graphics);
         testBendWorkflow(graphics);

@@ -38,6 +38,7 @@ class MainWindow final : public QMainWindow {
 
   protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
     class Impl;

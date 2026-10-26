@@ -14,7 +14,9 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QDropEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -25,6 +27,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -39,6 +42,7 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -68,6 +72,19 @@ std::filesystem::path nativePath(const QString &path) {
     return std::filesystem::path(
         std::string(utf8.constData(), static_cast<std::size_t>(utf8.size())));
 #endif
+}
+QString fileDropPath(const QMimeData *mime, bool inspectFile) {
+    if (!mime || !mime->hasUrls())
+        return {};
+    const auto urls = mime->urls();
+    if (urls.size() != 1 || !urls.front().isLocalFile())
+        return {};
+    const QFileInfo file(urls.front().toLocalFile());
+    const auto suffix = file.suffix().toLower();
+    if (suffix != QStringLiteral("step") && suffix != QStringLiteral("stp") &&
+        suffix != QStringLiteral("bend"))
+        return {};
+    return !inspectFile || file.isFile() ? file.filePath() : QString{};
 }
 QString number(double value) {
     return QLocale::system().toString(value, 'g', 8);
@@ -222,9 +239,10 @@ class MainWindow::Impl {
             } else {
                 project->addItem(QStringLiteral("Деталь не загружена"));
                 project->setToolTip({});
-                properties->setText(QStringLiteral(
-                    "Откройте STEP отдельной детали: Файл → Открыть STEP…\n\nПоддерживается одно "
-                    "корректное объёмное тело.\nЕдиницы будут приведены к мм."));
+                properties->setText(
+                    QStringLiteral("Перетащите STEP/STP или проект .bend в окно, либо выберите "
+                                   "Файл → Открыть…\n\nПоддерживается одно "
+                                   "корректное объёмное тело.\nЕдиницы будут приведены к мм."));
                 window->setWindowTitle(title);
             }
         }
@@ -427,7 +445,7 @@ class MainWindow::Impl {
         const bool chosen =
             tools && (toolSelection->usesCatalog() || toolDraftChanged || (entry && entry->tools));
         partName->setText(document ? displayPath(document->metadata().sourcePath.filename())
-                                   : QStringLiteral("Начните с CAD-модели"));
+                                   : QStringLiteral("Перетащите STEP/STP или .bend в окно"));
         partToolSummary->setText(
             chosen ? QStringLiteral("Инструмент: %1").arg(toolSelection->summary()) : QString{});
         partToolSummary->setVisible(document && chosen);
@@ -1292,6 +1310,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->writer = std::move(writer);
     impl_->previewBuilder = std::move(previewBuilder);
     setObjectName(QStringLiteral("mainWindow"));
+    setAcceptDrops(true);
     setStyleSheet(QStringLiteral(
         "QPushButton#partPrimaryAction,QPushButton#applyToolSetup,"
         "QPushButton#checkBend,QPushButton#playBend{background:#087F83;color:white;"
@@ -2118,10 +2137,34 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     .arg(QString::fromLatin1(qVersion()), cadVersion));
     });
     impl_->refresh();
+    qApp->installEventFilter(this);
 }
 
 MainWindow::~MainWindow() {
+    qApp->removeEventFilter(this);
     impl_->controller->shutdown();
+}
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    const auto type = event->type();
+    if (type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::Drop)
+        return QMainWindow::eventFilter(watched, event);
+    const auto *widget = qobject_cast<QWidget *>(watched);
+    if (!widget || widget->window() != this)
+        return QMainWindow::eventFilter(watched, event);
+    auto *drop = static_cast<QDropEvent *>(event);
+    if (!drop->mimeData() || !drop->mimeData()->hasUrls())
+        return QMainWindow::eventFilter(watched, event);
+    const auto path = fileDropPath(drop->mimeData(), type != QEvent::DragMove);
+    if (path.isEmpty() || !(drop->possibleActions() & Qt::CopyAction) ||
+        QApplication::activeModalWidget() || !isEnabled()) {
+        drop->ignore();
+        return true;
+    }
+    drop->setDropAction(Qt::CopyAction);
+    drop->accept();
+    if (type == QEvent::Drop)
+        openStep(path);
+    return true;
 }
 void MainWindow::openStep(const QString &path) {
     if (!path.isEmpty() && impl_->canDiscard()) {
