@@ -1,6 +1,9 @@
 #include "bending/core/BendSequence.h"
+#include "bending/core/BendTarget.h"
 
 #include <iostream>
+#include <limits>
+#include <numbers>
 #include <stdexcept>
 
 int main() {
@@ -10,6 +13,19 @@ int main() {
         }
     };
     try {
+        using bending::core::validBendTarget;
+        const auto radians = [](double degrees) { return degrees * std::numbers::pi / 180.0; };
+        for (double angle : {1.0, 30.0, 90.0, 120.0, 179.0}) {
+            require(validBendTarget({radians(angle), 4.0}), "Supported target rejected");
+        }
+        for (double angle : {0.0, -90.0, 180.0, std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+            require(!validBendTarget({radians(angle), 4.0}), "Invalid target angle accepted");
+        }
+        for (double radius : {0.0, -1.0, 1.0e6 + 1.0, std::numeric_limits<double>::infinity(),
+                              std::numeric_limits<double>::quiet_NaN()}) {
+            require(!validBendTarget({radians(90.0), radius}), "Invalid target radius accepted");
+        }
         bending::core::BendSequence sequence({"B01", "B03", "B02", "B04"});
         require(sequence.move(2, 1) == 1, "Reordering must invalidate from the first changed step");
         require(sequence.bendIds() == std::vector<std::string>({"B01", "B02", "B03", "B04"}),

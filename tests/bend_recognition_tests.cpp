@@ -68,6 +68,8 @@ void test(const std::filesystem::path &directory) {
         std::cout << name << ": " << result.bends.size() << " bends, "
                   << result.unrecognizedCylindricalFaces << " unmatched cylinders\n";
         require(result.bends.size() == expected, "Unexpected bend count");
+        require(result.interiorContourDiagnostics.empty(),
+                "Plain geometry produced a false opening diagnostic");
         for (const auto &bend : result.bends) {
             requireNear(bend.angleRadians, angle, 1.0e-6, "Wrong bend angle");
             requireNear(bend.innerRadiusMm, 4.0, 1.0e-5, "Wrong inner radius");
@@ -146,12 +148,67 @@ void test(const std::filesystem::path &directory) {
     require(std::get<cad::StepImportError>(cancelled).code == cad::StepImportErrorCode::Cancelled,
             "Cancelled analysis published a document");
 }
+void testInteriorContours(const std::filesystem::path &directory) {
+    const auto check = [&](const TopoDS_Shape &shape, const char *unit = "MM") {
+        const auto path = directory / "zone-opening.step";
+        write(path, shape, unit);
+        const auto document = read(path);
+        const auto &analysis = document->metadata().bendAnalysis;
+        require(analysis.status == application::BendRecognitionStatus::Completed &&
+                    analysis.bends.size() == 1 && analysis.interiorContourDiagnostics.size() == 1 &&
+                    document->metadata().closedCutouts.status ==
+                        application::ClosedCutoutStatus::Filled,
+                "Closed cutout approximation or source evidence was lost");
+        const auto &diagnostic = analysis.interiorContourDiagnostics.front();
+        const auto &candidate = diagnostic.candidate;
+        requireNear(candidate.innerRadiusMm, 8, 1e-5, "Wrong diagnostic radius");
+        requireNear(candidate.thicknessMm, 6, 1e-5, "Wrong diagnostic cylinder separation");
+        requireNear(candidate.angleRadians, std::numbers::pi / 2, 1e-6, "Wrong diagnostic angle");
+        requireNear(candidate.lengthMm, 80, 1e-5, "Wrong diagnostic extent");
+        require(!diagnostic.boundaryFaces.empty(), "Opening boundary evidence is missing");
+        for (const auto face : diagnostic.boundaryFaces) {
+            require(face > 0 && face <= document->faces().size() && face != candidate.innerFace &&
+                        face != candidate.outerFace,
+                    "Invalid opening evidence face");
+        }
+    };
+    check(fixtures::bendWithZoneOpening());
+    check(fixtures::bendWithZoneOpening(false));
+    constexpr double angle = std::numbers::pi / 6.0;
+    const auto secondHole =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(4 * std::cos(angle), 4 * std::sin(angle), 60),
+                                        gp_Dir(std::cos(angle), std::sin(angle), 0)),
+                                 2, 14)
+            .Shape();
+    check(BRepAlgoAPI_Cut(fixtures::bendWithZoneOpening(), secondHole).Shape());
+    check(fixtures::bendWithZoneOpening(), "INCH");
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(3, -8, 11), gp_Dir(1, 2, 3)), 1.1);
+    check(BRepBuilderAPI_Transform(fixtures::bendWithZoneOpening(), transform, true));
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(), gp_Dir(1, 0, 0)));
+    check(BRepBuilderAPI_Transform(fixtures::bendWithZoneOpening(), mirror, true));
+    const auto sector =
+        BRepAlgoAPI_Cut(fixtures::bentStrip(8, 6, std::numbers::pi / 2, 80, false),
+                        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(3, 3, 40), gp_Dir(1, 1, 0)), 2, 20))
+            .Shape();
+    const auto path = directory / "sector-opening.step";
+    write(path, sector, "MM");
+    require(read(path)->metadata().bendAnalysis.interiorContourDiagnostics.empty(),
+            "An isolated round sector was called an interrupted bend");
+    write(path, fixtures::channelWithZoneOpening(), "MM");
+    const auto mixed = read(path);
+    require(mixed->metadata().bendAnalysis.bends.size() == 2 &&
+                mixed->metadata().bendAnalysis.interiorContourDiagnostics.size() == 1,
+            "An interrupted zone hid the separate complete bend");
+}
 } // namespace
 int main() {
     try {
         STEPControl_Controller::Init();
         Temporary temporary;
         test(temporary.path);
+        testInteriorContours(temporary.path);
         if (const auto *path = std::getenv("BENDING_RECOGNITION_STEP")) {
             const auto document = read(path);
             const auto &analysis = document->metadata().bendAnalysis;
