@@ -1,6 +1,7 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include "bending/simulation/ToolProfiles.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Common.hxx>
@@ -280,6 +281,12 @@ PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBa
         return prism(points, extrusion);
     };
     PreviewFrame frame;
+    frame.dimensions = BendDimensionAnchors{{position(state.fixed[0]), position(state.fixed[1])},
+                                            {position(state.moving[0]), position(state.moving[3])},
+                                            position(state.innerArc[1]),
+                                            extrusion,
+                                            state.angleRadians,
+                                            state.innerRadiusMm};
     frame.regions[0] = flange(state.fixed);
     frame.regions[2] = flange(state.moving);
     if (state.angleRadians == 0.0) {
@@ -318,14 +325,10 @@ PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &ba
 // The profile width is nondecreasing with Y. Its exact upward translational
 // sweep is the original profile plus the vertical strip above its full-width top.
 TopoDS_Shape makePunch(const core::PressTools &t, double tip, double extension = 0.0) {
-    const double halfAngle = t.punchAngleRadians / 2.0;
-    const double tangentX = t.noseRadiusMm * std::cos(halfAngle);
-    const double tangentY = tip + t.noseRadiusMm * (1.0 - std::sin(halfAngle));
-    const double topY = tip + t.openingMm;
-    const double topX =
-        (t.openingMm - t.noseRadiusMm) * std::tan(halfAngle) + t.noseRadiusMm / std::cos(halfAngle);
-    const gp_Pnt leftTop(-topX, topY, 0), rightTop(topX, topY, 0);
-    const gp_Pnt left(-tangentX, tangentY, 0), right(tangentX, tangentY, 0);
+    const auto profile = simulation::toolProfiles(t).value();
+    const auto point = [tip](simulation::Point2Mm p) { return gp_Pnt(p.x, p.y + tip, 0); };
+    const auto leftTop = point(profile.punch[0]), rightTop = point(profile.punch[4]);
+    const auto left = point(profile.punch[1]), right = point(profile.punch[3]);
     BRepBuilderAPI_MakeWire wire;
     wire.Add(BRepBuilderAPI_MakeEdge(leftTop, left).Edge());
     wire.Add(
@@ -340,23 +343,21 @@ TopoDS_Shape makePunch(const core::PressTools &t, double tip, double extension =
     } else {
         wire.Add(BRepBuilderAPI_MakeEdge(rightTop, leftTop).Edge());
     }
+    gp_Trsf center;
+    center.SetTranslation(gp_Vec(0, 0, (t.lengthMm - core::punchLengthMm(t)) / 2));
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(),
-                                 gp_Vec(0, 0, t.lengthMm))
-        .Shape();
+                                 gp_Vec(0, 0, core::punchLengthMm(t)))
+        .Shape()
+        .Moved(TopLoc_Location(center));
 }
 std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, double thickness) {
     const auto &t = setup.tools;
-    const double v = t.openingMm;
-    const double bottom = -setup.grooveDepthMm - v / 2.0;
-    const gp_Vec extrusion(0, 0, t.lengthMm);
-    auto die = prism({{-v, 0, 0},
-                      {-v / 2.0, 0, 0},
-                      {0, -setup.grooveDepthMm, 0},
-                      {v / 2.0, 0, 0},
-                      {v, 0, 0},
-                      {v, bottom, 0},
-                      {-v, bottom, 0}},
-                     extrusion);
+    const auto profile = simulation::toolProfiles(t).value();
+    std::vector<gp_Pnt> contour;
+    for (const auto p : profile.die) {
+        contour.emplace_back(p.x, p.y, 0);
+    }
+    const auto die = prism(contour, gp_Vec(0, 0, t.lengthMm));
     const auto punch = makePunch(t, thickness + t.clearanceMm);
     for (const auto &shape : {die, punch}) {
         if (!BRepCheck_Analyzer(shape).IsValid() || !std::isfinite(volume(shape)) ||

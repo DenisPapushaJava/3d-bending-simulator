@@ -84,6 +84,14 @@ void check(const application::BendPreviewPtr &result, double sourceVolume) {
     double fixedVolume = 0;
     for (std::size_t i = 0; i < result->frameCount(); ++i) {
         const auto &frame = cad::OcctPreviewAccess::frame(*result, i);
+        require(frame.dimensions &&
+                    std::abs(frame.dimensions->fixed[0].Distance(frame.dimensions->fixed[1]) -
+                             result->model().fixedFlangeMm) < 1.0e-6 &&
+                    std::abs(frame.dimensions->moving[0].Distance(frame.dimensions->moving[1]) -
+                             result->model().movingFlangeMm) < 1.0e-6 &&
+                    std::abs(frame.dimensions->widthVector.Magnitude() - result->model().widthMm) <
+                        1.0e-6,
+                "World-space dimension attachments changed flange measurements");
         require(std::abs(volume(frame.shape) - sourceVolume) < 1.0e-4,
                 "Intermediate volume differs from CAD");
         if (i == 0) {
@@ -120,6 +128,12 @@ application::BendPreviewPtr checkMotion(application::DocumentPtr document, core:
     for (std::size_t i = 0; i < motion->frameCount(); ++i) {
         const auto &frame = cad::OcctPreviewAccess::frame(*motion, i);
         const auto *state = motion->pressState(i);
+        require(frame.dimensions && state &&
+                    frame.dimensions->angleRadians == state->section.angleRadians &&
+                    frame.dimensions->innerRadiusMm == state->section.innerRadiusMm &&
+                    std::abs(frame.dimensions->fixed[0].X() - state->section.fixed[0].x) < 1.0e-6 &&
+                    std::abs(frame.dimensions->fixed[0].Y() - state->section.fixed[0].y) < 1.0e-6,
+                "Dimension anchors do not follow the contact state");
         require(state && BRepCheck_Analyzer(frame.shape).IsValid(), "Invalid press frame");
         double total = 0;
         for (const auto &region : frame.regions) {
@@ -222,7 +236,7 @@ void checkReturnSweep(const application::BendPreviewPtr &result) {
     Bnd_Box box;
     BRepBndLib::AddOptimal(formed.tools[1], box, false, false);
     const double halfWidth = box.CornerMax().X();
-    const double addedVolume = 2 * halfWidth * report.liftMm * tools.lengthMm;
+    const double addedVolume = 2 * halfWidth * report.liftMm * core::punchLengthMm(tools);
     require(std::abs(volume(sweep) - volume(formed.tools[1]) - addedVolume) < 1e-4,
             "Return envelope is not the exact translational sweep");
     for (double fraction : {0.0, 0.137, 0.382, 0.5, 0.749, 1.0}) {
@@ -490,7 +504,19 @@ void testProfiled(const std::filesystem::path &path) {
         }
     }
     const core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
-    checkReturnSweep(checkMotion(document, tools));
+    auto independent = tools;
+    independent.lengthMm = 140;
+    independent.punchLengthMm = 120;
+    const auto independentMotion = checkMotion(document, independent);
+    const auto &independentFrame = cad::OcctPreviewAccess::frame(*independentMotion, 0);
+    for (std::size_t i = 0; i < 2; ++i) {
+        Bnd_Box bounds;
+        BRepBndLib::AddOptimal(independentFrame.tools[i], bounds, false, false);
+        require(std::abs(bounds.CornerMin().Z() - (i == 0 ? 0 : 10)) < 1e-5 &&
+                    std::abs(bounds.CornerMax().Z() - (i == 0 ? 140 : 130)) < 1e-5,
+                "Independent tool lengths are not centred correctly");
+    }
+    checkReturnSweep(independentMotion);
     for (int i = 1; i <= sourceFaces.Extent(); ++i) {
         TopLoc_Location location;
         require(BRep_Tool::Triangulation(TopoDS::Face(sourceFaces(i)), location) ==

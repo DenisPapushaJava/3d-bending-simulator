@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=3D Bending Simulator
+GenericName=Sheet metal bending simulator
+GenericName[ru]=Симулятор гибки листового металла
+Comment=Open a STEP part and prepare a bending check
+Comment[ru]=Просмотр STEP и подготовка проверки гибки детали
+Exec=3d-bending-simulator %f
+TryExec=3d-bending-simulator
+Icon=3d-bending-simulator
+Terminal=false
+Categories=Graphics;3DGraphics;
+StartupWMClass=3D Bending Simulator
