@@ -22,6 +22,9 @@ struct PunchRetractionCheck {
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual bool ignoresClosedCutouts() const noexcept {
+        return false;
+    }
     [[nodiscard]] virtual const simulation::PressMotion *pressMotion() const noexcept {
         return nullptr;
     }

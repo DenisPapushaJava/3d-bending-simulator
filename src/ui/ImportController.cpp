@@ -115,6 +115,21 @@ class ImportController::Impl {
     std::optional<BendPreviewError> previewError;
     std::uint64_t previewId = 0;
     bool preparingPreview = false;
+    BendingDrawingPtr drawing;
+    std::optional<DrawingError> drawingError;
+    std::uint64_t drawingId = 0;
+    bool preparingDrawing = false;
+    std::optional<DrawingRequest> drawingRequest;
+    void invalidateDrawing() {
+        ++drawingId;
+        drawing.reset();
+        drawingError.reset();
+        drawingRequest.reset();
+        if (preparingDrawing) {
+            stop.request_stop();
+            preparingDrawing = false;
+        }
+    }
     void invalidatePreview() {
         ++previewId;
         preview.reset();
@@ -141,6 +156,7 @@ void ImportController::open(std::filesystem::path path) {
     }
     impl_->stop.request_stop();
     impl_->invalidatePreview();
+    impl_->invalidateDrawing();
     ++impl_->saveId;
     impl_->writeError.clear();
     impl_->pending = impl_->session.beginImport(std::move(path));
@@ -151,6 +167,7 @@ void ImportController::open(std::filesystem::path path) {
 void ImportController::cancel() {
     impl_->stop.request_stop();
     impl_->invalidatePreview();
+    impl_->invalidateDrawing();
     ++impl_->saveId;
     impl_->writeError.clear();
     impl_->pending.reset();
@@ -191,6 +208,7 @@ ThicknessValidation ImportController::setManualThickness(double valueMm) {
     const auto result = impl_->session.setManualThickness(valueMm);
     if (before != impl_->session.editRevision()) {
         impl_->invalidatePreview();
+        impl_->invalidateDrawing();
     }
     emit stateChanged();
     return result;
@@ -200,6 +218,7 @@ void ImportController::useAutomaticThickness() {
     impl_->session.useAutomaticThickness();
     if (before != impl_->session.editRevision()) {
         impl_->invalidatePreview();
+        impl_->invalidateDrawing();
     }
     emit stateChanged();
 }
@@ -222,6 +241,18 @@ bool ImportController::setBendTools(std::size_t recognizedIndex,
     }
     const auto before = impl_->session.editRevision();
     const bool result = impl_->session.setBendTools(recognizedIndex, tools);
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidatePreview();
+    }
+    emit stateChanged();
+    return result;
+}
+bool ImportController::setBendToolAssignment(std::size_t index, core::ToolAssignment assignment) {
+    if (impl_->stopping || hasWork()) {
+        return false;
+    }
+    const auto before = impl_->session.editRevision();
+    const bool result = impl_->session.setBendToolAssignment(index, std::move(assignment));
     if (before != impl_->session.editRevision()) {
         impl_->invalidatePreview();
     }
@@ -305,7 +336,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
         return false;
     }
     const auto *entry = impl_->session.bend(recognizedIndex);
-    if (!entry || entry->review != BendReview::Confirmed || !entry->target ||
+    if (!entry || !included(entry->review) || !impl_->session.bendTarget(recognizedIndex) ||
         (mode != BendPreviewMode::Kinematic && !entry->tools)) {
         return false;
     }
@@ -323,7 +354,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     const auto document = state->session.document();
     const auto revision = state->session.revision();
     const auto editRevision = state->session.editRevision();
-    const auto target = *entry->target;
+    const auto target = *state->session.bendTarget(recognizedIndex);
     const auto tools = mode == BendPreviewMode::Kinematic ? std::nullopt : entry->tools;
     state->stop = std::stop_source{};
     const auto stop = state->stop.get_token();
@@ -414,5 +445,85 @@ const std::optional<BendPreviewError> &ImportController::bendPreviewError() cons
 }
 bool ImportController::isPreparingPreview() const {
     return impl_->preparingPreview;
+}
+} // namespace bending::ui
+
+namespace bending::ui {
+bool ImportController::prepareDrawing(
+    std::shared_ptr<const application::BendingDrawingBuilder> builder,
+    application::DrawingRequest request) {
+    if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
+        return false;
+    auto *state = impl_.get();
+    request.manualThicknessMm = state->session.manualThicknessMm();
+    if (state->drawing && state->drawingRequest == request) {
+        emit stateChanged();
+        return true;
+    }
+    state->invalidateDrawing();
+    state->drawingRequest = request;
+    const auto id = state->drawingId;
+    const auto document = state->session.document();
+    const auto revision = state->session.revision();
+    const auto editRevision = state->session.editRevision();
+    request.manualThicknessMm = state->session.manualThicknessMm();
+    state->stop = std::stop_source{};
+    const auto stop = state->stop.get_token();
+    state->running = true;
+    state->preparingDrawing = true;
+    QMetaObject::invokeMethod(
+        state->worker,
+        [state, builder = std::move(builder), request, id, document, revision, editRevision, stop] {
+            application::DrawingResult result = application::DrawingError{"Drawing failed"};
+            try {
+                result = builder->build(document, request, stop);
+            } catch (const std::exception &e) {
+                result = application::DrawingError{e.what()};
+            } catch (...) {
+                result = application::DrawingError{"Unexpected drawing failure"};
+            }
+            QMetaObject::invokeMethod(
+                state->owner,
+                [state, result = std::move(result), id, revision, editRevision, stop] {
+                    state->running = false;
+                    state->preparingDrawing = false;
+                    if (state->stopping)
+                        return;
+                    if (!stop.stop_requested() && id == state->drawingId &&
+                        revision == state->session.revision() &&
+                        editRevision == state->session.editRevision() &&
+                        !state->session.activeRequest()) {
+                        if (const auto *drawing =
+                                std::get_if<application::BendingDrawingPtr>(&result)) {
+                            if (*drawing && application::drawingScale(**drawing))
+                                state->drawing = *drawing;
+                            else
+                                state->drawingError =
+                                    application::DrawingError{"Invalid drawing snapshot"};
+                        } else {
+                            state->drawingError = std::get<application::DrawingError>(result);
+                        }
+                    }
+                    state->dispatch();
+                    emit state->owner->stateChanged();
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
+    emit stateChanged();
+    return true;
+}
+application::BendingDrawingPtr ImportController::drawing() const {
+    return impl_->drawing;
+}
+std::optional<application::DrawingError> ImportController::drawingError() const {
+    return impl_->drawingError;
+}
+bool ImportController::isPreparingDrawing() const {
+    return impl_->preparingDrawing;
+}
+void ImportController::cancelDrawing() {
+    impl_->invalidateDrawing();
+    emit stateChanged();
 }
 } // namespace bending::ui
