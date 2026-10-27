@@ -26,6 +26,7 @@
 #include <QThread>
 #include <QTimer>
 #include <STEPControl_Writer.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <algorithm>
@@ -147,9 +148,6 @@ void holePositions(const QString &folder) {
                 plate, BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 60, -1), gp_Dir(0, 0, 1)), 4, 8))
                 .Shape();
     plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakeBox(gp_Pnt(80, 80, -1), 20, 15, 8)).Shape();
-    plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakeCylinder(
-                                       gp_Ax2(gp_Pnt(210, 90, -1), gp_Dir(.25, 0, 1)), 4, 10))
-                .Shape();
     const auto document = load(plate, folder + "/hole-coordinates.step");
     const auto drawing = build(document);
     const auto &dimensions = drawing->views[0].holeDimensions;
@@ -220,6 +218,184 @@ void holePositions(const QString &folder) {
         require(ui::DrawingSheet::writePdf(output, *drawing, {}).isEmpty(),
                 "Hole coordinates example PDF failed");
 }
+void ovalVisibility(const QString &folder) {
+    const auto ellipse =
+        build(load(BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(80, 40, 4),
+                                   BRepPrimAPI_MakeCylinder(
+                                       gp_Ax2(gp_Pnt(20, 20, -1), gp_Dir(.25, 0, 1)), 4, 10))
+                       .Shape(),
+                   folder + "/elliptical-mouth.step"));
+    require(ellipse->views[0].openingAxes.size() == 1 &&
+                ellipse->views[0].holeDimensions.size() == 2,
+            "A true planar ellipse lost its symmetry center");
+    require(ui::DrawingSheet::writePdf(folder + "/ellipse.pdf", *ellipse, {}).isEmpty(),
+            "Ellipse PDF failed");
+    auto cutter = BRepAlgoAPI_Fuse(
+                      BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(45, 40, -1), gp_Dir(0, 0, 1)), 5, 8),
+                      BRepPrimAPI_MakeBox(gp_Pnt(45, 35, -1), 10, 10, 8))
+                      .Shape();
+    cutter = BRepAlgoAPI_Fuse(cutter, BRepPrimAPI_MakeCylinder(
+                                          gp_Ax2(gp_Pnt(55, 40, -1), gp_Dir(0, 0, 1)), 5, 8))
+                 .Shape();
+    auto masked = BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(100, 80, 6), cutter).Shape();
+    masked = BRepAlgoAPI_Fuse(masked, BRepPrimAPI_MakeBox(gp_Pnt(65, 30, 6), 5, 20, 6)).Shape();
+    masked = BRepAlgoAPI_Fuse(masked, BRepPrimAPI_MakeBox(gp_Pnt(50, 30, 10), 20, 20, 2)).Shape();
+    const auto doc = load(masked, folder + "/masked-oval.step");
+    application::DrawingRequest reverse;
+    reverse.reverseView = true;
+    const auto first = build(doc), second = build(doc, reverse);
+    require(
+        (first->views[0].visibleOpeningCount == 1 && second->views[0].visibleOpeningCount == 0) ||
+            (second->views[0].visibleOpeningCount == 1 && first->views[0].visibleOpeningCount == 0),
+        "Duplicate arc fragments completed a partly hidden oval");
+    auto asymmetric = BRepAlgoAPI_Fuse(BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(gp_Pnt(30, 20, -1), gp_Dir(0, 0, 1)), 4, 8),
+                                       BRepPrimAPI_MakeBox(gp_Pnt(30, 16, -1), 10, 8, 8))
+                          .Shape();
+    asymmetric =
+        BRepAlgoAPI_Fuse(
+            asymmetric, BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(40, 20, -1), gp_Dir(0, 0, 1)), 6, 8))
+            .Shape();
+    const auto unknown =
+        build(load(BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(80, 40, 6), asymmetric).Shape(),
+                   folder + "/asymmetric-opening.step"));
+    require(unknown->views[0].holeDimensions.empty(),
+            "An arbitrary bounding-box midpoint was called an oval axis");
+}
+
+TopoDS_Shape taperedChannel() {
+    const double pi = std::numbers::pi, angle = pi / 60, extent = 400;
+    const auto part = [&](bool right) {
+        BRepBuilderAPI_MakeWire wire;
+        const auto line = [&](gp_Pnt a, gp_Pnt b) { wire.Add(BRepBuilderAPI_MakeEdge(a, b)); };
+        const auto arc = [&](double x, double y, double r, double a, double b) {
+            wire.Add(
+                BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(fixtures::polar(r, a, x, y),
+                                                           fixtures::polar(r, (a + b) / 2, x, y),
+                                                           fixtures::polar(r, b, x, y))
+                                            .Value()));
+        };
+        if (right) {
+            arc(80, 6, 6, 1.5 * pi, 2 * pi);
+            line({86, 6, 0}, {86, 40, 0});
+            arc(80, 40, 6, 0, pi / 2);
+            line({80, 46, 0}, {60, 46, 0});
+            line({60, 46, 0}, {60, 44, 0});
+            line({60, 44, 0}, {80, 44, 0});
+            arc(80, 40, 4, pi / 2, 0);
+            line({84, 40, 0}, {84, 6, 0});
+            arc(80, 6, 4, 0, -pi / 2);
+            line({80, 2, 0}, {80, 0, 0});
+        } else {
+            line({-6, 40, 0}, {-6, 6, 0});
+            arc(0, 6, 6, pi, 1.5 * pi);
+            line({0, 0, 0}, {0, 2, 0});
+            arc(0, 6, 4, 1.5 * pi, pi);
+            line({-4, 6, 0}, {-4, 40, 0});
+            line({-4, 40, 0}, {-6, 40, 0});
+        }
+        return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()),
+                                     gp_Vec(0, 0, right ? extent * std::cos(angle) : extent))
+            .Shape();
+    };
+    gp_Trsf tilt;
+    tilt.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0)), angle);
+    const auto left = BRepBuilderAPI_Transform(part(false), tilt, true).Shape();
+    BRepBuilderAPI_MakeWire panel;
+    const std::array<gp_Pnt, 4> points{{{0, 0, 0},
+                                        {80, 0, 0},
+                                        {80, 0, extent * std::cos(angle)},
+                                        {extent * std::sin(angle), 0, extent * std::cos(angle)}}};
+    for (std::size_t i = 0; i < points.size(); ++i)
+        panel.Add(BRepBuilderAPI_MakeEdge(points[i], points[(i + 1) % points.size()]));
+    const auto middle =
+        BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(panel.Wire()), gp_Vec(0, 2, 0)).Shape();
+    auto shape = BRepAlgoAPI_Fuse(BRepAlgoAPI_Fuse(left, middle).Shape(), part(true)).Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, true, true, true);
+    unify.Build();
+    shape = unify.Shape();
+    for (double z : {100., 250.}) {
+        auto cutter = BRepAlgoAPI_Fuse(BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(gp_Pnt(83, 20, z - 4), gp_Dir(1, 0, 0)), 3, 4),
+                                       BRepPrimAPI_MakeBox(gp_Pnt(83, 17, z - 4), 4, 6, 8))
+                          .Shape();
+        cutter = BRepAlgoAPI_Fuse(cutter, BRepPrimAPI_MakeCylinder(
+                                              gp_Ax2(gp_Pnt(83, 20, z + 4), gp_Dir(1, 0, 0)), 3, 4))
+                     .Shape();
+        if (z == 100)
+            cutter =
+                BRepAlgoAPI_Fuse(cutter, BRepPrimAPI_MakeCylinder(
+                                             gp_Ax2(gp_Pnt(83, 20, z), gp_Dir(1, 0, 0)), 3.5, 4))
+                    .Shape();
+        shape = BRepAlgoAPI_Cut(shape, cutter).Shape();
+    }
+    return shape;
+}
+void variableProfile(const QString &folder) {
+    const auto source = taperedChannel();
+    const auto document = load(source, folder + "/variable-channel.step");
+    require(document->metadata().bendAnalysis.bends.size() == 3,
+            "Variable channel lost its three analytic bends");
+    const auto drawing = build(document);
+    require(drawing->variableProfile == application::DrawingVariableProfile::Measured,
+            "A measured variable profile is reported as incomplete");
+    require(drawing->details.size() == 2 && drawing->details[0].fullProfile &&
+                drawing->details[1].fullProfile && drawing->views[0].sectionMarkers.size() == 2 &&
+                drawing->views[0].sectionDimensions.size() == 2 &&
+                drawing->views[0].directionNotes.size() == 1,
+            "Variable wall has no two positioned true sections");
+    require(std::abs(drawing->views[0].directionNotes[0].radians - std::numbers::pi / 60) < 1e-6,
+            "Nonparallel bend directions were silently merged");
+    double first = 0;
+    for (const auto &d : drawing->details[0].view.dimensions)
+        if (d.label.starts_with("H"))
+            first = std::max(first, d.valueMm);
+    require(drawing->details[1].view.dimensions.size() == 1,
+            "Second section repeats all unchanged dimensions");
+    const double difference = std::abs(first - drawing->details[1].view.dimensions[0].valueMm);
+    const auto &positions = drawing->views[0].sectionDimensions;
+    const double separation = std::abs(positions[0].valueMm - positions[1].valueMm);
+    require(std::abs(difference / separation - std::tan(std::numbers::pi / 60)) < 1e-5,
+            "Variable dimensions are global extrema rather than station measurements");
+    require(drawing->views[1].openingAxes.size() == 2 &&
+                drawing->views[1].holeDimensions.size() == 3 &&
+                drawing->unrecognizedCylindricalFaces == 0,
+            "Oval cutouts lost axes or masquerade as unrecognized bend walls");
+    require(ui::DrawingSheet::pageCount(*drawing) == 1 &&
+                ui::DrawingSheet::writePdf(folder + "/variable.pdf", *drawing, {}).isEmpty(),
+            "Two sections, stations and oval coordinates do not fit A3");
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_VARIABLE_OUTPUT");
+    if (!output.isEmpty())
+        require(ui::DrawingSheet::writePdf(output, *drawing, {}).isEmpty(),
+                "Variable example PDF failed");
+    for (int turn = 0; turn < 4; ++turn) {
+        application::DrawingRequest request;
+        request.quarterTurns = turn;
+        request.reverseView = turn % 2 != 0;
+        const auto rotated = build(document, request);
+        require(rotated->variableProfile == application::DrawingVariableProfile::Measured &&
+                    rotated->views[0].sectionDimensions.size() == 2 &&
+                    std::abs(rotated->views[0].sectionDimensions[0].valueMm -
+                             rotated->views[0].sectionDimensions[1].valueMm) > 1,
+                "Turning the drawing lost the variable section positions");
+        require(!ui::DrawingSheet::preview(*rotated, {}).isNull(),
+                "Turned variable drawing cannot be laid out");
+    }
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .734);
+    transform.SetTranslationPart(gp_Vec(117, -53, 82));
+    const auto moved = build(load(BRepBuilderAPI_Transform(source, transform, true).Shape(),
+                                  folder + "/variable-rotated.step"));
+    require(moved->variableProfile == application::DrawingVariableProfile::Measured &&
+                moved->views[0].sectionDimensions.size() == 2,
+            "World rotation lost variable stations");
+    const double movedSeparation = std::abs(moved->views[0].sectionDimensions[0].valueMm -
+                                            moved->views[0].sectionDimensions[1].valueMm);
+    require(std::abs(movedSeparation - separation) < 1e-4,
+            "World rotation changed the measured interval");
+    require(moved->views[1].visibleOpeningCount == 2, "World rotation hid oval centers");
+}
+
 void geometry(const QString &folder) {
     const auto source = fixtures::bentStrip(8, 6);
     const auto document = load(source, folder + "/base.step");
@@ -488,7 +664,9 @@ int main(int argc, char **argv) {
     QTemporaryDir temp;
     try {
         drawingMeasurements(temp.path());
+        variableProfile(temp.path());
         holePositions(temp.path());
+        ovalVisibility(temp.path());
         geometry(temp.path());
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";

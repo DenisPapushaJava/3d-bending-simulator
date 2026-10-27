@@ -35,14 +35,30 @@ struct DrawingSectionMarker {
     DrawingPoint viewDirection;
     std::string designation;
 };
+struct DrawingCenterAxes {
+    DrawingPoint center;
+    DrawingPoint first;
+    DrawingPoint second;
+};
+struct DrawingDirectionNote {
+    DrawingPoint anchor;
+    std::size_t first;
+    std::size_t second;
+    double radians;
+};
 struct DrawingView {
     std::vector<DrawingPath> paths;
     DrawingPoint minimum;
     DrawingPoint maximum;
     std::vector<DrawingDimension> dimensions;
-    // Coordinates of visible circular inner contours, from this view's minimum X/Y.
+    // Centers of visible symmetric inner contours, from this view's minimum X/Y.
     // Equal coordinates share one dimension; these are not unfolded positions.
     std::vector<DrawingDimension> holeDimensions;
+    std::vector<DrawingCenterAxes> openingAxes;
+    std::vector<DrawingDimension> sectionDimensions;
+    std::vector<DrawingDirectionNote> directionNotes;
+    std::size_t visibleOpeningCount = 0;
+    bool reverseProjection = false; // Auxiliary orthographic view from the opposite side.
     DrawingPoint sideAnchor;
     DrawingPoint sideTip;
     std::optional<std::array<double, 2>>
@@ -71,6 +87,7 @@ struct DrawingDetail {
     std::string designation;
     bool fullProfile = false;
 };
+enum class DrawingVariableProfile { None, Measured, NotMeasured };
 struct DrawingRequest {
     std::optional<std::size_t> baseFace;
     bool reverseView = false;
@@ -93,6 +110,7 @@ struct BendingDrawing {
     std::string sourceName;
     std::vector<DrawingDetail> details;
     bool drawingOnlyRecognition = false;
+    DrawingVariableProfile variableProfile = DrawingVariableProfile::None;
     BendRecognitionStatus bendRecognitionStatus = BendRecognitionStatus::NotAnalyzed;
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;

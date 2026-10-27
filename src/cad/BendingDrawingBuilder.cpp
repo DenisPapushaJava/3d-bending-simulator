@@ -1,5 +1,6 @@
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "BendRecognizer.h"
+#include "DrawingOpenings.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/DocumentAccess.h"
 
@@ -13,6 +14,7 @@
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GCPnts_QuasiUniformDeflection.hxx>
@@ -28,6 +30,7 @@
 #include <TopTools_HSequenceOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
@@ -130,7 +133,7 @@ void contours(const TopoDS_Shape &shape, bool hidden, DrawingView &view, std::si
     }
 }
 DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budget,
-                   std::stop_token stop) {
+                   std::stop_token stop, const std::vector<DrawingOpening> *openings = nullptr) {
     if (stop.stop_requested())
         throw DrawingError{"Cancelled", true};
     Handle(HLRBRep_Algo) algo = new HLRBRep_Algo;
@@ -163,80 +166,16 @@ DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budge
     const auto b = bounds(shape, f);
     view.minimum = {b[0], b[1]};
     view.maximum = {b[2], b[3]};
+    if (openings) {
+        BRep_Builder builder;
+        TopoDS_Compound visible;
+        builder.MakeCompound(visible);
+        for (const auto &edges : {result.VCompound(), result.OutLineVCompound()})
+            if (!edges.IsNull())
+                builder.Add(visible, edges);
+        addDrawingOpenings(*openings, gp_Ax2(gp_Pnt(0, 0, 0), f.normal, f.u), visible, view, stop);
+    }
     return view;
-}
-void holeDimensions(const TopoDS_Shape &shape, const Frame &frame, DrawingView &view,
-                    std::stop_token stop) {
-    std::vector<DrawingPoint> centers;
-    constexpr double tolerance = 1e-5;
-    for (TopExp_Explorer faceIt(shape, TopAbs_FACE); faceIt.More(); faceIt.Next()) {
-        if (stop.stop_requested())
-            throw DrawingError{"Cancelled", true};
-        const auto face = TopoDS::Face(faceIt.Current());
-        BRepAdaptor_Surface surface(face);
-        if (surface.GetType() != GeomAbs_Plane ||
-            !surface.Plane().Axis().Direction().IsParallel(frame.normal, 1e-7))
-            continue;
-        const auto outer = BRepTools::OuterWire(face);
-        for (TopExp_Explorer wireIt(face, TopAbs_WIRE); wireIt.More(); wireIt.Next()) {
-            const auto wire = TopoDS::Wire(wireIt.Current());
-            if (wire.IsSame(outer) || !wire.Closed())
-                continue;
-            std::optional<gp_Circ> circle;
-            double span = 0;
-            bool round = true;
-            for (BRepTools_WireExplorer edge(wire, face); edge.More(); edge.Next()) {
-                BRepAdaptor_Curve curve(edge.Current());
-                if (curve.GetType() != GeomAbs_Circle) {
-                    round = false;
-                    break;
-                }
-                const auto current = curve.Circle();
-                if (circle &&
-                    (circle->Location().Distance(current.Location()) > tolerance ||
-                     std::abs(circle->Radius() - current.Radius()) > tolerance ||
-                     !circle->Axis().Direction().IsParallel(current.Axis().Direction(), 1e-7))) {
-                    round = false;
-                    break;
-                }
-                circle = current;
-                span += curve.LastParameter() - curve.FirstParameter();
-            }
-            if (!round || !circle || std::abs(span - 2 * std::numbers::pi) > 1e-6)
-                continue;
-            const auto c = project(circle->Location(), frame);
-            // HLR must also expose a complete circle: do not dimension a hidden/oblique rim.
-            if (std::none_of(view.circleCenters.begin(), view.circleCenters.end(),
-                             [&](const auto &visible) {
-                                 return std::hypot(visible.first.x - c.x, visible.first.y - c.y) <
-                                            tolerance &&
-                                        std::abs(visible.second - circle->Radius()) < tolerance;
-                             }) ||
-                std::any_of(centers.begin(), centers.end(), [&](auto old) {
-                    return std::hypot(old.x - c.x, old.y - c.y) < tolerance;
-                }))
-                continue;
-            centers.push_back(c);
-        }
-    }
-    for (bool horizontal : {true, false}) {
-        auto sorted = centers;
-        std::sort(sorted.begin(), sorted.end(), [horizontal](auto a, auto b) {
-            return horizontal ? (a.x == b.x ? a.y < b.y : a.x < b.x)
-                              : (a.y == b.y ? a.x < b.x : a.y < b.y);
-        });
-        std::optional<double> previous;
-        for (const auto c : sorted) {
-            const double coordinate = horizontal ? c.x : c.y;
-            const double value = coordinate - (horizontal ? view.minimum.x : view.minimum.y);
-            if (value <= tolerance || (previous && coordinate - *previous < tolerance))
-                continue;
-            previous = coordinate;
-            view.holeDimensions.push_back(
-                {horizontal ? DrawingPoint{view.minimum.x, c.y} : DrawingPoint{c.x, view.minimum.y},
-                 c, value, ""});
-        }
-    }
 }
 struct FlangeSize {
     gp_Pnt corner;
@@ -385,6 +324,41 @@ bool sharedOuterFace(const RecognizedBend &a, const RecognizedBend &b) {
                 return true;
     return false;
 }
+gp_Dir preferredAxis(const std::vector<RecognizedBend> &bends, std::size_t base, gp_Dir normal,
+                     gp_Dir fallback) {
+    const auto axisOf = [](const RecognizedBend &b) {
+        return gp_Dir(gp_Vec(gp_Pnt(b.axisStart.x, b.axisStart.y, b.axisStart.z),
+                             gp_Pnt(b.axisEnd.x, b.axisEnd.y, b.axisEnd.z)));
+    };
+    std::size_t bestCount = 0;
+    double bestLength = 0;
+    for (std::size_t i = 0; i < bends.size(); ++i) {
+        const auto &bend = bends[i];
+        const auto axis = axisOf(bend);
+        if (std::find(bend.flangeFaces.begin(), bend.flangeFaces.end(), base) ==
+                bend.flangeFaces.end() ||
+            std::abs(axis.Dot(normal)) > 1e-7)
+            continue;
+        std::vector<std::size_t> members{i};
+        for (std::size_t k = 0; k < members.size(); ++k)
+            for (std::size_t j = 0; j < bends.size(); ++j)
+                if (std::find(members.begin(), members.end(), j) == members.end() &&
+                    axis.IsParallel(axisOf(bends[j]), 1e-7) &&
+                    sharedOuterFace(bends[members[k]], bends[j]))
+                    members.push_back(j);
+        double length = 0;
+        for (auto index : members)
+            length += bends[index].lengthMm;
+        if (members.size() > bestCount ||
+            (members.size() == bestCount &&
+             length > bestLength + std::max(1e-6, bestLength * 1e-9))) {
+            bestCount = members.size();
+            bestLength = length;
+            fallback = axis;
+        }
+    }
+    return fallback;
+}
 void extendToAdjacentBend(FlangeSize &measured, std::size_t faceIndex, std::size_t current,
                           const std::vector<RecognizedBend> &bends,
                           const TopTools_IndexedMapOfShape &faces, gp_Dir axis, double tolerance) {
@@ -527,6 +501,240 @@ std::optional<ProfileGroup> planProfileGroup(const TopoDS_Shape &shape,
     }
     return best;
 }
+
+struct VariableSections {
+    std::vector<DrawingDetail> details;
+    std::vector<DrawingSectionMarker> markers;
+    std::vector<DrawingDimension> positions;
+    DrawingDirectionNote direction;
+};
+std::optional<VariableSections> variableSections(const TopoDS_Shape &shape,
+                                                 const TopTools_IndexedMapOfShape &faces,
+                                                 const std::vector<RecognizedBend> &bends,
+                                                 const ProfileGroup &group, const Frame &front,
+                                                 std::size_t &budget, std::stop_token stop) {
+    if (bends.size() < 3 || bends.size() > 8)
+        return {};
+    const auto axisOf = [](const RecognizedBend &b) {
+        return gp_Dir(gp_Vec(gp_Pnt(b.axisStart.x, b.axisStart.y, b.axisStart.z),
+                             gp_Pnt(b.axisEnd.x, b.axisEnd.y, b.axisEnd.z)));
+    };
+    std::vector<std::size_t> members = group.members;
+    for (std::size_t k = 0; k < members.size(); ++k)
+        for (std::size_t j = 0; j < bends.size(); ++j)
+            if (std::find(members.begin(), members.end(), j) == members.end() &&
+                sharedOuterFace(bends[members[k]], bends[j]) &&
+                std::abs(axisOf(bends[j]).Dot(group.frame.normal)) >
+                    std::cos(std::numbers::pi / 12))
+                members.push_back(j);
+    if (members.size() != bends.size() || members.size() == group.members.size())
+        return {}; // Do not replace profiles for an unmeasured disconnected group.
+    double low = -1e100, high = 1e100;
+    for (const auto &bend : bends) {
+        const auto at = [&](auto p) {
+            return gp_Vec(gp_Pnt(0, 0, 0), gp_Pnt(p.x, p.y, p.z)).Dot(gp_Vec(group.frame.normal));
+        };
+        const double a = at(bend.axisStart), b = at(bend.axisEnd);
+        low = std::max(low, std::min(a, b));
+        high = std::min(high, std::max(a, b));
+    }
+    const double thickness = bends.front().thicknessMm;
+    if (high - low < 10 * thickness)
+        return {};
+    const double margin = std::min((high - low) / 4, std::max(2 * thickness, (high - low) * .1));
+    VariableSections result;
+    std::size_t tilted = members.front();
+    for (auto index : members)
+        if (!axisOf(bends[index]).IsParallel(group.frame.normal, 1e-7)) {
+            tilted = index;
+            break;
+        }
+    const auto &oblique = bends[tilted];
+    for (const auto &bend : bends)
+        if (!axisOf(bend).IsParallel(group.frame.normal, 1e-7) &&
+            !axisOf(bend).IsParallel(axisOf(oblique), 1e-7))
+            return {}; // Two measured stations do not describe several unrelated axis directions.
+    const gp_Pnt middle((oblique.axisStart.x + oblique.axisEnd.x) / 2,
+                        (oblique.axisStart.y + oblique.axisEnd.y) / 2,
+                        (oblique.axisStart.z + oblique.axisEnd.z) / 2);
+    result.direction = {
+        project(middle, front), tilted, group.members.front(),
+        std::acos(std::clamp(std::abs(axisOf(oblique).Dot(group.frame.normal)), 0., 1.))};
+    const auto frontBounds = bounds(shape, front);
+    const bool horizontal =
+        std::abs(group.frame.normal.Dot(front.u)) >= std::abs(group.frame.normal.Dot(front.v));
+    std::array<double, 2> coordinates{low + margin, high - margin};
+    if (group.frame.normal.Dot(horizontal ? front.u : front.v) < 0)
+        std::reverse(coordinates.begin(), coordinates.end());
+    for (const double coordinate : coordinates) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const auto station = gp_Pnt(0, 0, 0).Translated(gp_Vec(group.frame.normal) * coordinate);
+        auto profile = sectionView(shape, group.frame, station, station, 1, budget, stop, true);
+        const double w = profile.maximum.x - profile.minimum.x;
+        const double h = profile.maximum.y - profile.minimum.y;
+        const auto scale = standardDrawingScale(std::min(70. / w, 115. / h));
+        if (!scale || thickness * *scale < .75)
+            return {};
+        std::vector<gp_Pnt> corners;
+        for (const auto &bend : bends) {
+            const auto first =
+                BRepAdaptor_Surface(TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[1]))))
+                    .Plane();
+            const auto second =
+                BRepAdaptor_Surface(TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[3]))))
+                    .Plane();
+            IntAna_QuadQuadGeo intersect(first, second, 1e-8, 1e-6);
+            if (!intersect.IsDone() || intersect.TypeInter() != IntAna_Line ||
+                intersect.NbSolutions() != 1)
+                return {};
+            const auto rail = intersect.Line(1);
+            const double denominator = rail.Direction().Dot(group.frame.normal);
+            if (std::abs(denominator) < .9)
+                return {};
+            corners.push_back(rail.Location().Translated(
+                gp_Vec(rail.Direction()) *
+                (gp_Vec(rail.Location(), station).Dot(gp_Vec(group.frame.normal)) / denominator)));
+        }
+        bool thicknessAdded = false;
+        for (std::size_t index = 0; index < bends.size(); ++index) {
+            const auto &bend = bends[index];
+            std::array<gp_Vec, 2> directions;
+            for (std::size_t side = 0; side < 2; ++side) {
+                const auto faceId = bend.flangeFaces[side * 2 + 1];
+                const auto face = TopoDS::Face(faces(static_cast<int>(faceId)));
+                const auto plane = BRepAdaptor_Surface(face).Plane();
+                gp_Vec direction = gp_Vec(plane.Axis().Direction())
+                                       .Crossed(gp_Vec(group.frame.normal))
+                                       .Normalized();
+                BRepAlgoAPI_Section section(face, gp_Pln(station, group.frame.normal), false);
+                section.Build();
+                if (!section.IsDone())
+                    return {};
+                double minimum = 1e100, maximum = -1e100;
+                for (TopExp_Explorer vi(section.Shape(), TopAbs_VERTEX); vi.More(); vi.Next()) {
+                    const double value =
+                        gp_Vec(corners[index], BRep_Tool::Pnt(TopoDS::Vertex(vi.Current())))
+                            .Dot(direction);
+                    minimum = std::min(minimum, value);
+                    maximum = std::max(maximum, value);
+                }
+                if (minimum == 1e100 || (minimum < -1e-5 && maximum > 1e-5))
+                    return {};
+                if (std::abs(minimum) > std::abs(maximum)) {
+                    direction.Reverse();
+                    maximum = -minimum;
+                }
+                directions[side] = direction;
+                const auto realEnd = corners[index].Translated(direction * maximum);
+                auto end = realEnd;
+                for (std::size_t other = 0; other < bends.size(); ++other) {
+                    if (other == index)
+                        continue;
+                    for (std::size_t os = 0; os < 2; ++os) {
+                        if (bends[other].flangeFaces[os * 2 + 1] != faceId)
+                            continue;
+                        const gp_Vec distance(corners[index], corners[other]);
+                        const double extent = distance.Dot(direction);
+                        const gp_Vec across = gp_Vec(plane.Axis().Direction())
+                                                  .Crossed(gp_Vec(axisOf(bends[other])))
+                                                  .Normalized();
+                        const double factor = std::abs(direction.Dot(across));
+                        if (factor < .9 || distance.Crossed(direction).Magnitude() > 1e-5)
+                            continue;
+                        const double setback =
+                            (bends[other].innerRadiusMm + bends[other].thicknessMm) *
+                            std::tan(bends[other].angleRadians / 2) / factor;
+                        if (std::abs(extent - maximum - setback) < 1e-4)
+                            end = corners[other];
+                    }
+                }
+                const DrawingDimension dimension{
+                    project(corners[index], group.frame), project(end, group.frame),
+                    corners[index].Distance(end), "H" + std::to_string(faceId)};
+                const auto equal = [](DrawingPoint a, DrawingPoint b) {
+                    return std::hypot(a.x - b.x, a.y - b.y) < 1e-5;
+                };
+                if (std::none_of(profile.dimensions.begin(), profile.dimensions.end(),
+                                 [&](const auto &old) {
+                                     return (equal(old.start, dimension.start) &&
+                                             equal(old.end, dimension.end)) ||
+                                            (equal(old.start, dimension.end) &&
+                                             equal(old.end, dimension.start));
+                                 }))
+                    profile.dimensions.push_back(dimension);
+                if (!thicknessAdded) {
+                    const auto inner =
+                        TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[side * 2])));
+                    const auto innerPlane = BRepAdaptor_Surface(inner).Plane();
+                    const double distance = gp_Vec(innerPlane.Location(), realEnd)
+                                                .Dot(gp_Vec(innerPlane.Axis().Direction()));
+                    const auto inside =
+                        realEnd.Translated(-gp_Vec(innerPlane.Axis().Direction()) * distance);
+                    BRepClass_FaceClassifier classifier(inner, inside, 1e-5);
+                    if (std::abs(std::abs(distance) - thickness) < 1e-5 &&
+                        (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON)) {
+                        profile.dimensions.push_back({project(inside, group.frame),
+                                                      project(realEnd, group.frame), thickness,
+                                                      "t"});
+                        thicknessAdded = true;
+                    }
+                }
+            }
+            const double interior = std::numbers::pi - bend.angleRadians;
+            if (std::abs(std::acos(std::clamp(directions[0].Dot(directions[1]), -1., 1.)) -
+                         interior) > 1e-5)
+                return {}; // An oblique section angle must not masquerade as the true bend angle.
+            profile.angles.push_back(
+                {project(corners[index], group.frame),
+                 project(corners[index].Translated(directions[0]), group.frame),
+                 project(corners[index].Translated(directions[1]), group.frame), interior,
+                 (bend.innerRadiusMm + bend.thicknessMm) / std::sin(interior / 2) -
+                     bend.innerRadiusMm});
+            auto anchor = bendSurfacePoint(bend, faces, station);
+            const auto axis = axisOf(bend);
+            anchor.Translate(gp_Vec(axis) *
+                             gp_Vec(anchor, station).Dot(gp_Vec(group.frame.normal)) /
+                             axis.Dot(group.frame.normal));
+            BRepClass_FaceClassifier classifier(
+                TopoDS::Face(faces(static_cast<int>(bend.innerFace))), anchor, 1e-5);
+            if (classifier.State() != TopAbs_IN && classifier.State() != TopAbs_ON)
+                return {};
+            profile.bendNotes.push_back({project(anchor, group.frame), index});
+        }
+        if (!result.details.empty()) {
+            const auto &first = result.details.front().view;
+            std::erase_if(profile.dimensions, [&](const auto &dimension) {
+                return std::any_of(first.dimensions.begin(), first.dimensions.end(),
+                                   [&](const auto &old) {
+                                       return old.label == dimension.label &&
+                                              std::abs(old.valueMm - dimension.valueMm) < 1e-5;
+                                   });
+            });
+            if (profile.dimensions.empty())
+                return {};             // This is not a variable profile.
+            profile.bendNotes.clear(); // R/L and unchanged dimensions appear on the first section.
+        }
+        const auto designation = "А" + std::to_string(result.details.size() + 1);
+        result.details.push_back({std::move(profile), group.members.front(), designation, true});
+        auto marker = group.marker;
+        const auto shift = project(station, front);
+        const auto previous = project(group.station, front);
+        marker.first.x += shift.x - previous.x;
+        marker.first.y += shift.y - previous.y;
+        marker.second.x += shift.x - previous.x;
+        marker.second.y += shift.y - previous.y;
+        marker.designation = designation;
+        result.markers.push_back(marker);
+        result.positions.push_back(
+            {{frontBounds[0], frontBounds[1]},
+             horizontal ? DrawingPoint{shift.x, frontBounds[1]}
+                        : DrawingPoint{frontBounds[0], shift.y},
+             horizontal ? std::abs(shift.x - frontBounds[0]) : std::abs(shift.y - frontBounds[1]),
+             ""});
+    }
+    return result;
+}
 } // namespace
 DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest request,
                                            std::stop_token stop) const {
@@ -657,16 +865,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         }
 
         // A parallel bend axis makes the left view a useful true profile of the bend.
-        for (const auto &bend : bendAnalysis.bends) {
-            const gp_Vec axis(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
-                              gp_Pnt(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z));
-            if (std::find(bend.flangeFaces.begin(), bend.flangeFaces.end(), base) !=
-                    bend.flangeFaces.end() &&
-                axis.Magnitude() > 1e-6 && std::abs(axis.Normalized().Dot(gp_Vec(side))) < 1e-4) {
-                u = gp_Dir(axis - gp_Vec(side) * axis.Dot(gp_Vec(side)));
-                break;
-            }
-        }
+        u = preferredAxis(bendAnalysis.bends, base, side, u);
         u = gp_Dir(gp_Vec(u) - gp_Vec(side) * gp_Vec(u).Dot(gp_Vec(side)));
         gp_Dir n = request.reverseView ? side.Reversed() : side;
         gp_Dir v = gp_Dir(gp_Vec(n).Crossed(gp_Vec(u)));
@@ -684,11 +883,10 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         }
         const gp_Dir isoN(gp_Vec(u) * 1.0 + gp_Vec(v) * 1.0 + gp_Vec(n) * 1.0);
         const gp_Dir isoU(gp_Vec(u) - gp_Vec(n));
-        const std::array<Frame, 4> frames{
-            {{u, v, n},
-             {u, n.Reversed(), v},
-             {n, v, u.Reversed()},
-             {isoU, gp_Dir(gp_Vec(isoN).Crossed(gp_Vec(isoU))), isoN}}};
+        std::array<Frame, 4> frames{{{u, v, n},
+                                     {u, n.Reversed(), v},
+                                     {n, v, u.Reversed()},
+                                     {isoU, gp_Dir(gp_Vec(isoN).Crossed(gp_Vec(isoU))), isoN}}};
         auto drawing = std::make_shared<BendingDrawing>();
         drawing->baseFace = base;
         drawing->drawingOnlyRecognition = drawingOnlyRecognition;
@@ -699,12 +897,24 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         const auto utf8 = metadata.sourcePath.filename().u8string();
         drawing->sourceName.assign(utf8.begin(), utf8.end());
         std::size_t budget = 0;
+        const auto openings = drawingOpenings(shape, faces, stop);
         auto profileGroup = planProfileGroup(shape, bendAnalysis.bends, frames,
                                              bendAnalysis.lengthToleranceMm, budget, stop);
         for (std::size_t i = 0; i < frames.size(); ++i) {
-            drawing->views[i] = viewOf(shape, frames[i], budget, stop);
-            if (i < 3)
-                holeDimensions(shape, frames[i], drawing->views[i], stop);
+            drawing->views[i] = viewOf(shape, frames[i], budget, stop, i < 3 ? &openings : nullptr);
+            if (i > 0 && i < 3 && std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
+                    return o.normal.IsParallel(frames[i].normal, 1e-7);
+                })) {
+                auto opposite = viewOf(
+                    shape, {frames[i].u, frames[i].v.Reversed(), frames[i].normal.Reversed()},
+                    budget, stop, &openings);
+                if (opposite.visibleOpeningCount > drawing->views[i].visibleOpeningCount) {
+                    frames[i].v.Reverse();
+                    frames[i].normal.Reverse();
+                    opposite.reverseProjection = true;
+                    drawing->views[i] = std::move(opposite);
+                }
+            }
         }
         const auto &fv = drawing->views[0];
         const double width = fv.maximum.x - fv.minimum.x;
@@ -975,6 +1185,38 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     {project(at, frames[0]), (detail.view.maximum.x - detail.view.minimum.x) / 2});
             }
         }
+        for (std::size_t i = 0; i < bendAnalysis.bends.size(); ++i)
+            for (std::size_t j = i + 1; j < bendAnalysis.bends.size(); ++j) {
+                const auto &a = bendAnalysis.bends[i], &b = bendAnalysis.bends[j];
+                const gp_Dir first(gp_Vec(gp_Pnt(a.axisStart.x, a.axisStart.y, a.axisStart.z),
+                                          gp_Pnt(a.axisEnd.x, a.axisEnd.y, a.axisEnd.z)));
+                const gp_Dir second(gp_Vec(gp_Pnt(b.axisStart.x, b.axisStart.y, b.axisStart.z),
+                                           gp_Pnt(b.axisEnd.x, b.axisEnd.y, b.axisEnd.z)));
+                if (sharedOuterFace(a, b) && !first.IsParallel(second, 1e-7) &&
+                    std::abs(first.Dot(second)) > std::cos(std::numbers::pi / 12))
+                    drawing->variableProfile = DrawingVariableProfile::NotMeasured;
+            }
+        if (profileGroup && drawing->bends.size() == bendAnalysis.bends.size()) {
+            try {
+                if (auto variable = variableSections(shape, faces, bendAnalysis.bends,
+                                                     *profileGroup, frames[0], budget, stop)) {
+                    drawing->variableProfile = DrawingVariableProfile::Measured;
+                    drawing->details = std::move(variable->details);
+                    for (auto &projection : drawing->views) {
+                        projection.labels.clear();
+                        projection.detailCircles.clear();
+                        projection.sectionMarkers.clear();
+                    }
+                    drawing->views[0].sectionMarkers = std::move(variable->markers);
+                    drawing->views[0].sectionDimensions = std::move(variable->positions);
+                    drawing->views[0].directionNotes.push_back(variable->direction);
+                }
+            } catch (const Standard_Failure &) {
+                // Optional measurements must not hide the ordinary projections.
+            } catch (const std::runtime_error &) {
+                // NotMeasured remains visible on the sheet; cancellation is not caught here.
+            }
+        }
         // Full circular surfaces (for example, bores) are not press-bend candidates.
         std::vector<bool> used(static_cast<std::size_t>(faces.Extent()) + 1);
         for (const auto &bend : bendAnalysis.bends) {
@@ -985,6 +1227,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             used[d.candidate.innerFace] = true;
             used[d.candidate.outerFace] = true;
         }
+        for (const auto &opening : openings)
+            for (auto faceIndex : opening.wallFaces)
+                used[faceIndex] = true;
         drawing->unrecognizedCylindricalFaces = 0;
         for (int i = 1; i <= faces.Extent(); ++i) {
             BRepAdaptor_Surface cylinderSurface(TopoDS::Face(faces(i)));

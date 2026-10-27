@@ -1,4 +1,4 @@
-add_library(bending_cad STATIC Kernel.cpp CadDocument.cpp StepImporter.cpp ThicknessRecognizer.cpp BendRecognizer.cpp ClosedCutouts.cpp SingleBendPreviewBuilder.cpp BendingDrawingBuilder.cpp)
+add_library(bending_cad STATIC Kernel.cpp CadDocument.cpp StepImporter.cpp ThicknessRecognizer.cpp BendRecognizer.cpp ClosedCutouts.cpp SingleBendPreviewBuilder.cpp BendingDrawingBuilder.cpp DrawingOpenings.cpp)
 add_library(Bending::Cad ALIAS bending_cad)
 target_include_directories(bending_cad PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(bending_cad PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/occt/include")
