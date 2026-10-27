@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 
+class QMenu;
 namespace bending::application {
 class Document;
 struct RecognizedBend;
@@ -20,13 +21,15 @@ class ViewerWidget final : public QWidget {
     Q_OBJECT
 
   public:
-    enum class Orientation { Isometric, Top, Front };
+    enum class Orientation { Isometric, Top, Front, Back, Left, Right, Bottom };
 
     explicit ViewerWidget(QWidget *parent = nullptr);
     ~ViewerWidget() override;
 
     [[nodiscard]] bool isReady() const;
     [[nodiscard]] QString errorString() const;
+    // Shared actions, owned by the viewer; null when the native backend is unavailable.
+    [[nodiscard]] QMenu *navigationMenu() const;
     // Captures the OCCT framebuffer, including native surfaces QWidget::grab cannot capture.
     [[nodiscard]] QImage captureImage(bool includeControls = false);
     void fitAll();

@@ -1,3 +1,4 @@
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
@@ -1579,6 +1580,94 @@ void testTrimmedBendWorkflow(bool graphics) {
     }
     controller.closeDocument();
 }
+void testViewportControls(bool graphics) {
+    using namespace bending;
+    auto files = std::make_shared<project::ProjectFiles>();
+    ui::MainWindow window({"test", cad::kernelVersion()}, files, files);
+    window.setDrawingBuilder(std::make_shared<cad::BendingDrawingBuilder>());
+    window.resize(1366, 768);
+    window.show();
+    auto &controller = window.importController();
+    auto *quickClose = window.findChild<QToolButton *>(QStringLiteral("quickClosePart"));
+    auto *close = window.findChild<QAction *>(QStringLiteral("closeDocumentAction"));
+    auto *viewer = window.findChild<viewer::ViewerWidget *>();
+    require(quickClose && close && quickClose->defaultAction() == close && !quickClose->isEnabled(),
+            "Quick close is not bound to the existing close action");
+    require(!window.findChild<QToolBar *>(QStringLiteral("cameraToolbar")),
+            "A duplicate camera toolbar remains outside the viewport");
+    const auto finished = [&] {
+        return !controller.hasWork() && !controller.session().activeRequest();
+    };
+    const auto source =
+        QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/bend-90-6mm.step");
+    window.openStep(source);
+    waitUntil(finished);
+    require(controller.session().document() && quickClose->isEnabled(),
+            "Loaded part cannot be closed quickly");
+    if (graphics) {
+        waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+        require(viewer->isReady(), "Viewport controls have no native rendering context");
+        auto *controls = viewer->findChild<QWidget *>(QStringLiteral("viewportControls"));
+        auto *canvas = viewer->findChild<QWidget *>(QStringLiteral("cadCanvas"));
+        require(controls && canvas && controls->isVisible() &&
+                    canvas->rect().contains(controls->geometry()) &&
+                    canvas->width() - controls->geometry().right() <= 14,
+                "Viewport control row is not anchored inside the upper-right corner");
+        const auto revision = controller.session().editRevision();
+        const auto document = controller.session().document();
+        for (const char *name :
+             {"viewFront", "viewBack", "viewLeft", "viewRight", "viewTop", "viewBottom",
+              "viewIsometric", "displayWireframe", "displayShaded", "displayEdges", "fitModel"}) {
+            auto *action = viewer->findChild<QAction *>(QString::fromLatin1(name));
+            require(action && action->isEnabled(), "A viewport command is missing or disabled");
+            action->trigger();
+        }
+        require(controller.session().editRevision() == revision &&
+                    controller.session().document() == document && !controller.session().modified(),
+                "View controls edited or replaced the project");
+        const auto output = qEnvironmentVariable("BENDING_VIEWPORT_SNAPSHOT");
+        if (!output.isEmpty()) {
+            auto image = window.grab().toImage();
+            QPainter painter(&image);
+            painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                              viewer->captureImage(true));
+            painter.end();
+            require(image.save(output), "Cannot save viewport controls snapshot");
+        }
+        window.resize(980, 700);
+        QApplication::processEvents();
+        require(canvas->rect().contains(controls->geometry()),
+                "Viewport controls escaped after resize");
+    }
+    controller.setManualThickness(5);
+    require(controller.session().modified(), "Close fixture has no unsaved changes");
+    const auto edited = controller.session().document();
+    const auto edit = controller.session().editRevision();
+    QTimer::singleShot(0, [] {
+        auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        require(dialog != nullptr, "Quick close skipped the unsaved-changes prompt");
+        dialog->button(QMessageBox::Cancel)->click();
+    });
+    quickClose->click();
+    require(controller.session().document() == edited &&
+                controller.session().editRevision() == edit,
+            "Cancelled quick close lost the part or edits");
+    QTimer::singleShot(0, [] {
+        auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        require(dialog != nullptr, "Quick close skipped the discard guard");
+        dialog->button(QMessageBox::Discard)->click();
+    });
+    quickClose->click();
+    require(!controller.session().document() && !quickClose->isEnabled(),
+            "Quick close retained the part");
+    window.openStep(source);
+    require(quickClose->isEnabled(), "Loading cannot be closed from the main toolbar");
+    quickClose->click();
+    waitUntil(finished);
+    require(!controller.session().document(), "A stale import republished a quickly closed part");
+    window.close();
+}
+
 void testGuidedWorkflow(bool graphics) {
     using namespace bending;
     using namespace application;
@@ -1845,6 +1934,21 @@ void testGuidedWorkflow(bool graphics) {
                 !controller.session().bend(0)->target,
             "Guided check lost catalogue snapshot/separate lengths");
     slider->setValue(24);
+    if (graphics) {
+        const auto preview = controller.bendPreview();
+        const auto revision = controller.session().editRevision();
+        const auto frame = slider->value();
+        viewer->findChild<QAction *>(QStringLiteral("displayWireframe"))->trigger();
+        viewer->findChild<QAction *>(QStringLiteral("viewTop"))->trigger();
+        slider->setValue(0);
+        require(viewer->findChild<QAction *>(QStringLiteral("displayWireframe"))->isChecked() &&
+                    controller.bendPreview() == preview &&
+                    controller.session().editRevision() == revision,
+                "A camera/display command invalidated ready frames or lost its mode");
+        viewer->findChild<QAction *>(QStringLiteral("displayEdges"))->trigger();
+        viewer->findChild<QAction *>(QStringLiteral("viewIsometric"))->trigger();
+        slider->setValue(frame);
+    }
     snapshot("check");
     if (graphics) {
         const auto preview = controller.bendPreview();
@@ -1972,6 +2076,13 @@ int main(int argc, char *argv[]) {
     app.setQuitOnLastWindowClosed(false);
     try {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
+        if (app.arguments().contains(QStringLiteral("--viewport-controls-only"))) {
+            testViewportControls(graphics);
+            std::cout << "Viewport controls and quick close passed\n";
+            return 0;
+        }
+        if (graphics)
+            testViewportControls(true);
         if (app.arguments().contains(QStringLiteral("--file-drop-only"))) {
             testFileDrop(graphics);
             std::cout << "File drop workflow passed\n";

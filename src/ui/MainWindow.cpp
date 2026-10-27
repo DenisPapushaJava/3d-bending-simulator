@@ -37,6 +37,7 @@
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -330,7 +331,6 @@ class MainWindow::Impl {
         bendList->setEnabled(document && !controller->hasWork());
         updateBendReviews();
         showSelectedBend(false);
-        camera->setEnabled(viewer->isReady() && document != nullptr);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
         if (drawingAction)
             drawingAction->setEnabled(document && drawingBuilder && !controller->hasWork());
@@ -1291,7 +1291,6 @@ class MainWindow::Impl {
     QPlainTextEdit *diagnostics = nullptr;
     QLabel *cutoutNotice = nullptr;
     QPushButton *showCutouts = nullptr;
-    QToolBar *camera = nullptr;
     QAction *closeAction = nullptr;
     QAction *cancelAction = nullptr;
     QProgressBar *progress = nullptr;
@@ -1374,7 +1373,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->cancelAction, &QAction::triggered, impl_->controller, &ImportController::cancel);
     impl_->closeAction = fileMenu->addAction(QStringLiteral("Закрыть деталь"));
     impl_->closeAction->setObjectName(QStringLiteral("closeDocumentAction"));
-    impl_->closeAction->setShortcut(QKeySequence::Close);
+    impl_->closeAction->setIconText(QStringLiteral("Закрыть"));
+    impl_->closeAction->setIcon(style()->standardIcon(QStyle::SP_DialogCloseButton));
+    impl_->closeAction->setToolTip(QStringLiteral("Закрыть деталь · Ctrl+W"));
+    impl_->closeAction->setShortcuts(
+        {QKeySequence(QStringLiteral("Ctrl+W")), QKeySequence(QStringLiteral("Ctrl+F4"))});
     connect(impl_->closeAction, &QAction::triggered, this, [this] {
         if (impl_->canDiscard()) {
             impl_->controller->closeDocument();
@@ -1405,6 +1408,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     toolbar->setObjectName(QStringLiteral("workflowToolbar"));
     toolbar->setMovable(false);
     toolbar->addAction(open);
+    auto *quickClose = new QToolButton(toolbar);
+    quickClose->setObjectName(QStringLiteral("quickClosePart"));
+    quickClose->setDefaultAction(impl_->closeAction);
+    quickClose->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    quickClose->setToolTip(QStringLiteral("Закрыть деталь · Ctrl+W"));
+    quickClose->setAccessibleName(QStringLiteral("Закрыть текущую деталь"));
+    toolbar->addWidget(quickClose);
     toolbar->addAction(impl_->saveAction);
     toolbar->addAction(impl_->drawingAction);
     toolbar->addAction(impl_->cancelAction);
@@ -1414,25 +1424,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->propertyTabs->setCurrentIndex(3);
         impl_->propertyTabs->parentWidget()->show();
     });
-    impl_->camera = addToolBar(QStringLiteral("Камера"));
-    impl_->camera->setObjectName(QStringLiteral("cameraToolbar"));
-    impl_->camera->setMovable(false);
-    auto *fit = impl_->camera->addAction(QStringLiteral("Вписать · F"));
-    auto *views = new QMenu(QStringLiteral("Ракурс"), impl_->camera);
-    auto *viewButton = new QToolButton(impl_->camera);
-    viewButton->setText(QStringLiteral("Ракурс"));
-    viewButton->setMenu(views);
-    viewButton->setPopupMode(QToolButton::InstantPopup);
-    impl_->camera->addWidget(viewButton);
-    connect(fit, &QAction::triggered, impl_->viewer, &viewer::ViewerWidget::fitAll);
-    const auto orientation = [&](const QString &label, viewer::ViewerWidget::Orientation value) {
-        auto *action = views->addAction(label);
-        connect(action, &QAction::triggered, impl_->viewer,
-                [this, value] { impl_->viewer->setOrientation(value); });
-    };
-    orientation(QStringLiteral("Изометрия"), viewer::ViewerWidget::Orientation::Isometric);
-    orientation(QStringLiteral("Сверху"), viewer::ViewerWidget::Orientation::Top);
-    orientation(QStringLiteral("Спереди"), viewer::ViewerWidget::Orientation::Front);
+    if (auto *navigation = impl_->viewer->navigationMenu())
+        viewMenu->addMenu(navigation);
 
     const auto addDock = [&](const QString &name, const QString &title, QWidget *widget,
                              Qt::DockWidgetArea area) {

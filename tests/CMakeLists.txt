@@ -70,6 +70,9 @@ if(BENDING_BUILD_APP)
     add_test(NAME app.file-drop COMMAND workflow_tests --file-drop-only)
     set_tests_properties(app.file-drop PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=1" TIMEOUT 30 LABELS "integration")
+    add_test(NAME app.viewport-controls COMMAND workflow_tests --viewport-controls-only)
+    set_tests_properties(app.viewport-controls PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=1" TIMEOUT 30 LABELS "integration")
     add_executable(import_controller_tests import_controller_tests.cpp)
     target_link_libraries(import_controller_tests PRIVATE Bending::Ui bending_options)
     add_test(NAME application.import-controller COMMAND import_controller_tests)
