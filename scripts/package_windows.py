@@ -82,10 +82,12 @@ def main():
     shutil.copy2(args.vcpkg_root / "LICENSE.txt", notices / "vcpkg-LICENSE.txt")
     installed = ROOT / "vcpkg_installed/x64-windows-release/share/opencascade/copyright"
     shutil.copy2(installed, notices / "OCCT-copyright.txt")
-    shaders = installed.parent / "resources/Shaders"
-    if not shaders.is_dir():
-        raise RuntimeError(f"OCCT shader resources are missing: {shaders}")
-    shutil.copytree(shaders, stage / "share/opencascade/resources/Shaders", dirs_exist_ok=True)
+    for resource in ("Shaders", "XSMessage", "SHMessage", "XSTEPResource", "UnitsAPI"):
+        resource_dir = installed.parent / "resources" / resource
+        if not resource_dir.is_dir():
+            raise RuntimeError(f"OCCT runtime resources are missing: {resource_dir}")
+        shutil.copytree(resource_dir, stage / "share/opencascade/resources" / resource,
+                        dirs_exist_ok=True)
     # A binary-cache hit does not populate vcpkg buildtrees. Reproduce sources independently.
     occt_archive = output / "OCCT-V7_9_3.tar.gz"
     urllib.request.urlretrieve("https://github.com/Open-Cascade-SAS/OCCT/archive/V7_9_3.tar.gz",
@@ -122,19 +124,36 @@ def main():
         "See https://github.com/DenisPapushaJava/3d-bending-simulator/blob/main/docs/development.md\n",
         encoding="utf-8")
     (stage / "README.txt").write_text(
-        "Run bin/3d-bending-simulator.exe. This is the foundation, not a working bending simulator.\n"
-        "Microsoft Visual C++ 2015-2022 x64 Runtime may be required:\n"
+        f"3D Bending Simulator {version} — экспериментальный выпуск Windows x64.\n\n"
+        "Распакуйте весь архив и запустите bin/3d-bending-simulator.exe.\n"
+        "Откройте STEP/STP одной детали или проект .bend; файл можно перетащить в окно.\n"
+        "Этапы работы: Деталь → Инструмент → Проверка.\n"
+        "Учебные STEP: share/3d-bending-simulator/examples.\n\n"
+        "Доступны просмотр детали, распознавание поддержанных прямых сгибов,\n"
+        "подбор по параметрам, геометрический просмотр одного сгиба и справочный PDF.\n"
+        "Это не физический расчёт материала и не проверка полного маршрута гибки.\n"
+        "Интерактивная работа на Windows/GPU ещё требует проверки.\n\n"
+        "Может потребоваться Microsoft Visual C++ 2015–2022 x64 Runtime:\n"
         "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist\n"
-        "Keep DLLs and plugins with the executable. They may be replaced with compatible builds.\n"
-        "Matching dependency sources are in the companion dependency-sources ZIP.\n",
+        "Сохраняйте структуру папок, DLL и плагины рядом с EXE.\n"
+        "DLL допускается заменять совместимыми сборками. Лицензии — в share/licenses.\n"
+        "Соответствующие исходники Qt/OCCT находятся в соседнем dependency-sources ZIP.\n"
+        "Встроенное обновление пока отсутствует.\n"
+        "Проект: https://github.com/DenisPapushaJava/3d-bending-simulator\n",
         encoding="utf-8")
 
     environment = os.environ.copy()
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment.pop("QT_PLUGIN_PATH", None)
     environment.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    for variable in list(environment):
+        if variable.startswith("CSF_"):
+            environment.pop(variable)
     environment["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
     subprocess.run([str(executable), "--smoke-test"], env=environment, check=True, timeout=20)
+    subprocess.run([str(executable), "--smoke-test",
+                    str(stage / "share/3d-bending-simulator/examples/plate-inch.stp")],
+                   env=environment, check=True, timeout=30)
     archive_tree(output / f"{name}.zip", stage)
     archive_tree(output / f"{sources.name}.zip", sources)
 

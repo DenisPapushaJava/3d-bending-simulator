@@ -1,18 +1,41 @@
 #include "bending/Version.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/Kernel.h"
+#include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/project/ProjectFiles.h"
+#include "bending/project/ToolCatalog.h"
+#include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <QSettings>
 
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
-#include <QDockWidget>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFileInfo>
+#include <QIcon>
 #include <QPalette>
 #include <QTimer>
+#include <algorithm>
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+    const QDir resources(QDir(QCoreApplication::applicationDirPath())
+                             .filePath(QStringLiteral("../share/opencascade/resources")));
+    const auto resource = [&](const char *variable, const char *relative) {
+        const auto path = resources.filePath(QString::fromLatin1(relative));
+        if (!qEnvironmentVariableIsSet(variable) && QFileInfo::exists(path)) {
+            qputenv(variable, QDir::toNativeSeparators(path).toUtf8());
+        }
+    };
+    resource("CSF_STEPDefaults", "XSTEPResource");
+    resource("CSF_ShadersDirectory", "Shaders");
+    resource("CSF_XSMessage", "XSMessage");
+    resource("CSF_SHMessage", "SHMessage");
+    resource("CSF_UnitsLexicon", "UnitsAPI/Lexi_Expr.dat");
+    resource("CSF_UnitsDefinition", "UnitsAPI/Units.dat");
     QApplication::setStyle(QStringLiteral("Fusion"));
     QPalette palette;
     palette.setColor(QPalette::Window, QColor("#F7F9FB"));
@@ -27,12 +50,19 @@ int main(int argc, char *argv[]) {
     palette.setColor(QPalette::Disabled, QPalette::Text, QColor("#83909F"));
     palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor("#83909F"));
     app.setPalette(palette);
+    QCoreApplication::setOrganizationName(QStringLiteral("3D Bending Simulator"));
     QCoreApplication::setApplicationName(QStringLiteral("3D Bending Simulator"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("3d-bending-simulator"));
+    QIcon applicationIcon;
+    for (int size : {16, 24, 32, 48, 64, 128, 256}) {
+        applicationIcon.addFile(QStringLiteral(":/app/icons/%1.png").arg(size), QSize(size, size));
+    }
+    QApplication::setWindowIcon(applicationIcon);
     QCoreApplication::setApplicationVersion(QString::fromUtf8(
         bending::version.data(), static_cast<qsizetype>(bending::version.size())));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("Каркас симулятора гибки листового металла"));
+    parser.setApplicationDescription(QStringLiteral("Импорт и просмотр STEP · симулятор гибки"));
     parser.addHelpOption();
     parser.addVersionOption();
     QCommandLineOption smokeTest(QStringLiteral("smoke-test"),
@@ -42,20 +72,100 @@ int main(int argc, char *argv[]) {
         QStringLiteral("graphics-smoke-test"),
         QStringLiteral("Проверить настоящий OCCT/OpenGL-рендеринг и завершиться"));
     parser.addOption(graphicsTest);
+    QCommandLineOption toolCatalogOption(
+        QStringLiteral("tool-catalog"),
+        QStringLiteral("Дополнить/обновить каталог пресетами из JSON"), QStringLiteral("file"));
+    parser.addOption(toolCatalogOption);
+    parser.addPositionalArgument(QStringLiteral("step"),
+                                 QStringLiteral("STEP одной детали или проект .bend для открытия"),
+                                 QStringLiteral("[step]"));
     parser.process(app);
+    if (parser.positionalArguments().size() > 1) {
+        parser.showHelp(1);
+    }
 
-    bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()});
+    const auto files = std::make_shared<bending::project::ProjectFiles>();
+    const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
+    auto catalogue = bending::project::builtInToolCatalog();
+    if (const auto *error = std::get_if<std::string>(&catalogue)) {
+        qCritical() << "Tool catalogue failed:" << QString::fromStdString(*error);
+        return 1;
+    }
+    auto tools = std::get<bending::core::ToolCatalog>(std::move(catalogue));
+    const auto savedCatalog =
+        (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
+            ? QString{}
+            : QSettings().value(QStringLiteral("tools/catalogPath")).toString();
+    if (parser.isSet(toolCatalogOption) || !savedCatalog.isEmpty()) {
+        const auto argument =
+            parser.isSet(toolCatalogOption) ? parser.value(toolCatalogOption) : savedCatalog;
+#ifdef _WIN32
+        const auto path = std::filesystem::path(argument.toStdWString());
+#else
+        const auto path = std::filesystem::path(argument.toStdString());
+#endif
+        const auto extra = bending::project::readToolCatalog(path);
+        if (const auto *error = std::get_if<std::string>(&extra)) {
+            if (parser.isSet(toolCatalogOption)) {
+                qCritical() << "Custom tool catalogue failed:" << QString::fromStdString(*error);
+                return 1;
+            }
+            qWarning() << "Saved tool catalogue unavailable:" << QString::fromStdString(*error);
+        }
+        if (const auto *additional = std::get_if<bending::core::ToolCatalog>(&extra))
+            for (const auto &preset : *additional) {
+                const auto it = std::find_if(tools.begin(), tools.end(),
+                                             [&](const auto &t) { return t.id == preset.id; });
+                if (it == tools.end())
+                    tools.push_back(preset);
+                else
+                    *it = preset;
+            }
+        if (!bending::core::validToolCatalog(tools)) {
+            qCritical() << "Merged tool catalogue is invalid";
+            return 1;
+        }
+    }
+    bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
+                                   previewBuilder, std::move(tools));
+    window.setToolCatalogLoader(bending::project::readToolCatalog);
+    window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
+    const bool hasFile = !parser.positionalArguments().isEmpty();
+    if (hasFile) {
+        window.openStep(parser.positionalArguments().first());
+    }
+    auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    if (parser.isSet(graphicsTest) && !hasFile && viewer) {
+        viewer->showDiagnosticBox();
+    }
     window.show();
-    if (parser.isSet(graphicsTest)) {
-        auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
+    if (parser.isSet(graphicsTest) || parser.isSet(smokeTest)) {
         auto *timer = new QTimer(&app);
         QElapsedTimer started;
         started.start();
         QObject::connect(timer, &QTimer::timeout, &app, [&, viewer, timer, started] {
-            if (viewer && viewer->isReady()) {
+            const auto &session = window.importController().session();
+            if (session.error() || started.elapsed() > 30000) {
+                timer->stop();
+                qCritical() << "STEP/startup check failed:"
+                            << (session.error() ? QString::fromStdString(session.error()->detail)
+                                                : QStringLiteral("Timeout"));
+                app.exit(1);
+                return;
+            }
+            if (hasFile && !session.document()) {
+                return;
+            }
+            if (parser.isSet(smokeTest) && !parser.isSet(graphicsTest)) {
+                timer->stop();
+                const bool ready = window.isVisible() && window.centralWidget() != nullptr &&
+                                   viewer != nullptr &&
+                                   !window.windowIcon().pixmap(32, 32).isNull();
+                app.exit(ready ? 0 : 1);
+            } else if (viewer && viewer->isReady()) {
                 timer->stop();
                 app.exit(viewer->captureImage().isNull() ? 1 : 0);
-            } else if (!viewer || !viewer->errorString().isEmpty() || started.elapsed() > 10000) {
+            } else if (!viewer || !viewer->errorString().isEmpty()) {
                 timer->stop();
                 qCritical() << "OCCT graphics check failed:"
                             << (viewer ? viewer->errorString() : QStringLiteral("Viewer missing"));
@@ -63,12 +173,6 @@ int main(int argc, char *argv[]) {
             }
         });
         timer->start(50);
-    } else if (parser.isSet(smokeTest)) {
-        QTimer::singleShot(100, &app, [&] {
-            const bool ready = window.isVisible() && window.centralWidget() != nullptr &&
-                               window.findChildren<QDockWidget *>().size() == 3;
-            app.exit(ready ? 0 : 1);
-        });
     }
     return app.exec();
 }

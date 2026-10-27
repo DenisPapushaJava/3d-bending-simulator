@@ -3,8 +3,17 @@
 #include <QImage>
 #include <QWidget>
 
+#include <cstddef>
 #include <memory>
+#include <vector>
 
+class QMenu;
+namespace bending::application {
+class Document;
+struct RecognizedBend;
+struct BendInteriorContourDiagnostic;
+class SingleBendPreview;
+} // namespace bending::application
 namespace bending::viewer {
 
 // OCCT and native-window resources stay behind this Qt-only presentation boundary.
@@ -12,21 +21,41 @@ class ViewerWidget final : public QWidget {
     Q_OBJECT
 
   public:
-    enum class Orientation { Isometric, Top, Front };
+    enum class Orientation { Isometric, Top, Front, Back, Left, Right, Bottom };
 
     explicit ViewerWidget(QWidget *parent = nullptr);
     ~ViewerWidget() override;
 
     [[nodiscard]] bool isReady() const;
     [[nodiscard]] QString errorString() const;
+    // Shared actions, owned by the viewer; null when the native backend is unavailable.
+    [[nodiscard]] QMenu *navigationMenu() const;
     // Captures the OCCT framebuffer, including native surfaces QWidget::grab cannot capture.
-    [[nodiscard]] QImage captureImage();
+    [[nodiscard]] QImage captureImage(bool includeControls = false);
     void fitAll();
+    void setCutoutsVisible(bool visible);
+    void setDimensionsVisible(bool visible);
+    [[nodiscard]] bool dimensionsVisible() const;
     void setOrientation(Orientation orientation);
+    // Empty result means accepted. Geometry is prepared by the importer before publication.
+    [[nodiscard]] QString presentDocument(std::shared_ptr<const application::Document> document,
+                                          quint64 revision);
+    void clearDocument(quint64 revision);
+    void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
+    // Distinguishes the bend zone from its adjacent planar flanges.
+    void highlightBend(const application::RecognizedBend &bend, quint64 revision);
+    void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
+                                 quint64 revision);
+    [[nodiscard]] QString
+    presentBendPreview(std::shared_ptr<const application::SingleBendPreview> preview,
+                       std::size_t frameIndex, quint64 documentRevision);
+    [[nodiscard]] QString endBendPreview();
+    // Explicit diagnostic scene, never shown by the normal application startup.
+    void showDiagnosticBox();
 
   signals:
     void renderingChanged(bool ready);
-    void selectionChanged(const QString &description);
+    void selectionChanged(quint64 documentRevision, int faceIndex);
 
   private:
     class Impl;
