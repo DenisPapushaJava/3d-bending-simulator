@@ -19,6 +19,7 @@ SOURCES = {
     "url": RELEASES + "v2026.1.0-alpha.1/3d-bending-simulator-2026.1.0-alpha.1-dependency-sources.zip",
     "sha256": "69971ab7a34582157d322092ec98c0611da5b94d8bfdfb3f916e0c4a83abfa92",
 }
+SOURCE_INPUT_SHA256 = "c261963aa7234d1b760117945fcc00f24a42e7872d0e82096390fb0fbf369876"
 
 
 def sha256(path):
@@ -56,7 +57,36 @@ def installed_packages(installed):
     return sorted(records, key=lambda p: p["package"])
 
 
-def pack(root, cache, installed, output):
+def add_notices(archive, sources):
+    if sha256(sources) != SOURCES["sha256"]:
+        raise ValueError("Corresponding source archive checksum mismatch")
+    with zipfile.ZipFile(sources) as source:
+        names = source.namelist()
+        for suffix in ["occt-7.9.3-patched/LICENSE_LGPL_21.txt",
+                       "occt-7.9.3-patched/OCCT_LGPL_EXCEPTION.txt",
+                       "freetype-2.14.3-patched/docs/FTL.TXT",
+                       "freetype-2.14.3-patched/src/bdf/README",
+                       "freetype-2.14.3-patched/src/pcf/README",
+                       "freetype-2.14.3-patched/src/gzip/zlib.h",
+                       "freetype-2.14.3-patched/src/autofit/ft-hb-ft.c",
+                       "freetype-2.14.3-patched/src/autofit/ft-hb-decls.h",
+                       "freetype-2.14.3-patched/src/autofit/ft-hb-types.h",
+                       "freetype-2.14.3-patched/src/autofit/hb-script-list.h"]:
+            matches = [name for name in names if name.endswith("/" + suffix)]
+            if len(matches) != 1:
+                raise ValueError(f"Missing unambiguous license source: {suffix}")
+            archive.writestr("licenses/" + suffix, source.read(matches[0]))
+        font = next(name for name in names if name.endswith("/src/Font/Font_DejavuSans_Latin_woff.pxx"))
+        notice = "\n".join(line[3:].lstrip() for line in source.read(font).decode("utf-8").splitlines()
+                           if line.startswith("//!"))
+        if "Bitstream" not in notice:
+            raise ValueError("Missing OCCT embedded font notice")
+        archive.writestr("licenses/OCCT-DejaVu-copyright.txt", notice + "\n")
+
+
+def pack(root, cache, installed, output, sources):
+    if input_hash(root) != SOURCE_INPUT_SHA256:
+        raise ValueError("Review and select matching corresponding sources before exporting a new SDK")
     packages = installed_packages(installed)
     for record in packages:
         path = cache / record["path"]
@@ -74,6 +104,10 @@ def pack(root, cache, installed, output):
         "packages": packages,
         "sources": SOURCES,
     }
+    if not sources.is_file():
+        sources.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(SOURCES["url"], timeout=60) as source, sources.open("wb") as target:
+            shutil.copyfileobj(source, target)
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as archive:
         archive.writestr("sdk.json", json.dumps(metadata, indent=2) + "\n")
@@ -87,6 +121,7 @@ def pack(root, cache, installed, output):
             archive.write(path, "cmake/triplets/" + path.name)
         for record in packages:
             archive.write(cache / record["path"], "packages/" + record["path"])
+        add_notices(archive, sources)
     digest = sha256(output)
     output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     output.with_name("SHA256SUMS.txt").write_text(f"{digest}  {output.name}\n", encoding="ascii")
@@ -157,9 +192,10 @@ def main():
     parser.add_argument("--installed", type=Path, default=ROOT / "vcpkg_installed")
     parser.add_argument("--output", type=Path, default=ROOT / "out/windows-sdk-2026.1.zip")
     parser.add_argument("--lock", type=Path, default=ROOT / "cmake/windows-sdk.lock.json")
+    parser.add_argument("--sources", type=Path, default=ROOT / "out/sdk-corresponding-sources.zip")
     args = parser.parse_args()
     if args.command == "pack":
-        pack(args.root, args.cache, args.installed, args.output)
+        pack(args.root, args.cache, args.installed, args.output, args.sources)
     else:
         restore(args.root, args.lock, args.cache, os.environ["VCToolsVersion"].rstrip("/\\"))
 

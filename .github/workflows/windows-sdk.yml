@@ -46,7 +46,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .ci-tools
-          sparse-checkout: .github/actions/windows-sdk
+          sparse-checkout: |
+            .github/actions/windows-sdk
+            scripts/windows_sdk.py
+            cmake/windows-sdk.lock.json
+          sparse-checkout-cone-mode: false
           persist-credentials: false
       - name: Approved SDK manifest and triplets
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

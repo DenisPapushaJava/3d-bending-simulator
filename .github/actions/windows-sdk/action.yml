@@ -9,6 +9,10 @@ inputs:
     description: Require existing binary packages without compiling dependencies
     default: 'false'
     required: false
+  use-actions-cache:
+    description: Restore and save the transient Actions cache (false tests the durable snapshot)
+    default: 'true'
+    required: false
 outputs:
   cache-hit:
     description: Exact SDK cache hit
@@ -69,6 +73,8 @@ runs:
         persist-credentials: false
     - name: Restore SDK binary cache
       id: cache
+      if: inputs.use-actions-cache != 'false'
+      continue-on-error: true
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .cache/vcpkg
@@ -76,6 +82,16 @@ runs:
         restore-keys: |
           vcpkg-windows-2022-${{ steps.metadata.outputs.digest }}
           vcpkg-windows-2022-
+    - name: Restore durable SDK snapshot
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        SDK_MANIFEST: ${{ steps.metadata.outputs.manifest }}
+        SDK_HELPER: ${{ github.action_path }}/../../../scripts/windows_sdk.py
+        SDK_LOCK: ${{ github.action_path }}/../../../cmake/windows-sdk.lock.json
+      run: |
+        python "$env:SDK_HELPER" restore --root "$env:SDK_MANIFEST" --lock "$env:SDK_LOCK" --cache "$pwd/.cache/vcpkg"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Prepare SDK
       shell: pwsh
       env:
@@ -90,7 +106,7 @@ runs:
         & ./.deps/vcpkg/vcpkg.exe install --triplet x64-windows-release "--vcpkg-root=$pwd/.deps/vcpkg" "--x-manifest-root=$env:SDK_MANIFEST" "--overlay-triplets=$env:SDK_MANIFEST/cmake/triplets" "--x-install-root=$pwd/vcpkg_installed" @options
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Save SDK before configuring the application
-      if: steps.cache.outputs.cache-hit != 'true'
+      if: inputs.use-actions-cache != 'false' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .cache/vcpkg
