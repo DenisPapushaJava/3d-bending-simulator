@@ -1,4 +1,5 @@
 #include "bending/simulation/FlatToolSetup.h"
+#include "bending/simulation/ToolProfiles.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +12,8 @@ FlatToolSetupResult flatToolSetup(const SingleBend &model, core::PressTools tool
         lengthToleranceMm > 0.01) {
         return ToolSetupIssue::InvalidParameters;
     }
-    if (tools.lengthMm + lengthToleranceMm < model.widthMm) {
+    if (tools.lengthMm + lengthToleranceMm < model.widthMm ||
+        core::punchLengthMm(tools) + lengthToleranceMm < model.widthMm) {
         return ToolSetupIssue::ToolTooShort;
     }
     const double halfZone = bendAllowanceMm(model) / 2.0;
@@ -25,8 +27,7 @@ FlatToolSetupResult flatToolSetup(const SingleBend &model, core::PressTools tool
     if (rightOverlap <= lengthToleranceMm) {
         return ToolSetupIssue::MissingRightSupport;
     }
-    return FlatToolSetup{
-        tools, leftOverlap, rightOverlap,
-        left,  right,       tools.openingMm / (2.0 * std::tan(tools.dieAngleRadians / 2.0))};
+    return FlatToolSetup{tools, leftOverlap, rightOverlap,
+                         left,  right,       toolProfiles(tools)->grooveDepthMm};
 }
 } // namespace bending::simulation

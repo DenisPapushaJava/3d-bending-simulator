@@ -2,7 +2,9 @@
 
 #include "BendRecognizer.h"
 #include "CadDocumentData.h"
+#include "ClosedCutouts.h"
 #include "ThicknessRecognizer.h"
+#include "bending/application/BendPreparation.h"
 #include "bending/cad/Kernel.h"
 
 #include <BRepAdaptor_Surface.hxx>
@@ -379,6 +381,49 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
         }
         data->metadata.thickness = recognizeThickness(data->shape, tolerance, stop);
         data->metadata.bendAnalysis = recognizeBends(data->shape, tolerance, stop);
+        auto filled =
+            fillClosedCutouts(data->shape, data->metadata.bendAnalysis.lengthToleranceMm, stop);
+        data->metadata.closedCutouts = filled.report;
+        if (filled.report.status == application::ClosedCutoutStatus::Filled) {
+            auto analysis = recognizeBends(filled.shape, tolerance, stop);
+            auto originals = data->metadata.bendAnalysis.bends;
+            for (const auto &diagnostic : data->metadata.bendAnalysis.interiorContourDiagnostics) {
+                originals.push_back(diagnostic.candidate);
+            }
+            std::vector<application::BendPreparation> anchors;
+            for (const auto &bend : originals) {
+                anchors.push_back({"source-" + std::to_string(anchors.size()),
+                                   {bend.axisStart, bend.axisEnd, bend.angleRadians,
+                                    bend.innerRadiusMm, bend.thicknessMm, bend.lengthMm,
+                                    bend.trimmedEnds, bend.minimumStraightLengthMm},
+                                   application::BendReview::Pending,
+                                   std::nullopt,
+                                   std::nullopt});
+            }
+            const auto bindings = application::restoreBendPreparations(analysis, anchors);
+            bool matched = analysis.status == application::BendRecognitionStatus::Completed &&
+                           analysis.interiorContourDiagnostics.empty() &&
+                           analysis.bends.size() == originals.size() &&
+                           anchors.size() == originals.size() && bindings.unresolved.empty();
+            std::vector<application::RecognizedBend> ordered(originals.size());
+            for (std::size_t i = 0; matched && i < analysis.bends.size(); ++i) {
+                if (!bindings.byRecognizedBend[i] ||
+                    *bindings.byRecognizedBend[i] >= ordered.size()) {
+                    matched = false;
+                } else {
+                    ordered[*bindings.byRecognizedBend[i]] = analysis.bends[i];
+                }
+            }
+            if (matched) {
+                data->metadata.bendAnalysis.bends = std::move(originals);
+                analysis.bends = std::move(ordered);
+                data->filledBends = std::move(analysis);
+                data->filledShape = std::move(filled.shape);
+            } else {
+                data->metadata.closedCutouts.status = application::ClosedCutoutStatus::Unsupported;
+                data->metadata.closedCutouts.addedVolumeMm3 = 0;
+            }
+        }
         if (report(application::ImportPhase::Preparing)) {
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before presentation preparation");

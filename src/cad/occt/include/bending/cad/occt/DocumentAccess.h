@@ -9,5 +9,8 @@ namespace bending::cad {
 class OcctDocumentAccess final {
   public:
     [[nodiscard]] static const TopoDS_Shape &shape(const CadDocument &document);
+    [[nodiscard]] static const TopoDS_Shape &simulationShape(const CadDocument &document);
+    [[nodiscard]] static const application::BendAnalysis &
+    simulationBends(const CadDocument &document);
 };
 } // namespace bending::cad

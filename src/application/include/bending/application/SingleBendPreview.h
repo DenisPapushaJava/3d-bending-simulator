@@ -22,6 +22,9 @@ struct PunchRetractionCheck {
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual bool ignoresClosedCutouts() const noexcept {
+        return false;
+    }
     [[nodiscard]] virtual const simulation::PressMotion *pressMotion() const noexcept {
         return nullptr;
     }
@@ -42,6 +45,7 @@ class SingleBendPreview {
 using BendPreviewPtr = std::shared_ptr<const SingleBendPreview>;
 enum class BendPreviewErrorCode {
     UnsupportedGeometry,
+    BendZoneInteriorContours,
     UnsupportedParameters,
     TargetMismatch,
     ToolTooShort,

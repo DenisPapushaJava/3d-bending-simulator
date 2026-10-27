@@ -25,4 +25,12 @@ std::string_view CadDocument::sourceStep() const noexcept {
 const TopoDS_Shape &OcctDocumentAccess::shape(const CadDocument &document) {
     return document.impl_->shape;
 }
+const TopoDS_Shape &OcctDocumentAccess::simulationShape(const CadDocument &document) {
+    return document.impl_->filledShape.IsNull() ? document.impl_->shape
+                                                : document.impl_->filledShape;
+}
+const application::BendAnalysis &OcctDocumentAccess::simulationBends(const CadDocument &document) {
+    return document.impl_->filledShape.IsNull() ? document.impl_->metadata.bendAnalysis
+                                                : document.impl_->filledBends;
+}
 } // namespace bending::cad
