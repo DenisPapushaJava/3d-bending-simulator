@@ -29,6 +29,12 @@ struct DrawingAngle {
     double radians = 0;
     double minimumRadiusMm = 0; // Keep the dimension arc outside the material.
 };
+struct DrawingSectionMarker {
+    DrawingPoint first;
+    DrawingPoint second;
+    DrawingPoint viewDirection;
+    std::string designation;
+};
 struct DrawingView {
     std::vector<DrawingPath> paths;
     DrawingPoint minimum;
@@ -44,6 +50,7 @@ struct DrawingView {
     std::vector<std::vector<DrawingPoint>> sectionLoops;
     std::vector<std::pair<DrawingPoint, double>> detailCircles;
     std::vector<std::pair<DrawingPoint, std::size_t>> bendNotes;
+    std::vector<DrawingSectionMarker> sectionMarkers;
 };
 struct DrawingBend {
     double turnRadians;
@@ -59,6 +66,7 @@ struct DrawingDetail {
     DrawingView view;
     std::size_t bendIndex;
     std::string designation;
+    bool fullProfile = false;
 };
 struct DrawingRequest {
     std::optional<std::size_t> baseFace;
@@ -81,6 +89,8 @@ struct BendingDrawing {
     std::size_t unrecognizedCylindricalFaces = 0;
     std::string sourceName;
     std::vector<DrawingDetail> details;
+    bool drawingOnlyRecognition = false;
+    BendRecognitionStatus bendRecognitionStatus = BendRecognitionStatus::NotAnalyzed;
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
 struct DrawingError {
@@ -97,4 +107,5 @@ class BendingDrawingBuilder {
 // Largest standard scale fitting the three orthographic view boxes, including annotation space.
 [[nodiscard]] std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept;
 [[nodiscard]] std::optional<double> standardDrawingScale(double maximum) noexcept;
+[[nodiscard]] bool drawingProfilesCoverBends(const BendingDrawing &drawing) noexcept;
 } // namespace bending::application

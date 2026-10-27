@@ -8,6 +8,8 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <QAction>
 #include <QApplication>
 #include <QDialog>
@@ -23,6 +25,8 @@
 #include <QThread>
 #include <QTimer>
 #include <STEPControl_Writer.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -66,6 +70,59 @@ application::BendingDrawingPtr build(application::DocumentPtr document,
     if (const auto *e = std::get_if<application::DrawingError>(&result))
         throw std::runtime_error(e->detail);
     return std::get<application::BendingDrawingPtr>(result);
+}
+TopoDS_Shape withVertexGap(double gap) {
+    const auto shape = fixtures::bentStrip(8, 6);
+    for (TopExp_Explorer vertex(shape, TopAbs_VERTEX); vertex.More(); vertex.Next()) {
+        const auto v = TopoDS::Vertex(vertex.Current());
+        const auto p = BRep_Tool::Pnt(v);
+        if (p.Y() < -29 && p.Z() < .1) {
+            BRep_Builder{}.UpdateVertex(v, p.Translated(gp_Vec(0, 0, gap)), gap * 1.5);
+            return shape;
+        }
+    }
+    throw std::runtime_error("Fixture has no free flange vertex");
+}
+void drawingMeasurements(const QString &folder) {
+    const auto trimmedDoc = load(fixtures::cornerTrimmedBend(), folder + "/split-cap.step");
+    require(trimmedDoc->metadata().bendAnalysis.bends.empty(),
+            "Drawing cap support changed strict simulation recognition");
+    const auto trimmed = build(trimmedDoc);
+    require(trimmed->drawingOnlyRecognition && trimmed->bends.size() == 1 &&
+                trimmed->bends[0].trimmedEnds && trimmed->bends[0].interiorAngleRadians &&
+                std::abs(*trimmed->bends[0].interiorAngleRadians - std::numbers::pi / 2) < 1e-5 &&
+                std::abs(trimmed->bends[0].thicknessMm - 2) < 1e-5,
+            "A piecewise cap lost its drawing measurements");
+    const auto tolerantDoc = load(withVertexGap(.004), folder + "/tolerant.step");
+    require(tolerantDoc->metadata().maximumToleranceMm > .001 &&
+                tolerantDoc->metadata().maximumToleranceMm <= .01 &&
+                tolerantDoc->metadata().bendAnalysis.status ==
+                    application::BendRecognitionStatus::Unsupported,
+            "Fixture did not preserve its STEP boundary gap");
+    const auto tolerant = build(tolerantDoc);
+    require(tolerant->drawingOnlyRecognition && tolerant->bends.size() == 1 &&
+                tolerant->bendRecognitionStatus == application::BendRecognitionStatus::Completed &&
+                tolerant->thicknessMm && std::abs(*tolerant->thicknessMm - 6) < 1e-5 &&
+                tolerantDoc->metadata().bendAnalysis.bends.empty(),
+            "Drawing tolerance changed the simulation document or lost dimensions");
+    require(ui::DrawingSheet::writePdf(folder + "/tolerant.pdf", *tolerant, {}).isEmpty(),
+            "Drawing-only measurement PDF failed");
+    const auto mixedDoc = load(fixtures::cornerTrimmedChannel(), folder + "/mixed.step");
+    require(mixedDoc->metadata().bendAnalysis.bends.size() == 1,
+            "Fixture lost its one strictly supported bend");
+    const auto mixed = build(mixedDoc);
+    require(mixed->drawingOnlyRecognition && mixed->bends.size() == 2 &&
+                mixed->details.size() == 1 && mixed->details[0].fullProfile &&
+                std::abs(mixed->bends[0].axialLengthMm -
+                         mixedDoc->metadata().bendAnalysis.bends[0].lengthMm) < 1e-5 &&
+                mixedDoc->metadata().bendAnalysis.bends.size() == 1,
+            "Drawing-only additions lost or replaced a strictly recognized zone");
+    const auto excessive = build(load(withVertexGap(.025), folder + "/excessive.step"));
+    require(excessive->bends.empty() && !excessive->drawingOnlyRecognition &&
+                excessive->bendRecognitionStatus ==
+                    application::BendRecognitionStatus::Unsupported &&
+                !ui::DrawingSheet::preview(*excessive, {}).isNull(),
+            "Drawing measurements accepted excessive source tolerance");
 }
 void geometry(const QString &folder) {
     const auto source = fixtures::bentStrip(8, 6);
@@ -191,10 +248,32 @@ void geometry(const QString &folder) {
         require(ui::DrawingSheet::writePdf(path, *shortened, title).isEmpty(),
                 "Long demo PDF failed");
     const auto channel = build(load(fixtures::channel(), folder + "/channel.step"));
-    require(channel->bends.size() == 2 && channel->details.size() == 2 &&
+    require(channel->bends.size() == 2 && channel->details.size() == 1 &&
+                channel->details[0].fullProfile && channel->details[0].view.angles.size() == 2 &&
+                channel->views[0].sectionMarkers.size() == 1 &&
+                std::any_of(channel->details[0].view.dimensions.begin(),
+                            channel->details[0].view.dimensions.end(),
+                            [](const auto &d) { return std::abs(d.valueMm - 92) < 1e-4; }) &&
                 ui::DrawingSheet::pageCount(*channel) == 1 &&
                 !ui::DrawingSheet::preview(*channel, {}).isNull(),
-            "Two bend profiles did not share the overview sheet");
+            "Connected bends lost the whole profile or corner-to-corner dimension");
+    const auto longChannel = build(load(fixtures::channel(2000), folder + "/long-channel.step"));
+    require(longChannel->details.size() == 1 && longChannel->details[0].fullProfile &&
+                !longChannel->views[0].omittedX && ui::DrawingSheet::pageCount(*longChannel) == 1 &&
+                !ui::DrawingSheet::preview(*longChannel, {}).isNull(),
+            "A whole section was marked inside an omitted interval");
+    const auto movedChannel =
+        load(BRepBuilderAPI_Transform(fixtures::channel(), rotate, true).Shape(),
+             folder + "/channel-rotated.step");
+    for (int turn = 0; turn < 4; ++turn) {
+        application::DrawingRequest r;
+        r.quarterTurns = turn;
+        r.reverseView = turn % 2 != 0;
+        const auto changed = build(movedChannel, r);
+        require(changed->details.size() == 1 && changed->details[0].fullProfile &&
+                    !ui::DrawingSheet::preview(*changed, {}).isNull(),
+                "A whole section cannot be laid out after changing the viewing direction");
+    }
     auto many = *acute;
     for (std::size_t i = 1; i < 31; ++i) {
         many.bends.push_back(acute->bends[0]);
@@ -312,6 +391,7 @@ int main(int argc, char **argv) {
     app.setQuitOnLastWindowClosed(false);
     QTemporaryDir temp;
     try {
+        drawingMeasurements(temp.path());
         geometry(temp.path());
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";

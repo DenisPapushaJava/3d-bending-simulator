@@ -29,6 +29,13 @@ int main() {
         require(drawingScale(d) == .5);
         d.views[0].omittedX = std::array<double, 2>{-1, 100};
         require(!drawingScale(d));
+        BendingDrawing grouped;
+        grouped.bends.resize(2);
+        grouped.details.resize(1);
+        grouped.details[0].view.bendNotes = {{{0, 0}, 0}};
+        require(!drawingProfilesCoverBends(grouped));
+        grouped.details[0].view.bendNotes.push_back({{1, 1}, 1});
+        require(drawingProfilesCoverBends(grouped));
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

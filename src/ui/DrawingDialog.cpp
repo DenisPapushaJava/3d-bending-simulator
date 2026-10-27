@@ -97,6 +97,16 @@ class DrawingDialog::Impl {
                     .arg(cut ? QStringLiteral(
                                    " · подтверждённый однородный участок показан с разрывом")
                              : QString{}));
+            if (drawing->drawingOnlyRecognition)
+                status->setText(
+                    status->text() +
+                    QStringLiteral(
+                        " Зон на чертеже: %1; это измерения для листа, не проверка гибки.")
+                        .arg(drawing->bends.size()));
+            if (drawing->bendRecognitionStatus != application::BendRecognitionStatus::Completed)
+                status->setText(
+                    status->text() +
+                    QStringLiteral(" Размеры гибов не построены: распознавание не выполнено."));
             render();
         }
     }

@@ -6,7 +6,7 @@ namespace bending::application {
 std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept {
     double fit = 100;
     std::array<DrawingPoint, 3> available{{{134, 48}, {134, 48}, {104, 48}}};
-    if (!drawing.details.empty() && drawing.details.size() == drawing.bends.size())
+    if (drawingProfilesCoverBends(drawing))
         available[0].x = 112; // Compact overview: keep room for dimensions at the left frame.
     for (std::size_t i = 0; i < available.size(); ++i) {
         const auto &v = drawing.views[i];
@@ -24,6 +24,17 @@ std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept {
         fit = std::min({fit, (available[i].x - (v.omittedX ? 8 : 0)) / w, available[i].y / h});
     }
     return standardDrawingScale(fit);
+}
+bool drawingProfilesCoverBends(const BendingDrawing &drawing) noexcept {
+    if (drawing.bends.empty() || drawing.details.empty())
+        return false;
+    for (std::size_t i = 0; i < drawing.bends.size(); ++i)
+        if (std::none_of(drawing.details.begin(), drawing.details.end(), [&](const auto &detail) {
+                return std::any_of(detail.view.bendNotes.begin(), detail.view.bendNotes.end(),
+                                   [i](const auto &note) { return note.second == i; });
+            }))
+            return false;
+    return true;
 }
 std::optional<double> standardDrawingScale(double fit) noexcept {
     if (!std::isfinite(fit) || fit <= 0)
