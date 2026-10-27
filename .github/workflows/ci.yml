@@ -6,6 +6,12 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      sdk_archive_only:
+        description: Verify Windows SDK from the durable archive without Actions cache or source builds
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -81,6 +87,9 @@ jobs:
       - name: Windows SDK
         if: runner.os == 'Windows'
         uses: ./.github/actions/windows-sdk
+        with:
+          use-actions-cache: ${{ inputs.sdk_archive_only != true }}
+          binary-only: ${{ inputs.sdk_archive_only == true }}
       - name: Qt 6.8.3 (shared libraries)
         if: runner.os == 'Windows'
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1

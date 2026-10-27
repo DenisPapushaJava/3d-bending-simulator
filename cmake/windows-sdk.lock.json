@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "tag": "sdk-windows-x64-2026.1",
+  "asset": "windows-sdk-2026.1.zip",
+  "sha256": "f454af257276530a0766ab10adcd8b21438f60a5703f15fe2428228152dad926",
+  "input_sha256": "c261963aa7234d1b760117945fcc00f24a42e7872d0e82096390fb0fbf369876",
+  "compiler": "14.44.35207"
+}
