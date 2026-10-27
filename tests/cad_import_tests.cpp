@@ -2,8 +2,10 @@
 
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -186,6 +188,140 @@ void checkBox(const CadDocument &document) {
         require(diagnostic.severity != DiagnosticSeverity::Error,
                 "Successful import contains an error diagnostic");
     }
+}
+
+std::string withAppearance(std::string source, const std::string &renderingMethod,
+                           const std::string &fillName, bool pointMarker = false) {
+    const auto solidType = source.find("MANIFOLD_SOLID_BREP(");
+    require(solidType != std::string::npos, "Appearance fixture needs a solid");
+    const auto begin = source.rfind('#', solidType);
+    const auto end = source.find_first_not_of("0123456789", begin + 1);
+    const auto solid = source.substr(begin, end - begin);
+    require(source.find("#900001") == std::string::npos, "Fixture labels overlap");
+    std::string styles = "#900001=COLOUR_RGB('',0.5,0.5,0.5);\n"
+                         "#900002=SURFACE_STYLE_TRANSPARENT(0.);\n"
+                         "#900003=SURFACE_STYLE_RENDERING_WITH_PROPERTIES(" +
+                         renderingMethod +
+                         ",#900001,(#900002));\n"
+                         "#900004=FILL_AREA_STYLE_COLOUR('',#900001);\n"
+                         "#900005=FILL_AREA_STYLE(" +
+                         fillName +
+                         ",(#900004));\n"
+                         "#900006=SURFACE_STYLE_FILL_AREA(#900005);\n"
+                         "#900007=SURFACE_SIDE_STYLE('',(#900003,#900006));\n"
+                         "#900008=SURFACE_STYLE_USAGE(.BOTH.,#900007);\n"
+                         "#900009=PRESENTATION_STYLE_ASSIGNMENT((#900008" +
+                         std::string(pointMarker ? ",#900012" : "") +
+                         "));\n"
+                         "#900010=STYLED_ITEM('',(#900009)," +
+                         solid + ");\n";
+    if (pointMarker) {
+        styles += "#900011=PRE_DEFINED_POINT_MARKER_SYMBOL('plus');\n"
+                  "#900012=POINT_STYLE('',#900011,POSITIVE_LENGTH_MEASURE(3.),#900001);\n";
+    }
+    source.insert(source.rfind("ENDSEC;"), styles);
+    return source;
+}
+
+void testAppearanceAndReferenceGeometry(const std::filesystem::path &directory) {
+    const auto box = BRepPrimAPI_MakeBox(gp_Pnt(10.0, -20.0, 5.0), 100.0, 60.0, 2.0).Shape();
+    const auto base = directory / "appearance-base.step";
+    writeStep(base, box, "MM");
+    std::ifstream input(base, std::ios::binary);
+    const std::string source(std::istreambuf_iterator<char>{input}, {});
+    const auto verify = [&](const char *name, const std::string &method,
+                            const std::string &fillName, bool pointMarker,
+                            const std::vector<int> &expectedLabels) {
+        const auto bytes = withAppearance(source, method, fillName, pointMarker);
+        const auto path = directory / name;
+        writeText(path, bytes);
+        const auto document = load(path);
+        checkBox(*document);
+        require(document->sourceStep() == bytes, "Appearance recovery changed the saved STEP");
+        std::vector<int> labels;
+        for (const auto &diagnostic : document->metadata().diagnostics) {
+            if (diagnostic.message.starts_with("Оформление STEP пропущено")) {
+                require(diagnostic.stage == ImportStage::Read &&
+                            diagnostic.severity == DiagnosticSeverity::Warning,
+                        "Ignored appearance error must remain an explicit read warning");
+                labels.push_back(diagnostic.entityNumber);
+            }
+        }
+        std::sort(labels.begin(), labels.end());
+        require(labels == expectedLabels, "Wrong appearance warning count or original STEP label");
+        auto embedded = StepImporter{}.readBytes(bytes, path);
+        require(std::holds_alternative<std::unique_ptr<const CadDocument>>(embedded),
+                "Embedded original STEP must use the same recovery policy");
+    };
+    verify("appearance-valid.step", ".NORMAL_SHADING.", "''", false, {});
+    verify("appearance-rendering.step", "$", "''", false, {900003});
+    verify("appearance-fill.step", ".NORMAL_SHADING.", "$", false, {900005});
+    verify("appearance-marker.step", ".NORMAL_SHADING.", "''", true, {900012});
+    verify("appearance-combined.step", "$", "$", true, {900003, 900005, 900012});
+
+    auto brokenPoint = withAppearance(source, "$", "$", true);
+    const auto point = brokenPoint.find("CARTESIAN_POINT(");
+    require(point != std::string::npos, "Missing geometric point in fixture");
+    const auto name = point + std::string("CARTESIAN_POINT(").size();
+    brokenPoint.replace(name, brokenPoint.find(',', name) - name, "42");
+    const auto invalidPoint = directory / "appearance-broken-geometry.step";
+    writeText(invalidPoint, brokenPoint);
+    const auto pointError = expectError(invalidPoint, StepImportErrorCode::InvalidStep);
+    require(std::any_of(pointError.diagnostics.begin(), pointError.diagnostics.end(),
+                        [](const auto &d) { return d.severity == DiagnosticSeverity::Error; }),
+            "A geometry name error was hidden by appearance warnings");
+
+    auto unknownStyleError = withAppearance(source, "$", "''");
+    const auto colour = unknownStyleError.find("$,#900001,(#900002)");
+    require(colour != std::string::npos, "Missing rendering colour in fixture");
+    unknownStyleError.replace(colour, std::string("$,#900001,(#900002)").size(),
+                              "$,#900005,(#900002)");
+    const auto invalidStyle = directory / "appearance-unknown-error.step";
+    writeText(invalidStyle, unknownStyleError);
+    expectError(invalidStyle, StepImportErrorCode::InvalidStep);
+
+    const auto invalidUnits = directory / "appearance-invalid-units.step";
+    writeStep(invalidUnits, box, "MM", UnitFixture::InvalidLength);
+    std::ifstream unitsInput(invalidUnits, std::ios::binary);
+    const std::string unitsSource(std::istreambuf_iterator<char>{unitsInput}, {});
+    unitsInput.close();
+    writeText(invalidUnits, withAppearance(unitsSource, "$", "$"));
+    expectError(invalidUnits, StepImportErrorCode::UnsupportedUnits);
+
+    BRep_Builder builder;
+    TopoDS_Compound referenceGeometry;
+    builder.MakeCompound(referenceGeometry);
+    builder.Add(referenceGeometry, box);
+    BRepBuilderAPI_MakePolygon polygon;
+    polygon.Add(gp_Pnt(500, 500, 500));
+    polygon.Add(gp_Pnt(510, 500, 500));
+    polygon.Add(gp_Pnt(510, 510, 500));
+    builder.Add(referenceGeometry, polygon.Wire());
+    builder.Add(referenceGeometry,
+                BRepBuilderAPI_MakeEdge(gp_Pnt(600, 600, 600), gp_Pnt(620, 600, 600)).Shape());
+    builder.Add(referenceGeometry, BRepBuilderAPI_MakeVertex(gp_Pnt(700, 700, 700)).Shape());
+    const auto references = directory / "solid-and-reference-curves.step";
+    writeStep(references, referenceGeometry, "MM");
+    const auto body = load(references);
+    checkBox(*body); // No auxiliary points in the dimensions, faces or volume.
+    std::ifstream referenceInput(references, std::ios::binary);
+    const std::string referenceSource(std::istreambuf_iterator<char>{referenceInput}, {});
+    require(body->sourceStep() == referenceSource, "Reference geometry was removed from source");
+    require(std::any_of(body->metadata().diagnostics.begin(), body->metadata().diagnostics.end(),
+                        [](const auto &d) {
+                            return d.stage == ImportStage::Transfer &&
+                                   d.severity == DiagnosticSeverity::Warning &&
+                                   d.message.starts_with("Выбрано единственное объёмное тело STEP");
+                        }),
+            "Reference geometry must not be omitted silently");
+
+    const auto onlyCurve = directory / "only-reference-curve.step";
+    writeStep(onlyCurve, polygon.Wire(), "MM");
+    expectError(onlyCurve, StepImportErrorCode::UnsupportedComposition);
+    builder.Add(referenceGeometry, BRepBuilderAPI_MakeFace(gp_Pln(), 0.0, 5.0, 0.0, 5.0).Shape());
+    const auto extraFace = directory / "reference-curves-and-free-face.step";
+    writeStep(extraFace, referenceGeometry, "MM");
+    expectError(extraFace, StepImportErrorCode::UnsupportedComposition);
 }
 
 void testImport(const std::filesystem::path &directory) {
@@ -392,6 +528,7 @@ int main() {
         WriteParameter assemblyMode("write.step.assembly", "Off");
         FixtureDirectory fixtures;
         testImport(fixtures.path);
+        testAppearanceAndReferenceGeometry(fixtures.path);
         testThickness(fixtures.path);
         std::cout << "STEP import: units, metadata, Unicode paths, failures and ownership passed\n";
     } catch (const Standard_Failure &error) {

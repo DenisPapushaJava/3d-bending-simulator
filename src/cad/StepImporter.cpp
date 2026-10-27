@@ -30,6 +30,9 @@
 #include <StepGeom_GeometricRepresentationContextAndGlobalUnitAssignedContext.hxx>
 #include <StepRepr_AssemblyComponentUsage.hxx>
 #include <StepRepr_GlobalUnitAssignedContext.hxx>
+#include <StepVisual_FillAreaStyle.hxx>
+#include <StepVisual_PointStyle.hxx>
+#include <StepVisual_SurfaceStyleRendering.hxx>
 #include <TColStd_SequenceOfAsciiString.hxx>
 #include <TopExp.hxx>
 #include <TopLoc_Location.hxx>
@@ -45,23 +48,55 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 namespace bending::cad {
 namespace {
 std::mutex importMutex;
 
-void appendDiagnostics(Interface_CheckIterator checks, ImportStage stage,
-                       std::vector<ImportDiagnostic> &diagnostics) {
+// Only fields of presentation entities which this geometry-only importer does not use.
+// Do not infer safety from an error message alone (e.g. CARTESIAN_POINT also has a name).
+bool unusedAppearanceFailure(const Handle(Standard_Transient) & entity, std::string_view message) {
+    if (entity.IsNull()) {
+        return false;
+    }
+    if (entity->IsKind(STANDARD_TYPE(StepVisual_SurfaceStyleRendering))) {
+        return message.find("(surface_style_rendering.rendering_method)") != std::string_view::npos;
+    }
+    if (entity->IsKind(STANDARD_TYPE(StepVisual_FillAreaStyle))) {
+        return message.find("(name) not a quoted String") != std::string_view::npos;
+    }
+    if (entity->IsKind(STANDARD_TYPE(StepVisual_PointStyle))) {
+        return message.find("(marker) : Entity has illegal type") != std::string_view::npos;
+    }
+    return false;
+}
+
+void appendDiagnostics(Interface_CheckIterator checks, const Handle(StepData_StepModel) & model,
+                       ImportStage stage, std::vector<ImportDiagnostic> &diagnostics) {
     for (checks.Start(); checks.More(); checks.Next()) {
         const auto &check = checks.Value();
+        auto entity = check->Entity();
+        if (entity.IsNull() && checks.Number() > 0 && checks.Number() <= model->NbEntities()) {
+            entity = model->Value(checks.Number());
+        }
+        const auto label = entity.IsNull() ? 0 : model->IdentLabel(entity);
+        const int entityNumber = label > 0 ? label : checks.Number();
         for (int i = 1; i <= check->NbFails(); ++i) {
+            const bool appearance =
+                stage == ImportStage::Read && unusedAppearanceFailure(entity, check->CFail(i));
+            std::string message = check->CFail(i);
+            if (appearance) {
+                message = "Оформление STEP пропущено; используется стандартный вид: " + message;
+            }
             diagnostics.push_back(
-                {stage, DiagnosticSeverity::Error, checks.Number(), check->CFail(i)});
+                {stage, appearance ? DiagnosticSeverity::Warning : DiagnosticSeverity::Error,
+                 entityNumber, std::move(message)});
         }
         for (int i = 1; i <= check->NbWarnings(); ++i) {
             diagnostics.push_back(
-                {stage, DiagnosticSeverity::Warning, checks.Number(), check->CWarning(i)});
+                {stage, DiagnosticSeverity::Warning, entityNumber, check->CWarning(i)});
         }
     }
 }
@@ -123,10 +158,36 @@ bool hasValidLengthUnits(const Handle(StepData_StepModel) & model) {
     return found;
 }
 
-// Do not silently discard free surfaces/edges or repeated solid occurrences in a compound.
-bool countSolidOccurrences(const TopoDS_Shape &shape, std::size_t &count) {
+struct ImportComposition {
+    std::size_t solidOccurrences = 0;
+    TopoDS_Shape solid;
+    std::size_t auxiliaryWires = 0;
+    std::size_t auxiliaryEdges = 0;
+    std::size_t auxiliaryVertices = 0;
+
+    bool hasAuxiliaryGeometry() const {
+        return auxiliaryWires || auxiliaryEdges || auxiliaryVertices;
+    }
+};
+
+// Curves/points outside the sole solid are reported explicitly as reference geometry.
+// Free faces/shells and repeated solid occurrences must never become a partial part.
+bool inspectComposition(const TopoDS_Shape &shape, ImportComposition &composition) {
     if (shape.ShapeType() == TopAbs_SOLID) {
-        return ++count == 1;
+        composition.solid = shape;
+        return ++composition.solidOccurrences == 1;
+    }
+    if (shape.ShapeType() == TopAbs_WIRE) {
+        ++composition.auxiliaryWires;
+        return true;
+    }
+    if (shape.ShapeType() == TopAbs_EDGE) {
+        ++composition.auxiliaryEdges;
+        return true;
+    }
+    if (shape.ShapeType() == TopAbs_VERTEX) {
+        ++composition.auxiliaryVertices;
+        return true;
     }
     if (shape.ShapeType() != TopAbs_COMPOUND && shape.ShapeType() != TopAbs_COMPSOLID) {
         return false;
@@ -134,7 +195,7 @@ bool countSolidOccurrences(const TopoDS_Shape &shape, std::size_t &count) {
     bool hasChildren = false;
     for (TopoDS_Iterator child(shape); child.More(); child.Next()) {
         hasChildren = true;
-        if (!countSolidOccurrences(child.Value(), count)) {
+        if (!inspectComposition(child.Value(), composition)) {
             return false;
         }
     }
@@ -292,7 +353,8 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
         if (reader.StepModel().IsNull() || reader.StepModel()->NbEntities() == 0) {
             return fail(StepImportErrorCode::NoGeometry, "STEP contains no model entities");
         }
-        appendDiagnostics(reader.WS()->ModelCheckList(), ImportStage::Read, diagnostics);
+        appendDiagnostics(reader.WS()->ModelCheckList(), reader.StepModel(), ImportStage::Read,
+                          diagnostics);
         if (hasErrors(diagnostics)) {
             return fail(StepImportErrorCode::InvalidStep, "STEP model contains read errors");
         }
@@ -324,8 +386,8 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
         if (report(application::ImportPhase::Validating)) {
             return fail(StepImportErrorCode::Cancelled, "Import cancelled after transfer");
         }
-        appendDiagnostics(reader.WS()->TransferReader()->LastCheckList(), ImportStage::Transfer,
-                          diagnostics);
+        appendDiagnostics(reader.WS()->TransferReader()->LastCheckList(), reader.StepModel(),
+                          ImportStage::Transfer, diagnostics);
         if (transferred != roots || hasErrors(diagnostics)) {
             return fail(StepImportErrorCode::TransferFailed,
                         "STEP roots were not transferred completely");
@@ -334,13 +396,24 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
         if (shape.IsNull()) {
             return fail(StepImportErrorCode::NoGeometry, "Transfer produced no geometry");
         }
-        std::size_t solids = 0;
-        if (!countSolidOccurrences(shape, solids) || solids != 1) {
+        ImportComposition composition;
+        if (!inspectComposition(shape, composition) || composition.solidOccurrences != 1) {
             return fail(StepImportErrorCode::UnsupportedComposition,
-                        "Expected exactly one solid without extra surfaces or wires");
+                        "Expected exactly one solid without extra surfaces or shells");
         }
         if (!BRepCheck_Analyzer(shape).IsValid()) {
             return fail(StepImportErrorCode::InvalidGeometry, "Transferred BRep is not valid");
+        }
+        if (composition.hasAuxiliaryGeometry()) {
+            diagnostics.push_back(
+                {ImportStage::Transfer, DiagnosticSeverity::Warning, 0,
+                 "Выбрано единственное объёмное тело STEP. Вспомогательные элементы вне тела "
+                 "не отображаются и не участвуют в размерах/проверках: контуров " +
+                     std::to_string(composition.auxiliaryWires) + ", отдельных рёбер " +
+                     std::to_string(composition.auxiliaryEdges) + ", точек " +
+                     std::to_string(composition.auxiliaryVertices) +
+                     ". Исходный файл не изменён."});
+            shape = std::move(composition.solid);
         }
         Bnd_Box box;
         BRepBndLib::AddOptimal(shape, box, false, false);
