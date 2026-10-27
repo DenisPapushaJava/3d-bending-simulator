@@ -52,6 +52,6 @@ GOST 2.304-81 Type A Regular, unmodified v0.7.6 font by Sergey S. Betke (2015).
 Source: https://github.com/Metrolog/Font.GOST2.304-81/releases/tag/v0.7.6
 The font's embedded name-table license is SIL Open Font License 1.1, with no Reserved Font Name.
 The exact notice and license are retained in `src/ui/data/fonts/OFL.txt` and installed in
-`share/doc/3d-bending-simulator/licenses/fonts/OFL.txt` in packaged builds.
+`share/doc/BendingSimulator/licenses/fonts/OFL.txt` in packaged builds.
 The repository's Apache license describes its tooling; this embedded font retains its own OFL.
 No glyph outlines were changed. Font embedding does not change the license of generated PDF documents.

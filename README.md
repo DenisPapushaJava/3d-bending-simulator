@@ -12,6 +12,8 @@
 
 ## Быстрый старт — Windows x64
 
+Целевая система: Windows 10 (1809+) / Windows 11, x64; [границы комплекта](docs/releases.md).
+
 В [релизах](https://github.com/DenisPapushaJava/3d-bending-simulator/releases) выберите Windows ZIP, распакуйте **весь** архив и запустите `bin/3d-bending-simulator.exe`. При отсутствии библиотек MSVC установите [Microsoft Visual C++ x64 Runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). Сохраняйте структуру папок комплекта. Учебные детали находятся в `share/3d-bending-simulator/examples`.
 
 Это экспериментальный alpha: интерактивный Windows/GPU ещё требует проверки. Состав возможностей и ограничения — в [истории изменений](CHANGELOG.md). `dependency-sources.zip` содержит исходники зависимостей и для обычного запуска не нужен.
