@@ -746,48 +746,51 @@ class OcctCanvas final : public QWidget {
     void updateNavigationCube() {
         if (!ready_ || context_.IsNull())
             return;
-        if (shape_.IsNull()) {
-            if (!navigationCube_.IsNull() && context_->IsDisplayed(navigationCube_))
-                context_->Remove(navigationCube_, false);
-            return;
-        }
-        const bool yup = preview_ && preview_->toolSetup();
-        const double ratio = devicePixelRatioF();
-        const bool created = navigationCube_.IsNull();
-        if (created) {
-            navigationCube_ = new AIS_ViewCube();
-            navigationCube_->SetAutoStartAnimation(false);
-            navigationCube_->SetDrawAxes(false);
-            navigationCube_->SetBoxColor(Quantity_Color(.86, .90, .94, Quantity_TOC_RGB));
-            navigationCube_->SetTextColor(Quantity_Color(.08, .12, .18, Quantity_TOC_RGB));
-            navigationCube_->Attributes()->TextAspect()->Aspect()->SetTextFontAspect(Font_FA_Bold);
-        }
-        const bool changed = created || navigationCube_->IsYup() != yup || cubeRatio_ != ratio;
-        if (changed) {
-            navigationCube_->SetYup(yup, false);
-            navigationCube_->SetSize(64 * ratio);
-            navigationCube_->SetFontHeight(12 * ratio);
-            const auto label = [&](V3d_TypeOfOrientation side, const char *value) {
-                navigationCube_->SetBoxSideLabel(side, value);
-            };
-            label(V3d_Xpos, "СПРАВА");
-            label(V3d_Xneg, "СЛЕВА");
-            label(yup ? V3d_Ypos : V3d_Zpos, "СВЕРХУ");
-            label(yup ? V3d_Yneg : V3d_Zneg, "СНИЗУ");
-            label(yup ? V3d_Zpos : V3d_Yneg, "СПЕРЕДИ");
-            label(yup ? V3d_Zneg : V3d_Ypos, "СЗАДИ");
-            navigationCube_->SetTransformPersistence(new Graphic3d_TransformPers(
-                Graphic3d_TMF_TriedronPers, Aspect_TOTP_RIGHT_UPPER,
-                Graphic3d_Vec2i(qRound(82 * ratio), qRound(116 * ratio))));
-            cubeRatio_ = ratio;
-            if (context_->IsDisplayed(navigationCube_))
-                context_->Redisplay(navigationCube_, false);
-        }
-        const bool hidden = !context_->IsDisplayed(navigationCube_);
-        if (hidden)
-            context_->Display(navigationCube_, 0, 0, false);
-        if (changed || hidden)
-            view_->Redraw();
+        guarded([&] {
+            if (shape_.IsNull()) {
+                if (!navigationCube_.IsNull() && context_->IsDisplayed(navigationCube_))
+                    context_->Remove(navigationCube_, false);
+                return;
+            }
+            const bool yup = preview_ && preview_->toolSetup();
+            const double ratio = devicePixelRatioF();
+            const bool created = navigationCube_.IsNull();
+            if (created) {
+                navigationCube_ = new AIS_ViewCube();
+                navigationCube_->SetAutoStartAnimation(false);
+                navigationCube_->SetDrawAxes(false);
+                navigationCube_->SetBoxColor(Quantity_Color(.86, .90, .94, Quantity_TOC_RGB));
+                navigationCube_->SetTextColor(Quantity_Color(.08, .12, .18, Quantity_TOC_RGB));
+                navigationCube_->Attributes()->TextAspect()->Aspect()->SetTextFontAspect(
+                    Font_FA_Bold);
+            }
+            const bool changed = created || navigationCube_->IsYup() != yup || cubeRatio_ != ratio;
+            if (changed) {
+                navigationCube_->SetYup(yup, false);
+                navigationCube_->SetSize(64 * ratio);
+                navigationCube_->SetFontHeight(12 * ratio);
+                const auto label = [&](V3d_TypeOfOrientation side, const char *value) {
+                    navigationCube_->SetBoxSideLabel(side, value);
+                };
+                label(V3d_Xpos, "СПРАВА");
+                label(V3d_Xneg, "СЛЕВА");
+                label(yup ? V3d_Ypos : V3d_Zpos, "СВЕРХУ");
+                label(yup ? V3d_Yneg : V3d_Zneg, "СНИЗУ");
+                label(yup ? V3d_Zpos : V3d_Yneg, "СПЕРЕДИ");
+                label(yup ? V3d_Zneg : V3d_Ypos, "СЗАДИ");
+                navigationCube_->SetTransformPersistence(new Graphic3d_TransformPers(
+                    Graphic3d_TMF_TriedronPers, Aspect_TOTP_RIGHT_UPPER,
+                    Graphic3d_Vec2i(qRound(82 * ratio), qRound(116 * ratio))));
+                cubeRatio_ = ratio;
+                if (context_->IsDisplayed(navigationCube_))
+                    context_->Redisplay(navigationCube_, false);
+            }
+            const bool hidden = !context_->IsDisplayed(navigationCube_);
+            if (hidden)
+                context_->Display(navigationCube_, 0, 0, false);
+            if (changed || hidden)
+                view_->Redraw();
+        });
     }
 
     void updateDimensionButton() {
