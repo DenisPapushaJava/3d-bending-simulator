@@ -809,11 +809,12 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 const auto detail =
                     std::find_if(drawing->details.begin(), drawing->details.end(),
                                  [index](const auto &d) { return d.bendIndex == index; });
-                const auto &v = detail->view;
-                combined.angles.insert(combined.angles.end(), v.angles.begin(), v.angles.end());
-                combined.bendNotes.insert(combined.bendNotes.end(), v.bendNotes.begin(),
-                                          v.bendNotes.end());
-                for (const auto &dimension : v.dimensions) {
+                const auto &detailView = detail->view;
+                combined.angles.insert(combined.angles.end(), detailView.angles.begin(),
+                                       detailView.angles.end());
+                combined.bendNotes.insert(combined.bendNotes.end(), detailView.bendNotes.begin(),
+                                          detailView.bendNotes.end());
+                for (const auto &dimension : detailView.dimensions) {
                     const auto equalPoint = [](DrawingPoint a, DrawingPoint b) {
                         return std::hypot(a.x - b.x, a.y - b.y) < 1e-5;
                     };
@@ -838,9 +839,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                               detail.bendIndex) == profileGroup->members.end())
                     details.push_back(std::move(detail));
             drawing->details = std::move(details);
-            for (auto &v : drawing->views) {
-                v.labels.clear();
-                v.detailCircles.clear();
+            for (auto &projection : drawing->views) {
+                projection.labels.clear();
+                projection.detailCircles.clear();
             }
             profileGroup->marker.designation = "А1";
             drawing->views[0].sectionMarkers.push_back(profileGroup->marker);
@@ -872,8 +873,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         }
         drawing->unrecognizedCylindricalFaces = 0;
         for (int i = 1; i <= faces.Extent(); ++i) {
-            BRepAdaptor_Surface surface(TopoDS::Face(faces(i)));
-            if (surface.GetType() != GeomAbs_Cylinder || used[static_cast<std::size_t>(i)])
+            BRepAdaptor_Surface cylinderSurface(TopoDS::Face(faces(i)));
+            if (cylinderSurface.GetType() != GeomAbs_Cylinder || used[static_cast<std::size_t>(i)])
                 continue;
             double u0, u1, v0, v1;
             BRepTools::UVBounds(TopoDS::Face(faces(i)), u0, u1, v0, v1);
