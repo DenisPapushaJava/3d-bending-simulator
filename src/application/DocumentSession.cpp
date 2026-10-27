@@ -100,7 +100,7 @@ bool DocumentSession::setBendReview(std::size_t recognizedIndex, BendReview revi
     const auto *entry = bend(recognizedIndex);
     if (!document_ || active_ || !entry ||
         (review != BendReview::Pending && review != BendReview::Confirmed &&
-         review != BendReview::Excluded)) {
+         review != BendReview::Excluded && review != BendReview::Automatic)) {
         return false;
     }
     if (entry->review != review) {
@@ -113,12 +113,58 @@ bool DocumentSession::setBendReview(std::size_t recognizedIndex, BendReview revi
 bool DocumentSession::setBendTarget(std::size_t recognizedIndex,
                                     std::optional<core::BendTarget> target) {
     const auto *entry = bend(recognizedIndex);
-    if (!document_ || active_ || !entry || entry->review != BendReview::Confirmed ||
+    if (!document_ || active_ || !entry || !included(entry->review) ||
         (target && !core::validBendTarget(*target))) {
         return false;
     }
     if (entry->target != target) {
         bends_[*bendBindings_.byRecognizedBend[recognizedIndex]].target = target;
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+
+bool DocumentSession::setBendTools(std::size_t recognizedIndex,
+                                   std::optional<core::PressTools> tools) {
+    const auto *entry = bend(recognizedIndex);
+    if (!document_ || active_ || !entry || !included(entry->review) ||
+        (tools && !core::validPressTools(*tools))) {
+        return false;
+    }
+    if (entry->tools != tools || entry->catalogTools) {
+        auto &changed = bends_[*bendBindings_.byRecognizedBend[recognizedIndex]];
+        changed.tools = tools;
+        changed.catalogTools.reset();
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+
+std::optional<core::BendTarget> DocumentSession::bendTarget(std::size_t index) const {
+    const auto *entry = bend(index);
+    if (!document_ || !entry || !included(entry->review) ||
+        index >= document_->metadata().bendAnalysis.bends.size()) {
+        return {};
+    }
+    if (entry->target) {
+        return entry->target;
+    }
+    const auto &bend = document_->metadata().bendAnalysis.bends[index];
+    const core::BendTarget target{bend.angleRadians, bend.innerRadiusMm};
+    return core::validBendTarget(target) ? std::optional{target} : std::nullopt;
+}
+bool DocumentSession::setBendToolAssignment(std::size_t index, core::ToolAssignment assignment) {
+    const auto *entry = bend(index);
+    const auto parameters = core::toolParameters(assignment);
+    if (!document_ || active_ || !entry || !included(entry->review) || !parameters) {
+        return false;
+    }
+    if (entry->catalogTools != assignment || entry->tools != parameters) {
+        auto &changed = bends_[*bendBindings_.byRecognizedBend[index]];
+        changed.tools = parameters;
+        changed.catalogTools = std::move(assignment);
         modified_ = true;
         ++editRevision_;
     }

@@ -33,6 +33,9 @@ bool matches(const BendAnchor &a, const RecognizedBend &b, double lengthToleranc
            close(a.minimumStraightLengthMm, b.minimumStraightLengthMm);
 }
 } // namespace
+bool included(BendReview review) noexcept {
+    return review == BendReview::Confirmed || review == BendReview::Automatic;
+}
 bool validBendPreparations(const std::vector<BendPreparation> &entries) {
     if (entries.size() > 512) {
         return false;
@@ -55,9 +58,16 @@ bool validBendPreparations(const std::vector<BendPreparation> &entries) {
             !std::isfinite(distance(a.axisStart, a.axisEnd)) ||
             distance(a.axisStart, a.axisEnd) <= 0.0 ||
             (entry.review != BendReview::Pending && entry.review != BendReview::Confirmed &&
-             entry.review != BendReview::Excluded) ||
-            (entry.target && !core::validBendTarget(*entry.target))) {
+             entry.review != BendReview::Excluded && entry.review != BendReview::Automatic) ||
+            (entry.target && !core::validBendTarget(*entry.target)) ||
+            (entry.tools && !core::validPressTools(*entry.tools))) {
             return false;
+        }
+        if (entry.catalogTools) {
+            const auto parameters = core::toolParameters(*entry.catalogTools);
+            if (!parameters || !entry.tools || *parameters != *entry.tools) {
+                return false;
+            }
         }
     }
     return true;
@@ -101,7 +111,7 @@ BendBindings restoreBendPreparations(const BendAnalysis &analysis,
         } while (ids.contains(id));
         ids.insert(id);
         result.byRecognizedBend[b] = entries.size();
-        entries.push_back({std::move(id), anchorOf(analysis.bends[b]), BendReview::Pending, {}});
+        entries.push_back({std::move(id), anchorOf(analysis.bends[b]), BendReview::Automatic, {}});
     }
     return result;
 }

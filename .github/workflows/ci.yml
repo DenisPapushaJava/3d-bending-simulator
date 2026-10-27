@@ -2,11 +2,9 @@ name: CI
 
 on:
   pull_request:
-    paths-ignore: ['docs/**', 'design/**', '**/*.md']
   push:
     branches: [main]
     tags: ['v*']
-    paths-ignore: ['docs/**', 'design/**', '**/*.md']
   workflow_dispatch:
 
 permissions:
@@ -24,10 +22,26 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      fingerprint: ${{ steps.fingerprint.outputs.fingerprint }}
+      build: ${{ steps.scope.outputs.build }}
+      package: ${{ steps.scope.outputs.package }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Fingerprint build inputs
+        id: fingerprint
+        run: python3 scripts/ci_scope.py --github-output "$GITHUB_OUTPUT"
+      - name: Restore successful CI proof
+        if: github.ref_type != 'tag' && github.event_name != 'workflow_dispatch'
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ci-validated
+          key: ci-validated-v1-${{ steps.fingerprint.outputs.fingerprint }}
+      - name: Select build scope
+        id: scope
+        run: python3 scripts/ci_scope.py --proof "$RUNNER_TEMP/ci-validated/fingerprint" --github-output "$GITHUB_OUTPUT"
       - name: Validate version and release tag
         id: version
         env:
@@ -36,8 +50,10 @@ jobs:
       - name: Check release version rules
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check C++ formatting
+        if: steps.scope.outputs.build == 'true'
         run: find src tests tools -type f \( -name '*.h' -o -name '*.cpp' \) -print0 | xargs -0 clang-format-18 --dry-run --Werror
       - name: Check domain without Qt or OCCT
+        if: steps.scope.outputs.build == 'true'
         run: |
           cmake --preset core --no-warn-unused-cli -DCMAKE_DISABLE_FIND_PACKAGE_Qt6=ON -DCMAKE_DISABLE_FIND_PACKAGE_OpenCASCADE=ON
           cmake --build --preset core --parallel 2
@@ -46,6 +62,7 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     needs: quality
+    if: needs.quality.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -120,48 +137,76 @@ jobs:
         run: cmake --build --preset release --parallel 2
       - name: Test core, OCCT and app startup
         run: ctest --preset release
-      - name: Package Ubuntu 24.04 / Mint 22 .deb
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p out
-          cd build/release
-          cpack -G DEB -B ../../out
-          cd ../..
-          dpkg-deb --info out/*.deb
-          dpkg-deb --extract out/*.deb out/linux-check
-          QT_QPA_PLATFORM=offscreen out/linux-check/usr/bin/3d-bending-simulator --smoke-test
-          QT_QPA_PLATFORM=offscreen out/linux-check/usr/bin/3d-bending-simulator --smoke-test out/linux-check/usr/share/3d-bending-simulator/examples/plate-inch.stp
-          xvfb-run -a -s "-screen 0 1920x1200x24" env QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 out/linux-check/usr/bin/3d-bending-simulator --graphics-smoke-test out/linux-check/usr/share/3d-bending-simulator/examples/angle-mm.step
       - name: Package Windows and corresponding sources
-        if: runner.os == 'Windows' && github.event_name != 'pull_request'
+        if: runner.os == 'Windows' && needs.quality.outputs.package == 'true'
         shell: pwsh
         run: python scripts/package_windows.py --qt-root "$env:QT_ROOT_DIR" --vcpkg-root "$pwd/.deps/vcpkg"
       - name: Checksums
-        if: github.event_name != 'pull_request'
+        if: runner.os == 'Windows' && needs.quality.outputs.package == 'true'
         shell: python
         run: |
           import hashlib
           from pathlib import Path
-          paths = sorted(p for p in Path('out').iterdir() if p.suffix in {'.zip', '.deb'})
-          with Path('out/SHA256SUMS-${{ runner.os }}.txt').open('w') as out:
+          paths = sorted(Path('out').glob('*.zip'))
+          if not paths:
+              raise SystemExit('Windows release ZIPs are missing')
+          with Path('out/SHA256SUMS.txt').open('w') as out:
               for path in paths:
                   out.write(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n')
       - name: Build artifacts
-        if: github.event_name != 'pull_request'
+        if: runner.os == 'Windows' && needs.quality.outputs.package == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: packages-${{ runner.os }}
+          name: windows-release
           path: |
             out/*.zip
-            out/*.deb
-            out/SHA256SUMS-*.txt
+            out/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7
+
+  ci:
+    name: CI
+    if: always()
+    needs: [quality, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require successful checks or validated reuse
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          BUILD: ${{ needs.build.result }}
+          BUILD_REQUIRED: ${{ needs.quality.outputs.build }}
+        run: |
+          test "$QUALITY" = success
+          if [ "$BUILD_REQUIRED" = true ]; then
+            test "$BUILD" = success
+          else
+            test "$BUILD_REQUIRED" = false
+            test "$BUILD" = skipped
+          fi
+      - name: Record successful full validation
+        if: needs.quality.outputs.build == 'true'
+        shell: python
+        env:
+          FINGERPRINT: ${{ needs.quality.outputs.fingerprint }}
+        run: |
+          import os
+          from pathlib import Path
+          proof = Path(os.environ['RUNNER_TEMP']) / 'ci-validated'
+          proof.mkdir(parents=True, exist_ok=True)
+          (proof / 'fingerprint').write_text(os.environ['FINGERPRINT'] + '\n', encoding='ascii')
+      - name: Save successful CI proof
+        if: needs.quality.outputs.build == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ci-validated
+          key: ci-validated-v1-${{ needs.quality.outputs.fingerprint }}
 
   release:
     name: Draft GitHub Release
     if: github.ref_type == 'tag'
-    needs: [quality, build]
+    needs: [quality, ci]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -174,8 +219,8 @@ jobs:
         run: test -f LICENSE
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: windows-release
           path: release-assets
-          merge-multiple: true
       - name: Create or update the draft
         env:
           GH_TOKEN: ${{ github.token }}
