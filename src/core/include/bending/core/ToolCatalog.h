@@ -8,7 +8,28 @@
 
 namespace bending::core {
 enum class ToolKind { Punch, Die };
-// Catalogue facts only. All current simulation bodies remain idealized working profiles.
+struct DrawingPoint {
+    double x = 0;
+    double y = 0;
+    bool operator==(const DrawingPoint &) const = default;
+};
+struct DrawingEdge {
+    DrawingPoint start;
+    DrawingPoint end;
+    std::optional<DrawingPoint> center; // Null: line. Otherwise circular arc.
+    double sweepRadians = 0;            // Signed mathematical XY sweep.
+    bool operator==(const DrawingEdge &) const = default;
+};
+// Source drawing for inspection only; never silently substituted for the simulation body.
+struct ToolDrawing {
+    std::string sourceFile;
+    std::string sha256;
+    bool millimeters = false;
+    std::vector<DrawingEdge> edges; // One ordered closed contour, no annotation/axes.
+    bool operator==(const ToolDrawing &) const = default;
+};
+[[nodiscard]] bool validToolDrawing(const ToolDrawing &drawing);
+// Catalogue facts only. Simulation bodies remain idealized working profiles.
 struct ToolPreset {
     std::string id;
     std::string manufacturer;
@@ -22,6 +43,8 @@ struct ToolPreset {
     std::string source;
     std::string notes;
     bool teaching = false;
+    bool parametersConfirmed = true; // False: inventory entry, unavailable for assignment/search.
+    std::optional<ToolDrawing> drawing = std::nullopt;
     bool operator==(const ToolPreset &) const = default;
 };
 using ToolCatalog = std::vector<ToolPreset>;

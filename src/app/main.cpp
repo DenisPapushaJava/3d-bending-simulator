@@ -1,4 +1,5 @@
 #include "bending/Version.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
@@ -6,6 +7,7 @@
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <QSettings>
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -13,6 +15,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QIcon>
 #include <QPalette>
 #include <QTimer>
 #include <algorithm>
@@ -49,6 +52,12 @@ int main(int argc, char *argv[]) {
     app.setPalette(palette);
     QCoreApplication::setOrganizationName(QStringLiteral("3D Bending Simulator"));
     QCoreApplication::setApplicationName(QStringLiteral("3D Bending Simulator"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("3d-bending-simulator"));
+    QIcon applicationIcon;
+    for (int size : {16, 24, 32, 48, 64, 128, 256}) {
+        applicationIcon.addFile(QStringLiteral(":/app/icons/%1.png").arg(size), QSize(size, size));
+    }
+    QApplication::setWindowIcon(applicationIcon);
     QCoreApplication::setApplicationVersion(QString::fromUtf8(
         bending::version.data(), static_cast<qsizetype>(bending::version.size())));
 
@@ -83,8 +92,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     auto tools = std::get<bending::core::ToolCatalog>(std::move(catalogue));
-    if (parser.isSet(toolCatalogOption)) {
-        const auto argument = parser.value(toolCatalogOption);
+    const auto savedCatalog =
+        (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
+            ? QString{}
+            : QSettings().value(QStringLiteral("tools/catalogPath")).toString();
+    if (parser.isSet(toolCatalogOption) || !savedCatalog.isEmpty()) {
+        const auto argument =
+            parser.isSet(toolCatalogOption) ? parser.value(toolCatalogOption) : savedCatalog;
 #ifdef _WIN32
         const auto path = std::filesystem::path(argument.toStdWString());
 #else
@@ -92,17 +106,21 @@ int main(int argc, char *argv[]) {
 #endif
         const auto extra = bending::project::readToolCatalog(path);
         if (const auto *error = std::get_if<std::string>(&extra)) {
-            qCritical() << "Custom tool catalogue failed:" << QString::fromStdString(*error);
-            return 1;
+            if (parser.isSet(toolCatalogOption)) {
+                qCritical() << "Custom tool catalogue failed:" << QString::fromStdString(*error);
+                return 1;
+            }
+            qWarning() << "Saved tool catalogue unavailable:" << QString::fromStdString(*error);
         }
-        for (const auto &preset : std::get<bending::core::ToolCatalog>(extra)) {
-            const auto it = std::find_if(tools.begin(), tools.end(),
-                                         [&](const auto &t) { return t.id == preset.id; });
-            if (it == tools.end())
-                tools.push_back(preset);
-            else
-                *it = preset;
-        }
+        if (const auto *additional = std::get_if<bending::core::ToolCatalog>(&extra))
+            for (const auto &preset : *additional) {
+                const auto it = std::find_if(tools.begin(), tools.end(),
+                                             [&](const auto &t) { return t.id == preset.id; });
+                if (it == tools.end())
+                    tools.push_back(preset);
+                else
+                    *it = preset;
+            }
         if (!bending::core::validToolCatalog(tools)) {
             qCritical() << "Merged tool catalogue is invalid";
             return 1;
@@ -110,6 +128,8 @@ int main(int argc, char *argv[]) {
     }
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
+    window.setToolCatalogLoader(bending::project::readToolCatalog);
+    window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());
@@ -138,8 +158,9 @@ int main(int argc, char *argv[]) {
             }
             if (parser.isSet(smokeTest) && !parser.isSet(graphicsTest)) {
                 timer->stop();
-                const bool ready =
-                    window.isVisible() && window.centralWidget() != nullptr && viewer != nullptr;
+                const bool ready = window.isVisible() && window.centralWidget() != nullptr &&
+                                   viewer != nullptr &&
+                                   !window.windowIcon().pixmap(32, 32).isNull();
                 app.exit(ready ? 0 : 1);
             } else if (viewer && viewer->isReady()) {
                 timer->stop();

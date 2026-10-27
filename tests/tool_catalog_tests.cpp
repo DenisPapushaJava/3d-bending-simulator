@@ -1,4 +1,5 @@
 #include "bending/core/ToolCatalog.h"
+#include "bending/core/ToolSelection.h"
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -64,6 +65,51 @@ int main() {
         require(punchLengthMm(legacy) == 100 && validPressTools(legacy), "Legacy lengths changed");
         legacy.punchLengthMm = std::numeric_limits<double>::infinity();
         require(!validPressTools(legacy), "Invalid upper length accepted");
+        const ToolSelectionRequest request{2, std::numbers::pi / 2, 3, 100};
+        const auto result = selectTools({punch, die}, request);
+        require(result.validRequest && result.candidates.size() == 4 &&
+                    result.candidates.front().groove == 1 &&
+                    result.candidates.front().openingThicknessRatio == 8,
+                "Selection did not rank V16 for 2 mm first");
+        require(screenTools({4, std::numbers::pi / 2, 3, 100}, punch, die, 1) ==
+                    ToolRejection::NarrowOpening,
+                "Out-of-scope V/t offered");
+        require(screenTools({2, std::numbers::pi / 2, .8, 100}, punch, die, 1) ==
+                    ToolRejection::Radius,
+                "Nose radius equality silently certified");
+        require(screenTools({2, std::numbers::pi * .8, 3, 100}, punch, die, 1) ==
+                    ToolRejection::Angle,
+                "Internal angle and bend turn confused");
+        require(screenTools({2, std::numbers::pi / 2, 3, 600}, punch, die, 1) ==
+                    ToolRejection::TooShort,
+                "Short punch offered");
+        bad = punch;
+        bad.parametersConfirmed = false;
+        bad.lengthMm = 0;
+        require(validToolPreset(bad) && !toolParameters({bad, die, 0, 10, ""}) &&
+                    selectTools({bad, die}, request).candidates.empty() &&
+                    selectTools({bad, die}, request).missingData == 1,
+                "Incomplete inventory became executable");
+        bad = punch;
+        bad.teaching = true;
+        require(selectTools({bad, die}, request).candidates.empty(),
+                "Teaching tool recommended as workshop stock");
+        require(!selectTools({punch, die}, {0, 1, 3, 100}).validRequest &&
+                    selectTools({punch, die}, {2, 1, 3, 10000}).candidates.empty(),
+                "Bad input or impossible length accepted");
+        const ToolDrawing drawing{"own.dxf",
+                                  std::string(64, 'a'),
+                                  true,
+                                  {{{0, 0}, {2, 0}, {}, 0},
+                                   {{2, 0}, {0, 2}, DrawingPoint{0, 0}, std::numbers::pi / 2},
+                                   {{0, 2}, {0, 0}, {}, 0}}};
+        require(validToolDrawing(drawing), "Analytic contour rejected");
+        auto broken = drawing;
+        broken.edges[1].sweepRadians = -std::numbers::pi / 2;
+        require(!validToolDrawing(broken), "Wrong arc sweep accepted");
+        broken = drawing;
+        broken.edges.pop_back();
+        require(!validToolDrawing(broken), "Open contour accepted");
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         return 1;

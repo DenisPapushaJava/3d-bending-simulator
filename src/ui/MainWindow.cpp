@@ -1,4 +1,5 @@
 #include "bending/ui/MainWindow.h"
+#include "DrawingDialog.h"
 #include "ProcessStepButton.h"
 #include "ToolSelectionWidget.h"
 
@@ -13,7 +14,9 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QDropEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -24,6 +27,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -33,11 +37,13 @@
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -67,6 +73,19 @@ std::filesystem::path nativePath(const QString &path) {
     return std::filesystem::path(
         std::string(utf8.constData(), static_cast<std::size_t>(utf8.size())));
 #endif
+}
+QString fileDropPath(const QMimeData *mime, bool inspectFile) {
+    if (!mime || !mime->hasUrls())
+        return {};
+    const auto urls = mime->urls();
+    if (urls.size() != 1 || !urls.front().isLocalFile())
+        return {};
+    const QFileInfo file(urls.front().toLocalFile());
+    const auto suffix = file.suffix().toLower();
+    if (suffix != QStringLiteral("step") && suffix != QStringLiteral("stp") &&
+        suffix != QStringLiteral("bend"))
+        return {};
+    return !inspectFile || file.isFile() ? file.filePath() : QString{};
 }
 QString number(double value) {
     return QLocale::system().toString(value, 'g', 8);
@@ -221,9 +240,10 @@ class MainWindow::Impl {
             } else {
                 project->addItem(QStringLiteral("Деталь не загружена"));
                 project->setToolTip({});
-                properties->setText(QStringLiteral(
-                    "Откройте STEP отдельной детали: Файл → Открыть STEP…\n\nПоддерживается одно "
-                    "корректное объёмное тело.\nЕдиницы будут приведены к мм."));
+                properties->setText(
+                    QStringLiteral("Перетащите STEP/STP или проект .bend в окно, либо выберите "
+                                   "Файл → Открыть…\n\nПоддерживается одно "
+                                   "корректное объёмное тело.\nЕдиницы будут приведены к мм."));
                 window->setWindowTitle(title);
             }
         }
@@ -311,15 +331,20 @@ class MainWindow::Impl {
         bendList->setEnabled(document && !controller->hasWork());
         updateBendReviews();
         showSelectedBend(false);
-        camera->setEnabled(viewer->isReady() && document != nullptr);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
-        const bool cancellable =
-            session.activeRequest().has_value() || controller->isPreparingPreview();
+        if (drawingAction)
+            drawingAction->setEnabled(document && drawingBuilder && !controller->hasWork());
+        const bool cancellable = session.activeRequest().has_value() ||
+                                 controller->isPreparingPreview() ||
+                                 controller->isPreparingDrawing();
         cancelAction->setVisible(cancellable);
         cancelAction->setEnabled(cancellable);
         progress->setVisible(session.activeRequest().has_value() || controller->isSaving() ||
-                             controller->isPreparingPreview());
-        if (controller->isPreparingPreview()) {
+                             controller->isPreparingPreview() || controller->isPreparingDrawing());
+        if (controller->isPreparingDrawing()) {
+            window->statusBar()->showMessage(
+                QStringLiteral("Подготовка проекций и размеров листа…"));
+        } else if (controller->isPreparingPreview()) {
             window->statusBar()->showMessage(
                 QStringLiteral("Восстановление заготовки и подготовка состояний сгиба…"));
         } else if (controller->isSaving()) {
@@ -420,7 +445,7 @@ class MainWindow::Impl {
         const bool chosen =
             tools && (toolSelection->usesCatalog() || toolDraftChanged || (entry && entry->tools));
         partName->setText(document ? displayPath(document->metadata().sourcePath.filename())
-                                   : QStringLiteral("Начните с CAD-модели"));
+                                   : QStringLiteral("Перетащите STEP/STP или .bend в окно"));
         partToolSummary->setText(
             chosen ? QStringLiteral("Инструмент: %1").arg(toolSelection->summary()) : QString{});
         partToolSummary->setVisible(document && chosen);
@@ -542,6 +567,16 @@ class MainWindow::Impl {
         fixedSide->setEnabled(document && !controller->hasWork());
         toolMode->setEnabled(document && !controller->hasWork());
         const bool toolEditable = entry && included(entry->review) && !controller->hasWork();
+        std::optional<core::ToolSelectionRequest> selectionRequest;
+        if (document && entry && included(entry->review) && matchingThickness && row >= 0 &&
+            static_cast<std::size_t>(row) < document->metadata().bendAnalysis.bends.size()) {
+            const auto &bend =
+                document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)];
+            if (const auto target = session.bendTarget(static_cast<std::size_t>(row)))
+                selectionRequest = core::ToolSelectionRequest{
+                    bend.thicknessMm, target->angleRadians, target->innerRadiusMm, bend.lengthMm};
+        }
+        toolSelection->setSelectionRequest(selectionRequest);
         toolSelection->setEnabled(toolEditable);
         applyTools->setEnabled(toolEditable && previewBuilder && supported && matchingThickness &&
                                session.bendTarget(static_cast<std::size_t>(row)).has_value());
@@ -1185,6 +1220,10 @@ class MainWindow::Impl {
     QPushButton *applyBendTarget = nullptr;
     QPushButton *resetBendTarget = nullptr;
     std::shared_ptr<const SingleBendPreviewBuilder> previewBuilder;
+    std::shared_ptr<const BendingDrawingBuilder> drawingBuilder;
+    QAction *drawingAction = nullptr;
+    std::optional<std::size_t> drawingBase;
+    std::uint64_t drawingBaseRevision = 0;
     application::BendPreviewPtr displayedPreview;
     QString previewDisplayError;
     QComboBox *fixedSide = nullptr;
@@ -1252,7 +1291,6 @@ class MainWindow::Impl {
     QPlainTextEdit *diagnostics = nullptr;
     QLabel *cutoutNotice = nullptr;
     QPushButton *showCutouts = nullptr;
-    QToolBar *camera = nullptr;
     QAction *closeAction = nullptr;
     QAction *cancelAction = nullptr;
     QProgressBar *progress = nullptr;
@@ -1271,6 +1309,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->writer = std::move(writer);
     impl_->previewBuilder = std::move(previewBuilder);
     setObjectName(QStringLiteral("mainWindow"));
+    setAcceptDrops(true);
     setStyleSheet(QStringLiteral(
         "QPushButton#partPrimaryAction,QPushButton#applyToolSetup,"
         "QPushButton#checkBend,QPushButton#playBend{background:#087F83;color:white;"
@@ -1334,11 +1373,30 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->cancelAction, &QAction::triggered, impl_->controller, &ImportController::cancel);
     impl_->closeAction = fileMenu->addAction(QStringLiteral("Закрыть деталь"));
     impl_->closeAction->setObjectName(QStringLiteral("closeDocumentAction"));
-    impl_->closeAction->setShortcut(QKeySequence::Close);
+    impl_->closeAction->setIconText(QStringLiteral("Закрыть"));
+    impl_->closeAction->setIcon(style()->standardIcon(QStyle::SP_DialogCloseButton));
+    impl_->closeAction->setToolTip(QStringLiteral("Закрыть деталь · Ctrl+W"));
+    impl_->closeAction->setShortcuts(
+        {QKeySequence(QStringLiteral("Ctrl+W")), QKeySequence(QStringLiteral("Ctrl+F4"))});
     connect(impl_->closeAction, &QAction::triggered, this, [this] {
         if (impl_->canDiscard()) {
             impl_->controller->closeDocument();
         }
+    });
+    impl_->drawingAction = fileMenu->addAction(QStringLiteral("Лист гибки / PDF…"));
+    impl_->drawingAction->setObjectName(QStringLiteral("bendingDrawingAction"));
+    impl_->drawingAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+    impl_->drawingAction->setEnabled(false);
+    connect(impl_->drawingAction, &QAction::triggered, this, [this] {
+        const auto &session = impl_->controller->session();
+        if (!impl_->drawingBuilder || !session.document() || impl_->controller->hasWork())
+            return;
+        impl_->stopPlayback();
+        DrawingDialog dialog(*impl_->controller, impl_->drawingBuilder,
+                             impl_->drawingBaseRevision == session.revision() ? impl_->drawingBase
+                                                                              : std::nullopt,
+                             this);
+        dialog.exec();
     });
     fileMenu->addSeparator();
     auto *exit = fileMenu->addAction(QStringLiteral("Выход"));
@@ -1350,7 +1408,15 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     toolbar->setObjectName(QStringLiteral("workflowToolbar"));
     toolbar->setMovable(false);
     toolbar->addAction(open);
+    auto *quickClose = new QToolButton(toolbar);
+    quickClose->setObjectName(QStringLiteral("quickClosePart"));
+    quickClose->setDefaultAction(impl_->closeAction);
+    quickClose->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    quickClose->setToolTip(QStringLiteral("Закрыть деталь · Ctrl+W"));
+    quickClose->setAccessibleName(QStringLiteral("Закрыть текущую деталь"));
+    toolbar->addWidget(quickClose);
     toolbar->addAction(impl_->saveAction);
+    toolbar->addAction(impl_->drawingAction);
     toolbar->addAction(impl_->cancelAction);
     auto *toolSetupAction = viewMenu->addAction(QStringLiteral("Инструмент"));
     toolSetupAction->setObjectName(QStringLiteral("toolSetupAction"));
@@ -1358,25 +1424,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->propertyTabs->setCurrentIndex(3);
         impl_->propertyTabs->parentWidget()->show();
     });
-    impl_->camera = addToolBar(QStringLiteral("Камера"));
-    impl_->camera->setObjectName(QStringLiteral("cameraToolbar"));
-    impl_->camera->setMovable(false);
-    auto *fit = impl_->camera->addAction(QStringLiteral("Вписать · F"));
-    auto *views = new QMenu(QStringLiteral("Ракурс"), impl_->camera);
-    auto *viewButton = new QToolButton(impl_->camera);
-    viewButton->setText(QStringLiteral("Ракурс"));
-    viewButton->setMenu(views);
-    viewButton->setPopupMode(QToolButton::InstantPopup);
-    impl_->camera->addWidget(viewButton);
-    connect(fit, &QAction::triggered, impl_->viewer, &viewer::ViewerWidget::fitAll);
-    const auto orientation = [&](const QString &label, viewer::ViewerWidget::Orientation value) {
-        auto *action = views->addAction(label);
-        connect(action, &QAction::triggered, impl_->viewer,
-                [this, value] { impl_->viewer->setOrientation(value); });
-    };
-    orientation(QStringLiteral("Изометрия"), viewer::ViewerWidget::Orientation::Isometric);
-    orientation(QStringLiteral("Сверху"), viewer::ViewerWidget::Orientation::Top);
-    orientation(QStringLiteral("Спереди"), viewer::ViewerWidget::Orientation::Front);
+    if (auto *navigation = impl_->viewer->navigationMenu())
+        viewMenu->addMenu(navigation);
 
     const auto addDock = [&](const QString &name, const QString &title, QWidget *widget,
                              Qt::DockWidgetArea area) {
@@ -2053,11 +2102,16 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     static_cast<std::size_t>(index) <= session.document()->faces().size()) {
                     const auto &face =
                         session.document()->faces()[static_cast<std::size_t>(index - 1)];
+                    impl_->drawingBase = face.surface == SurfaceKind::Plane
+                                             ? std::optional{face.index}
+                                             : std::nullopt;
+                    impl_->drawingBaseRevision = session.revision();
                     impl_->selection->setText(
                         QStringLiteral("Грань №%1\nПоверхность: %2\nПлощадь: %3 мм²")
                             .arg(face.index)
                             .arg(surfaceName(face.surface), number(face.areaMm2)));
                 } else {
+                    impl_->drawingBase.reset();
                     impl_->selection->setText(
                         QStringLiteral("Грань не выбрана. Нажмите ЛКМ на модели."));
                 }
@@ -2076,10 +2130,34 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     .arg(QString::fromLatin1(qVersion()), cadVersion));
     });
     impl_->refresh();
+    qApp->installEventFilter(this);
 }
 
 MainWindow::~MainWindow() {
+    qApp->removeEventFilter(this);
     impl_->controller->shutdown();
+}
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    const auto type = event->type();
+    if (type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::Drop)
+        return QMainWindow::eventFilter(watched, event);
+    const auto *widget = qobject_cast<QWidget *>(watched);
+    if (!widget || widget->window() != this)
+        return QMainWindow::eventFilter(watched, event);
+    auto *drop = static_cast<QDropEvent *>(event);
+    if (!drop->mimeData() || !drop->mimeData()->hasUrls())
+        return QMainWindow::eventFilter(watched, event);
+    const auto path = fileDropPath(drop->mimeData(), type != QEvent::DragMove);
+    if (path.isEmpty() || !(drop->possibleActions() & Qt::CopyAction) ||
+        QApplication::activeModalWidget() || !isEnabled()) {
+        drop->ignore();
+        return true;
+    }
+    drop->setDropAction(Qt::CopyAction);
+    drop->accept();
+    if (type == QEvent::Drop)
+        openStep(path);
+    return true;
 }
 void MainWindow::openStep(const QString &path) {
     if (!path.isEmpty() && impl_->canDiscard()) {
@@ -2096,5 +2174,15 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     }
     impl_->controller->closeDocument();
     QMainWindow::closeEvent(event);
+}
+void MainWindow::setToolCatalogLoader(
+    std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
+        loader) {
+    impl_->toolSelection->loadCatalog = std::move(loader);
+}
+void MainWindow::setDrawingBuilder(
+    std::shared_ptr<const application::BendingDrawingBuilder> builder) {
+    impl_->drawingBuilder = std::move(builder);
+    impl_->refresh();
 }
 } // namespace bending::ui

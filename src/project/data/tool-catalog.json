@@ -1,6 +1,6 @@
 {
   "format": "bending-tool-catalog",
-  "version": 1,
+  "version": 2,
   "tools": [
     {
       "id": "s-tool-st2401s",
@@ -157,6 +157,115 @@
       "source": "Собственная параметрическая модель проекта, MIT",
       "notes": "Условный профиль с острыми плечами, без станка.",
       "teaching": true
+    },
+    {
+      "id": "s-tool-st1701s",
+      "manufacturer": "S-Tool",
+      "code": "ST1701S",
+      "kind": "punch",
+      "angleRadians": 0.5235987755982988,
+      "lengthMm": 835,
+      "heightMm": 150,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "Параметры пользовательских DXF/подписей DWG заказов ST396/ST398, 2026-10-19",
+      "notes": "Размеры подтверждены подписью ST1701S A30° H150 R0.8 и L835 в DWG ST396. Полный габарит DXF 180 мм включает хвостовик; H150 не заменяется габаритом.",
+      "teaching": false,
+      "parametersConfirmed": true
+    },
+    {
+      "id": "s-tool-st1405m",
+      "manufacturer": "S-Tool",
+      "code": "ST1405M",
+      "kind": "punch",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 415,
+      "heightMm": 130,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "Параметры пользовательских DXF/подписей DWG заказов ST396/ST398, 2026-10-19",
+      "notes": "Исполнение L415 подписано в заказе ST398. Профиль с хвостовиком имеет полный габарит 160 мм; рабочая высота H130.",
+      "teaching": false,
+      "parametersConfirmed": true
+    },
+    {
+      "id": "s-tool-st2263",
+      "manufacturer": "S-Tool",
+      "code": "ST2263",
+      "kind": "die",
+      "angleRadians": 0.0,
+      "lengthMm": 0,
+      "heightMm": null,
+      "noseRadiusMm": null,
+      "openingsMm": [],
+      "source": "Параметры пользовательских DXF/подписей DWG заказов ST396/ST398, 2026-10-19",
+      "notes": "Миллиметры подтверждены пользователем 2026-10-19; в HEADER единицы отсутствуют. Требуют подтверждения V, угол, рабочая длина и крепление. Контур доступен для просмотра.",
+      "teaching": false,
+      "parametersConfirmed": false
+    },
+    {
+      "id": "s-tool-st1405f",
+      "manufacturer": "S-Tool",
+      "code": "ST1405F",
+      "kind": "punch",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 0,
+      "heightMm": 130,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "Параметры пользовательских DXF/подписей DWG заказов ST396/ST398, 2026-10-19",
+      "notes": "Набор секций, а не непрерывный инструмент L835. Для расчёта требуется конкретная секция/состав установки. Рожковые концы ST1405F не представлены обычным сечением.",
+      "teaching": false,
+      "parametersConfirmed": false
+    },
+    {
+      "id": "s-tool-st1701f",
+      "manufacturer": "S-Tool",
+      "code": "ST1701F",
+      "kind": "punch",
+      "angleRadians": 0.5235987755982988,
+      "lengthMm": 0,
+      "heightMm": 150,
+      "noseRadiusMm": 0.8,
+      "openingsMm": [],
+      "source": "Параметры пользовательских DXF/подписей DWG заказов ST396/ST398, 2026-10-19",
+      "notes": "Набор секций, а не непрерывный инструмент L835. Для расчёта требуется конкретная секция/состав установки. Рожковые концы ST1405F не представлены обычным сечением.",
+      "teaching": false,
+      "parametersConfirmed": false
+    },
+    {
+      "id": "s-tool-st3408f",
+      "manufacturer": "S-Tool",
+      "code": "ST3408F",
+      "kind": "die",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 0,
+      "heightMm": 120,
+      "noseRadiusMm": null,
+      "openingsMm": [
+        8
+      ],
+      "source": "Параметры пользовательских DXF/подписей DWG заказов ST396/ST398, 2026-10-19",
+      "notes": "Набор секций, а не непрерывный инструмент L835. Для расчёта требуется конкретная секция/состав установки. Рожковые концы ST1405F не представлены обычным сечением.",
+      "teaching": false,
+      "parametersConfirmed": false
+    },
+    {
+      "id": "s-tool-st3412f",
+      "manufacturer": "S-Tool",
+      "code": "ST3412F",
+      "kind": "die",
+      "angleRadians": 1.0471975511965976,
+      "lengthMm": 0,
+      "heightMm": 120,
+      "noseRadiusMm": null,
+      "openingsMm": [
+        12
+      ],
+      "source": "Параметры пользовательских DXF/подписей DWG заказов ST396/ST398, 2026-10-19",
+      "notes": "Набор секций, а не непрерывный инструмент L835. Для расчёта требуется конкретная секция/состав установки. Рожковые концы ST1405F не представлены обычным сечением.",
+      "teaching": false,
+      "parametersConfirmed": false
     }
   ]
 }

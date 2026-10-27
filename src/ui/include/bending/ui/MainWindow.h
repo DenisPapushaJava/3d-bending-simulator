@@ -3,11 +3,15 @@
 #include "bending/core/ToolCatalog.h"
 #include <QMainWindow>
 
+#include "bending/application/BendingDrawing.h"
 #include "bending/application/DocumentImporter.h"
 #include "bending/application/ProjectWriter.h"
 #include "bending/application/SingleBendPreview.h"
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <string_view>
+#include <variant>
 
 namespace bending::ui {
 class ImportController;
@@ -27,9 +31,14 @@ class MainWindow final : public QMainWindow {
     ~MainWindow() override;
     void openStep(const QString &path);
     [[nodiscard]] ImportController &importController() const;
+    void setToolCatalogLoader(
+        std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
+            loader);
+    void setDrawingBuilder(std::shared_ptr<const application::BendingDrawingBuilder> builder);
 
   protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
     class Impl;

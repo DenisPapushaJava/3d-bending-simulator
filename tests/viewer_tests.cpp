@@ -1,5 +1,6 @@
 #include "bending/viewer/ViewerWidget.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
@@ -35,6 +36,9 @@ int differences(const QImage &first, const QImage &second) {
     int count = 0;
     for (int y = 0; y < first.height(); y += 4) {
         for (int x = 0; x < first.width(); x += 4) {
+            // Camera assertions must measure the model, not the rotating navigation cube.
+            if (x > first.width() - 200 && y < 195)
+                continue;
             count += first.pixel(x, y) != second.pixel(x, y) ? 1 : 0;
         }
     }
@@ -102,13 +106,24 @@ int main(int argc, char *argv[]) {
             require(initial.width() == qRound(canvas->width() * canvas->devicePixelRatioF()),
                     "Framebuffer size must use physical pixels");
 
-            int selection = 0;
-            QObject::connect(&widget, &Viewer::selectionChanged,
-                             [&](quint64, int value) { selection = value; });
+            int selection = 0, selectionSignals = 0;
+            QObject::connect(&widget, &Viewer::selectionChanged, [&](quint64, int value) {
+                selection = value;
+                ++selectionSignals;
+            });
             const auto center = canvas->rect().center();
             mouse(canvas, QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton);
             mouse(canvas, QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton);
             require(selection > 0, "Clicking the primitive must select a real CAD face");
+            const auto beforeCube = widget.captureImage();
+            const auto signalsBeforeCube = selectionSignals;
+            const auto cube = QPoint(canvas->width() - 100, 116);
+            mouse(canvas, QEvent::MouseButtonPress, cube, Qt::LeftButton, Qt::LeftButton);
+            mouse(canvas, QEvent::MouseButtonRelease, cube, Qt::LeftButton, Qt::NoButton);
+            require(differences(beforeCube, widget.captureImage()) > 200 &&
+                        selectionSignals == signalsBeforeCube && selection > 0,
+                    "Cube did not change the model view or changed the CAD selection");
+            widget.setOrientation(Viewer::Orientation::Isometric);
             mouse(canvas, QEvent::MouseButtonPress, {5, 5}, Qt::LeftButton, Qt::LeftButton);
             mouse(canvas, QEvent::MouseButtonRelease, {5, 5}, Qt::LeftButton, Qt::NoButton);
             require(selection == 0, "Clicking empty space must clear the selection");
@@ -116,6 +131,27 @@ int main(int argc, char *argv[]) {
             widget.setOrientation(Viewer::Orientation::Top);
             require(differences(initial, widget.captureImage()) > 200,
                     "Top projection did not change");
+            widget.setOrientation(Viewer::Orientation::Isometric);
+            const auto edged = widget.captureImage();
+            auto *wireframe = widget.findChild<QAction *>(QStringLiteral("displayWireframe"));
+            auto *shaded = widget.findChild<QAction *>(QStringLiteral("displayShaded"));
+            auto *edges = widget.findChild<QAction *>(QStringLiteral("displayEdges"));
+            require(wireframe && shaded && edges && edges->isChecked(),
+                    "Viewport display choices are missing");
+            wireframe->trigger();
+            require(wireframe->isChecked() && differences(edged, widget.captureImage()) > 200,
+                    "Wireframe did not change the rendered model");
+            shaded->trigger();
+            require(shaded->isChecked() && differences(edged, widget.captureImage()) > 5,
+                    "Shaded mode retained model edges");
+            edges->trigger();
+            require(edges->isChecked(), "Display choices are not exclusive");
+            for (const char *name : {"viewBack", "viewLeft", "viewRight", "viewBottom"}) {
+                auto *action = widget.findChild<QAction *>(QString::fromLatin1(name));
+                require(action && action->isEnabled(), "A standard view is missing");
+                action->trigger();
+                require(!widget.captureImage().isNull(), "A standard view lost the context");
+            }
             widget.setOrientation(Viewer::Orientation::Isometric);
             const auto beforeRotate = widget.captureImage();
             drag(canvas, Qt::RightButton, center, center + QPoint(65, 40));
