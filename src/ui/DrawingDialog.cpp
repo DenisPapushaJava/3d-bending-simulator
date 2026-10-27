@@ -90,13 +90,18 @@ class DrawingDialog::Impl {
                                 .arg(QString::fromStdString(error->detail)));
         } else if (drawing && !settingsChanged) {
             const bool cut = drawing->views[0].omittedX.has_value();
+            const auto coverage = application::drawingMeasurementCoverage(*drawing);
             status->setText(
-                QStringLiteral("Готово · A3 · %1 лист(а)%2. Все размеры справочные; подписи и "
-                               "допуски не назначены.")
+                QStringLiteral("%1 · A3 · %2 лист(а)%3. Размеры полок и углы: %4 из %5 "
+                               "распознанных гибов. Все размеры справочные.")
+                    .arg(coverage.missing.empty() ? QStringLiteral("Лист сформирован")
+                                                  : QStringLiteral("Неполные размеры"))
                     .arg(DrawingSheet::pageCount(*drawing))
                     .arg(cut ? QStringLiteral(
                                    " · подтверждённый однородный участок показан с разрывом")
-                             : QString{}));
+                             : QString{})
+                    .arg(coverage.dimensioned)
+                    .arg(coverage.total));
             if (drawing->drawingOnlyRecognition)
                 status->setText(
                     status->text() +

@@ -3,6 +3,28 @@
 #include <cmath>
 
 namespace bending::application {
+DrawingMeasurementCoverage drawingMeasurementCoverage(const BendingDrawing &drawing) {
+    DrawingMeasurementCoverage coverage;
+    for (std::size_t i = 0; i < drawing.bends.size(); ++i) {
+        if (drawing.bends[i].diagnostic)
+            continue;
+        ++coverage.total;
+        const auto contains = [i](const auto &view) {
+            return std::find(view.dimensionedBends.begin(), view.dimensionedBends.end(), i) !=
+                   view.dimensionedBends.end();
+        };
+        const bool found = std::any_of(drawing.views.begin(), drawing.views.end(), contains) ||
+                           std::any_of(drawing.details.begin(), drawing.details.end(),
+                                       [&](const auto &d) { return contains(d.view); }) ||
+                           std::any_of(drawing.profiles.begin(), drawing.profiles.end(),
+                                       [&](const auto &p) { return contains(p.view); });
+        if (found)
+            ++coverage.dimensioned;
+        else
+            coverage.missing.push_back(i);
+    }
+    return coverage;
+}
 std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept {
     double fit = 100;
     std::array<DrawingPoint, 3> available{{{134, 48}, {134, 48}, {104, 48}}};

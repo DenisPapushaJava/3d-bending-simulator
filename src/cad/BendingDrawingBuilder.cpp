@@ -1,6 +1,7 @@
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "BendRecognizer.h"
 #include "DrawingOpenings.h"
+#include "DrawingProfiles.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/DocumentAccess.h"
 
@@ -9,8 +10,10 @@
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
@@ -65,6 +68,55 @@ std::array<double, 4> bounds(const TopoDS_Shape &shape, const Frame &frame,
         throw std::runtime_error("Cannot measure finite drawing bounds");
     const auto low = box.CornerMin(), high = box.CornerMax();
     return {low.X(), low.Y(), high.X(), high.Y()};
+}
+void overallWitnesses(const TopoDS_Shape &shape, const Frame &frame, DrawingDimension &dimension,
+                      bool horizontal, std::stop_token stop) {
+    std::array<DrawingPoint, 2> points;
+    const std::array targets{dimension.start, dimension.end};
+    const auto axis = horizontal ? frame.u : frame.v;
+    try {
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(shape, box, false, false);
+        if (box.IsVoid() || box.IsOpen())
+            return;
+        const auto center = gp_Pnt((box.CornerMin().XYZ() + box.CornerMax().XYZ()) / 2);
+        const double reach = box.CornerMin().Distance(box.CornerMax()) + 1;
+        for (std::size_t i = 0; i < 2; ++i) {
+            if (stop.stop_requested())
+                throw DrawingError{"Cancelled", true};
+            const double coordinate = horizontal ? targets[i].x : targets[i].y;
+            // Keep the support plane outside the solid. A touching/intersecting plane
+            // can produce an arbitrary zero-distance inner solution in OCCT.
+            const double offset = std::max(1., dimension.valueMm * .01);
+            const auto origin = center.Translated(
+                gp_Vec(axis) * (coordinate + (i == 0 ? -offset : offset) -
+                                gp_Vec(gp_Pnt(0, 0, 0), center).Dot(gp_Vec(axis))));
+            const auto plane =
+                BRepBuilderAPI_MakeFace(gp_Pln(origin, axis), -reach, reach, -reach, reach).Face();
+            BRepExtrema_DistShapeShape distance(shape, plane);
+            if (stop.stop_requested())
+                throw DrawingError{"Cancelled", true};
+            if (!distance.IsDone() || std::abs(distance.Value() - offset) > 1e-5 ||
+                !distance.NbSolution())
+                return;
+            double closest = 1e100;
+            for (int j = 1; j <= distance.NbSolution(); ++j) {
+                const auto point = project(distance.PointOnShape1(j), frame);
+                if (std::abs((horizontal ? point.x : point.y) - coordinate) > 1e-5)
+                    continue;
+                const double delta = std::hypot(point.x - targets[i].x, point.y - targets[i].y);
+                if (delta < closest) {
+                    closest = delta;
+                    points[i] = point;
+                }
+            }
+            if (closest == 1e100)
+                return;
+        }
+        dimension.witnesses = points;
+    } catch (const Standard_Failure &) {
+        // Keep the measured projection if this optional contour attachment is unavailable.
+    }
 }
 struct CircleArcs {
     DrawingPoint center;
@@ -701,6 +753,7 @@ std::optional<VariableSections> variableSections(const TopoDS_Shape &shape,
             if (classifier.State() != TopAbs_IN && classifier.State() != TopAbs_ON)
                 return {};
             profile.bendNotes.push_back({project(anchor, group.frame), index});
+            profile.dimensionedBends.push_back(index);
         }
         if (!result.details.empty()) {
             const auto &first = result.details.front().view;
@@ -942,6 +995,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                   {top.minimum.x, top.maximum.y},
                                   top.maximum.y - top.minimum.y,
                                   ""});
+        overallWitnesses(shape, frames[0], front.dimensions[0], true, stop);
+        overallWitnesses(shape, frames[0], front.dimensions[1], false, stop);
+        overallWitnesses(shape, frames[1], top.dimensions[0], false, stop);
         const double baseScale = drawingScale(*drawing).value_or(1);
         const auto addBend = [&](const RecognizedBend &bend, bool diagnostic) {
             const gp_Vec axisVector(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
@@ -966,6 +1022,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                             {}};
             if (!diagnostic) {
                 const gp_Dir axis(axisVector);
+                const auto angular = drawingBendCorner(bend, faces, at);
+                if (angular)
+                    row.interiorAngleRadians = angular->interior;
                 std::array<std::optional<FlangeSize>, 2> measured;
                 for (std::size_t i = 0; i < 2; ++i) {
                     const auto other =
@@ -982,14 +1041,6 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                         row.outerFlangeMm[i] = measured[i]->value;
                     }
                 }
-                if (measured[0] && measured[1]) {
-                    const auto first = gp_Vec(measured[0]->corner, measured[0]->end).Normalized();
-                    const auto second = gp_Vec(measured[1]->corner, measured[1]->end).Normalized();
-                    const double angle = std::acos(std::clamp(first.Dot(second), -1., 1.));
-                    if (angle > 1e-5 && angle < std::numbers::pi - 1e-5 &&
-                        std::abs(angle + bend.angleRadians - std::numbers::pi) < 1e-5)
-                        row.interiorAngleRadians = angle;
-                }
                 const bool trueProfile = std::abs(axis.Dot(frames[best].normal)) > 1 - 1e-7;
                 const bool enlarged = row.interiorAngleRadians &&
                                       ((bend.innerRadiusMm + bend.thicknessMm) * baseScale < 1.5 ||
@@ -1004,7 +1055,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     grouped ? profileGroup->station
                             : gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z)
                                   .Translated(axisVector * .5);
-                if (enlarged) {
+                if (enlarged && measured[0] && measured[1]) {
                     if (drawing->details.size() >= 24)
                         throw std::runtime_error("At most 24 enlarged bend profiles are supported");
                     if (!trueProfile) {
@@ -1021,15 +1072,20 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                          budget, stop);
                 }
                 auto &profile = detail ? *detail : drawing->views[best];
-                if (row.interiorAngleRadians && (detail || trueProfile))
-                    profile.angles.push_back({project(measured[0]->corner, profileFrame),
-                                              project(measured[0]->end, profileFrame),
-                                              project(measured[1]->end, profileFrame),
-                                              *row.interiorAngleRadians,
-                                              (bend.innerRadiusMm + bend.thicknessMm) /
-                                                      std::sin(*row.interiorAngleRadians / 2) -
-                                                  bend.innerRadiusMm});
+                const bool angleShown = angular && (detail || trueProfile);
+                if (angleShown)
+                    profile.angles.push_back(
+                        {project(angular->point, profileFrame),
+                         project(angular->point.Translated(gp_Vec(angular->directions[0])),
+                                 profileFrame),
+                         project(angular->point.Translated(gp_Vec(angular->directions[1])),
+                                 profileFrame),
+                         *row.interiorAngleRadians,
+                         (bend.innerRadiusMm + bend.thicknessMm) /
+                                 std::sin(*row.interiorAngleRadians / 2) -
+                             bend.innerRadiusMm});
                 bool thicknessAdded = false;
+                std::array<bool, 2> dimensionShown{};
                 for (std::size_t i = 0; i < 2; ++i) {
                     if (!measured[i])
                         continue;
@@ -1061,9 +1117,11 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                         continue;
                     if (detail || drawing->bends.empty()) {
                         const auto direction = gp_Vec(m.corner, m.end).Normalized();
-                        if (std::abs(direction.Dot(gp_Vec(profileFrame.normal))) < 1e-7)
+                        if (std::abs(direction.Dot(gp_Vec(profileFrame.normal))) < 1e-7) {
                             profile.dimensions.push_back({project(m.corner, profileFrame), end,
                                                           m.value, "H" + std::to_string(i + 1)});
+                            dimensionShown[i] = true;
+                        }
                     }
                     if (m.virtualEnd || thicknessAdded || (!detail && !drawing->bends.empty()))
                         continue;
@@ -1097,6 +1155,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 }
                 profile.bendNotes.push_back(
                     {project(noteAnchor, profileFrame), drawing->bends.size()});
+                if (angleShown && dimensionShown[0] && dimensionShown[1])
+                    profile.dimensionedBends.push_back(drawing->bends.size());
                 noted = true;
                 if (detail) {
                     const std::string designation =
@@ -1138,6 +1198,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                        detailView.angles.end());
                 combined.bendNotes.insert(combined.bendNotes.end(), detailView.bendNotes.begin(),
                                           detailView.bendNotes.end());
+                combined.dimensionedBends.insert(combined.dimensionedBends.end(),
+                                                 detailView.dimensionedBends.begin(),
+                                                 detailView.dimensionedBends.end());
                 for (const auto &dimension : detailView.dimensions) {
                     const auto equalPoint = [](DrawingPoint a, DrawingPoint b) {
                         return std::hypot(a.x - b.x, a.y - b.y) < 1e-5;
@@ -1239,6 +1302,36 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             BRepTools::UVBounds(TopoDS::Face(faces(i)), u0, u1, v0, v1);
             if (u1 - u0 < 2 * std::numbers::pi - 1e-5)
                 ++drawing->unrecognizedCylindricalFaces;
+        }
+        if (drawing->variableProfile != DrawingVariableProfile::Measured) {
+            drawing->profiles = drawingProfiles(
+                bendAnalysis.bends, faces, gp_Ax2(gp_Pnt(0, 0, 0), frames[0].normal, frames[0].u),
+                bendAnalysis.lengthToleranceMm, stop);
+            for (auto &profile : drawing->profiles) {
+                const auto &first = bendAnalysis.bends[profile.bends.front()];
+                const gp_Pnt axisPoint(first.axisStart.x, first.axisStart.y, first.axisStart.z);
+                const gp_Vec axis(profile.normal.x, profile.normal.y, profile.normal.z);
+                const gp_Pnt station(profile.station.x, profile.station.y, profile.station.z);
+                profile.locator = project(
+                    axisPoint.Translated(axis * gp_Vec(axisPoint, station).Dot(axis)), frames[3]);
+                for (std::size_t k = 0; k < profile.bends.size(); ++k)
+                    drawing->bends[profile.bends[k]].interiorAngleRadians =
+                        profile.view.angles[k].radians;
+                for (const auto &segment : profile.segments)
+                    for (auto adjacent : {segment.previousBend, segment.nextBend}) {
+                        if (!adjacent)
+                            continue;
+                        const auto &source = bendAnalysis.bends[*adjacent];
+                        for (std::size_t sideIndex = 0; sideIndex < 2; ++sideIndex) {
+                            std::array pair{source.flangeFaces[sideIndex * 2],
+                                            source.flangeFaces[sideIndex * 2 + 1]};
+                            std::sort(pair.begin(), pair.end());
+                            if (pair == segment.wallFaces)
+                                drawing->bends[*adjacent].outerFlangeMm[sideIndex] =
+                                    segment.dimension.valueMm;
+                        }
+                    }
+            }
         }
         drawing->declaredThicknessMm = request.manualThicknessMm;
         if (!drawing->bends.empty()) {

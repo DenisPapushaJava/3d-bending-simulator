@@ -191,6 +191,8 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
             gp_Dir major = plane.XAxis().Direction();
             bool allowed = true, curved = false, circular = true;
             double radius = 0, span = 0;
+            double longestLine = 0;
+            std::vector<gp_Dir> lineDirections;
             int edges = 0;
             for (BRepTools_WireExplorer ei(wire, face); ei.More(); ei.Next()) {
                 BRepAdaptor_Curve curve(ei.Current());
@@ -214,14 +216,26 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                     major = curve.Ellipse().XAxis().Direction();
                     curved = true;
                     circular = false;
-                } else if (curve.GetType() == GeomAbs_Line)
+                } else if (curve.GetType() == GeomAbs_Line) {
                     circular = false;
-                else {
+                    lineDirections.push_back(curve.Line().Direction());
+                    const auto size = curve.Value(curve.FirstParameter())
+                                          .Distance(curve.Value(curve.LastParameter()));
+                    if (size > longestLine) {
+                        longestLine = size;
+                        major = curve.Line().Direction();
+                    }
+                } else {
                     allowed = false;
                     break;
                 }
             }
-            if (!allowed || !curved)
+            const bool rectangle =
+                !curved && edges == 4 && lineDirections.size() == 4 &&
+                std::all_of(lineDirections.begin(), lineDirections.end(), [&](auto direction) {
+                    return direction.IsParallel(major, 1e-7) || direction.IsNormal(major, 1e-7);
+                });
+            if (!allowed || (!curved && !rectangle))
                 continue;
             const auto box = bounds(wire, plane.Position().Ax2());
             const auto center = plane.Location().Translated(

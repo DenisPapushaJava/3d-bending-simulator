@@ -36,6 +36,17 @@ int main() {
         require(!drawingProfilesCoverBends(grouped));
         grouped.details[0].view.bendNotes.push_back({{1, 1}, 1});
         require(drawingProfilesCoverBends(grouped));
+        auto coverage = drawingMeasurementCoverage(grouped);
+        require(coverage.total == 2 && coverage.dimensioned == 0 && coverage.missing.size() == 2);
+        grouped.profiles.resize(1);
+        grouped.profiles[0].view.dimensionedBends = {0, 0};
+        grouped.details[0].view.dimensionedBends = {1};
+        coverage = drawingMeasurementCoverage(grouped);
+        require(coverage.total == 2 && coverage.dimensioned == 2 && coverage.missing.empty());
+        grouped.bends[1].diagnostic = true;
+        grouped.details[0].view.dimensionedBends.clear();
+        coverage = drawingMeasurementCoverage(grouped);
+        require(coverage.total == 1 && coverage.dimensioned == 1 && coverage.missing.empty());
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
