@@ -1,5 +1,5 @@
 {
   "name": "3d-bending-simulator",
   "builtin-baseline": "256310531c1e57ee83f8ac01f7bea7c1e56630f5",
-  "dependencies": [ { "name": "opencascade", "default-features": false } ]
+  "dependencies": [ { "name": "opencascade", "default-features": false, "features": ["freetype"] } ]
 }

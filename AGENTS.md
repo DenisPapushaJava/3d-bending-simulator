@@ -82,3 +82,6 @@ D045: для переменных стенок/овальных вырезов �
 
 
 D046: значок принадлежит app/data/icons; один SVG, производные PNG/ICO закоммичены. Сборка/CI не требуют Inkscape/Pillow/Qt SVG. Qt использует встроенные PNG, Windows — отдельный нативный RC resource, Linux — desktop/hicolor install с общей идентичностью. C++-флаги не передавать RC. При замене SVG регенерировать ассеты по их README; не менять имя приложения/QSettings ради картинки.
+
+
+D047: Windows OCCT требует feature freetype для размеров и подписей куба; см. docs/releases.md и THIRD_PARTY_NOTICES.md. Не отключать FreeType при использовании AIS-текста. viewer.fonts и probe подготовленного ZIP проверяют реальную растеризацию без GPU; обычный window startup этого не доказывает. Использовать переносимый sans-serif alias. При обновлении SDK сохранить FTL/MIT/X11/zlib и встроенный Bitstream/DejaVu notices, исходники/патчи портов и сверку hash.

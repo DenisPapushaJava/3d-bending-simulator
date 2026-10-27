@@ -12,6 +12,7 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
+#include <Font_NameOfFont.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -761,6 +762,7 @@ class OcctCanvas final : public QWidget {
                 navigationCube_->SetDrawAxes(false);
                 navigationCube_->SetBoxColor(Quantity_Color(.86, .90, .94, Quantity_TOC_RGB));
                 navigationCube_->SetTextColor(Quantity_Color(.08, .12, .18, Quantity_TOC_RGB));
+                navigationCube_->Attributes()->TextAspect()->SetFont(Font_NOF_SANS_SERIF);
                 navigationCube_->Attributes()->TextAspect()->Aspect()->SetTextFontAspect(
                     Font_FA_Bold);
             }

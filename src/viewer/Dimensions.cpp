@@ -5,6 +5,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepTools.hxx>
+#include <Font_NameOfFont.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <Prs3d_DimensionAspect.hxx>
 #include <PrsDim_LengthDimension.hxx>
@@ -60,7 +61,7 @@ void length(DimensionAnnotations &result, const gp_Pnt &a, const gp_Pnt &b, cons
     aspect->MakeArrows3d(false);
     aspect->SetCommonColor(color);
     aspect->TextAspect()->SetHeight(height);
-    aspect->TextAspect()->SetFont("DejaVu Sans");
+    aspect->TextAspect()->SetFont(Font_NOF_SANS_SERIF);
     aspect->ArrowAspect()->SetLength(std::min(a.Distance(b) * 0.1, offset.Magnitude() * 0.06));
     aspect->SetExtensionSize(offset.Magnitude() * 0.2);
     dimension->SetDimensionAspect(aspect);
@@ -81,7 +82,7 @@ void callout(DimensionAnnotations &result, const gp_Pnt &anchor, const gp_Vec &o
     label->SetText(extended(caption));
     label->SetColor(bendColor);
     label->SetHeight(height);
-    label->SetFont("DejaVu Sans");
+    label->SetFont(Font_NOF_SANS_SERIF);
     label->SetZoomable(false);
     label->SetHJustification(Graphic3d_HTA_CENTER);
     label->SetVJustification(Graphic3d_VTA_BOTTOM);

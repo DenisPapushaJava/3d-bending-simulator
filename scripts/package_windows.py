@@ -14,6 +14,29 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 QT_VERSION = "6.8.3"
 QT_SOURCE_SHA256 = "56001b905601bb9023d399f3ba780d7fa940f3e4861e496a7c490331f49e0b80"
+FREETYPE_VERSION = "2.14.3"
+FREETYPE_SOURCE_SHA512 = (
+    "c3b6b0cc4b428c9c647ab2148386901dfd315273b68051940e8fea6010d46fdd2913467"
+    "c3ef58be0d499b8e2ef5a0f1a4cc5e739756155587f4f7dff08ef9695")
+
+
+def unpack_patched_source(archive_path, destination, port, patches):
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path) as archive:
+        for member in archive.getmembers():
+            relative = Path(*Path(member.name).parts[1:])
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError("Unsafe dependency source archive path")
+            if member.isfile():
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.extractfile(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+    subprocess.run(["git", "init", "--quiet", str(destination)], check=True)
+    for patch in patches:
+        subprocess.run(["git", "-C", str(destination), "apply", "--ignore-whitespace",
+                        str((port / patch).resolve())], check=True)
+    shutil.rmtree(destination / ".git")
 
 
 def archive_tree(output, folder):
@@ -96,29 +119,46 @@ def main():
                      "ed8f1d930d2aec87ef172ded551d0a237fad128319fb9cbcabdc755aa0aa67")
     if hashlib.sha512(occt_archive.read_bytes()).hexdigest() != expected_occt:
         raise RuntimeError("OCCT sources differ from the SHA512 pinned by the vcpkg port")
-    occt_sources = sources / "occt-7.9.3-patched"
-    occt_sources.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(occt_archive) as archive:
-        for member in archive.getmembers():
-            relative = Path(*Path(member.name).parts[1:])
-            if relative.is_absolute() or ".." in relative.parts:
-                raise RuntimeError("Unsafe OCCT archive path")
-            if member.isfile():
-                target = occt_sources / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.extractfile(member) as source, target.open("wb") as destination:
-                    shutil.copyfileobj(source, destination)
-    subprocess.run(["git", "init", "--quiet", str(occt_sources)], check=True)
-    for patch in ["fix-install-prefix-path.patch", "drop-bin-letter-d.patch", "dependencies.patch",
-                  "install-include-dir.patch", "remove-vcpkg-enabling.patch"]:
-        subprocess.run(["git", "-C", str(occt_sources), "apply", "--ignore-whitespace",
-                        str((port / patch).resolve())], check=True)
-    shutil.rmtree(occt_sources / ".git")
+    unpack_patched_source(occt_archive, sources / "occt-7.9.3-patched", port,
+                          ["fix-install-prefix-path.patch", "drop-bin-letter-d.patch",
+                           "dependencies.patch", "install-include-dir.patch",
+                           "remove-vcpkg-enabling.patch"])
+    embedded_font = (sources / "occt-7.9.3-patched/src/Font/Font_DejavuSans_Latin_woff.pxx")
+    font_notice = "\n".join(line[3:].lstrip() for line in embedded_font.read_text(
+        encoding="utf-8").splitlines() if line.startswith("//!"))
+    if "Bitstream" not in font_notice:
+        raise RuntimeError("OCCT embedded font notice is missing")
+    (notices / "OCCT-DejaVu-copyright.txt").write_text(font_notice + "\n", encoding="utf-8")
+    freetype_port = args.vcpkg_root / "ports/freetype"
+    shutil.copytree(freetype_port, sources / "vcpkg-freetype-port", dirs_exist_ok=True)
+    shutil.copy2(installed.parent.parent / "freetype/copyright",
+                 notices / "FreeType-copyright.txt")
+    freetype_archive = output / f"freetype-{FREETYPE_VERSION}.tar.gz"
+    freetype_ref = "VER-" + FREETYPE_VERSION.replace(".", "-")
+    urllib.request.urlretrieve(
+        "https://gitlab.freedesktop.org/freetype/freetype/-/archive/"
+        f"{freetype_ref}/freetype-{freetype_ref}.tar.gz", freetype_archive)
+    if hashlib.sha512(freetype_archive.read_bytes()).hexdigest() != FREETYPE_SOURCE_SHA512:
+        raise RuntimeError("FreeType sources differ from the SHA512 pinned by the vcpkg port")
+    unpack_patched_source(freetype_archive, sources / f"freetype-{FREETYPE_VERSION}-patched",
+                          freetype_port, ["0003-Fix-UWP.patch", "brotli-static.patch",
+                                          "bzip2.patch", "fix-exports.patch"])
+    # These bundled source files retain their own MIT/X11/zlib notices beyond FTL.
+    for relative in ["src/bdf/README", "src/pcf/README", "src/gzip/zlib.h",
+                     "src/autofit/ft-hb-ft.c", "src/autofit/ft-hb-decls.h",
+                     "src/autofit/ft-hb-types.h", "src/autofit/hb-script-list.h",
+                     "src/base/fthash.c", "include/freetype/internal/fthash.h"]:
+        target = notices / "freetype" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sources / f"freetype-{FREETYPE_VERSION}-patched" / relative, target)
     for path in ["vcpkg.json", "CMakePresets.json", "THIRD_PARTY_NOTICES.md", "LICENSE"]:
         shutil.copy2(ROOT / path, sources / path)
     shutil.copytree(ROOT / "cmake/triplets", sources / "triplets", dirs_exist_ok=True)
     (sources / "README.txt").write_text(
-        "OCCT sources include vcpkg port patches. The port files and triplet describe the build.\n"
+        "OCCT and FreeType sources include vcpkg port patches.\n"
+        "The port files, manifest and triplet describe the build.\n"
+        "FreeType patches: 0003-Fix-UWP, brotli-static, bzip2, fix-exports.\n"
+        "Optional FreeType features are disabled; the FTL license option is selected.\n"
         "vcpkg baseline: 256310531c1e57ee83f8ac01f7bea7c1e56630f5.\n"
         "Qt base sources include bundled third-party source/license materials.\n"
         "See https://github.com/DenisPapushaJava/3d-bending-simulator/blob/main/docs/development.md\n",
@@ -137,7 +177,7 @@ def main():
         "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist\n"
         "Сохраняйте структуру папок, DLL и плагины рядом с EXE.\n"
         "DLL допускается заменять совместимыми сборками. Лицензии — в share/licenses.\n"
-        "Соответствующие исходники Qt/OCCT находятся в соседнем dependency-sources ZIP.\n"
+        "Соответствующие исходники Qt/OCCT/FreeType — в соседнем dependency-sources ZIP.\n"
         "Встроенное обновление пока отсутствует.\n"
         "Проект: https://github.com/DenisPapushaJava/3d-bending-simulator\n",
         encoding="utf-8")
@@ -150,6 +190,12 @@ def main():
         if variable.startswith("CSF_"):
             environment.pop(variable)
     environment["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
+    font_probe = stage / "bin/_font-probe.exe"
+    shutil.copy2(ROOT / "build/release/bin/viewer_font_tests.exe", font_probe)
+    try:
+        subprocess.run([str(font_probe)], env=environment, check=True, timeout=20)
+    finally:
+        font_probe.unlink()
     subprocess.run([str(executable), "--smoke-test"], env=environment, check=True, timeout=20)
     subprocess.run([str(executable), "--smoke-test",
                     str(stage / "share/3d-bending-simulator/examples/plate-inch.stp")],

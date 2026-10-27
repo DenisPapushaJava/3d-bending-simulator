@@ -22,10 +22,20 @@ Installed copyright notices are under `/usr/share/doc/` in the respective distri
 - Open CASCADE Technology 7.9.3, vcpkg port revision 1: LGPL-2.1 with Open CASCADE Exception 1.0.
   Sources: https://github.com/Open-Cascade-SAS/OCCT/tree/V7_9_3
   vcpkg build and patches: https://github.com/microsoft/vcpkg/tree/256310531c1e57ee83f8ac01f7bea7c1e56630f5/ports/opencascade
+- FreeType 2.14.3, enabled for OCCT viewer dimensions and navigation labels: FreeType License (FTL).
+  This software is based in part on the work of the FreeType Team.
+  Portions of this software are copyright © 1996–2026 The FreeType Project
+  (https://freetype.org). All rights reserved.
+  Sources: https://gitlab.freedesktop.org/freetype/freetype/-/tree/VER-2-14-3
+  vcpkg build and patches: https://github.com/microsoft/vcpkg/tree/256310531c1e57ee83f8ac01f7bea7c1e56630f5/ports/freetype
+  The FTL option is selected; bundled MIT/X11/zlib notices are also retained.
 
 Windows bundles use shared libraries and keep their DLLs replaceable. No third-party source was
-copied into original project code. OCCT optional FreeType, TBB, VTK and FreeImage features are off
+copied into original project code. OCCT optional TBB, VTK and FreeImage features are off
 for the foundation build. Enabling them requires updating this inventory.
+FreeType uses no optional Brotli/bzip2/PNG/external-zlib/HarfBuzz dependencies.
+OCCT's embedded DejaVu Sans Latin fallback retains its Bitstream Vera font notice in
+`share/licenses/OCCT-DejaVu-copyright.txt` (DejaVu changes are public domain).
 The foundation bundle omits unused SVG/image and generic touch plugins, Mesa software OpenGL,
 and the system D3D/DXC compilers. Packaging rejects additional Qt modules until their
 source/license inventory is updated.
@@ -36,7 +46,7 @@ and OCCT copyright notices cover these resources. No sample implementation was c
 the original viewer code.
 
 The matching `dependency-sources` companion contains Qt base sources including its bundled
-third-party license texts, the OCCT sources as built, and the vcpkg port/patches. Windows packaging
+third-party license texts, OCCT and FreeType sources as built, and their vcpkg ports/patches. Windows packaging
 also copies license notices into `share/licenses`. The Microsoft Visual C++ Runtime is a separate
 prerequisite and is not redistributed in this ZIP.
 

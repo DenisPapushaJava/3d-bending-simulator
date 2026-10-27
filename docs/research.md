@@ -339,3 +339,10 @@ LibreDWG — отдельный локальный исследовательс�
 ## Целевая Windows первого ZIP — 2026-10-27
 
 В [официальной таблице Qt 6.8](https://doc.qt.io/qt-6.8/supported-platforms.html#windows) проверены Windows 10 (1809+) и Windows 11 x86_64 с MSVC 2022. Поэтому первый ZIP обозначен для этих систем, а не для произвольной Windows x64. Метод проверки — чтение документации выбранной линии Qt; запуск нашего приложения на пользовательской Windows/GPU этим не подтверждается. CI использует Windows Server 2022, а offscreen-проверка готового ZIP отдельно проверяет загрузку DLL/плагинов и STEP при очищенном PATH.
+
+
+## Растеризация OCCT и FreeType — 2026-10-27
+
+По [исходнику Font_FTFont OCCT 7.9.3](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_3/src/Font/Font_FTFont.cxx) без HAVE_FREETYPE инициализация шрифта возвращает отказ; AIS_TextLabel/PrsDim и куб не получают bitmap текста. В [зафиксированном порте OCCT](https://github.com/microsoft/vcpkg/blob/256310531c1e57ee83f8ac01f7bea7c1e56630f5/ports/opencascade/vcpkg.json) feature freetype на Windows подключает FreeType без default features, без Fontconfig. Порт [FreeType](https://github.com/microsoft/vcpkg/blob/256310531c1e57ee83f8ac01f7bea7c1e56630f5/ports/freetype/portfile.cmake) фиксирует 2.14.3, SHA-512 и четыре обязательных патча.
+
+Уровень проверки: чтение кода/лицензий конкретных версий; реальное скачивание исходных архивов с проверкой hash и применением патчей; реальная CPU-растеризация обычного/жирного шрифта на Linux. Windows проверяется отдельно штатным CI и probe готового ZIP; интерактивная GPU-сцена этим не подтверждается.
