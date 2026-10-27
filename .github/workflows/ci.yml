@@ -78,19 +78,9 @@ jobs:
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo bash scripts/install-linux-deps.sh
-      - name: Windows compiler environment
-        id: compiler
+      - name: Windows SDK
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath
-          $environment = & "$vs/Common7/Tools/VsDevCmd.bat" -arch=x64 -host_arch=x64 '&&' set
-          foreach ($line in $environment) {
-            if ($line -match '^([^=]+)=(.*)$') {
-              "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV
-              if ($Matches[1] -eq 'VCToolsVersion') { "version=$($Matches[2])" >> $env:GITHUB_OUTPUT }
-            }
-          }
+        uses: ./.github/actions/windows-sdk
       - name: Qt 6.8.3 (shared libraries)
         if: runner.os == 'Windows'
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
@@ -98,25 +88,6 @@ jobs:
           version: '6.8.3'
           arch: win64_msvc2022_64
           cache: true
-      - name: Pinned vcpkg
-        if: runner.os == 'Windows'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: microsoft/vcpkg
-          ref: 256310531c1e57ee83f8ac01f7bea7c1e56630f5
-          path: .deps/vcpkg
-          persist-credentials: false
-      - name: Cache OCCT binaries
-        id: vcpkg-cache
-        if: runner.os == 'Windows'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .cache/vcpkg
-          key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}-msvc-${{ steps.compiler.outputs.version }}
-          # vcpkg checks each package ABI before reuse, including compiler and port inputs.
-          restore-keys: |
-            vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}
-            vcpkg-windows-2022-
       - name: Configure Linux
         if: runner.os == 'Linux'
         run: cmake --preset release
@@ -124,15 +95,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & ./.deps/vcpkg/bootstrap-vcpkg.bat -disableMetrics
           cmake --preset release "-DCMAKE_TOOLCHAIN_FILE=$pwd/.deps/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-release "-DVCPKG_OVERLAY_TRIPLETS=$pwd/cmake/triplets" "-DVCPKG_INSTALLED_DIR=$pwd/vcpkg_installed"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Save successful OCCT build before packaging
-        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .cache/vcpkg
-          key: vcpkg-windows-2022-${{ hashFiles('vcpkg.json', 'cmake/triplets/*.cmake') }}-msvc-${{ steps.compiler.outputs.version }}
       - name: Build
         run: cmake --build --preset release --parallel 2
       - name: Test core, OCCT and app startup

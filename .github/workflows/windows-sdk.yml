@@ -1,0 +1,58 @@
+name: Prepare Windows SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Approved SDK settings commit SHA (empty uses main)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-windows-sdk
+  cancel-in-progress: false
+
+jobs:
+  sdk:
+    name: Prepare SDK cache in main
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Select immutable SDK inputs
+        id: source
+        shell: python
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          import os, re
+          from pathlib import Path
+          sha = os.environ['SOURCE_SHA'] or os.environ['GITHUB_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', sha):
+              raise SystemExit('Use a full approved commit SHA')
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
+              output.write(f'sha={sha}\n')
+      - name: Trusted SDK preparation action from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .ci-tools
+          sparse-checkout: .github/actions/windows-sdk
+          persist-credentials: false
+      - name: Approved SDK manifest and triplets
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          path: sdk-inputs
+          sparse-checkout: |
+            vcpkg.json
+            cmake/triplets
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: ./.ci-tools/.github/actions/windows-sdk
+        with:
+          manifest-directory: sdk-inputs
