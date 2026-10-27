@@ -6,6 +6,7 @@
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
@@ -29,6 +30,7 @@
 #include <TopoDS.hxx>
 #include <algorithm>
 #include <cmath>
+#include <gp_Circ.hxx>
 #include <iostream>
 #include <stdexcept>
 
@@ -123,6 +125,100 @@ void drawingMeasurements(const QString &folder) {
                     application::BendRecognitionStatus::Unsupported &&
                 !ui::DrawingSheet::preview(*excessive, {}).isNull(),
             "Drawing measurements accepted excessive source tolerance");
+}
+void holePositions(const QString &folder) {
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(300, 120, 6).Shape();
+    for (const double x : {150., 270.})
+        plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(gp_Pnt(x, 40, -1), gp_Dir(0, 0, 1)), 4, 8))
+                    .Shape();
+    BRepBuilderAPI_MakeWire splitRim;
+    const gp_Circ rim(gp_Ax2(gp_Pnt(30, 40, -1), gp_Dir(0, 0, 1)), 4);
+    splitRim.Add(BRepBuilderAPI_MakeEdge(rim, 0, std::numbers::pi / 2));
+    splitRim.Add(BRepBuilderAPI_MakeEdge(rim, std::numbers::pi / 2, 2 * std::numbers::pi));
+    plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(splitRim.Wire()),
+                                                         gp_Vec(0, 0, 8)))
+                .Shape();
+    // Concentric counterbore, an open edge notch and a non-round internal cutout.
+    plate = BRepAlgoAPI_Cut(
+                plate, BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(150, 40, 4), gp_Dir(0, 0, 1)), 7, 3))
+                .Shape();
+    plate = BRepAlgoAPI_Cut(
+                plate, BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 60, -1), gp_Dir(0, 0, 1)), 4, 8))
+                .Shape();
+    plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakeBox(gp_Pnt(80, 80, -1), 20, 15, 8)).Shape();
+    plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakeCylinder(
+                                       gp_Ax2(gp_Pnt(210, 90, -1), gp_Dir(.25, 0, 1)), 4, 10))
+                .Shape();
+    const auto document = load(plate, folder + "/hole-coordinates.step");
+    const auto drawing = build(document);
+    const auto &dimensions = drawing->views[0].holeDimensions;
+    require(dimensions.size() == 4,
+            "Hole row coordinates repeated or non-round/open cuts included");
+    for (std::size_t i = 0; i < 3; ++i)
+        require(std::abs(dimensions[i].valueMm - (30 + 120 * static_cast<double>(i))) < 1e-4 &&
+                    std::abs(dimensions[i].start.x - drawing->views[0].minimum.x) < 1e-5,
+                "Hole axis was not measured from the projected overall datum");
+    require(std::abs(dimensions.back().valueMm - 40) < 1e-4 ||
+                std::abs(dimensions.back().valueMm - 80) < 1e-4,
+            "Hole row lost its common transverse coordinate");
+    require(drawing->views[1].holeDimensions.empty() && drawing->views[2].holeDimensions.empty() &&
+                drawing->views[3].holeDimensions.empty(),
+            "An oblique/edge-on projection received circular hole coordinates");
+    require(ui::DrawingSheet::writePdf(folder + "/hole-coordinates.pdf", *drawing, {}).isEmpty(),
+            "Hole dimensions cannot be placed with the existing overall dimensions");
+    application::DrawingRequest request;
+    request.reverseView = true;
+    const auto reverse = build(document, request);
+    require(reverse->views[0].holeDimensions.size() == 4 &&
+                std::abs(reverse->views[0].holeDimensions.back().valueMm +
+                         dimensions.back().valueMm - 120) < 1e-4,
+            "Reverse view retained the old hole datum distance");
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .734);
+    transform.SetTranslationPart(gp_Vec(117, -53, 82));
+    const auto moved = build(load(BRepBuilderAPI_Transform(plate, transform, true).Shape(),
+                                  folder + "/rotated-holes.step"));
+    require(moved->views[0].holeDimensions.size() == dimensions.size(),
+            "Rotated STEP lost circular hole positions");
+    for (std::size_t i = 0; i < dimensions.size(); ++i)
+        require(std::abs(moved->views[0].holeDimensions[i].valueMm - dimensions[i].valueMm) < 1e-4,
+                "STEP world coordinates changed hole dimensions");
+    for (int turn = 0; turn < 4; ++turn) {
+        request.quarterTurns = turn;
+        const auto turned = build(document, request);
+        require(turned->views[0].holeDimensions.size() == 4 &&
+                    !ui::DrawingSheet::preview(*turned, {}).isNull(),
+                "A quarter-turn view cannot place hole coordinates");
+    }
+    const auto boss = build(load(BRepPrimAPI_MakeCylinder(10, 6).Shape(), folder + "/boss.step"));
+    require(std::all_of(boss->views.begin(), boss->views.end(),
+                        [](const auto &v) { return v.holeDimensions.empty(); }),
+            "A round external boundary was treated as a hole");
+    TopoDS_Shape masked = BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(100, 80, 6),
+                                          BRepPrimAPI_MakeCylinder(
+                                              gp_Ax2(gp_Pnt(50, 40, -1), gp_Dir(0, 0, 1)), 10, 8))
+                              .Shape();
+    masked = BRepAlgoAPI_Fuse(masked, BRepPrimAPI_MakeBox(gp_Pnt(65, 30, 6), 5, 20, 6)).Shape();
+    masked = BRepAlgoAPI_Fuse(masked, BRepPrimAPI_MakeBox(gp_Pnt(50, 30, 10), 20, 20, 2)).Shape();
+    const auto maskedDoc = load(masked, folder + "/partially-hidden-hole.step");
+    const auto visible = build(maskedDoc);
+    application::DrawingRequest otherSide;
+    otherSide.reverseView = true;
+    const auto obscured = build(maskedDoc, otherSide);
+    require((visible->views[0].holeDimensions.size() == 2 &&
+             obscured->views[0].holeDimensions.empty()) ||
+                (obscured->views[0].holeDimensions.size() == 2 &&
+                 visible->views[0].holeDimensions.empty()),
+            "Overlapping visible arc fragments falsely completed a partially hidden circle");
+    const auto bent = build(load(fixtures::profiledBend(), folder + "/perforated-bend.step"));
+    require(!bent->views[0].holeDimensions.empty() &&
+                !ui::DrawingSheet::preview(*bent, {}).isNull(),
+            "Hole coordinates conflict with enlarged bend profiles");
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_HOLES_OUTPUT");
+    if (!output.isEmpty())
+        require(ui::DrawingSheet::writePdf(output, *drawing, {}).isEmpty(),
+                "Hole coordinates example PDF failed");
 }
 void geometry(const QString &folder) {
     const auto source = fixtures::bentStrip(8, 6);
@@ -392,6 +488,7 @@ int main(int argc, char **argv) {
     QTemporaryDir temp;
     try {
         drawingMeasurements(temp.path());
+        holePositions(temp.path());
         geometry(temp.path());
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";

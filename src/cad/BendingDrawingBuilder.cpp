@@ -30,10 +30,12 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <numbers>
 #include <stdexcept>
 
@@ -61,8 +63,41 @@ std::array<double, 4> bounds(const TopoDS_Shape &shape, const Frame &frame,
     const auto low = box.CornerMin(), high = box.CornerMax();
     return {low.X(), low.Y(), high.X(), high.Y()};
 }
+struct CircleArcs {
+    DrawingPoint center;
+    double radius;
+    std::vector<std::array<double, 2>> intervals;
+};
+void circleArc(const BRepAdaptor_Curve &curve, std::vector<CircleArcs> &circles) {
+    const auto circle = curve.Circle();
+    const auto c = circle.Location();
+    auto found = std::find_if(circles.begin(), circles.end(), [&](const auto &old) {
+        return std::hypot(old.center.x - c.X(), old.center.y - c.Y()) < 1e-5 &&
+               std::abs(old.radius - circle.Radius()) < 1e-5;
+    });
+    if (found == circles.end()) {
+        circles.push_back({{c.X(), c.Y()}, circle.Radius(), {}});
+        found = std::prev(circles.end());
+    }
+    constexpr double full = 2 * std::numbers::pi;
+    const auto point = curve.Value(curve.FirstParameter());
+    double start = std::atan2(point.Y() - c.Y(), point.X() - c.X());
+    const double span = curve.LastParameter() - curve.FirstParameter();
+    if (circle.Axis().Direction().Z() < 0)
+        start -= span;
+    start = std::fmod(start, full);
+    if (start < 0)
+        start += full;
+    if (span >= full - 1e-7)
+        found->intervals.push_back({0, full});
+    else {
+        found->intervals.push_back({start, std::min(full, start + span)});
+        if (start + span > full)
+            found->intervals.push_back({0, start + span - full});
+    }
+}
 void contours(const TopoDS_Shape &shape, bool hidden, DrawingView &view, std::size_t &budget,
-              std::stop_token stop) {
+              std::stop_token stop, std::vector<CircleArcs> *circles = nullptr) {
     for (TopExp_Explorer e(shape, TopAbs_EDGE); e.More(); e.Next()) {
         if (stop.stop_requested())
             throw DrawingError{"Cancelled", true};
@@ -82,17 +117,8 @@ void contours(const TopoDS_Shape &shape, bool hidden, DrawingView &view, std::si
                 const auto p = sample.Value(i);
                 path.points.push_back({p.X(), p.Y()});
             }
-            if (!hidden && curve.GetType() == GeomAbs_Circle &&
-                std::abs(curve.LastParameter() - curve.FirstParameter() - 2 * std::numbers::pi) <
-                    1e-7) {
-                const auto circle = curve.Circle();
-                const auto c = circle.Location();
-                if (std::none_of(
-                        view.circleCenters.begin(), view.circleCenters.end(), [&](const auto &old) {
-                            return std::hypot(old.first.x - c.X(), old.first.y - c.Y()) < 1e-5;
-                        }))
-                    view.circleCenters.push_back({{c.X(), c.Y()}, circle.Radius()});
-            }
+            if (!hidden && circles && curve.GetType() == GeomAbs_Circle)
+                circleArc(curve, *circles);
         }
         budget += path.points.size();
         if (budget > 200000)
@@ -116,16 +142,101 @@ DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budge
     algo->Hide();
     HLRBRep_HLRToShape result(algo);
     DrawingView view;
-    contours(result.VCompound(), false, view, budget, stop);
-    contours(result.OutLineVCompound(), false, view, budget, stop);
+    std::vector<CircleArcs> circles;
+    contours(result.VCompound(), false, view, budget, stop, &circles);
+    contours(result.OutLineVCompound(), false, view, budget, stop, &circles);
     contours(result.HCompound(), true, view, budget, stop);
     contours(result.OutLineHCompound(), true, view, budget, stop);
+    for (auto &circle : circles) {
+        std::sort(circle.intervals.begin(), circle.intervals.end());
+        double covered = 0;
+        for (const auto interval : circle.intervals) {
+            if (interval[0] > covered + 1e-6)
+                break;
+            covered = std::max(covered, interval[1]);
+        }
+        if (covered >= 2 * std::numbers::pi - 1e-6)
+            view.circleCenters.push_back({circle.center, circle.radius});
+    }
     if (view.paths.empty())
         throw std::runtime_error("HLR produced no drawing contours");
     const auto b = bounds(shape, f);
     view.minimum = {b[0], b[1]};
     view.maximum = {b[2], b[3]};
     return view;
+}
+void holeDimensions(const TopoDS_Shape &shape, const Frame &frame, DrawingView &view,
+                    std::stop_token stop) {
+    std::vector<DrawingPoint> centers;
+    constexpr double tolerance = 1e-5;
+    for (TopExp_Explorer faceIt(shape, TopAbs_FACE); faceIt.More(); faceIt.Next()) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const auto face = TopoDS::Face(faceIt.Current());
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane ||
+            !surface.Plane().Axis().Direction().IsParallel(frame.normal, 1e-7))
+            continue;
+        const auto outer = BRepTools::OuterWire(face);
+        for (TopExp_Explorer wireIt(face, TopAbs_WIRE); wireIt.More(); wireIt.Next()) {
+            const auto wire = TopoDS::Wire(wireIt.Current());
+            if (wire.IsSame(outer) || !wire.Closed())
+                continue;
+            std::optional<gp_Circ> circle;
+            double span = 0;
+            bool round = true;
+            for (BRepTools_WireExplorer edge(wire, face); edge.More(); edge.Next()) {
+                BRepAdaptor_Curve curve(edge.Current());
+                if (curve.GetType() != GeomAbs_Circle) {
+                    round = false;
+                    break;
+                }
+                const auto current = curve.Circle();
+                if (circle &&
+                    (circle->Location().Distance(current.Location()) > tolerance ||
+                     std::abs(circle->Radius() - current.Radius()) > tolerance ||
+                     !circle->Axis().Direction().IsParallel(current.Axis().Direction(), 1e-7))) {
+                    round = false;
+                    break;
+                }
+                circle = current;
+                span += curve.LastParameter() - curve.FirstParameter();
+            }
+            if (!round || !circle || std::abs(span - 2 * std::numbers::pi) > 1e-6)
+                continue;
+            const auto c = project(circle->Location(), frame);
+            // HLR must also expose a complete circle: do not dimension a hidden/oblique rim.
+            if (std::none_of(view.circleCenters.begin(), view.circleCenters.end(),
+                             [&](const auto &visible) {
+                                 return std::hypot(visible.first.x - c.x, visible.first.y - c.y) <
+                                            tolerance &&
+                                        std::abs(visible.second - circle->Radius()) < tolerance;
+                             }) ||
+                std::any_of(centers.begin(), centers.end(), [&](auto old) {
+                    return std::hypot(old.x - c.x, old.y - c.y) < tolerance;
+                }))
+                continue;
+            centers.push_back(c);
+        }
+    }
+    for (bool horizontal : {true, false}) {
+        auto sorted = centers;
+        std::sort(sorted.begin(), sorted.end(), [horizontal](auto a, auto b) {
+            return horizontal ? (a.x == b.x ? a.y < b.y : a.x < b.x)
+                              : (a.y == b.y ? a.x < b.x : a.y < b.y);
+        });
+        std::optional<double> previous;
+        for (const auto c : sorted) {
+            const double coordinate = horizontal ? c.x : c.y;
+            const double value = coordinate - (horizontal ? view.minimum.x : view.minimum.y);
+            if (value <= tolerance || (previous && coordinate - *previous < tolerance))
+                continue;
+            previous = coordinate;
+            view.holeDimensions.push_back(
+                {horizontal ? DrawingPoint{view.minimum.x, c.y} : DrawingPoint{c.x, view.minimum.y},
+                 c, value, ""});
+        }
+    }
 }
 struct FlangeSize {
     gp_Pnt corner;
@@ -590,8 +701,11 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         std::size_t budget = 0;
         auto profileGroup = planProfileGroup(shape, bendAnalysis.bends, frames,
                                              bendAnalysis.lengthToleranceMm, budget, stop);
-        for (std::size_t i = 0; i < frames.size(); ++i)
+        for (std::size_t i = 0; i < frames.size(); ++i) {
             drawing->views[i] = viewOf(shape, frames[i], budget, stop);
+            if (i < 3)
+                holeDimensions(shape, frames[i], drawing->views[i], stop);
+        }
         const auto &fv = drawing->views[0];
         const double width = fv.maximum.x - fv.minimum.x;
         const double section = std::max(fv.maximum.y - fv.minimum.y,

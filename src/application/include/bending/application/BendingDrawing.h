@@ -40,6 +40,9 @@ struct DrawingView {
     DrawingPoint minimum;
     DrawingPoint maximum;
     std::vector<DrawingDimension> dimensions;
+    // Coordinates of visible circular inner contours, from this view's minimum X/Y.
+    // Equal coordinates share one dimension; these are not unfolded positions.
+    std::vector<DrawingDimension> holeDimensions;
     DrawingPoint sideAnchor;
     DrawingPoint sideTip;
     std::optional<std::array<double, 2>>

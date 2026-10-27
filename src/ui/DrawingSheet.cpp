@@ -100,8 +100,14 @@ bool crossesText(QPointF a, QPointF b, const std::vector<QRectF> &occupied) {
     }
     return false;
 }
+struct DimensionPlacement {
+    std::array<int, 4> nextLane{}; // Top, right, bottom, left, in paper coordinates.
+    std::vector<QLineF> lines;
+    QRectF area;
+};
 void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDimension &d,
-               std::vector<QRectF> &occupied) {
+               std::vector<QRectF> &occupied, DimensionPlacement *placement = nullptr,
+               bool holePosition = false) {
     const auto vector = b - a;
     const double length = std::hypot(vector.x(), vector.y());
     if (length < 1e-7)
@@ -111,10 +117,8 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
     const auto middle = (a + b) / 2;
     if (QPointF::dotProduct(middle - bounds.center(), normal) < 0)
         normal = -normal;
-    double maximum = -1e30;
-    for (auto corner :
-         {bounds.topLeft(), bounds.topRight(), bounds.bottomLeft(), bounds.bottomRight()})
-        maximum = std::max(maximum, QPointF::dotProduct(corner - middle, normal));
+    if (holePosition)
+        normal = std::abs(vector.x()) > std::abs(vector.y()) ? QPointF(0, -1) : QPointF(1, 0);
     const QString value = (d.label.empty() || d.label.starts_with("H")
                                ? QString{}
                                : QString::fromStdString(d.label) + QLatin1Char('=')) +
@@ -126,25 +130,57 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
         angle += 180;
     QPointF da, db, label;
     bool found = false;
-    for (int lane = 0; lane < 8 && !found; ++lane) {
-        const double offset = std::max(10.0, maximum + 10) + lane * 7;
-        da = a + normal * offset;
-        db = b + normal * offset;
-        for (int position = 0; position < 2; ++position) {
-            label = outside ? (position == 0 ? db + direction * (textWidth / 2 + 5)
-                                             : da - direction * (textWidth / 2 + 5))
-                            : (da + db) / 2;
-            QTransform transform;
-            transform.translate(label.x(), label.y());
-            transform.rotate(angle);
-            const auto rect = transform.mapRect(QRectF(-textWidth / 2, -5, textWidth, 4.5));
-            if (!overlaps(rect, occupied) && QRectF(25, 20, 385, 193).contains(rect)) {
-                occupied.push_back(rect);
-                found = true;
-                break;
+    for (int side = 0; side < (holePosition ? 2 : 1) && !found; ++side) {
+        if (side)
+            normal = -normal;
+        double maximum = -1e30;
+        for (auto corner :
+             {bounds.topLeft(), bounds.topRight(), bounds.bottomLeft(), bounds.bottomRight()})
+            maximum = std::max(maximum, QPointF::dotProduct(corner - middle, normal));
+        const std::size_t sideIndex = std::abs(normal.x()) > std::abs(normal.y())
+                                          ? (normal.x() > 0 ? 1 : 3)
+                                          : (normal.y() > 0 ? 2 : 0);
+        const int firstLane = placement ? placement->nextLane[sideIndex] : 0;
+        for (int lane = firstLane; lane < firstLane + 8 && !found; ++lane) {
+            const double offset = std::max(10.0, maximum + 10) + lane * 7;
+            da = a + normal * offset;
+            db = b + normal * offset;
+            const std::array<QLineF, 3> segments{
+                QLineF(da - direction * (outside ? 6 : 0), db + direction * (outside ? 6 : 0)),
+                QLineF(a + normal * .8, da + normal * 2), QLineF(b + normal * .8, db + normal * 2)};
+            for (int position = 0; position < 2; ++position) {
+                label = outside ? (position == 0 ? db + direction * (textWidth / 2 + 5)
+                                                 : da - direction * (textWidth / 2 + 5))
+                                : (da + db) / 2;
+                QTransform transform;
+                transform.translate(label.x(), label.y());
+                transform.rotate(angle);
+                const auto rect = transform.mapRect(QRectF(-textWidth / 2, -5, textWidth, 4.5));
+                const bool crosses =
+                    placement &&
+                    (std::any_of(segments.begin(), segments.end(),
+                                 [&](auto line) {
+                                     return crossesText(line.p1(), line.p2(), occupied) ||
+                                            !placement->area.contains(line.p1()) ||
+                                            !placement->area.contains(line.p2());
+                                 }) ||
+                     std::any_of(placement->lines.begin(), placement->lines.end(), [&](auto line) {
+                         return crossesText(line.p1(), line.p2(), {rect});
+                     }));
+                if (!crosses && !overlaps(rect, occupied) &&
+                    (placement ? placement->area : QRectF(25, 20, 385, 193)).contains(rect)) {
+                    occupied.push_back(rect);
+                    if (placement) {
+                        placement->nextLane[sideIndex] = lane + 1;
+                        placement->lines.insert(placement->lines.end(), segments.begin(),
+                                                segments.end());
+                    }
+                    found = true;
+                    break;
+                }
+                if (!outside)
+                    break;
             }
-            if (!outside)
-                break;
         }
     }
     if (!found)
@@ -321,7 +357,17 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         }
     }
     pen(p, .25, Qt::DashDotLine);
-    for (const auto &[c, radius] : v.circleCenters) {
+    std::vector<std::pair<DrawingPoint, double>> centers;
+    for (const auto &circle : v.circleCenters) {
+        const auto found = std::find_if(centers.begin(), centers.end(), [&](const auto &old) {
+            return std::hypot(old.first.x - circle.first.x, old.first.y - circle.first.y) < 1e-5;
+        });
+        if (found == centers.end())
+            centers.push_back(circle);
+        else
+            found->second = std::max(found->second, circle.second);
+    }
+    for (const auto &[c, radius] : centers) {
         if (v.omittedX && c.x > (*v.omittedX)[0] && c.x < (*v.omittedX)[1])
             continue;
         const auto at = map(c);
@@ -361,8 +407,13 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     std::vector<QRectF> localOccupied;
     auto &occupied = sheetOccupied ? *sheetOccupied : localOccupied;
     occupied.push_back(captionBox);
+    DimensionPlacement placement;
+    placement.area = annotationArea.adjusted(0, -10, 0, 7).intersected(QRectF(25, 20, 385, 193));
+    for (const auto &d : v.holeDimensions)
+        dimension(p, map(d.start), map(d.end), bounds, d, occupied, &placement, true);
     for (const auto &d : v.dimensions)
-        dimension(p, map(d.start), map(d.end), bounds, d, occupied);
+        dimension(p, map(d.start), map(d.end), bounds, d, occupied,
+                  v.holeDimensions.empty() ? nullptr : &placement);
     for (const auto &angle : v.angles)
         angularDimension(p, map(angle.vertex), map(angle.first), map(angle.second), angle, scale,
                          annotationArea, occupied, fullProfile);
@@ -663,6 +714,10 @@ void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitl
              QStringLiteral("Углы — внутренние, между стенками. L — осевой размер зоны гиба."), 2.5,
              Qt::AlignLeft | Qt::AlignVCenter);
     QStringList notes;
+    if (page == 0 && inlineProfiles(d) &&
+        (!d.views[1].holeDimensions.empty() || !d.views[2].holeDimensions.empty()))
+        notes << QStringLiteral(
+            "Привязки отверстий других стенок: выберите их грань главным видом");
     if (d.bendRecognitionStatus != BendRecognitionStatus::Completed ||
         (d.drawingOnlyRecognition && d.bends.empty()))
         notes << QStringLiteral("Размеры гибов не построены: геометрия не прошла распознавание");
