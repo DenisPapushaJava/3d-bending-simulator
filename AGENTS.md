@@ -85,3 +85,6 @@ D046: значок принадлежит app/data/icons; один SVG, прои
 
 
 D047: Windows OCCT требует feature freetype для размеров и подписей куба; см. docs/releases.md и THIRD_PARTY_NOTICES.md. Не отключать FreeType при использовании AIS-текста. Прямую зависимость freetype с default-features=false в корневом manifest сохранять: транзитивный запрет не отключает его defaults в vcpkg. viewer.fonts и probe подготовленного ZIP проверяют реальную растеризацию без GPU; обычный window startup этого не доказывает. Использовать переносимый sans-serif alias. При обновлении SDK сохранить FTL/MIT/X11/zlib и встроенный Bitstream/DejaVu notices, исходники/патчи портов и сверку hash.
+
+
+D048: при изменении vcpkg.json/SDK-triplets перед полным PR CI подготовить проверенный SDK в кэше main: gh workflow run windows-sdk.yml --ref main -f source_sha=FULL_COMMIT_SHA. Сначала прочитать/проверить изменённые manifest/triplets и лицензии, отправить коммит рабочей ветки; дождаться успеха SDK workflow, затем запускать PR CI. Workflow работает только от владельца и на main; сборщик берётся из main, исходные SDK-настройки — по неизменяемому SHA. Общий код — .github/actions/windows-sdk/action.yml. Для обычных C++/UI/docs-изменений подготовка SDK не нужна. Кэш SDK не считать успешной проверкой приложения; обе ОС/CI proof/теги — по D042.

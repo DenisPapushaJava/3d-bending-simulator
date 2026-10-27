@@ -1,0 +1,90 @@
+name: Windows SDK
+description: Restore or build the pinned OCCT/FreeType SDK independently of the application
+inputs:
+  manifest-directory:
+    description: Directory containing vcpkg.json and cmake/triplets
+    default: .
+    required: false
+outputs:
+  cache-hit:
+    description: Exact SDK cache hit
+    value: ${{ steps.cache.outputs.cache-hit }}
+  cache-key:
+    description: SDK input and compiler key
+    value: ${{ steps.metadata.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - name: Windows compiler environment
+      id: compiler
+      shell: pwsh
+      run: |
+        $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath
+        $environment = & "$vs/Common7/Tools/VsDevCmd.bat" -arch=x64 -host_arch=x64 '&&' set
+        foreach ($line in $environment) {
+          if ($line -match '^([^=]+)=(.*)$') {
+            "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV
+            if ($Matches[1] -eq 'VCToolsVersion') { "version=$($Matches[2])" >> $env:GITHUB_OUTPUT }
+          }
+        }
+    - name: Validate SDK inputs
+      id: metadata
+      shell: python
+      env:
+        SDK_MANIFEST_DIRECTORY: ${{ inputs.manifest-directory }}
+        SDK_INPUT_HASH: ${{ hashFiles(format('{0}/vcpkg.json', inputs.manifest-directory), format('{0}/cmake/triplets/*.cmake', inputs.manifest-directory)) }}
+        SDK_COMPILER_VERSION: ${{ steps.compiler.outputs.version }}
+      run: |
+        import json, os, re
+        from pathlib import Path
+        workspace = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+        manifest = (workspace / os.environ['SDK_MANIFEST_DIRECTORY']).resolve()
+        if not manifest.is_relative_to(workspace):
+            raise SystemExit('SDK manifest must be inside the workspace')
+        baseline = json.loads((manifest / 'vcpkg.json').read_text(encoding='utf-8'))['builtin-baseline']
+        if not re.fullmatch(r'[0-9a-f]{40}', baseline):
+            raise SystemExit('A pinned vcpkg baseline SHA is required')
+        if not (manifest / 'cmake/triplets/x64-windows-release.cmake').is_file():
+            raise SystemExit('The Windows release triplet is missing')
+        digest = os.environ['SDK_INPUT_HASH']
+        compiler = os.environ['SDK_COMPILER_VERSION'].rstrip('/\\')
+        image = os.environ.get('ImageVersion', 'unversioned')
+        if not re.fullmatch(r'[0-9a-f]{64}', digest) or not re.fullmatch(r'[0-9.]+', compiler):
+            raise SystemExit('SDK hash or compiler version is missing')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', image):
+            raise SystemExit('Invalid runner image version')
+        key = f'vcpkg-windows-2022-{digest}-msvc-{compiler}-image-{image}'
+        with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
+            output.write(f'baseline={baseline}\nmanifest={manifest}\nkey={key}\ndigest={digest}\n')
+    - name: Pinned vcpkg
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: microsoft/vcpkg
+        ref: ${{ steps.metadata.outputs.baseline }}
+        path: .deps/vcpkg
+        persist-credentials: false
+    - name: Restore SDK binary cache
+      id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .cache/vcpkg
+        key: ${{ steps.metadata.outputs.key }}
+        restore-keys: |
+          vcpkg-windows-2022-${{ steps.metadata.outputs.digest }}
+          vcpkg-windows-2022-
+    - name: Prepare SDK
+      shell: pwsh
+      env:
+        SDK_MANIFEST: ${{ steps.metadata.outputs.manifest }}
+        VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.cache/vcpkg,readwrite
+      run: |
+        & ./.deps/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & ./.deps/vcpkg/vcpkg.exe install --triplet x64-windows-release "--vcpkg-root=$pwd/.deps/vcpkg" "--x-manifest-root=$env:SDK_MANIFEST" "--overlay-triplets=$env:SDK_MANIFEST/cmake/triplets" "--x-install-root=$pwd/vcpkg_installed"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Save SDK before configuring the application
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .cache/vcpkg
+        key: ${{ steps.metadata.outputs.key }}
