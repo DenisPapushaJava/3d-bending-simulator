@@ -10,7 +10,13 @@
 
 [![CI](https://github.com/DenisPapushaJava/3d-bending-simulator/actions/workflows/ci.yml/badge.svg)](https://github.com/DenisPapushaJava/3d-bending-simulator/actions/workflows/ci.yml)
 
-## Быстрый старт — Ubuntu 24.04 / Mint 22.x
+## Быстрый старт — Windows x64
+
+В [релизах](https://github.com/DenisPapushaJava/3d-bending-simulator/releases) выберите Windows ZIP, распакуйте **весь** архив и запустите `bin/3d-bending-simulator.exe`. При отсутствии библиотек MSVC установите [Microsoft Visual C++ x64 Runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). Сохраняйте структуру папок комплекта. Учебные детали находятся в `share/3d-bending-simulator/examples`.
+
+Это экспериментальный alpha: интерактивный Windows/GPU ещё требует проверки. Состав возможностей и ограничения — в [истории изменений](CHANGELOG.md). `dependency-sources.zip` содержит исходники зависимостей и для обычного запуска не нужен.
+
+## Сборка — Ubuntu 24.04 / Mint 22.x
 
 ```bash
 sudo bash scripts/install-linux-deps.sh
@@ -81,4 +87,4 @@ Windows, Docker и устройство модулей описаны в [рук
 
 Скилл содержит правила работы и навигацию по этим документам. Продуктовые решения хранятся в проекте. При переносе проекта нужно обновить путь к его корню в скилле.
 
-Актуализировано: 2026-10-19.
+Актуализировано: 2026-10-27.
