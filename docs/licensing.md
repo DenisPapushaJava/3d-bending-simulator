@@ -71,3 +71,10 @@ D042, 2026-10-27: в автоматическом выпуске остаютс�
 
 
 Значок D046 — авторский SVG проекта и производные PNG/ICO под MIT, в `src/app/data/icons`. Для регенерации используются отдельные инструменты разработчика Inkscape/Pillow; они не входят в приложение/комплект. Состав runtime-зависимостей Qt/OCCT не расширен.
+
+
+### FreeType и встроенный fallback OCCT — D047, 2026-10-27
+
+Windows OCCT включает FreeType 2.14.3 без optional features. Для библиотеки выбран FreeType License (FTL); credit/disclaimer сохранён в THIRD_PARTY_NOTICES.md, полный текст — в share/licenses/FreeType-copyright.txt. Включённые в FreeType MIT/X11/zlib notices сохранены дополнительно в share/licenses/freetype вместе с исходными файлами-носителями; исходники с четырьмя применёнными патчами и рецепт порта входят в companion ZIP. Подпроект GPL не выбран как лицензия нашей поставки FreeType.
+
+Шрифт fallback Font_DejavuSans_Latin_woff внутри OCCT сохраняет Bitstream Vera notice и public-domain статус изменений DejaVu; упаковщик извлекает его неизменённые условия в share/licenses/OCCT-DejaVu-copyright.txt. Системные Arial/DejaVu не копируются. Это дополнение фактического состава, а не замена лицензий собственным MIT.
