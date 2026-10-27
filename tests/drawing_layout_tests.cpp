@@ -43,6 +43,13 @@ int main() {
         grouped.details[0].view.dimensionedBends = {1};
         coverage = drawingMeasurementCoverage(grouped);
         require(coverage.total == 2 && coverage.dimensioned == 2 && coverage.missing.empty());
+        coverage = drawingMeasurementCoverage(grouped, true);
+        require(coverage.total == 2 && coverage.dimensioned == 1 &&
+                coverage.missing == std::vector<std::size_t>{0});
+        grouped.sections.resize(1);
+        grouped.sections[0].view.dimensionedBends = {0};
+        coverage = drawingMeasurementCoverage(grouped, true);
+        require(coverage.dimensioned == 2 && coverage.missing.empty());
         grouped.bends[1].diagnostic = true;
         grouped.details[0].view.dimensionedBends.clear();
         coverage = drawingMeasurementCoverage(grouped);

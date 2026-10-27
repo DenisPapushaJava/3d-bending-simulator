@@ -19,4 +19,9 @@ drawingBendCorner(const application::RecognizedBend &bend, const TopTools_Indexe
 drawingProfiles(const std::vector<application::RecognizedBend> &bends,
                 const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference, double tolerance,
                 std::stop_token stop);
+[[nodiscard]] std::optional<application::DrawingProfile>
+drawingProfileAt(const std::vector<std::size_t> &members,
+                 const std::vector<application::RecognizedBend> &bends,
+                 const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference, double tolerance,
+                 double fraction, std::stop_token stop);
 } // namespace bending::cad

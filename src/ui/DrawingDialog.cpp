@@ -24,6 +24,7 @@ class DrawingDialog::Impl {
     std::uint64_t revision;
     QComboBox *base;
     QComboBox *turn;
+    QComboBox *layoutMode;
     QCheckBox *reverse;
     QCheckBox *breaks;
     QLineEdit *name;
@@ -45,8 +46,13 @@ class DrawingDialog::Impl {
         : dialog(d), controller(c), builder(std::move(b)), revision(c.session().revision()),
           selected(face) {}
     DrawingTitle title() const {
-        return {name->text(), designation->text(), material->text(), execution->text(),
-                quantity->value() ? std::optional<int>{quantity->value()} : std::nullopt};
+        return {name->text(),
+                designation->text(),
+                material->text(),
+                execution->text(),
+                quantity->value() ? std::optional<int>{quantity->value()} : std::nullopt,
+                layoutMode->currentIndex() == 0 ? DrawingLayout::Classical
+                                                : DrawingLayout::Profiles};
     }
     void invalidate() {
         settingsChanged = true;
@@ -58,11 +64,12 @@ class DrawingDialog::Impl {
         const auto drawing = controller.drawing();
         if (!drawing || settingsChanged || controller.session().revision() != revision)
             return;
-        page->setMaximum(DrawingSheet::pageCount(*drawing));
+        page->setMaximum(DrawingSheet::pageCount(*drawing, title()));
         try {
             image->setPixmap(QPixmap::fromImage(DrawingSheet::preview(
                 *drawing, title(), page->value() - 1, std::max(600, dialog->width() - 370))));
             image->adjustSize();
+            exportPdf->setEnabled(!controller.hasWork());
         } catch (const std::exception &e) {
             exportPdf->setEnabled(false);
             status->setText(QString::fromUtf8(e.what()));
@@ -90,13 +97,13 @@ class DrawingDialog::Impl {
                                 .arg(QString::fromStdString(error->detail)));
         } else if (drawing && !settingsChanged) {
             const bool cut = drawing->views[0].omittedX.has_value();
-            const auto coverage = application::drawingMeasurementCoverage(*drawing);
+            const auto coverage = DrawingSheet::coverage(*drawing, title());
             status->setText(
                 QStringLiteral("%1 · A3 · %2 лист(а)%3. Размеры полок и углы: %4 из %5 "
                                "распознанных гибов. Все размеры справочные.")
                     .arg(coverage.missing.empty() ? QStringLiteral("Лист сформирован")
                                                   : QStringLiteral("Неполные размеры"))
-                    .arg(DrawingSheet::pageCount(*drawing))
+                    .arg(DrawingSheet::pageCount(*drawing, title()))
                     .arg(cut ? QStringLiteral(
                                    " · подтверждённый однородный участок показан с разрывом")
                              : QString{})
@@ -161,6 +168,11 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->quantity->setSpecialValueText(QStringLiteral("Не указано"));
     impl_->quantity->setAccessibleName(QStringLiteral("Количество в партии, штук"));
     form->addRow(QStringLiteral("Количество, шт."), impl_->quantity);
+    impl_->layoutMode = new QComboBox(panel);
+    impl_->layoutMode->setObjectName(QStringLiteral("drawingLayout"));
+    impl_->layoutMode->addItems(
+        {QStringLiteral("Чертёж: виды и сечения"), QStringLiteral("Профили для ввода")});
+    form->addRow(QStringLiteral("Представление"), impl_->layoutMode);
     impl_->base = new QComboBox(panel);
     impl_->base->setObjectName(QStringLiteral("drawingBaseFace"));
     impl_->base->addItem(QStringLiteral("Авто: основная плоская грань"));
@@ -219,6 +231,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->name->setText(QString::fromUtf8(reinterpret_cast<const char *>(utf8.data()),
                                            static_cast<qsizetype>(utf8.size())));
     connect(impl_->quantity, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
+    connect(impl_->layoutMode, &QComboBox::currentIndexChanged, this, [this] { impl_->refresh(); });
     connect(impl_->page, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
     for (auto *combo : {impl_->base, impl_->turn})
         connect(combo, &QComboBox::currentIndexChanged, this, [this] { impl_->invalidate(); });

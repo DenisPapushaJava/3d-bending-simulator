@@ -189,7 +189,7 @@ bool supportedFreeCap(const std::array<gp_Pnt, 2> &end, Wall wall, gp_Dir axis,
 DrawingProfile buildProfile(const std::vector<std::size_t> &members,
                             const std::vector<RecognizedBend> &bends,
                             const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference,
-                            double tolerance, std::stop_token stop) {
+                            double tolerance, std::stop_token stop, double fraction = .5) {
     std::map<Wall, std::vector<std::size_t>> graph;
     for (auto index : members)
         for (std::size_t side = 0; side < 2; ++side)
@@ -248,7 +248,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
     }
     if (high - low <= 20 * tolerance)
         throw Unmeasured{};
-    const gp_Pnt station(gp_XYZ(axis.X(), axis.Y(), axis.Z()) * ((low + high) / 2));
+    const gp_Pnt station(gp_XYZ(axis.X(), axis.Y(), axis.Z()) * (low + (high - low) * fraction));
     const gp_Ax2 frame(station, axis, gp_Dir(horizontal));
     std::vector<DrawingBendCorner> corners;
     for (auto index : ordered) {
@@ -514,5 +514,19 @@ drawingProfiles(const std::vector<application::RecognizedBend> &bends,
         result.push_back(std::move(candidate));
     }
     return result;
+}
+std::optional<application::DrawingProfile>
+drawingProfileAt(const std::vector<std::size_t> &members,
+                 const std::vector<application::RecognizedBend> &bends,
+                 const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference, double tolerance,
+                 double fraction, std::stop_token stop) {
+    try {
+        return buildProfile(members, bends, faces, reference, std::max(1e-6, tolerance), stop,
+                            fraction);
+    } catch (const Unmeasured &) {
+        return {};
+    } catch (const Standard_Failure &) {
+        return {};
+    }
 }
 } // namespace bending::cad

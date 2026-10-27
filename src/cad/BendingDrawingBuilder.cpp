@@ -2,6 +2,7 @@
 #include "BendRecognizer.h"
 #include "DrawingOpenings.h"
 #include "DrawingProfiles.h"
+#include "DrawingSections.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/DocumentAccess.h"
 
@@ -951,10 +952,17 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         drawing->sourceName.assign(utf8.begin(), utf8.end());
         std::size_t budget = 0;
         const auto openings = drawingOpenings(shape, faces, stop);
+        const std::array<gp_Ax2, 3> classicalFrames{
+            gp_Ax2(gp_Pnt(0, 0, 0), frames[0].normal, frames[0].u),
+            gp_Ax2(gp_Pnt(0, 0, 0), frames[1].normal, frames[1].u),
+            gp_Ax2(gp_Pnt(0, 0, 0), frames[2].normal, frames[2].u)};
+        drawing->classicalViews.emplace();
         auto profileGroup = planProfileGroup(shape, bendAnalysis.bends, frames,
                                              bendAnalysis.lengthToleranceMm, budget, stop);
         for (std::size_t i = 0; i < frames.size(); ++i) {
             drawing->views[i] = viewOf(shape, frames[i], budget, stop, i < 3 ? &openings : nullptr);
+            if (i < 3)
+                (*drawing->classicalViews)[i] = drawing->views[i];
             if (i > 0 && i < 3 && std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
                     return o.normal.IsParallel(frames[i].normal, 1e-7);
                 })) {
@@ -966,6 +974,17 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     frames[i].normal.Reverse();
                     opposite.reverseProjection = true;
                     drawing->views[i] = std::move(opposite);
+                    drawing->auxiliaryViews.push_back({drawing->views[i], i == 1 ? "Ц" : "Ч", i});
+                    const auto &main = (*drawing->classicalViews)[0];
+                    const auto direction = classicalFrames[i].Direction();
+                    const double dx = direction.Dot(classicalFrames[0].XDirection());
+                    const double dy = direction.Dot(classicalFrames[0].YDirection());
+                    const DrawingPoint anchor{(main.minimum.x + main.maximum.x) / 2 -
+                                                  dx * (main.maximum.x - main.minimum.x) / 2,
+                                              (main.minimum.y + main.maximum.y) / 2 -
+                                                  dy * (main.maximum.y - main.minimum.y) / 2};
+                    (*drawing->classicalViews)[0].viewArrows.push_back(
+                        {anchor, {dx, dy}, drawing->auxiliaryViews.back().designation});
                 }
             }
         }
@@ -980,6 +999,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             const std::array<double, 2> gap{fv.minimum.x + keep / 2, fv.maximum.x - keep / 2};
             drawing->views[0].omittedX = gap;
             drawing->views[1].omittedX = gap;
+            (*drawing->classicalViews)[0].omittedX = gap;
+            (*drawing->classicalViews)[1].omittedX = gap;
         }
         auto &front = drawing->views[0];
         front.dimensions.push_back({{front.minimum.x, front.minimum.y},
@@ -998,6 +1019,16 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         overallWitnesses(shape, frames[0], front.dimensions[0], true, stop);
         overallWitnesses(shape, frames[0], front.dimensions[1], false, stop);
         overallWitnesses(shape, frames[1], top.dimensions[0], false, stop);
+        (*drawing->classicalViews)[0].dimensions = front.dimensions;
+        auto &classicalTop = (*drawing->classicalViews)[1];
+        classicalTop.dimensions.push_back({{classicalTop.minimum.x, classicalTop.minimum.y},
+                                           {classicalTop.minimum.x, classicalTop.maximum.y},
+                                           classicalTop.maximum.y - classicalTop.minimum.y,
+                                           {}});
+        const Frame classicalTopFrame{classicalFrames[1].XDirection(),
+                                      classicalFrames[1].YDirection(),
+                                      classicalFrames[1].Direction()};
+        overallWitnesses(shape, classicalTopFrame, classicalTop.dimensions[0], false, stop);
         const double baseScale = drawingScale(*drawing).value_or(1);
         const auto addBend = [&](const RecognizedBend &bend, bool diagnostic) {
             const gp_Vec axisVector(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
@@ -1294,6 +1325,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             for (auto faceIndex : opening.wallFaces)
                 used[faceIndex] = true;
         drawing->unrecognizedCylindricalFaces = 0;
+        for (auto index : drawingContourRoundings(shape, faces, bendAnalysis.bends,
+                                                  bendAnalysis.lengthToleranceMm, stop))
+            used[index] = true;
         for (int i = 1; i <= faces.Extent(); ++i) {
             BRepAdaptor_Surface cylinderSurface(TopoDS::Face(faces(i)));
             if (cylinderSurface.GetType() != GeomAbs_Cylinder || used[static_cast<std::size_t>(i)])
@@ -1351,6 +1385,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         const double arrow = std::max(5.0, std::min(30.0, longest * .2));
         drawing->views[3].sideAnchor = project(anchor, frames[3]);
         drawing->views[3].sideTip = project(anchor.Translated(gp_Vec(side) * arrow), frames[3]);
+        if (drawing->variableProfile != DrawingVariableProfile::Measured)
+            prepareClassicalDrawing(shape, faces, bendAnalysis.bends, classicalFrames, *drawing,
+                                    bendAnalysis.lengthToleranceMm, budget, stop);
         if (!drawingScale(*drawing))
             return DrawingError{"The part does not fit the supported A3 / standard scale range"};
         return BendingDrawingPtr(std::move(drawing));

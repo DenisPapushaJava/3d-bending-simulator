@@ -5,18 +5,23 @@
 
 class QPainter;
 namespace bending::ui {
+enum class DrawingLayout { Classical, Profiles };
 struct DrawingTitle {
     QString name;
     QString designation;
     QString material;
     QString execution;
     std::optional<int> quantity;
+    DrawingLayout layout = DrawingLayout::Classical;
 };
 class DrawingSheet final {
   public:
     static constexpr double widthMm = 420;
     static constexpr double heightMm = 297;
-    [[nodiscard]] static int pageCount(const application::BendingDrawing &drawing);
+    [[nodiscard]] static int pageCount(const application::BendingDrawing &drawing,
+                                       const DrawingTitle &title = {});
+    [[nodiscard]] static application::DrawingMeasurementCoverage
+    coverage(const application::BendingDrawing &drawing, const DrawingTitle &title = {});
     // Painter coordinates must already be millimetres. Preview and PDF use the same layout.
     static void paint(QPainter &painter, const application::BendingDrawing &drawing,
                       const DrawingTitle &title, int page = 0);

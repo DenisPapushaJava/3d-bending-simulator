@@ -135,10 +135,14 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
         normal = -normal;
     if (holePosition)
         normal = std::abs(vector.x()) > std::abs(vector.y()) ? QPointF(0, -1) : QPointF(1, 0);
-    const QString value = (d.label.empty() || d.label.starts_with("H")
-                               ? QString{}
-                               : QString::fromStdString(d.label) + QLatin1Char('=')) +
-                          number(d.valueMm);
+    const QString value = d.pitchIntervals
+                              ? QStringLiteral("%1×%2=%3")
+                                    .arg(d.pitchIntervals)
+                                    .arg(number(d.pitchMm), number(d.valueMm))
+                              : (d.label.empty() || d.label.starts_with("H")
+                                     ? QString{}
+                                     : QString::fromStdString(d.label) + QLatin1Char('=')) +
+                                    number(d.valueMm);
     const double textWidth = std::max(9., value.size() * 2.2);
     const bool outside = length < textWidth + 7;
     double angle = std::atan2(direction.y(), direction.x()) * 180 / std::numbers::pi;
@@ -223,7 +227,8 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
 }
 void angularDimension(QPainter &p, QPointF vertex, QPointF first, QPointF second,
                       const DrawingAngle &angle, double scale, QRectF area,
-                      std::vector<QRectF> &occupied, bool fullProfile = false) {
+                      std::vector<QRectF> &occupied, bool fullProfile = false,
+                      bool standardText = false) {
     const auto a = first - vertex, b = second - vertex;
     const double start = std::atan2(a.y(), a.x());
     const double sweep = std::atan2(a.x() * b.y() - a.y() * b.x(), QPointF::dotProduct(a, b));
@@ -252,7 +257,7 @@ void angularDimension(QPainter &p, QPointF vertex, QPointF first, QPointF second
         p.drawPath(arc);
         arrow(p, at(start, radius), at(start + sweep * .08, radius));
         arrow(p, at(start + sweep, radius), at(start + sweep * .92, radius));
-        text(p, box, value, fullProfile ? 2.5 : 3.5);
+        text(p, box, value, fullProfile && !standardText ? 2.5 : 3.5);
         return;
     }
     throw std::runtime_error("An angular dimension does not fit; choose another orientation");
@@ -305,7 +310,7 @@ void leaderNote(QPainter &p, QPointF anchor, QRectF bounds, const QString &value
 void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPointF center,
           double scale, const QString &caption, bool isometric = false, bool circular = false,
           bool compact = false, std::vector<QRectF> *sheetOccupied = nullptr,
-          bool fullProfile = false, std::optional<QRectF> cellArea = {}) {
+          bool fullProfile = false, std::optional<QRectF> cellArea = {}, bool classical = false) {
     const bool schematic = v.profileStart.has_value();
     const QPointF midpoint((v.minimum.x + v.maximum.x) / 2, (v.minimum.y + v.maximum.y) / 2);
     const double removed = v.omittedX ? (*v.omittedX)[1] - (*v.omittedX)[0] : 0;
@@ -438,13 +443,14 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     const QRectF captionBox =
         cellArea ? QRectF(cellArea->left(), cellArea->top(), cellArea->width(), 7)
                  : QRectF(center.x() - cell / 2, fullProfile ? 30 : center.y() - 48, cell, 7);
-    const QRectF annotationArea = cellArea ? cellArea->adjusted(0, 9, 0, 0)
+    const QRectF annotationArea = cellArea ? cellArea->adjusted(0, caption.isEmpty() ? 0 : 9, 0, 0)
                                   : fullProfile
                                       ? QRectF(center.x() - cell / 2, 25, cell, 185)
                                       : QRectF(center.x() - cell / 2, center.y() - 40, cell, 85);
     std::vector<QRectF> localOccupied;
     auto &occupied = sheetOccupied ? *sheetOccupied : localOccupied;
-    occupied.push_back(captionBox);
+    if (!caption.isEmpty())
+        occupied.push_back(captionBox);
     DimensionPlacement placement;
     const auto witnesses =
         [&](const DrawingDimension &dimension) -> std::optional<std::array<QPointF, 2>> {
@@ -455,6 +461,15 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     placement.area =
         cellArea ? annotationArea
                  : annotationArea.adjusted(0, -10, 0, 7).intersected(QRectF(25, 20, 385, 193));
+    std::array<int, 4> chainLanes{};
+    for (const auto &d : v.axialDimensions) {
+        placement.nextLane.fill(0); // Adjacent spans share one chain dimension line.
+        dimension(p, map(d.start), map(d.end), bounds, d, occupied, &placement, false,
+                  witnesses(d));
+        for (std::size_t i = 0; i < chainLanes.size(); ++i)
+            chainLanes[i] = std::max(chainLanes[i], placement.nextLane[i]);
+    }
+    placement.nextLane = chainLanes;
     for (const auto &d : v.holeDimensions)
         dimension(p, map(d.start), map(d.end), bounds, d, occupied, &placement, true, witnesses(d));
     for (const auto &d : v.sectionDimensions)
@@ -472,7 +487,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                   false, witnesses(d));
     for (const auto &angle : v.angles)
         angularDimension(p, map(angle.vertex), map(angle.first), map(angle.second), angle, scale,
-                         annotationArea, occupied, fullProfile && !schematic);
+                         annotationArea, occupied, fullProfile && !schematic, classical);
     for (const auto &marker : v.sectionMarkers) {
         const auto a = map(marker.first), b = map(marker.second);
         const auto delta = b - a;
@@ -506,7 +521,9 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                     for (double side : {-1., 1.}) {
                         const auto label = tip + look * (side * (9 + lane * 7)) + outward * along;
                         const QRectF box(label.x() - 6, label.y() - 2.5, 12, 5);
-                        if (!QRectF(25, 20, 385, 193).contains(box) || overlaps(box, occupied))
+                        if (!(classical ? placement.area : QRectF(25, 20, 385, 193))
+                                 .contains(box) ||
+                            overlaps(box, occupied) || (classical && box.intersects(bounds)))
                             continue;
                         occupied.push_back(box);
                         text(p, box, QString::fromStdString(marker.designation), 3.5);
@@ -543,6 +560,63 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                    : compact               ? QRectF(center.x() - 50, center.y() - 40, 100, 87)
                                            : QRectF(25, 20, 385, 193),
                    occupied, fullProfile);
+    }
+    for (const auto &note : v.groupedBendNotes) {
+        if (note.bends.empty())
+            continue;
+        QStringList ids;
+        for (auto index : note.bends)
+            ids << bendId(drawing, index);
+        const auto &bend = drawing.bends[note.bends.front()];
+        QString value = ids.join(QStringLiteral(", "));
+        if (!commonBendValue(drawing, false))
+            value += QStringLiteral(" · R%1").arg(number(bend.innerRadiusMm));
+        if (!commonBendValue(drawing, true))
+            value += QStringLiteral("\nL=%1").arg(number(bend.axialLengthMm));
+        if (bend.trimmedEnds)
+            value += QStringLiteral("!");
+        leaderNote(p, map(note.anchor), bounds, value, annotationArea, occupied, true);
+    }
+    if (classical) {
+        std::vector<double> diameters;
+        for (const auto &[center, diameter] : v.holeDiameters) {
+            if (std::any_of(diameters.begin(), diameters.end(),
+                            [&](auto d) { return std::abs(d - diameter) < 1e-5; }))
+                continue;
+            diameters.push_back(diameter);
+            const auto count =
+                std::count_if(v.holeDiameters.begin(), v.holeDiameters.end(),
+                              [&](const auto &d) { return std::abs(d.second - diameter) < 1e-5; });
+            const auto value = (count > 1 ? QStringLiteral("%1×").arg(count) : QString{}) +
+                               QChar(0x2300) + number(diameter);
+            leaderNote(p, map({center.x, center.y + diameter / 2}), bounds, value, annotationArea,
+                       occupied, true);
+        }
+    }
+    for (const auto &marker : v.viewArrows) {
+        const auto anchor = map(marker.anchor);
+        QPointF direction(marker.direction.x, -marker.direction.y);
+        direction /= std::hypot(direction.x(), direction.y());
+        const QPointF normal(-direction.y(), direction.x());
+        bool placed = false;
+        for (double lane : {0., 10., -10., 20., -20., 30., -30.}) {
+            const auto tip = anchor - direction * 4 + normal * lane;
+            const auto from = tip - direction * 8;
+            const auto at = from - direction * 4;
+            const QRectF box(at.x() - 4, at.y() - 2.5, 8, 5);
+            if (!placement.area.contains(box) || overlaps(box, occupied) ||
+                crossesText(tip, from, occupied))
+                continue;
+            occupied.push_back(box);
+            pen(p);
+            p.drawLine(from, tip);
+            arrow(p, tip, from);
+            text(p, box, QString::fromStdString(marker.designation));
+            placed = true;
+            break;
+        }
+        if (!placed)
+            throw std::runtime_error("A view direction arrow does not fit");
     }
     for (const auto &note : v.directionNotes)
         leaderNote(p, map(note.anchor), bounds,
@@ -581,7 +655,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             p.drawLine(end - QPointF(6, 0), end + QPointF(6, 0));
         text(p, QRectF(end.x() - 6, end.y() - 5, 12, 5), QString::fromStdString(value), 3.5);
     }
-    if (isometric) {
+    if (isometric && !classical) {
         const auto a = map(v.sideAnchor);
         auto b = map(v.sideTip);
         const auto delta = b - a;
@@ -903,8 +977,228 @@ void operatorSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &tit
         }
     }
 }
+bool classicalLayout(const BendingDrawing &d, const DrawingTitle &title) {
+    return title.layout == DrawingLayout::Classical && d.classicalViews &&
+           d.variableProfile != DrawingVariableProfile::Measured;
+}
+double classicalLeftWidth(const BendingDrawing &d) {
+    return d.sections.size() == 1 ? 183 : 238;
+}
+double sectionScale(const BendingDrawing &d, std::size_t index) {
+    const bool single = d.sections.size() == 1;
+    return fittedScale(d.sections[index].view, index < 2 ? (single ? 162 : 87) : 130,
+                       index < 2 ? (single ? 139 : 54) : 130);
+}
+std::vector<std::size_t> classicalDetails(const BendingDrawing &d) {
+    std::vector<std::size_t> result;
+    for (std::size_t i = 0; i < d.details.size(); ++i) {
+        bool needed = d.details[i].view.bendNotes.empty();
+        for (const auto &note : d.details[i].view.bendNotes) {
+            bool covered = false;
+            for (std::size_t s = 0; s < d.sections.size(); ++s)
+                if (std::find(d.sections[s].view.dimensionedBends.begin(),
+                              d.sections[s].view.dimensionedBends.end(),
+                              note.second) != d.sections[s].view.dimensionedBends.end()) {
+                    covered = true;
+                    const auto &b = d.bends[note.second];
+                    if (!d.details[i].fullProfile &&
+                        (b.innerRadiusMm + b.thicknessMm) * sectionScale(d, s) < 1.5)
+                        needed = true;
+                }
+            needed = needed || !covered;
+        }
+        if (needed)
+            result.push_back(i);
+    }
+    return result;
+}
+std::size_t classicalDetailCapacity(const BendingDrawing &d) {
+    const auto details = classicalDetails(d);
+    return std::all_of(details.begin(), details.end(),
+                       [&](auto i) { return !d.details[i].fullProfile; })
+               ? 4
+               : 2;
+}
+DrawingView classicalSource(const BendingDrawing &d, const DrawingView &source,
+                            std::size_t projection) {
+    auto view = source;
+    const auto &original = d.views[projection];
+    if (source.reverseProjection != original.reverseProjection)
+        return view;
+    for (auto index : classicalDetails(d)) {
+        const auto &name = d.details[index].designation;
+        for (const auto &label : original.labels) {
+            if (label.second != name ||
+                std::any_of(view.labels.begin(), view.labels.end(),
+                            [&](const auto &old) { return old.second == name; }))
+                continue;
+            view.labels.push_back(label);
+            for (const auto &circle : original.detailCircles)
+                if (std::hypot(circle.first.x - label.first.x, circle.first.y - label.first.y) <
+                    1e-5)
+                    view.detailCircles.push_back(circle);
+        }
+    }
+    return view;
+}
+int sectionPages(const BendingDrawing &d) {
+    return static_cast<int>((d.sections.size() > 2 ? d.sections.size() - 2 : 0) + 1) / 2;
+}
+int classicalPages(const BendingDrawing &d) {
+    const auto capacity = classicalDetailCapacity(d);
+    return 1 + sectionPages(d) + static_cast<int>(d.auxiliaryViews.size()) +
+           static_cast<int>((classicalDetails(d).size() + capacity - 1) / capacity);
+}
+double classicalTopMargin(const BendingDrawing &d) {
+    const auto count = (*d.classicalViews)[1].holeDimensions.size();
+    return count >= 4 ? 36 : count ? 26 : 20;
+}
+double classicalFrontHeight(const BendingDrawing &d) {
+    const auto &f = (*d.classicalViews)[0], &t = (*d.classicalViews)[1];
+    const double fh = f.maximum.y - f.minimum.y, th = t.maximum.y - t.minimum.y;
+    const double desired = 44 + (170 - 44 - classicalTopMargin(d)) * fh / (fh + th);
+    return std::clamp(desired, 80., t.holeDimensions.size() >= 6 ? 100. : 134.);
+}
+double classicalScale(const BendingDrawing &d) {
+    const auto &f = (*d.classicalViews)[0], &t = (*d.classicalViews)[1];
+    return std::min({1., fittedScale(f, classicalLeftWidth(d) - 65, classicalFrontHeight(d) - 44),
+                     fittedScale(t, classicalLeftWidth(d) - 65,
+                                 170 - classicalFrontHeight(d) - classicalTopMargin(d))});
+}
+void classicalParameters(QPainter &p, const BendingDrawing &d, const DrawingTitle &title) {
+    QStringList values;
+    if (d.thicknessMm)
+        values << QStringLiteral("t = %1 мм%2")
+                      .arg(number(*d.thicknessMm),
+                           d.manualThickness ? QStringLiteral(" (вручную)") : QString{});
+    if (const auto r = commonBendValue(d, false))
+        values << QStringLiteral("Ri = %1 мм").arg(number(*r));
+    if (const auto l = commonBendValue(d, true))
+        values << QStringLiteral("Длина зон гиба L = %1 мм").arg(number(*l));
+    else if (!d.bends.empty())
+        values << QStringLiteral("L — у соответствующих гибов");
+    if (d.thicknessMm && d.declaredThicknessMm && !d.manualThickness &&
+        std::abs(*d.thicknessMm - *d.declaredThicknessMm) > 1e-5)
+        values
+            << QStringLiteral("Вручную t = %1 (расхождение)").arg(number(*d.declaredThicknessMm));
+    if (!title.execution.trimmed().isEmpty())
+        values << title.execution.trimmed();
+    text(p, QRectF(25, 24, 385, 8), values.join(QStringLiteral("     ")), 3.5);
+}
+double classicalSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &title, int page) {
+    classicalParameters(p, d, title);
+    std::string lastError;
+    double scaleLimit = classicalScale(d);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        const double scale = standardDrawingScale(scaleLimit).value_or(scaleLimit);
+        const auto draw = [&](QPainter &trial) {
+            std::vector<QRectF> occupied;
+            const auto section = [&](std::size_t index, QRectF cell) {
+                const auto &s = d.sections[index];
+                const double localScale =
+                    standardDrawingScale(sectionScale(d, index) * std::pow(.8, attempt))
+                        .value_or(sectionScale(d, index));
+                const auto name = QString::fromStdString(s.designation);
+                const auto caption =
+                    QStringLiteral("%1-%1 (%2)%3")
+                        .arg(name, scaleName(localScale),
+                             s.locations.size() > 1
+                                 ? QStringLiteral(" · %1 места").arg(s.locations.size())
+                                 : QString{});
+                view(trial, d, s.view, cell.center() + QPointF(0, 6), localScale, caption, false,
+                     false, false, &occupied, true, cell, true);
+            };
+            if (page == 0) {
+                const double leftWidth = classicalLeftWidth(d);
+                const double frontHeight = classicalFrontHeight(d);
+                const QRectF front(25, 37, leftWidth, frontHeight),
+                    top(25, 42 + frontHeight, leftWidth, 170 - frontHeight);
+                // The front and top share U, scale and horizontal origin. The left view
+                // shares V, scale and vertical origin with the front (first-angle layout).
+                view(trial, d, classicalSource(d, (*d.classicalViews)[0], 0), front.center(), scale,
+                     {}, false, false, false, &occupied, false, front, true);
+                view(trial, d, classicalSource(d, (*d.classicalViews)[1], 1), top.center(), scale,
+                     {}, false, false, false, &occupied, false, top, true);
+                const double x = 25 + leftWidth + 10, width = 410 - x;
+                if (d.sections.empty()) {
+                    const QRectF left(x, 37, width, frontHeight);
+                    view(trial, d, classicalSource(d, (*d.classicalViews)[2], 2),
+                         {left.center().x(), front.center().y()}, scale, {}, false, false, false,
+                         &occupied, false, left, true);
+                    if (top.height() >= 45) {
+                        const QRectF iso(x, top.top(), width, top.height());
+                        const double isoScale =
+                            fittedScale(d.views[3], width - 35, top.height() - 28);
+                        view(trial, d, d.views[3], iso.center() + QPointF(0, 4), isoScale,
+                             QStringLiteral("Наглядный вид (%1)").arg(scaleName(isoScale)), true,
+                             false, false, &occupied, false, iso, true);
+                    }
+                } else if (d.sections.size() == 1)
+                    section(0, QRectF(x, 37, width, 175));
+                else {
+                    section(0, QRectF(x, 37, width, 87.5));
+                    section(1, QRectF(x, 129.5, width, 87.5));
+                }
+            } else if (page <= sectionPages(d)) {
+                const auto first = 2 + static_cast<std::size_t>(page - 1) * 2;
+                for (std::size_t i = first; i < std::min(first + 2, d.sections.size()); ++i)
+                    section(i, QRectF(25 + (i - first) * 195, 37, 190, 175));
+            } else if (page <= sectionPages(d) + static_cast<int>(d.auxiliaryViews.size())) {
+                const auto &v =
+                    d.auxiliaryViews[static_cast<std::size_t>(page - sectionPages(d) - 1)];
+                const double localScale = fittedScale(v.view, 280, 110) * std::pow(.8, attempt);
+                const double fit = standardDrawingScale(localScale).value_or(localScale);
+                view(trial, d, classicalSource(d, v.view, v.projection), {217.5, 128}, fit,
+                     QStringLiteral("Вид %1 (%2)")
+                         .arg(QString::fromStdString(v.designation), scaleName(fit)),
+                     false, false, false, &occupied, false, QRectF(25, 37, 385, 175), true);
+            } else {
+                const auto details = classicalDetails(d);
+                const auto capacity = classicalDetailCapacity(d);
+                const auto first =
+                    static_cast<std::size_t>(page - sectionPages(d) -
+                                             static_cast<int>(d.auxiliaryViews.size()) - 1) *
+                    capacity;
+                for (std::size_t i = first; i < std::min(first + capacity, details.size()); ++i) {
+                    const auto &detail = d.details[details[i]];
+                    const auto position = i - first;
+                    const QRectF cell(25 + (capacity == 4 ? position / 2 : position) * 195,
+                                      37 + (capacity == 4 ? position % 2 * 87 : 0), 190,
+                                      capacity == 4 ? 85 : 175);
+                    const double localScale = fittedScale(detail.view, capacity == 4 ? 60 : 120,
+                                                          capacity == 4 ? 40 : 130) *
+                                              std::pow(.8, attempt);
+                    const double fit = standardDrawingScale(localScale).value_or(localScale);
+                    view(trial, d, detail.view, cell.center() + QPointF(0, 4), fit,
+                         QStringLiteral("%1 · %2 (%3)")
+                             .arg(QString::fromStdString(detail.designation),
+                                  bendId(d, detail.bendIndex), scaleName(fit)),
+                         false, !detail.fullProfile, false, &occupied, detail.fullProfile, cell,
+                         true);
+                }
+            }
+        };
+        // Test placement without recording/replaying device-DPI-dependent painter commands.
+        // Both passes use the same millimetre geometry and fixed paper text heights.
+        QImage scratch(420, 297, QImage::Format_RGB32);
+        QPainter trial(&scratch);
+        try {
+            draw(trial);
+            trial.end();
+            draw(p);
+            return scale;
+        } catch (const std::runtime_error &e) {
+            trial.end();
+            lastError = e.what();
+            scaleLimit = scale * .8;
+        }
+    }
+    throw std::runtime_error(lastError);
+}
 } // namespace
-int DrawingSheet::pageCount(const BendingDrawing &d) {
+int DrawingSheet::pageCount(const BendingDrawing &d, const DrawingTitle &title) {
+    if (classicalLayout(d, title))
+        return classicalPages(d);
     if (!d.profiles.empty())
         return operatorPages(d) + (referencePage(d) ? 1 : 0) +
                static_cast<int>((remainingDetails(d).size() + remainingCapacity(d) - 1) /
@@ -913,9 +1207,13 @@ int DrawingSheet::pageCount(const BendingDrawing &d) {
     const auto inlineCount = inlineProfiles(d) ? std::min(capacity, d.details.size()) : 0;
     return 1 + static_cast<int>((d.details.size() - inlineCount + capacity - 1) / capacity);
 }
+DrawingMeasurementCoverage DrawingSheet::coverage(const BendingDrawing &d,
+                                                  const DrawingTitle &title) {
+    return drawingMeasurementCoverage(d, classicalLayout(d, title));
+}
 void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitle &t, int page) {
     const auto scale = drawingScale(d);
-    if (!scale || page < 0 || page >= pageCount(d))
+    if (!scale || page < 0 || page >= pageCount(d, t))
         throw std::runtime_error("Invalid drawing layout");
     p.setRenderHint(QPainter::Antialiasing);
     p.fillRect(QRectF(0, 0, widthMm, heightMm), Qt::white);
@@ -926,10 +1224,12 @@ void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitl
         : d.profiles.empty()
             ? *scale
             : fittedScale(d.profiles[0].view, d.profiles.size() == 1 ? 165 : 125, 80);
-    titleBlock(p, t, mainScale, page, pageCount(d));
+    const bool classical = classicalLayout(d, t);
+    if (!classical)
+        titleBlock(p, t, mainScale, page, pageCount(d, t));
     text(p, QRectF(96, 5, 312, 8),
          page == 0 ? QStringLiteral("ЛИСТ ГИБКИ") : QStringLiteral("ПРОФИЛИ СГИБОВ"), 5);
-    const auto coverage = drawingMeasurementCoverage(d);
+    const auto coverage = DrawingSheet::coverage(d, t);
     text(p, QRectF(96, 13, 312, 6),
          QStringLiteral("Размеры справочные, мм · измерено гибов %1/%2")
              .arg(coverage.dimensioned)
@@ -965,7 +1265,10 @@ void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitl
         view(p, d, v, center, *detailScale, caption, false, !detail.fullProfile, compact, &occupied,
              detail.fullProfile);
     };
-    if (largeOpeningView(d) && page == 0) {
+    if (classical) {
+        const auto actualScale = classicalSheet(p, d, t, page);
+        titleBlock(p, t, actualScale, page, pageCount(d, t));
+    } else if (largeOpeningView(d) && page == 0) {
         openingSheet(p, d, t);
     } else if (!d.profiles.empty()) {
         operatorSheet(p, d, t, page);
@@ -1040,9 +1343,9 @@ void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitl
         if (!t.execution.trimmed().isEmpty())
             thickness += QStringLiteral(" · ") + t.execution.trimmed();
         text(p, QRectF(25, 216, 380, 6), thickness, 3.5, Qt::AlignLeft | Qt::AlignVCenter);
-        if (pageCount(d) > 1)
+        if (pageCount(d, t) > 1)
             text(p, QRectF(25, 285, 195, 6),
-                 QStringLiteral("Продолжение профилей: лист 2-%1").arg(pageCount(d)), 2.5,
+                 QStringLiteral("Продолжение профилей: лист 2-%1").arg(pageCount(d, t)), 2.5,
                  Qt::AlignLeft | Qt::AlignVCenter);
     } else {
         const std::size_t first = (inlineProfiles(d) ? profileCapacity(d) : 0) +
@@ -1128,7 +1431,7 @@ QString DrawingSheet::writePdf(const QString &path, const BendingDrawing &d,
             if (!painter.isActive())
                 return QStringLiteral("Не удалось начать запись PDF");
             painter.scale(writer.resolution() / 25.4, writer.resolution() / 25.4);
-            for (int page = 0; page < pageCount(d); ++page) {
+            for (int page = 0; page < pageCount(d, t); ++page) {
                 if (page && !writer.newPage())
                     return QStringLiteral("Не удалось создать страницу PDF");
                 paint(painter, d, t, page);

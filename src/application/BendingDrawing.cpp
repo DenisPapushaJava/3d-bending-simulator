@@ -3,7 +3,8 @@
 #include <cmath>
 
 namespace bending::application {
-DrawingMeasurementCoverage drawingMeasurementCoverage(const BendingDrawing &drawing) {
+DrawingMeasurementCoverage drawingMeasurementCoverage(const BendingDrawing &drawing,
+                                                      bool sectionsOnly) {
     DrawingMeasurementCoverage coverage;
     for (std::size_t i = 0; i < drawing.bends.size(); ++i) {
         if (drawing.bends[i].diagnostic)
@@ -13,11 +14,14 @@ DrawingMeasurementCoverage drawingMeasurementCoverage(const BendingDrawing &draw
             return std::find(view.dimensionedBends.begin(), view.dimensionedBends.end(), i) !=
                    view.dimensionedBends.end();
         };
-        const bool found = std::any_of(drawing.views.begin(), drawing.views.end(), contains) ||
-                           std::any_of(drawing.details.begin(), drawing.details.end(),
-                                       [&](const auto &d) { return contains(d.view); }) ||
-                           std::any_of(drawing.profiles.begin(), drawing.profiles.end(),
-                                       [&](const auto &p) { return contains(p.view); });
+        const bool found =
+            std::any_of(drawing.sections.begin(), drawing.sections.end(),
+                        [&](const auto &s) { return contains(s.view); }) ||
+            std::any_of(drawing.details.begin(), drawing.details.end(),
+                        [&](const auto &d) { return contains(d.view); }) ||
+            (!sectionsOnly && (std::any_of(drawing.views.begin(), drawing.views.end(), contains) ||
+                               std::any_of(drawing.profiles.begin(), drawing.profiles.end(),
+                                           [&](const auto &p) { return contains(p.view); })));
         if (found)
             ++coverage.dimensioned;
         else

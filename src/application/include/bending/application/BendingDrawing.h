@@ -23,6 +23,8 @@ struct DrawingDimension {
     std::string label; // Semantic ID, not an editable measured value.
     // Actual contour points for projected dimensions; start/end define the measured axis.
     std::optional<std::array<DrawingPoint, 2>> witnesses = {};
+    std::size_t pitchIntervals = 0; // Verified equally spaced coordinates; valueMm is full span.
+    double pitchMm = 0;
 };
 struct DrawingAngle {
     DrawingPoint vertex;
@@ -47,6 +49,15 @@ struct DrawingDirectionNote {
     std::size_t first;
     std::size_t second;
     double radians;
+};
+struct DrawingViewArrow {
+    DrawingPoint anchor;
+    DrawingPoint direction;
+    std::string designation;
+};
+struct DrawingBendCallout {
+    DrawingPoint anchor;
+    std::vector<std::size_t> bends;
 };
 struct DrawingView {
     std::vector<DrawingPath> paths;
@@ -75,6 +86,10 @@ struct DrawingView {
     // Zones for which both adjacent dimensions and the true angle are represented.
     std::vector<std::size_t> dimensionedBends;
     std::optional<std::pair<DrawingPoint, DrawingPoint>> profileStart;
+    std::vector<DrawingDimension> axialDimensions;
+    std::vector<DrawingBendCallout> groupedBendNotes;
+    std::vector<std::pair<DrawingPoint, double>> holeDiameters;
+    std::vector<DrawingViewArrow> viewArrows;
 };
 struct DrawingBend {
     double turnRadians;
@@ -113,6 +128,23 @@ struct DrawingMeasurementCoverage {
     std::size_t dimensioned = 0;
     std::vector<std::size_t> missing;
 };
+struct DrawingSectionLocation {
+    std::size_t sourceView = 0;
+    DrawingSectionMarker marker;
+    PointMm station{0, 0, 0};
+    std::vector<std::size_t> bends;
+};
+struct DrawingSection {
+    DrawingView view; // Actual intersection of the source solid, including internal voids.
+    PointMm normal{0, 0, 1};
+    std::string designation;
+    std::vector<DrawingSectionLocation> locations;
+};
+struct DrawingAuxiliaryView {
+    DrawingView view;
+    std::string designation;
+    std::size_t projection = 0;
+};
 enum class DrawingVariableProfile { None, Measured, NotMeasured };
 struct DrawingRequest {
     std::optional<std::size_t> baseFace;
@@ -139,6 +171,9 @@ struct BendingDrawing {
     DrawingVariableProfile variableProfile = DrawingVariableProfile::None;
     BendRecognitionStatus bendRecognitionStatus = BendRecognitionStatus::NotAnalyzed;
     std::vector<DrawingProfile> profiles;
+    std::optional<std::array<DrawingView, 3>> classicalViews;
+    std::vector<DrawingSection> sections;
+    std::vector<DrawingAuxiliaryView> auxiliaryViews;
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
 struct DrawingError {
@@ -156,5 +191,6 @@ class BendingDrawingBuilder {
 [[nodiscard]] std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept;
 [[nodiscard]] std::optional<double> standardDrawingScale(double maximum) noexcept;
 [[nodiscard]] bool drawingProfilesCoverBends(const BendingDrawing &drawing) noexcept;
-[[nodiscard]] DrawingMeasurementCoverage drawingMeasurementCoverage(const BendingDrawing &drawing);
+[[nodiscard]] DrawingMeasurementCoverage drawingMeasurementCoverage(const BendingDrawing &drawing,
+                                                                    bool sectionsOnly = false);
 } // namespace bending::application

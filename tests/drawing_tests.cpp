@@ -13,6 +13,7 @@
 #include <BRep_Tool.hxx>
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QFile>
@@ -151,6 +152,12 @@ void holePositions(const QString &folder) {
     const auto document = load(plate, folder + "/hole-coordinates.step");
     const auto drawing = build(document);
     const auto &dimensions = drawing->views[0].holeDimensions;
+    require(drawing->classicalViews &&
+                (*drawing->classicalViews)[0].holeDimensions.size() == dimensions.size() &&
+                std::none_of((*drawing->classicalViews)[0].holeDimensions.begin(),
+                             (*drawing->classicalViews)[0].holeDimensions.end(),
+                             [](const auto &d) { return d.pitchIntervals != 0; }),
+            "Unequal hole spacing was replaced by a regular pitch");
     require(dimensions.size() == 6 && drawing->views[0].openingAxes.size() == 1,
             "Shared coordinates repeated, rectangle omitted or open notch included");
     const std::array expectedX{30., 90., 150., 270.};
@@ -591,8 +598,11 @@ void geometry(const QString &folder) {
         detail.view.dimensionedBends = {i};
         many.details.push_back(std::move(detail));
     }
-    require(ui::DrawingSheet::pageCount(many) == 8, "Pagination lost enlarged profiles");
-    require(ui::DrawingSheet::writePdf(folder + "/many.pdf", many, title).isEmpty(),
+    auto profileTitle = title;
+    profileTitle.layout = ui::DrawingLayout::Profiles;
+    require(ui::DrawingSheet::pageCount(many, profileTitle) == 8,
+            "Pagination lost enlarged profiles");
+    require(ui::DrawingSheet::writePdf(folder + "/many.pdf", many, profileTitle).isEmpty(),
             "Multi-page PDF failed");
     title.quantity = 0;
     require(!ui::DrawingSheet::writePdf(folder + "/bad.pdf", *drawing, title).isEmpty() &&
@@ -610,7 +620,8 @@ void geometry(const QString &folder) {
     }
 }
 // Independent analytic Z: outside dimensions 36 / 40 / 36, two opposite turns.
-TopoDS_Shape reverseProfile() {
+TopoDS_Shape reverseProfile(double axialLength = 80, double height = 40, double leftEnd = -30,
+                            double rightEnd = 40) {
     BRepBuilderAPI_MakeWire wire;
     const auto line = [&](gp_Pnt a, gp_Pnt b) { wire.Add(BRepBuilderAPI_MakeEdge(a, b).Edge()); };
     const auto arc = [&](double x, double y, double r, double from, double to) {
@@ -622,19 +633,20 @@ TopoDS_Shape reverseProfile() {
                 .Edge());
     };
     constexpr double pi = std::numbers::pi;
-    line({-30, 0, 0}, {0, 0, 0});
+    line({leftEnd, 0, 0}, {0, 0, 0});
     arc(0, 6, 6, -pi / 2, 0);
-    line({6, 6, 0}, {6, 34, 0});
-    arc(10, 34, 4, pi, pi / 2);
-    line({10, 38, 0}, {40, 38, 0});
-    line({40, 38, 0}, {40, 40, 0});
-    line({40, 40, 0}, {10, 40, 0});
-    arc(10, 34, 6, pi / 2, pi);
-    line({4, 34, 0}, {4, 6, 0});
+    line({6, 6, 0}, {6, height - 6, 0});
+    arc(10, height - 6, 4, pi, pi / 2);
+    line({10, height - 2, 0}, {rightEnd, height - 2, 0});
+    line({rightEnd, height - 2, 0}, {rightEnd, height, 0});
+    line({rightEnd, height, 0}, {10, height, 0});
+    arc(10, height - 6, 6, pi / 2, pi);
+    line({4, height - 6, 0}, {4, 6, 0});
     arc(0, 6, 4, 0, -pi / 2);
-    line({0, 2, 0}, {-30, 2, 0});
-    line({-30, 2, 0}, {-30, 0, 0});
-    return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, 80)).Shape();
+    line({0, 2, 0}, {leftEnd, 2, 0});
+    line({leftEnd, 2, 0}, {leftEnd, 0, 0});
+    return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, axialLength))
+        .Shape();
 }
 TopoDS_Shape returnLipProfile() {
     BRepBuilderAPI_MakeWire wire;
@@ -708,7 +720,10 @@ void operatorProfiles(const QString &folder) {
         require(coverage.dimensioned == p.bends.size() && coverage.total == p.bends.size() &&
                     coverage.missing.empty(),
                 "A fully measured chain has incomplete coverage");
-        require(!ui::DrawingSheet::preview(d, {}).isNull(), "Operator profile cannot be laid out");
+        ui::DrawingTitle title;
+        title.layout = ui::DrawingLayout::Profiles;
+        require(!ui::DrawingSheet::preview(d, title).isNull(),
+                "Operator profile cannot be laid out");
     };
     check(*build(load(fixtures::bentStrip(8, 6), folder + "/operator-L.step")), {44, 44}, false);
     check(*build(load(fixtures::channel(), folder + "/operator-U.step")), {40, 92, 40}, false);
@@ -785,6 +800,7 @@ void operatorProfiles(const QString &folder) {
     auto partial = *drawing;
     partial.profiles.clear();
     partial.details.clear();
+    partial.sections.clear();
     for (auto &v : partial.views)
         v.dimensionedBends.clear();
     partial.views[0].dimensionedBends = {0, 0};
@@ -794,6 +810,167 @@ void operatorProfiles(const QString &folder) {
     require(missing.total == 2 && missing.dimensioned == 1 &&
                 missing.missing == std::vector<std::size_t>{1},
             "Incomplete coverage counts notes or candidates");
+}
+// Independent three-station Z wall: 98 / 2 / 100 / 2 / 98, with the middle reversed.
+TopoDS_Shape segmentedWall(bool holes = true) {
+    const auto moved = [](const TopoDS_Shape &s, double z) {
+        gp_Trsf t;
+        t.SetTranslation(gp_Vec(0, 0, z));
+        return BRepBuilderAPI_Transform(s, t, true).Shape();
+    };
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(5, 0, 0), gp_Dir(1, 0, 0)));
+    auto shape =
+        BRepAlgoAPI_Fuse(
+            reverseProfile(98),
+            moved(BRepBuilderAPI_Transform(reverseProfile(100), mirror, true).Shape(), 100))
+            .Shape();
+    shape = BRepAlgoAPI_Fuse(shape, moved(reverseProfile(98), 202)).Shape();
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(4, 6, 0), 2, 28, 300)).Shape();
+    if (holes) {
+        for (double z : {25., 75., 125., 175., 225., 275.})
+            for (double y : {12., 28.})
+                shape =
+                    BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
+                                               gp_Ax2(gp_Pnt(3, y, z), gp_Dir(1, 0, 0)), 1.5, 4))
+                        .Shape();
+        for (const auto p : {gp_Pnt(-15, -1, 49), gp_Pnt(25, -1, 150), gp_Pnt(-15, -1, 251)})
+            shape =
+                BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(gp_Ax2(p, gp_Dir(0, 1, 0)), 3, 4))
+                    .Shape();
+    }
+    ShapeUpgrade_UnifySameDomain unify(shape, true, true, false);
+    unify.Build();
+    return unify.Shape();
+}
+void classicalDrawing(const QString &folder) {
+    const auto source = segmentedWall();
+    const auto document = load(source, folder + "/classical-wall.step");
+    const std::string bytes(document->sourceStep());
+    const auto d = build(document);
+    require(d->classicalViews && d->bends.size() == 6 && d->sections.size() == 2 &&
+                d->auxiliaryViews.empty(),
+            "Segmented wall lost classical sections or base views");
+    std::vector<std::size_t> places;
+    for (const auto &s : d->sections) {
+        places.push_back(s.locations.size());
+        require(s.view.sectionLoops.size() == 1 && s.view.profileStart == std::nullopt,
+                "An actual section was replaced by the operator schematic");
+        for (const auto &at : s.locations)
+            require(at.sourceView == 0 && at.marker.designation == s.designation &&
+                        at.bends.size() == 2,
+                    "A section lost its source plane or bend binding");
+    }
+    std::sort(places.begin(), places.end());
+    require(places == std::vector<std::size_t>{1, 2}, "Equal end sections were not grouped");
+    const auto &views = *d->classicalViews;
+    require(std::abs(views[0].minimum.x - views[1].minimum.x) < 1e-5 &&
+                std::abs(views[0].maximum.x - views[1].maximum.x) < 1e-5 &&
+                std::abs(views[0].minimum.y - views[2].minimum.y) < 1e-5 &&
+                std::abs(views[0].maximum.y - views[2].maximum.y) < 1e-5 &&
+                !views[1].reverseProjection && !views[2].reverseProjection,
+            "Classical views lost their shared projection coordinates");
+    require(views[0].sectionMarkers.size() == 3 && views[0].axialDimensions.size() == 5,
+            "Section traces or axial gaps are missing");
+    const std::array expected{98., 2., 100., 2., 98.};
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        require(std::abs(views[0].axialDimensions[i].valueMm - expected[i]) < 1e-5,
+                "Axial dimensions do not describe the occupied intervals and gaps");
+    require(std::count_if(views[0].holeDimensions.begin(), views[0].holeDimensions.end(),
+                          [](const auto &x) {
+                              return x.pitchIntervals == 5 && std::abs(x.pitchMm - 50) < 1e-5 &&
+                                     std::abs(x.valueMm - 250) < 1e-5;
+                          }) == 1 &&
+                views[0].holeDiameters.size() == 12,
+            "A verified hole pitch or diameter lost its measured source geometry");
+    const auto coverage = ui::DrawingSheet::coverage(*d);
+    require(coverage.total == 6 && coverage.dimensioned == 6 &&
+                ui::DrawingSheet::pageCount(*d) == 1 &&
+                ui::DrawingSheet::writePdf(folder + "/classical-wall.pdf", *d, {}).isEmpty(),
+            "A complete six-zone classical sheet does not fit A3");
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_CLASSICAL_OUTPUT");
+    if (!output.isEmpty())
+        require(ui::DrawingSheet::writePdf(output, *d, {}).isEmpty(),
+                "Classical sample PDF failed");
+    require(document->sourceStep() == bytes && document->metadata().bendAnalysis.bends.size() == 6,
+            "Classical drawing changed the source or simulation analysis");
+    gp_Trsf move;
+    move.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .734);
+    move.SetTranslationPart(gp_Vec(117, -53, 82));
+    const auto rotated = build(load(BRepBuilderAPI_Transform(source, move, true).Shape(),
+                                    folder + "/classical-rotated.step"));
+    require(rotated->sections.size() == 2 &&
+                ui::DrawingSheet::coverage(*rotated).dimensioned == 6 &&
+                !ui::DrawingSheet::preview(*rotated, {}).isNull(),
+            "A world rotation changed section grouping or completeness");
+    const auto different =
+        BRepAlgoAPI_Cut(segmentedWall(false), BRepPrimAPI_MakeBox(gp_Pnt(-22, -1, 1), 14, 4, 96))
+            .Shape();
+    const auto distinct = build(load(different, folder + "/classical-different-void.step"));
+    require(distinct->sections.size() == 3,
+            "Equal flange numbers hid a different material contour in a grouped section");
+    const auto base = build(load(reverseProfile(), folder + "/classical-solid.step"));
+    const auto slot = build(
+        load(BRepAlgoAPI_Cut(reverseProfile(), BRepPrimAPI_MakeBox(gp_Pnt(-22, -1, 1), 14, 4, 78))
+                 .Shape(),
+             folder + "/classical-slot.step"));
+    const auto area = [](const application::DrawingView &view) {
+        double sum = 0;
+        for (const auto &loop : view.sectionLoops) {
+            double signedArea = 0;
+            for (std::size_t i = 1; i < loop.size(); ++i)
+                signedArea += loop[i - 1].x * loop[i].y - loop[i].x * loop[i - 1].y;
+            sum += std::abs(signedArea) / 2;
+        }
+        return sum;
+    };
+    require(base->sections.size() == 1 && slot->sections.size() == 1 &&
+                slot->sections[0].view.sectionLoops.size() == 2 &&
+                std::abs(area(base->sections[0].view) - area(slot->sections[0].view) - 28) < .1,
+            "A true section filled an internal cutout or lost the material boundary");
+    const auto occludedDocument = load(
+        BRepAlgoAPI_Cut(fixtures::channel(),
+                        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-7, 20, 40), gp_Dir(1, 0, 0)), 3, 4))
+            .Shape(),
+        folder + "/classical-opposite-view.step");
+    application::DrawingRequest oppositeRequest;
+    oppositeRequest.reverseView = true;
+    const auto firstSide = build(occludedDocument);
+    const auto otherSide = build(occludedDocument, oppositeRequest);
+    const auto occluded = firstSide->auxiliaryViews.empty() ? otherSide : firstSide;
+    require(!occluded->auxiliaryViews.empty() && occluded->classicalViews &&
+                !(*occluded->classicalViews)[0].viewArrows.empty() &&
+                std::any_of(occluded->auxiliaryViews.begin(), occluded->auxiliaryViews.end(),
+                            [](const auto &v) {
+                                return !v.view.holeDiameters.empty() && !v.designation.empty();
+                            }) &&
+                ui::DrawingSheet::writePdf(folder + "/classical-opposite-view.pdf", *occluded, {})
+                    .isEmpty(),
+            "A more visible reverse projection was lost or shown without a direction binding");
+    const auto cornerBox = BRepPrimAPI_MakeBox(gp_Pnt(-30, -1, 0), 3, 4, 3).Shape();
+    const auto cornerCylinder =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-27, -1, 3), gp_Dir(0, 1, 0)), 3, 4).Shape();
+    const auto rounding =
+        BRepAlgoAPI_Cut(reverseProfile(), BRepAlgoAPI_Cut(cornerBox, cornerCylinder).Shape())
+            .Shape();
+    const auto roundedDocument = load(rounding, folder + "/classical-rounded-contour.step");
+    const auto rounded = build(roundedDocument);
+    require(roundedDocument->metadata().bendAnalysis.unrecognizedCylindricalFaces > 0 &&
+                rounded->unrecognizedCylindricalFaces == 0 && rounded->bends.size() == 2,
+            "A contour rounding was reported as an unexplained bend or changed simulation data");
+    auto smallPlate = BRepPrimAPI_MakeBox(60, 40, 4).Shape();
+    for (const auto p :
+         {gp_Pnt(10, 15, -1), gp_Pnt(24, 32, -1), gp_Pnt(36, 32, -1), gp_Pnt(50, 15, -1)})
+        smallPlate = BRepAlgoAPI_Cut(smallPlate,
+                                     BRepPrimAPI_MakeCylinder(gp_Ax2(p, gp_Dir(0, 0, 1)), 1.5, 6))
+                         .Shape();
+    const auto small = build(load(smallPlate, folder + "/classical-small-plate.step"));
+    require(ui::DrawingSheet::writePdf(folder + "/classical-small-plate.pdf", *small, {}).isEmpty(),
+            "A small plate with irregular hole coordinates cannot be placed");
+    const auto tall = build(
+        load(reverseProfile(3000, 1200.37, -24.17, 33.14), folder + "/classical-shallow-top.step"));
+    require(ui::DrawingSheet::writePdf(folder + "/classical-shallow-top.pdf", *tall, {}).isEmpty(),
+            "A shallow projection has no room for its outside dimension number");
 }
 void workflow(const QString &folder) {
     auto importer = std::make_shared<cad::StepImporter>();
@@ -820,6 +997,13 @@ void workflow(const QString &folder) {
         timer.stop();
         auto *qty = dialog->findChild<QSpinBox *>("drawingQuantity");
         qty->setValue(37);
+        const auto oldDrawing = c.drawing();
+        auto *layout = dialog->findChild<QComboBox *>("drawingLayout");
+        require(layout && layout->currentIndex() == 0, "Classical layout is not the default");
+        layout->setCurrentIndex(1);
+        layout->setCurrentIndex(0);
+        require(c.drawing() == oldDrawing && !c.hasWork() && exportButton->isEnabled(),
+                "Changing presentation recomputed or invalidated the CAD snapshot");
         dialog->findChild<QLineEdit *>("drawingExecution")->setText(QStringLiteral("Исполнение Л"));
         inspected = !dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().isNull() &&
                     c.session().editRevision() == revision;
@@ -890,6 +1074,7 @@ int main(int argc, char **argv) {
         ovalVisibility(temp.path());
         geometry(temp.path());
         operatorProfiles(temp.path());
+        classicalDrawing(temp.path());
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";
     } catch (const std::exception &e) {

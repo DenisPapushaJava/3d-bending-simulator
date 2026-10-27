@@ -21,4 +21,8 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
 void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax2 &projection,
                         const TopoDS_Shape &visible, application::DrawingView &view,
                         std::stop_token stop);
+std::vector<std::size_t>
+drawingContourRoundings(const TopoDS_Shape &shape, const TopTools_IndexedMapOfShape &faces,
+                        const std::vector<application::RecognizedBend> &bends, double tolerance,
+                        std::stop_token stop);
 } // namespace bending::cad
