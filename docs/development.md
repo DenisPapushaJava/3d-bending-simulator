@@ -582,7 +582,7 @@ D044 проверен штатным [CI 40474684049](https://github.com/DenisPa
 
 ## Подготовка первого Windows alpha — D047
 
-Windows manifest включает opencascade[freetype] с прежними отключёнными default features. Сам порт подключает FreeType 2.14.3 без дополнительных зависимостей. Растрирование AIS-текста требует этой возможности даже при успешном headless запуске окна. Цель viewer_font_tests / CTest viewer.fonts проверяет обычный/жирный sans-serif, цифру, латиницу, кириллицу и знак градуса без OpenGL. Размеры и куб используют alias Font_NOF_SANS_SERIF, разрешаемый OCCT на текущей ОС.
+Windows manifest включает opencascade[freetype] с прежними отключёнными default features. FreeType 2.14.3 также указан прямо в корневом manifest с default-features=false: транзитивного запрета в порте для этого недостаточно. Растрирование AIS-текста требует этой возможности даже при успешном headless запуске окна. Цель viewer_font_tests / CTest viewer.fonts проверяет обычный/жирный sans-serif, цифру, латиницу, кириллицу и знак градуса без OpenGL. Размеры и куб используют alias Font_NOF_SANS_SERIF, разрешаемый OCCT на текущей ОС.
 
 Windows-упаковщик временно копирует probe в bin подготовленного комплекта, выполняет его при очищенном PATH и удаляет перед ZIP. Это проверяет именно поставляемые DLL. Добавлены FreeType DLL, notices FTL и отдельных MIT/X11/zlib компонентов, notice встроенного Bitstream/DejaVu fallback и соответствующие исходники/патчи. Публичные исходные архивы проверяются по hash зафиксированных портов; восстановление источников работает и при binary cache hit.
 

@@ -65,10 +65,16 @@ def main():
                     "--no-opengl-sw", "--no-system-d3d-compiler", "--no-system-dxc-compiler",
                     "--skip-plugin-types", "iconengines,imageformats,generic",
                     "--dir", str(stage / "bin"), str(executable)], check=True)
-    inventoried_qt = {"Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"}
-    unexpected_qt = {dll.name for dll in (stage / "bin").glob("Qt6*.dll")} - inventoried_qt
-    if unexpected_qt:
-        raise RuntimeError(f"Update the source/license inventory before bundling {unexpected_qt}")
+    inventoried_dlls = {"qt6core.dll", "qt6gui.dll", "qt6widgets.dll", "freetype.dll"}
+    unexpected_dlls = {dll.name for dll in (stage / "bin").glob("*.dll")
+                       if not dll.name.lower().startswith("tk")
+                       and dll.name.lower() not in inventoried_dlls}
+    if unexpected_dlls:
+        raise RuntimeError(f"Update the source/license inventory before bundling {unexpected_dlls}")
+    freetype_dll = ROOT / "vcpkg_installed/x64-windows-release/bin/freetype.dll"
+    if (hashlib.sha256(freetype_dll.read_bytes()).digest() !=
+            hashlib.sha256((stage / "bin/freetype.dll").read_bytes()).digest()):
+        raise RuntimeError("Bundled FreeType DLL differs from the inventoried vcpkg build")
     # Lets the packaged startup check run headlessly; qwindows is also deployed above.
     shutil.copy2(args.qt_root / "plugins/platforms/qoffscreen.dll", stage / "bin/platforms")
 
