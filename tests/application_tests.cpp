@@ -155,7 +155,12 @@ void testBendPreparation() {
     const bending::core::BendTarget target{std::numbers::pi * 2 / 3, 5.5};
     require(session.bends().size() == 2 && !session.modified() && !session.bend(0)->target,
             "New measurements became confirmed targets");
-    require(!session.setBendTarget(0, target), "Unconfirmed zone accepted a target");
+    require(session.bend(0)->review == BendReview::Automatic && session.bendTarget(0) &&
+                session.bendTarget(0)->innerRadiusMm == 4,
+            "Automatic CAD target unavailable");
+    require(session.setBendReview(0, BendReview::Pending) && !session.bendTarget(0) &&
+                !session.setBendTarget(0, target),
+            "Pending zone accepted a target");
     require(session.setBendReview(0, BendReview::Confirmed) && session.setBendTarget(0, target),
             "Confirmed target not accepted");
     require(session.setBendReview(1, BendReview::Excluded), "Zone not excluded");
@@ -218,7 +223,7 @@ void testBendPreparation() {
     binding = restoreBendPreparations(changed, entries);
     require(binding.unresolved == std::vector<std::size_t>{0} && binding.byRecognizedBend[0] &&
                 entries[0].target == target &&
-                entries[*binding.byRecognizedBend[0]].review == BendReview::Pending &&
+                entries[*binding.byRecognizedBend[0]].review == BendReview::Automatic &&
                 !entries[*binding.byRecognizedBend[0]].target,
             "Unmatched decision lost or applied to a new zone");
     session.close();
