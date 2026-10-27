@@ -2,6 +2,7 @@
 
 #include <APIHeaderSection_MakeHeader.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
@@ -17,9 +18,15 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <numbers>
 #include <stdexcept>
 
 namespace {
+TopoDS_Shape rotateAroundZ(const TopoDS_Shape &shape, double degrees) {
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(), gp_Dir(0, 0, 1)), degrees * std::numbers::pi / 180.0);
+    return BRepBuilderAPI_Transform(shape, rotation, true).Shape();
+}
 void write(const std::filesystem::path &path, const TopoDS_Shape &shape, const char *unit) {
     if (!Interface_Static::SetCVal("write.step.unit", unit)) {
         throw std::runtime_error("Cannot set output unit");
@@ -72,7 +79,15 @@ int main(int argc, char *argv[]) {
         }
         write(output / "angle-6mm.step", thickAngle.Shape(), "MM");
         write(output / "bend-90-6mm.step", bending::fixtures::bentStrip(8.0, 6.0), "MM");
+        write(output / "profiled-bend-6mm.step", bending::fixtures::profiledBend(), "MM");
+        // Face the openings toward the standard isometric camera for the tutorial.
+        write(output / "bend-zone-hole-6mm.step",
+              rotateAroundZ(bending::fixtures::bendWithZoneOpening(), -75), "MM");
+        write(output / "bend-zone-pocket-6mm.step",
+              rotateAroundZ(bending::fixtures::bendWithZoneOpening(false), -75), "MM");
         write(output / "channel-2mm.step", bending::fixtures::channel(), "MM");
+        write(output / "channel-zone-hole-2mm.step",
+              rotateAroundZ(bending::fixtures::channelWithZoneOpening(), 75), "MM");
         write(output / "trimmed-bend-2mm.step", bending::fixtures::trimmedBend(), "MM");
     } catch (const Standard_Failure &error) {
         std::cerr << error.GetMessageString() << '\n';
