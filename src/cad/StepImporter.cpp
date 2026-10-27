@@ -1,6 +1,10 @@
 #include "bending/cad/StepImporter.h"
 
+#include "BendRecognizer.h"
 #include "CadDocumentData.h"
+#include "ClosedCutouts.h"
+#include "ThicknessRecognizer.h"
+#include "bending/application/BendPreparation.h"
 #include "bending/cad/Kernel.h"
 
 #include <BRepAdaptor_Surface.hxx>
@@ -36,9 +40,11 @@
 #include <XSControl_WorkSession.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <utility>
 
 namespace bending::cad {
@@ -200,12 +206,6 @@ StepImportResult StepImporter::read(const std::filesystem::path &path, std::stop
     const auto fail = [&](StepImportErrorCode code, std::string detail) -> StepImportResult {
         return StepImportError{code, std::move(detail), std::move(diagnostics)};
     };
-    const auto report = [&](application::ImportPhase phase) {
-        if (progress) {
-            progress(phase);
-        }
-        return stop.stop_requested();
-    };
     try {
         if (stop.stop_requested()) {
             return fail(StepImportErrorCode::Cancelled, "Import cancelled");
@@ -238,10 +238,50 @@ StepImportResult StepImporter::read(const std::filesystem::path &path, std::stop
                         "Source file contains no readable data");
         }
 
+        std::string source;
+        std::array<char, 65536> buffer{};
+        while (input) {
+            if (stop.stop_requested()) {
+                return fail(StepImportErrorCode::Cancelled, "Import cancelled while reading");
+            }
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            source.append(buffer.data(), static_cast<std::size_t>(input.gcount()));
+            if (source.size() > maximumSourceBytes) {
+                return fail(StepImportErrorCode::ReadFailed,
+                            "STEP exceeds the 64 MiB source limit");
+            }
+        }
+        if (input.bad()) {
+            return fail(StepImportErrorCode::ReadFailed, "Cannot read STEP source");
+        }
+        return readBytes(std::move(source), path, stop, progress);
+    } catch (const std::filesystem::filesystem_error &error) {
+        return fail(StepImportErrorCode::ReadFailed, error.what());
+    }
+}
+
+StepImportResult StepImporter::readBytes(std::string source, const std::filesystem::path &path,
+                                         std::stop_token stop,
+                                         const application::ImportProgress &progress) const {
+    std::vector<ImportDiagnostic> diagnostics;
+    const auto fail = [&](StepImportErrorCode code, std::string detail) -> StepImportResult {
+        return StepImportError{code, std::move(detail), std::move(diagnostics)};
+    };
+    const auto report = [&](application::ImportPhase phase) {
+        if (progress) {
+            progress(phase);
+        }
+        return stop.stop_requested();
+    };
+    if (source.empty() || source.size() > maximumSourceBytes) {
+        return fail(StepImportErrorCode::ReadFailed, "Empty or oversized STEP source");
+    }
+    try {
         std::lock_guard lock(importMutex);
         if (report(application::ImportPhase::Reading)) {
             return fail(StepImportErrorCode::Cancelled, "Import cancelled");
         }
+        std::istringstream input(source);
         STEPControl_Reader reader;
         if (reader.ReadStream("import.step", input) != IFSelect_RetDone || input.bad()) {
             return fail(StepImportErrorCode::InvalidStep, "STEP parser could not read the file");
@@ -334,6 +374,56 @@ StepImportResult StepImporter::read(const std::filesystem::path &path, std::stop
         auto data = std::make_unique<CadDocument::Impl>();
         data->shape = std::move(shape);
         data->metadata = std::move(metadata);
+        data->sourceStep = std::move(source);
+        if (report(application::ImportPhase::Analyzing)) {
+            return fail(StepImportErrorCode::Cancelled,
+                        "Import cancelled before thickness analysis");
+        }
+        data->metadata.thickness = recognizeThickness(data->shape, tolerance, stop);
+        data->metadata.bendAnalysis = recognizeBends(data->shape, tolerance, stop);
+        auto filled =
+            fillClosedCutouts(data->shape, data->metadata.bendAnalysis.lengthToleranceMm, stop);
+        data->metadata.closedCutouts = filled.report;
+        if (filled.report.status == application::ClosedCutoutStatus::Filled) {
+            auto analysis = recognizeBends(filled.shape, tolerance, stop);
+            auto originals = data->metadata.bendAnalysis.bends;
+            for (const auto &diagnostic : data->metadata.bendAnalysis.interiorContourDiagnostics) {
+                originals.push_back(diagnostic.candidate);
+            }
+            std::vector<application::BendPreparation> anchors;
+            for (const auto &bend : originals) {
+                anchors.push_back({"source-" + std::to_string(anchors.size()),
+                                   {bend.axisStart, bend.axisEnd, bend.angleRadians,
+                                    bend.innerRadiusMm, bend.thicknessMm, bend.lengthMm,
+                                    bend.trimmedEnds, bend.minimumStraightLengthMm},
+                                   application::BendReview::Pending,
+                                   std::nullopt,
+                                   std::nullopt});
+            }
+            const auto bindings = application::restoreBendPreparations(analysis, anchors);
+            bool matched = analysis.status == application::BendRecognitionStatus::Completed &&
+                           analysis.interiorContourDiagnostics.empty() &&
+                           analysis.bends.size() == originals.size() &&
+                           anchors.size() == originals.size() && bindings.unresolved.empty();
+            std::vector<application::RecognizedBend> ordered(originals.size());
+            for (std::size_t i = 0; matched && i < analysis.bends.size(); ++i) {
+                if (!bindings.byRecognizedBend[i] ||
+                    *bindings.byRecognizedBend[i] >= ordered.size()) {
+                    matched = false;
+                } else {
+                    ordered[*bindings.byRecognizedBend[i]] = analysis.bends[i];
+                }
+            }
+            if (matched) {
+                data->metadata.bendAnalysis.bends = std::move(originals);
+                analysis.bends = std::move(ordered);
+                data->filledBends = std::move(analysis);
+                data->filledShape = std::move(filled.shape);
+            } else {
+                data->metadata.closedCutouts.status = application::ClosedCutoutStatus::Unsupported;
+                data->metadata.closedCutouts.addedVolumeMm3 = 0;
+            }
+        }
         if (report(application::ImportPhase::Preparing)) {
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before presentation preparation");

@@ -21,6 +21,33 @@ class DocumentSession final {
     bool complete(const ImportRequest &request, ImportResult result);
     void cancel();
     void close();
+    [[nodiscard]] ThicknessValidation setManualThickness(double valueMm);
+    void useAutomaticThickness();
+    bool setBendReview(std::size_t recognizedIndex, BendReview review);
+    bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
+    bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
+    [[nodiscard]] std::optional<core::BendTarget> bendTarget(std::size_t recognizedIndex) const;
+    bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
+    [[nodiscard]] const std::vector<BendPreparation> &bends() const {
+        return bends_;
+    }
+    [[nodiscard]] const BendBindings &bendBindings() const {
+        return bendBindings_;
+    }
+    [[nodiscard]] const BendPreparation *bend(std::size_t recognizedIndex) const;
+    bool markSaved(std::uint64_t editRevision, std::filesystem::path path);
+    [[nodiscard]] const std::optional<double> &manualThicknessMm() const {
+        return manualThickness_;
+    }
+    [[nodiscard]] const std::filesystem::path &projectPath() const {
+        return projectPath_;
+    }
+    [[nodiscard]] bool modified() const {
+        return modified_;
+    }
+    [[nodiscard]] std::uint64_t editRevision() const {
+        return editRevision_;
+    }
 
     [[nodiscard]] const DocumentPtr &document() const noexcept {
         return document_;
@@ -45,5 +72,11 @@ class DocumentSession final {
     std::optional<ImportRequest> active_;
     std::optional<ImportError> error_;
     ImportPhase phase_ = ImportPhase::Waiting;
+    std::optional<double> manualThickness_;
+    std::filesystem::path projectPath_;
+    std::uint64_t editRevision_ = 0;
+    bool modified_ = false;
+    std::vector<BendPreparation> bends_;
+    BendBindings bendBindings_;
 };
 } // namespace bending::application
