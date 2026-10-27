@@ -1,6 +1,7 @@
-add_library(bending_ui STATIC MainWindow.cpp ImportController.cpp ToolSelectionWidget.cpp ToolProfilesWidget.cpp
+add_library(bending_ui STATIC MainWindow.cpp ImportController.cpp ToolSelectionWidget.cpp ToolProfilesWidget.cpp DrawingSheet.cpp DrawingDialog.cpp
     include/bending/ui/MainWindow.h include/bending/ui/ImportController.h)
 add_library(Bending::Ui ALIAS bending_ui)
 set_target_properties(bending_ui PROPERTIES AUTOMOC ON)
 target_include_directories(bending_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(bending_ui PUBLIC Qt6::Widgets Bending::Application PRIVATE Bending::Viewer Bending::Simulation bending_options)
+qt_add_resources(bending_ui drawing_assets PREFIX "/drawing" BASE "data" FILES data/fonts/GOST-Type-A.ttf)

@@ -1,4 +1,5 @@
 #include "bending/Version.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
@@ -14,6 +15,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QIcon>
 #include <QPalette>
 #include <QTimer>
 #include <algorithm>
@@ -50,6 +52,12 @@ int main(int argc, char *argv[]) {
     app.setPalette(palette);
     QCoreApplication::setOrganizationName(QStringLiteral("3D Bending Simulator"));
     QCoreApplication::setApplicationName(QStringLiteral("3D Bending Simulator"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("3d-bending-simulator"));
+    QIcon applicationIcon;
+    for (int size : {16, 24, 32, 48, 64, 128, 256}) {
+        applicationIcon.addFile(QStringLiteral(":/app/icons/%1.png").arg(size), QSize(size, size));
+    }
+    QApplication::setWindowIcon(applicationIcon);
     QCoreApplication::setApplicationVersion(QString::fromUtf8(
         bending::version.data(), static_cast<qsizetype>(bending::version.size())));
 
@@ -121,6 +129,7 @@ int main(int argc, char *argv[]) {
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
     window.setToolCatalogLoader(bending::project::readToolCatalog);
+    window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());
@@ -149,8 +158,9 @@ int main(int argc, char *argv[]) {
             }
             if (parser.isSet(smokeTest) && !parser.isSet(graphicsTest)) {
                 timer->stop();
-                const bool ready =
-                    window.isVisible() && window.centralWidget() != nullptr && viewer != nullptr;
+                const bool ready = window.isVisible() && window.centralWidget() != nullptr &&
+                                   viewer != nullptr &&
+                                   !window.windowIcon().pixmap(32, 32).isNull();
                 app.exit(ready ? 0 : 1);
             } else if (viewer && viewer->isReady()) {
                 timer->stop();
