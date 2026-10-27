@@ -124,12 +124,22 @@ def main():
         "See https://github.com/DenisPapushaJava/3d-bending-simulator/blob/main/docs/development.md\n",
         encoding="utf-8")
     (stage / "README.txt").write_text(
-        "Run bin/3d-bending-simulator.exe. STEP import/viewer; bending is not implemented yet.\n"
-        "Sample STEP files: share/3d-bending-simulator/examples.\n"
-        "Microsoft Visual C++ 2015-2022 x64 Runtime may be required:\n"
+        f"3D Bending Simulator {version} — экспериментальный выпуск Windows x64.\n\n"
+        "Распакуйте весь архив и запустите bin/3d-bending-simulator.exe.\n"
+        "Откройте STEP/STP одной детали или проект .bend; файл можно перетащить в окно.\n"
+        "Этапы работы: Деталь → Инструмент → Проверка.\n"
+        "Учебные STEP: share/3d-bending-simulator/examples.\n\n"
+        "Доступны просмотр детали, распознавание поддержанных прямых сгибов,\n"
+        "подбор по параметрам, геометрический просмотр одного сгиба и справочный PDF.\n"
+        "Это не физический расчёт материала и не проверка полного маршрута гибки.\n"
+        "Интерактивная работа на Windows/GPU ещё требует проверки.\n\n"
+        "Может потребоваться Microsoft Visual C++ 2015–2022 x64 Runtime:\n"
         "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist\n"
-        "Keep DLLs and plugins with the executable. They may be replaced with compatible builds.\n"
-        "Matching dependency sources are in the companion dependency-sources ZIP.\n",
+        "Сохраняйте структуру папок, DLL и плагины рядом с EXE.\n"
+        "DLL допускается заменять совместимыми сборками. Лицензии — в share/licenses.\n"
+        "Соответствующие исходники Qt/OCCT находятся в соседнем dependency-sources ZIP.\n"
+        "Встроенное обновление пока отсутствует.\n"
+        "Проект: https://github.com/DenisPapushaJava/3d-bending-simulator\n",
         encoding="utf-8")
 
     environment = os.environ.copy()
