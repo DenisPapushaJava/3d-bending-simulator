@@ -8,6 +8,11 @@ on:
         type: string
         required: false
         default: ''
+      export_snapshot:
+        description: Export the existing SDK cache as an archive (no source build)
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -19,7 +24,7 @@ concurrency:
 jobs:
   sdk:
     name: Prepare SDK cache in main
-    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner && !inputs.export_snapshot
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -56,3 +61,27 @@ jobs:
       - uses: ./.ci-tools/.github/actions/windows-sdk
         with:
           manifest-directory: sdk-inputs
+
+  snapshot:
+    name: Archive existing SDK packages
+    if: github.actor == github.repository_owner && inputs.export_snapshot
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/windows-sdk
+        with:
+          binary-only: 'true'
+      - name: Preserve only installed packages and provenance
+        run: python scripts/windows_sdk.py pack
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sdk-snapshot
+          path: |
+            out/windows-sdk-2026.1.zip
+            out/windows-sdk-2026.1.json
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7

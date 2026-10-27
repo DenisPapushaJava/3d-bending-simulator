@@ -5,6 +5,10 @@ inputs:
     description: Directory containing vcpkg.json and cmake/triplets
     default: .
     required: false
+  binary-only:
+    description: Require existing binary packages without compiling dependencies
+    default: 'false'
+    required: false
 outputs:
   cache-hit:
     description: Exact SDK cache hit
@@ -76,11 +80,14 @@ runs:
       shell: pwsh
       env:
         SDK_MANIFEST: ${{ steps.metadata.outputs.manifest }}
+        SDK_BINARY_ONLY: ${{ inputs.binary-only }}
         VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.cache/vcpkg,readwrite
       run: |
         & ./.deps/vcpkg/bootstrap-vcpkg.bat -disableMetrics
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        & ./.deps/vcpkg/vcpkg.exe install --triplet x64-windows-release "--vcpkg-root=$pwd/.deps/vcpkg" "--x-manifest-root=$env:SDK_MANIFEST" "--overlay-triplets=$env:SDK_MANIFEST/cmake/triplets" "--x-install-root=$pwd/vcpkg_installed"
+        $options = @()
+        if ($env:SDK_BINARY_ONLY -eq 'true') { $options += '--only-binarycaching' }
+        & ./.deps/vcpkg/vcpkg.exe install --triplet x64-windows-release "--vcpkg-root=$pwd/.deps/vcpkg" "--x-manifest-root=$env:SDK_MANIFEST" "--overlay-triplets=$env:SDK_MANIFEST/cmake/triplets" "--x-install-root=$pwd/vcpkg_installed" @options
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Save SDK before configuring the application
       if: steps.cache.outputs.cache-hit != 'true'
