@@ -3,6 +3,20 @@
 #include <utility>
 
 namespace bending::application {
+std::optional<std::string> projectSettingsError(const OpenedProject &project) {
+    if (!project.document || !validBendPreparations(project.bends)) {
+        return "Invalid saved bend preparations";
+    }
+    if (project.manualThicknessMm) {
+        const auto validation =
+            validateThickness(*project.manualThicknessMm, project.document->metadata().thickness);
+        if (validation == ThicknessValidation::Invalid ||
+            validation == ThicknessValidation::ConflictsWithGeometry) {
+            return "Saved thickness conflicts with geometry";
+        }
+    }
+    return {};
+}
 ImportRequest DocumentSession::beginImport(std::filesystem::path source) {
     active_ = ImportRequest{++nextRequest_, revision_, std::move(source)};
     error_.reset();
@@ -30,17 +44,17 @@ bool DocumentSession::complete(const ImportRequest &request, ImportResult result
     active_.reset();
     if (auto document = resultDocument(result)) {
         const auto *project = std::get_if<OpenedProject>(&result);
-        if (project && project->manualThicknessMm) {
-            const auto validation =
-                validateThickness(*project->manualThicknessMm, document->metadata().thickness);
-            if (validation == ThicknessValidation::Invalid ||
-                validation == ThicknessValidation::ConflictsWithGeometry) {
-                error_ = ImportError{
-                    ImportErrorCode::InvalidProject, "Saved thickness conflicts with geometry", {}};
+        if (project) {
+            if (const auto error = projectSettingsError(*project)) {
+                error_ = ImportError{ImportErrorCode::InvalidProject, *error, {}};
                 return true;
             }
         }
+        auto bends = project ? project->bends : std::vector<BendPreparation>{};
+        auto bindings = restoreBendPreparations(document->metadata().bendAnalysis, bends);
         document_ = std::move(document);
+        bends_ = std::move(bends);
+        bendBindings_ = std::move(bindings);
         ++revision_;
         ++editRevision_;
         manualThickness_ = project ? project->manualThicknessMm : std::nullopt;
@@ -71,6 +85,90 @@ void DocumentSession::close() {
     manualThickness_.reset();
     projectPath_.clear();
     modified_ = false;
+    bends_.clear();
+    bendBindings_ = {};
+}
+
+const BendPreparation *DocumentSession::bend(std::size_t recognizedIndex) const {
+    if (recognizedIndex >= bendBindings_.byRecognizedBend.size() ||
+        !bendBindings_.byRecognizedBend[recognizedIndex]) {
+        return nullptr;
+    }
+    return &bends_[*bendBindings_.byRecognizedBend[recognizedIndex]];
+}
+bool DocumentSession::setBendReview(std::size_t recognizedIndex, BendReview review) {
+    const auto *entry = bend(recognizedIndex);
+    if (!document_ || active_ || !entry ||
+        (review != BendReview::Pending && review != BendReview::Confirmed &&
+         review != BendReview::Excluded && review != BendReview::Automatic)) {
+        return false;
+    }
+    if (entry->review != review) {
+        bends_[*bendBindings_.byRecognizedBend[recognizedIndex]].review = review;
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+bool DocumentSession::setBendTarget(std::size_t recognizedIndex,
+                                    std::optional<core::BendTarget> target) {
+    const auto *entry = bend(recognizedIndex);
+    if (!document_ || active_ || !entry || !included(entry->review) ||
+        (target && !core::validBendTarget(*target))) {
+        return false;
+    }
+    if (entry->target != target) {
+        bends_[*bendBindings_.byRecognizedBend[recognizedIndex]].target = target;
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+
+bool DocumentSession::setBendTools(std::size_t recognizedIndex,
+                                   std::optional<core::PressTools> tools) {
+    const auto *entry = bend(recognizedIndex);
+    if (!document_ || active_ || !entry || !included(entry->review) ||
+        (tools && !core::validPressTools(*tools))) {
+        return false;
+    }
+    if (entry->tools != tools || entry->catalogTools) {
+        auto &changed = bends_[*bendBindings_.byRecognizedBend[recognizedIndex]];
+        changed.tools = tools;
+        changed.catalogTools.reset();
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+
+std::optional<core::BendTarget> DocumentSession::bendTarget(std::size_t index) const {
+    const auto *entry = bend(index);
+    if (!document_ || !entry || !included(entry->review) ||
+        index >= document_->metadata().bendAnalysis.bends.size()) {
+        return {};
+    }
+    if (entry->target) {
+        return entry->target;
+    }
+    const auto &bend = document_->metadata().bendAnalysis.bends[index];
+    const core::BendTarget target{bend.angleRadians, bend.innerRadiusMm};
+    return core::validBendTarget(target) ? std::optional{target} : std::nullopt;
+}
+bool DocumentSession::setBendToolAssignment(std::size_t index, core::ToolAssignment assignment) {
+    const auto *entry = bend(index);
+    const auto parameters = core::toolParameters(assignment);
+    if (!document_ || active_ || !entry || !included(entry->review) || !parameters) {
+        return false;
+    }
+    if (entry->catalogTools != assignment || entry->tools != parameters) {
+        auto &changed = bends_[*bendBindings_.byRecognizedBend[index]];
+        changed.tools = parameters;
+        changed.catalogTools = std::move(assignment);
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
 }
 
 ThicknessValidation DocumentSession::setManualThickness(double valueMm) {

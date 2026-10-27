@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bending/application/Document.h"
+#include "bending/application/BendPreparation.h"
 
 #include <functional>
 #include <memory>
@@ -38,7 +38,9 @@ struct OpenedProject {
     DocumentPtr document;
     std::optional<double> manualThicknessMm;
     std::filesystem::path path;
+    std::vector<BendPreparation> bends{};
 };
+[[nodiscard]] std::optional<std::string> projectSettingsError(const OpenedProject &project);
 using ImportResult = std::variant<DocumentPtr, OpenedProject, ImportError>;
 [[nodiscard]] inline DocumentPtr resultDocument(const ImportResult &result) {
     if (const auto *document = std::get_if<DocumentPtr>(&result)) {
