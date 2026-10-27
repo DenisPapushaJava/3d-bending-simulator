@@ -5,6 +5,7 @@
 #include "bending/cad/occt/PreviewAccess.h"
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -40,6 +41,9 @@ double volume(const TopoDS_Shape &shape) {
     GProp_GProps properties;
     BRepGProp::VolumeProperties(shape, properties);
     return std::abs(properties.Mass());
+}
+double modelVolume(const application::DocumentPtr &document) {
+    return document->metadata().volumeMm3 + document->metadata().closedCutouts.addedVolumeMm3;
 }
 struct Temporary {
     std::filesystem::path path =
@@ -80,6 +84,14 @@ void check(const application::BendPreviewPtr &result, double sourceVolume) {
     double fixedVolume = 0;
     for (std::size_t i = 0; i < result->frameCount(); ++i) {
         const auto &frame = cad::OcctPreviewAccess::frame(*result, i);
+        require(frame.dimensions &&
+                    std::abs(frame.dimensions->fixed[0].Distance(frame.dimensions->fixed[1]) -
+                             result->model().fixedFlangeMm) < 1.0e-6 &&
+                    std::abs(frame.dimensions->moving[0].Distance(frame.dimensions->moving[1]) -
+                             result->model().movingFlangeMm) < 1.0e-6 &&
+                    std::abs(frame.dimensions->widthVector.Magnitude() - result->model().widthMm) <
+                        1.0e-6,
+                "World-space dimension attachments changed flange measurements");
         require(std::abs(volume(frame.shape) - sourceVolume) < 1.0e-4,
                 "Intermediate volume differs from CAD");
         if (i == 0) {
@@ -99,7 +111,7 @@ void check(const application::BendPreviewPtr &result, double sourceVolume) {
         }
     }
 }
-void checkMotion(application::DocumentPtr document, core::PressTools tools) {
+application::BendPreviewPtr checkMotion(application::DocumentPtr document, core::PressTools tools) {
     const auto &bend = document->metadata().bendAnalysis.bends.at(0);
     const auto result = cad::SingleBendPreviewBuilder{}.buildToolMotion(
         document, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {});
@@ -109,19 +121,25 @@ void checkMotion(application::DocumentPtr document, core::PressTools tools) {
                                  failure->detail);
     }
     const auto motion = std::get<application::BendPreviewPtr>(result);
-    require(motion->frameCount() == 41 && motion->pressMotion() && motion->toolSetup(),
+    require(motion->frameCount() == 61 && motion->pressMotion() && motion->toolSetup(),
             "Missing press motion frames");
     double firstFixedY = 0, lastFixedY = 0;
     double previousTip = 1e10;
     for (std::size_t i = 0; i < motion->frameCount(); ++i) {
         const auto &frame = cad::OcctPreviewAccess::frame(*motion, i);
         const auto *state = motion->pressState(i);
+        require(frame.dimensions && state &&
+                    frame.dimensions->angleRadians == state->section.angleRadians &&
+                    frame.dimensions->innerRadiusMm == state->section.innerRadiusMm &&
+                    std::abs(frame.dimensions->fixed[0].X() - state->section.fixed[0].x) < 1.0e-6 &&
+                    std::abs(frame.dimensions->fixed[0].Y() - state->section.fixed[0].y) < 1.0e-6,
+                "Dimension anchors do not follow the contact state");
         require(state && BRepCheck_Analyzer(frame.shape).IsValid(), "Invalid press frame");
         double total = 0;
         for (const auto &region : frame.regions) {
             total += volume(region);
         }
-        require(std::abs(total - document->metadata().volumeMm3) < 1e-4,
+        require(std::abs(total - modelVolume(document)) < 1e-4,
                 "Contact motion changed material volume");
         BRepExtrema_DistShapeShape left(frame.regions[0], frame.tools[0]),
             right(frame.regions[2], frame.tools[0]);
@@ -132,9 +150,23 @@ void checkMotion(application::DocumentPtr document, core::PressTools tools) {
         const double gap = state->phase == simulation::PressPhase::Approach
                                ? state->punchTipYmm - motion->model().thicknessMm
                                : 0;
-        require(std::abs(punch.Value() - gap) < 1e-5, "Punch missed expected contact/clearance");
-        require(state->punchTipYmm <= previousTip + 1e-7,
-                "Punch moved upwards during forward stroke");
+        require(state->phase == simulation::PressPhase::Retracting ||
+                    std::abs(punch.Value() - gap) < 1e-5,
+                "Punch missed expected contact/clearance");
+        require(state->phase == simulation::PressPhase::Retracting
+                    ? state->punchTipYmm >= previousTip - 1e-7
+                    : state->punchTipYmm <= previousTip + 1e-7,
+                "Punch reversed inside a stroke phase");
+        if (i > 40) {
+            const auto &formed = cad::OcctPreviewAccess::frame(*motion, 40);
+            for (std::size_t region = 0; region < 3; ++region) {
+                GProp_GProps a, b;
+                BRepGProp::VolumeProperties(formed.regions[region], a);
+                BRepGProp::VolumeProperties(frame.regions[region], b);
+                require(a.CentreOfMass().Distance(b.CentreOfMass()) < 1e-7,
+                        "Punch return moved or unfolded the sheet");
+            }
+        }
         previousTip = state->punchTipYmm;
         GProp_GProps properties;
         BRepGProp::VolumeProperties(frame.regions[0], properties);
@@ -154,10 +186,15 @@ void checkMotion(application::DocumentPtr document, core::PressTools tools) {
     }
     require(std::abs(lastFixedY - firstFixedY) > 0.1,
             "One flange incorrectly remained stationary in machine coordinates");
-    require(!motion->pressState(41) &&
+    require(!motion->pressState(61) &&
                 motion->pressState(8)->phase == simulation::PressPhase::Bending &&
                 std::abs(motion->pressState(40)->section.angleRadians - bend.angleRadians) < 1e-8,
             "Wrong press phase/endpoint metadata");
+    require(motion->punchRetraction() && motion->punchRetraction()->liftMm > 0 &&
+                motion->punchRetraction()->finalClearanceMm > 1e-5 &&
+                motion->pressState(60)->phase == simulation::PressPhase::Retracting &&
+                std::abs(motion->pressState(60)->punchTravelMm) < 1e-7,
+            "Missing verified punch return or wrong final height");
     auto invalid = tools;
     invalid.punchAngleRadians = 100 * std::numbers::pi / 180;
     const auto rejected = cad::SingleBendPreviewBuilder{}.buildToolMotion(
@@ -174,6 +211,65 @@ void checkMotion(application::DocumentPtr document, core::PressTools tools) {
                 document, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, cancelled.get_token()))
                 .code == application::BendPreviewErrorCode::Cancelled,
         "Cancelled press motion was built");
+    return motion;
+}
+void checkReturnSweep(const application::BendPreviewPtr &result) {
+    const auto &formed = cad::OcctPreviewAccess::frame(*result, 40);
+    const auto &returned = cad::OcctPreviewAccess::frame(*result, 60);
+    const auto &sweep = cad::OcctPreviewAccess::retractionSweep(*result);
+    const auto &report = *result->punchRetraction();
+    const auto &tools = result->toolSetup()->tools;
+    const auto commonVolume = [](const TopoDS_Shape &a, const TopoDS_Shape &b) {
+        BRepAlgoAPI_Common common;
+        TopTools_ListOfShape arguments, cutters;
+        arguments.Append(a);
+        cutters.Append(b);
+        common.SetArguments(arguments);
+        common.SetTools(cutters);
+        common.SetNonDestructive(true);
+        common.Build();
+        require(common.IsDone() && !common.HasErrors(), "Return test Boolean failed");
+        return volume(common.Shape());
+    };
+    require(!sweep.IsNull() && BRepCheck_Analyzer(sweep).IsValid(),
+            "Invalid continuous return volume");
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(formed.tools[1], box, false, false);
+    const double halfWidth = box.CornerMax().X();
+    const double addedVolume = 2 * halfWidth * report.liftMm * core::punchLengthMm(tools);
+    require(std::abs(volume(sweep) - volume(formed.tools[1]) - addedVolume) < 1e-4,
+            "Return envelope is not the exact translational sweep");
+    for (double fraction : {0.0, 0.137, 0.382, 0.5, 0.749, 1.0}) {
+        gp_Trsf lift;
+        lift.SetTranslation(gp_Vec(0, fraction * report.liftMm, 0));
+        const auto at = BRepBuilderAPI_Transform(formed.tools[1], lift, true).Shape();
+        const double covered = commonVolume(at, sweep);
+        require(std::abs(covered - volume(at)) < 1e-4,
+                "Return sweep misses an intermediate tool pose");
+    }
+    double clearance = 1e100;
+    for (const auto &region : returned.regions) {
+        require(commonVolume(sweep, region) < 1e-5, "Swept return intersects the formed sheet");
+        BRepExtrema_DistShapeShape distance(region, returned.tools[1]);
+        require(distance.IsDone(), "Final clearance test failed");
+        clearance = std::min(clearance, distance.Value());
+    }
+    require(std::abs(clearance - report.finalClearanceMm) < 1e-6 &&
+                commonVolume(sweep, formed.tools[0]) < 1e-5,
+            "Wrong final clearance or return/die intersection");
+    // This obstacle misses both endpoints, but is crossed by the upper side of
+    // the translating wedge. Endpoint-only checks must not certify the return.
+    const double tangent = std::tan(tools.punchAngleRadians / 2);
+    const double x = halfWidth - tangent * report.liftMm / 8;
+    const double y = box.CornerMax().Y() + report.liftMm / 2;
+    const double epsilon = std::min(0.1, tangent * report.liftMm / 100);
+    const auto obstacle = BRepPrimAPI_MakeBox(gp_Pnt(x - epsilon, y - epsilon, tools.lengthMm / 2),
+                                              2 * epsilon, 2 * epsilon, 1)
+                              .Shape();
+    require(commonVolume(obstacle, formed.tools[1]) < 1e-6 &&
+                commonVolume(obstacle, returned.tools[1]) < 1e-6 &&
+                commonVolume(obstacle, sweep) > epsilon * epsilon,
+            "Return sweep missed a collision between clear endpoints");
 }
 void test(const std::filesystem::path &path) {
     const auto right = load(fixtures::bentStrip(), path);
@@ -266,20 +362,20 @@ void test(const std::filesystem::path &path) {
     for (double degrees : {5.0, 30.0, 60.0, 120.0, 150.0, 175.0}) {
         const auto document =
             load(fixtures::bentStrip(4, 2, degrees * std::numbers::pi / 180), path);
-        check(preview(document, false), document->metadata().volumeMm3);
+        check(preview(document, false), modelVolume(document));
     }
     gp_Trsf rotation;
     rotation.SetRotation(gp_Ax1(gp_Pnt(3, -8, 11), gp_Dir(1, 2, 3)), 1.1);
     const auto rotated =
         load(BRepBuilderAPI_Transform(fixtures::bentStrip(), rotation, true), path, "INCH");
-    check(preview(rotated, true), rotated->metadata().volumeMm3);
+    check(preview(rotated, true), modelVolume(rotated));
     gp_Trsf mirror;
     mirror.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
     const auto mirrored = load(BRepBuilderAPI_Transform(fixtures::bentStrip(), mirror, true), path);
-    check(preview(mirrored, false), mirrored->metadata().volumeMm3);
+    check(preview(mirrored, false), modelVolume(mirrored));
     const auto smallDocument =
         load(fixtures::bentStrip(0.1, 0.1, 5.0 * std::numbers::pi / 180.0, 1), path);
-    check(preview(smallDocument, false), smallDocument->metadata().volumeMm3);
+    check(preview(smallDocument, false), modelVolume(smallDocument));
     const auto excessive = load(fixtures::bentStrip(4, 2, 178.0 * std::numbers::pi / 180.0), path);
     const auto &excessiveBend = excessive->metadata().bendAnalysis.bends.at(0);
     require(
@@ -298,6 +394,13 @@ void test(const std::filesystem::path &path) {
     };
     reject(load(fixtures::channel(), path));
     reject(load(fixtures::trimmedBend(), path));
+    for (const auto &shape :
+         {fixtures::bendWithZoneOpening(), fixtures::bendWithZoneOpening(false)}) {
+        const auto interrupted = load(shape, path);
+        check(preview(interrupted, false), modelVolume(interrupted));
+        check(preview(interrupted, true), modelVolume(interrupted));
+    }
+    reject(load(fixtures::channelWithZoneOpening(), path));
     reject(load(BRepPrimAPI_MakePrism(
                     BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(), gp_Dir(0, 0, 1)), 0, 20, 0, 20).Face(),
                     gp_Vec(0, 0, 2))
@@ -313,8 +416,8 @@ void test(const std::filesystem::path &path) {
                 oblique->metadata().bendAnalysis.bends.size() == 1,
             "Negative fixture does not exercise reconstruction proof");
     // A nonrectangular free edge is now retained, rather than replaced by an area/W strip.
-    check(preview(oblique, false), oblique->metadata().volumeMm3);
-    check(preview(oblique, true), oblique->metadata().volumeMm3);
+    check(preview(oblique, false), modelVolume(oblique));
+    check(preview(oblique, true), modelVolume(oblique));
     const auto boss = load(
         BRepAlgoAPI_Fuse(fixtures::bentStrip(), BRepPrimAPI_MakeBox(gp_Pnt(5.5, -20, 30), 2, 5, 5))
             .Shape(),
@@ -367,7 +470,7 @@ void testProfiled(const std::filesystem::path &path) {
     }
     for (bool second : {false, true}) {
         const auto result = preview(document, second);
-        check(result, document->metadata().volumeMm3);
+        check(result, modelVolume(document));
         require(std::abs(result->model().fixedFlangeMm - 30) < 1e-5 &&
                     std::abs(result->model().movingFlangeMm - 30) < 1e-5,
                 "Perforation changed flange envelope lengths");
@@ -375,35 +478,45 @@ void testProfiled(const std::filesystem::path &path) {
             const auto &frame = cad::OcctPreviewAccess::frame(*result, i);
             TopTools_IndexedMapOfShape frameFaces;
             TopExp::MapShapes(frame.shape, TopAbs_FACE, frameFaces);
-            int cones = 0, holes = 0;
             for (int j = 1; j <= frameFaces.Extent(); ++j) {
                 require(!sourceFaces.Contains(frameFaces(j)), "Frame shares mutable source faces");
-                const BRepAdaptor_Surface surface(TopoDS::Face(frameFaces(j)));
-                cones += surface.GetType() == GeomAbs_Cone ? 1 : 0;
-                if (surface.GetType() == GeomAbs_Cylinder &&
-                    (std::abs(surface.Cylinder().Radius() - 1.5) < 1e-5 ||
-                     std::abs(surface.Cylinder().Radius() - 2.5) < 1e-5)) {
-                    ++holes;
-                }
             }
-            require(cones >= 1 && holes >= 2, "A frame filled a hole or lost its countersink");
+            require(!frame.displayShape.IsNull(), "Visible cutout surface missing");
+            TopTools_IndexedMapOfShape displayed;
+            TopExp::MapShapes(frame.displayShape, TopAbs_FACE, displayed);
+            require(displayed.Extent() == sourceFaces.Extent(),
+                    "Display lost cutout walls/countersink");
         }
         const auto &last = cad::OcctPreviewAccess::frame(*result, 20).shape;
         for (bool reverse : {false, true}) {
             BRepAlgoAPI_Cut residual;
             TopTools_ListOfShape arguments, tools;
-            arguments.Append(reverse ? last : source);
-            tools.Append(reverse ? source : last);
+            const auto &filled = cad::OcctDocumentAccess::simulationShape(
+                dynamic_cast<const cad::CadDocument &>(*document));
+            arguments.Append(reverse ? last : filled);
+            tools.Append(reverse ? filled : last);
             residual.SetArguments(arguments);
             residual.SetTools(tools);
             residual.SetNonDestructive(true);
             residual.Build();
             require(residual.IsDone() && !residual.HasErrors() && volume(residual.Shape()) < 1e-4,
-                    "Profiled endpoint does not match the original STEP");
+                    "Profiled check endpoint does not match filled approximation");
         }
     }
     const core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
-    checkMotion(document, tools);
+    auto independent = tools;
+    independent.lengthMm = 140;
+    independent.punchLengthMm = 120;
+    const auto independentMotion = checkMotion(document, independent);
+    const auto &independentFrame = cad::OcctPreviewAccess::frame(*independentMotion, 0);
+    for (std::size_t i = 0; i < 2; ++i) {
+        Bnd_Box bounds;
+        BRepBndLib::AddOptimal(independentFrame.tools[i], bounds, false, false);
+        require(std::abs(bounds.CornerMin().Z() - (i == 0 ? 0 : 10)) < 1e-5 &&
+                    std::abs(bounds.CornerMax().Z() - (i == 0 ? 140 : 130)) < 1e-5,
+                "Independent tool lengths are not centred correctly");
+    }
+    checkReturnSweep(independentMotion);
     for (int i = 1; i <= sourceFaces.Extent(); ++i) {
         TopLoc_Location location;
         require(BRep_Tool::Triangulation(TopoDS::Face(sourceFaces(i)), location) ==
@@ -414,38 +527,47 @@ void testProfiled(const std::filesystem::path &path) {
     rotation.SetRotation(gp_Ax1(gp_Pnt(3, -8, 11), gp_Dir(1, 2, 3)), 1.1);
     const auto rotated =
         load(BRepBuilderAPI_Transform(fixtures::profiledBend(), rotation, true), path, "INCH");
-    check(preview(rotated, true), rotated->metadata().volumeMm3);
+    check(preview(rotated, true), modelVolume(rotated));
     checkMotion(rotated, tools);
     gp_Trsf mirror;
     mirror.SetMirror(gp_Ax2(gp_Pnt(), gp_Dir(1, 0, 0)));
     const auto mirrored =
         load(BRepBuilderAPI_Transform(fixtures::profiledBend(), mirror, true), path);
-    check(preview(mirrored, false), mirrored->metadata().volumeMm3);
+    check(preview(mirrored, false), modelVolume(mirrored));
     const auto interrupted =
         load(BRepAlgoAPI_Cut(
                  fixtures::bentStrip(8, 6),
                  BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(7, -12, 40), gp_Dir(1, 0, 0)), 2, 8)),
              path);
-    check(preview(interrupted, false), interrupted->metadata().volumeMm3);
-    const auto &bend = interrupted->metadata().bendAnalysis.bends.at(0);
+    check(preview(interrupted, false), modelVolume(interrupted));
+    require(interrupted->metadata().closedCutouts.status == application::ClosedCutoutStatus::Filled,
+            "Enclosed support hole not approximated");
+    checkMotion(interrupted, tools);
+    // An open notch is part of the outer contour: it must still interrupt support.
+    const auto notched = load(
+        BRepAlgoAPI_Cut(fixtures::bentStrip(8, 6),
+                        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(7, -12, 0), gp_Dir(1, 0, 0)), 2, 8)),
+        path);
+    const auto &bend = notched->metadata().bendAnalysis.bends.at(0);
     for (bool motion : {false, true}) {
         const auto rejected =
             motion ? cad::SingleBendPreviewBuilder{}.buildToolMotion(
-                         interrupted, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {})
+                         notched, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {})
                    : cad::SingleBendPreviewBuilder{}.buildToolSetup(
-                         interrupted, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {});
-        require(std::get<application::BendPreviewError>(rejected).code ==
-                    application::BendPreviewErrorCode::SupportNotProven,
-                "A flange envelope was mistaken for intact support material");
+                         notched, 0, {bend.angleRadians, bend.innerRadiusMm}, tools, {});
+        require(std::holds_alternative<application::BendPreviewError>(rejected) &&
+                    std::get<application::BendPreviewError>(rejected).code ==
+                        application::BendPreviewErrorCode::SupportNotProven,
+                "Open notch was filled or mistaken for intact support");
     }
     if (const auto *external = std::getenv("BENDING_PROFILED_STEP")) {
         const auto imported = cad::StepImporter{}.load(external, {}, {});
         const auto local = application::resultDocument(imported);
         require(local != nullptr, "Cannot load local profiled STEP");
-        check(preview(local, false), local->metadata().volumeMm3);
-        check(preview(local, true), local->metadata().volumeMm3);
+        check(preview(local, false), modelVolume(local));
+        check(preview(local, true), modelVolume(local));
         checkMotion(local, tools);
-        std::cout << "Private profiled STEP: both fixed sides and 41 tool states passed\n";
+        std::cout << "Private profiled STEP: both fixed sides and 61 tool states passed\n";
     }
 }
 } // namespace

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/BendingDrawing.h"
 #include "bending/application/DocumentSession.h"
 #include "bending/application/ProjectWriter.h"
 #include "bending/application/SingleBendPreview.h"
@@ -27,6 +28,7 @@ class ImportController final : public QObject {
     void useAutomaticThickness();
     bool setBendReview(std::size_t recognizedIndex, application::BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
+    bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     void saveProject(std::filesystem::path path,
                      std::shared_ptr<const application::ProjectWriter> writer);
@@ -42,6 +44,12 @@ class ImportController final : public QObject {
     [[nodiscard]] application::BendPreviewPtr bendPreview() const;
     [[nodiscard]] const std::optional<application::BendPreviewError> &bendPreviewError() const;
     [[nodiscard]] bool isPreparingPreview() const;
+    bool prepareDrawing(std::shared_ptr<const application::BendingDrawingBuilder> builder,
+                        application::DrawingRequest request);
+    [[nodiscard]] application::BendingDrawingPtr drawing() const;
+    [[nodiscard]] std::optional<application::DrawingError> drawingError() const;
+    [[nodiscard]] bool isPreparingDrawing() const;
+    void cancelDrawing();
 
   signals:
     void stateChanged();

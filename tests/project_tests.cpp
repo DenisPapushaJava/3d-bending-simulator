@@ -1,5 +1,6 @@
 #include "bending/application/DocumentSession.h"
 #include "bending/project/ProjectFiles.h"
+#include "bending/project/ToolCatalog.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -190,7 +191,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 3, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 5, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -240,10 +241,30 @@ void testBendProject() {
         invalid = root;
         invalid.insert(QStringLiteral("version"), 2);
         reject(invalid);
+        auto v3Bends = bends;
+        for (qsizetype i = 0; i < v3Bends.size(); ++i) {
+            auto entry = v3Bends[i].toObject();
+            entry.remove(QStringLiteral("catalogTools"));
+            auto oldTools = entry.value(QStringLiteral("tools")).toObject();
+            if (!oldTools.isEmpty()) {
+                oldTools.remove(QStringLiteral("punchLengthMm"));
+                entry.insert(QStringLiteral("tools"), oldTools);
+            }
+            v3Bends[i] = entry;
+        }
+        auto v3 = root;
+        v3.insert(QStringLiteral("version"), 3);
+        v3.insert(QStringLiteral("bends"), v3Bends);
+        write(destination, QJsonDocument(v3).toJson());
+        session.complete(session.beginImport(path), files.load(path, {}, {}));
+        require(session.bend(0)->tools == tools && session.bend(0)->target == target &&
+                    !session.modified(),
+                "Legacy v3 migration failed");
         auto legacyBends = bends;
         for (qsizetype i = 0; i < legacyBends.size(); ++i) {
             auto entry = legacyBends[i].toObject();
             entry.remove(QStringLiteral("tools"));
+            entry.remove(QStringLiteral("catalogTools"));
             legacyBends[i] = entry;
         }
         auto legacy = root;
@@ -280,12 +301,12 @@ void testBendProject() {
         root.remove(QStringLiteral("bends"));
         write(destination, QJsonDocument(root).toJson());
         session.complete(session.beginImport(path), files.load(path, {}, {}));
-        require(session.bend(0) && session.bend(0)->review == BendReview::Pending &&
+        require(session.bend(0) && session.bend(0)->review == BendReview::Automatic &&
                     !session.bend(0)->target && !session.modified(),
                 "Legacy v1 did not open cleanly");
         require(!files.save(path, *session.document(), session.manualThicknessMm(), session.bends(),
                             {}),
-                "Legacy project could not be saved as v3");
+                "Legacy project could not be saved as v4");
 
         // A valid but unmatched geometry record is retained and never transferred to another zone.
         auto unresolved = session.bends();
@@ -346,12 +367,165 @@ void testPrivatePreparation() {
     }
     std::cout << "Private project: " << ids.size() << " bend records restored\n";
 }
+void testCatalogProject() {
+    using namespace bending;
+    const auto bundled = project::builtInToolCatalog();
+    require(std::holds_alternative<core::ToolCatalog>(bundled), "Bundled catalogue unreadable");
+    const auto &catalog = std::get<core::ToolCatalog>(bundled);
+    require(catalog.size() == 17 && std::count_if(catalog.begin(), catalog.end(),
+                                                  [](const auto &t) { return !t.teaching; }) == 15,
+            "Wrong catalogue contents");
+    const auto find = [&](const std::string &id) -> const core::ToolPreset & {
+        const auto it =
+            std::find_if(catalog.begin(), catalog.end(), [&](const auto &t) { return t.id == id; });
+        require(it != catalog.end(), "Missing preset");
+        return *it;
+    };
+    core::ToolAssignment assignment{find("s-tool-st1801m"), find("s-tool-st2401s"), 3, 10,
+                                    "Test machine"};
+    assignment.punch.drawing =
+        core::ToolDrawing{"own.dxf",
+                          std::string(64, 'a'),
+                          true,
+                          {{{0, 0}, {2, 0}, {}, 0},
+                           {{2, 0}, {0, 2}, core::DrawingPoint{0, 0}, std::numbers::pi / 2},
+                           {{0, 2}, {0, 0}, {}, 0}}};
+    require(assignment.punch.lengthMm == 525 &&
+                assignment.die.openingsMm == std::vector<double>{10, 16, 22, 35},
+            "Catalogue facts changed");
+    project::ProjectFiles files;
+    DocumentSession session;
+    session.complete(session.beginImport("fixture.step"),
+                     files.load(nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                                           QStringLiteral("/bend-90-6mm.step")),
+                                {}, {}));
+    require(session.bend(0) && session.bend(0)->review == BendReview::Automatic &&
+                session.bendTarget(0),
+            "No automatic target");
+    const auto revision = session.editRevision();
+    require(
+        session.setBendToolAssignment(0, assignment) && session.editRevision() == revision + 1 &&
+            session.setBendToolAssignment(0, assignment) && session.editRevision() == revision + 1,
+        "Assignment is not atomic/idempotent");
+    QTemporaryDir temp;
+    const auto path = temp.path() + QStringLiteral("/catalog.bend");
+    require(!files.save(nativePath(path), *session.document(), {}, session.bends(), {}),
+            "Snapshot save failed");
+    const auto bytes = read(path);
+    const auto root = QJsonDocument::fromJson(bytes).object();
+    {
+        auto legacyRoot = root;
+        legacyRoot.insert(QStringLiteral("version"), 4);
+        auto legacyBends = legacyRoot.value(QStringLiteral("bends")).toArray();
+        auto legacyBend = legacyBends[0].toObject();
+        auto pair = legacyBend.value(QStringLiteral("catalogTools")).toObject();
+        for (const auto &key : {QStringLiteral("punch"), QStringLiteral("die")}) {
+            auto tool = pair.value(key).toObject();
+            tool.remove(QStringLiteral("drawing"));
+            tool.remove(QStringLiteral("parametersConfirmed"));
+            pair.insert(key, tool);
+        }
+        legacyBend.insert(QStringLiteral("catalogTools"), pair);
+        legacyBends[0] = legacyBend;
+        legacyRoot.insert(QStringLiteral("bends"), legacyBends);
+        write(path, QJsonDocument(legacyRoot).toJson());
+        DocumentSession legacy;
+        legacy.complete(legacy.beginImport(nativePath(path)), files.load(nativePath(path), {}, {}));
+        require(legacy.document() && legacy.bend(0)->catalogTools &&
+                    !legacy.bend(0)->catalogTools->punch.drawing &&
+                    legacy.bend(0)->catalogTools->punch.parametersConfirmed,
+                "Legacy v4 catalogue without drawing no longer opens");
+        write(path, bytes);
+    }
+    session.complete(session.beginImport(nativePath(path)), files.load(nativePath(path), {}, {}));
+    require(!session.modified() && session.bend(0)->catalogTools == assignment &&
+                session.bend(0)->tools == core::toolParameters(assignment) &&
+                !session.bend(0)->target && session.bendTarget(0),
+            "Portable snapshot or automatic target lost");
+    auto excluded = session.bends();
+    excluded[0].review = BendReview::Excluded;
+    require(session.setBendReview(0, BendReview::Excluded) && !session.bendTarget(0) &&
+                session.bend(0)->catalogTools == assignment,
+            "Exclusion lost snapshot");
+    require(session.setBendReview(0, BendReview::Automatic) && session.bendTarget(0),
+            "Automatic mode did not recover");
+    require(session.setBendTools(0, session.bend(0)->tools) && !session.bend(0)->catalogTools,
+            "Manual parameters retained catalogue attribution");
+    const auto reject = [&](QJsonObject rootValue) {
+        write(path, QJsonDocument(rootValue).toJson());
+        const auto loaded = files.load(nativePath(path), {}, {});
+        require(std::holds_alternative<ImportError>(loaded) &&
+                    std::get<ImportError>(loaded).code == ImportErrorCode::InvalidProject,
+                "Corrupt snapshot accepted");
+    };
+    for (const auto &field :
+         {QStringLiteral("groove"), QStringLiteral("clearanceMm"), QStringLiteral("punch")}) {
+        auto altered = root;
+        auto bends = altered.value(QStringLiteral("bends")).toArray();
+        auto bend = bends[0].toObject();
+        auto a = bend.value(QStringLiteral("catalogTools")).toObject();
+        a.insert(field, field == QStringLiteral("groove")        ? QJsonValue(99)
+                        : field == QStringLiteral("clearanceMm") ? QJsonValue(20)
+                                                                 : QJsonValue(QJsonValue::Null));
+        bend.insert(QStringLiteral("catalogTools"), a);
+        bends[0] = bend;
+        altered.insert(QStringLiteral("bends"), bends);
+        reject(altered);
+    }
+    auto altered = root;
+    auto bends = altered.value(QStringLiteral("bends")).toArray();
+    auto bend = bends[0].toObject();
+    bend.remove(QStringLiteral("catalogTools"));
+    bends[0] = bend;
+    altered.insert(QStringLiteral("bends"), bends);
+    reject(altered);
+    // External catalogue input is data only, bounded and independently validated.
+    const auto catalogPath = temp.path() + QStringLiteral("/tools.json");
+    QFile resource(QStringLiteral(":/bending/tool-catalog.json"));
+    require(resource.open(QIODevice::ReadOnly), "No bundled JSON");
+    const auto catalogBytes = resource.readAll();
+    write(catalogPath, catalogBytes);
+    require(std::get<core::ToolCatalog>(project::readToolCatalog(nativePath(catalogPath))) ==
+                catalog,
+            "External catalogue differs");
+    auto catalogRoot = QJsonDocument::fromJson(catalogBytes).object();
+    {
+        auto legacyCatalog = catalogRoot;
+        legacyCatalog.insert(QStringLiteral("version"), 1);
+        QJsonArray legacyTools;
+        for (const auto &item : legacyCatalog.value(QStringLiteral("tools")).toArray()) {
+            auto tool = item.toObject();
+            if (tool.value(QStringLiteral("parametersConfirmed")).isBool() &&
+                !tool.value(QStringLiteral("parametersConfirmed")).toBool())
+                continue;
+            tool.remove(QStringLiteral("drawing"));
+            tool.remove(QStringLiteral("parametersConfirmed"));
+            legacyTools.append(tool);
+        }
+        legacyCatalog.insert(QStringLiteral("tools"), legacyTools);
+        write(catalogPath, QJsonDocument(legacyCatalog).toJson());
+        require(std::holds_alternative<core::ToolCatalog>(
+                    project::readToolCatalog(nativePath(catalogPath))),
+                "Legacy catalogue v1 no longer reads");
+    }
+    auto defs = catalogRoot.value(QStringLiteral("tools")).toArray();
+    defs.append(defs[0]);
+    catalogRoot.insert(QStringLiteral("tools"), defs);
+    write(catalogPath, QJsonDocument(catalogRoot).toJson());
+    require(std::holds_alternative<std::string>(project::readToolCatalog(nativePath(catalogPath))),
+            "Duplicate catalogue IDs accepted");
+    write(catalogPath, QByteArray(1024 * 1024 + 1, ' '));
+    require(std::holds_alternative<std::string>(project::readToolCatalog(nativePath(catalogPath))),
+            "Unbounded catalogue accepted");
+}
+
 } // namespace
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     try {
         testProject();
         testBendProject();
+        testCatalogProject();
         testPrivatePreparation();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

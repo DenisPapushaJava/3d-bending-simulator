@@ -49,7 +49,8 @@ std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotio
         return {};
     }
     constexpr double approach = 0.2;
-    const double fraction = progress <= approach ? 0.0 : (progress - approach) / (1.0 - approach);
+    const double forming = std::min(progress / pressBendingEndProgress, 1.0);
+    const double fraction = forming <= approach ? 0.0 : (forming - approach) / (1.0 - approach);
     const double angle = fraction * m.angleRadians;
     const double h = angle / 2.0;
     const double c = std::cos(h), s = std::sin(h);
@@ -84,10 +85,17 @@ std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotio
             section.innerRadiusMm = radius;
         }
     }
+    const double home = m.thicknessMm + motion.initial.tools.clearanceMm;
     const double gap =
-        progress < approach ? motion.initial.tools.clearanceMm * (1.0 - progress / approach) : 0.0;
-    const double tip = bottom + m.thicknessMm + gap;
-    return PressState{section, progress < approach ? PressPhase::Approach : PressPhase::Bending,
-                      tip, m.thicknessMm + motion.initial.tools.clearanceMm - tip, q};
+        forming < approach ? motion.initial.tools.clearanceMm * (1.0 - forming / approach) : 0.0;
+    const double formedTip = bottom + m.thicknessMm;
+    const double returned =
+        std::max(0.0, (progress - pressBendingEndProgress) / (1.0 - pressBendingEndProgress));
+    const double tip = formedTip + gap + returned * (home - formedTip);
+    const auto phase = progress > pressBendingEndProgress ? PressPhase::Retracting
+                       : forming < approach               ? PressPhase::Approach
+                                                          : PressPhase::Bending;
+    return PressState{section, phase, tip, m.thicknessMm + motion.initial.tools.clearanceMm - tip,
+                      q};
 }
 } // namespace bending::simulation
