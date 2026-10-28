@@ -1094,20 +1094,21 @@ double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt =
     const QRectF bounds(map({0, v.maximum.y}), map({v.maximum.x, 0}));
     auto bends = info.bends;
     std::sort(bends.begin(), bends.end(), [](const auto &a, const auto &b) {
-        const auto ay = a.firstY + a.secondY, by = b.firstY + b.secondY;
-        return ay != by ? ay > by : a.minimumX < b.minimumX;
+        const auto aa = a.centreLine(), bb = b.centreLine();
+        const double ay = aa[0].y + aa[1].y, by = bb[0].y + bb[1].y;
+        return ay != by ? ay > by : aa[0].x < bb[0].x;
     });
     for (const auto &b : bends) {
-        const double y = (b.firstY + b.secondY) / 2;
-        const auto a = map({b.minimumX, y}), end = map({b.maximumX, y});
+        const auto line = b.centreLine();
+        const auto a = map({line[0].x, line[0].y}), end = map({line[1].x, line[1].y});
         pen(p, .25, Qt::DashDotLine);
         p.drawLine(a, end);
-        const auto value = QStringLiteral("B%1 %2 %3°\nL=%4%5")
-                               .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
-                               .arg(b.direction > 0 ? QStringLiteral("↑") : QStringLiteral("↓"),
-                                    number(180 - b.turnRadians * 180 / std::numbers::pi),
-                                    number(b.maximumX - b.minimumX),
-                                    sameK ? QString{} : QStringLiteral(" · K=%1").arg(number(b.k)));
+        const auto value =
+            QStringLiteral("B%1 %2 %3°\nL=%4%5")
+                .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
+                .arg(b.direction > 0 ? QStringLiteral("↑") : QStringLiteral("↓"),
+                     number(180 - b.turnRadians * 180 / std::numbers::pi), number(b.lengthMm()),
+                     sameK ? QString{} : QStringLiteral(" · K=%1").arg(number(b.k)));
         leaderNote(p, (a + end) / 2, bounds, value, area, occupied, true, &dimensionLines);
     }
     return *scale;

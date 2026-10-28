@@ -1,6 +1,7 @@
 #pragma once
 #include "bending/application/Document.h"
 #include "bending/core/UnfoldRule.h"
+#include <cmath>
 #include <optional>
 #include <stop_token>
 #include <variant>
@@ -8,23 +9,27 @@
 namespace bending::application {
 struct FlatBend {
     std::size_t bendIndex;
-    double firstY;
-    double secondY;
-    double minimumX;
-    double maximumX;
+    PointMm start; // First tangency boundary, in the common flat XY plane.
+    PointMm end;
+    PointMm offset; // Vector from the first boundary to the second; magnitude = BA.
     double turnRadians;
     int direction;
     double radiusMm;
     double k;
     double allowanceMm;
+    [[nodiscard]] std::array<PointMm, 2> centreLine() const noexcept {
+        return {{{start.x + offset.x / 2, start.y + offset.y / 2, 0},
+                 {end.x + offset.x / 2, end.y + offset.y / 2, 0}}};
+    }
+    [[nodiscard]] double lengthMm() const noexcept {
+        return std::hypot(end.x - start.x, end.y - start.y);
+    }
 };
 struct FlatPatternInfo {
     core::UnfoldSettings settings;
     double thicknessMm = 0;
     BoundsMm bounds{};
     std::vector<FlatBend> bends;
-    // Tangency boundaries in flat Y, for dimensions. Not CNC back-gauge positions.
-    std::vector<double> wallBoundaries;
     bool cutoutsIgnored = false;
 };
 class FlatPattern {

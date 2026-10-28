@@ -841,9 +841,21 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
         v.dimensions.push_back({{0, 0}, {0, hi.y}, hi.y, ""});
         std::vector<double> ys, xs{0, hi.x};
         for (const auto &b : info.bends) {
-            ys.push_back((b.firstY + b.secondY) / 2);
-            xs.push_back(b.minimumX);
-            xs.push_back(b.maximumX);
+            const auto line = b.centreLine();
+            if (std::abs(line[0].y - line[1].y) < 1.e-5) {
+                ys.push_back(line[0].y);
+                xs.push_back(line[0].x);
+                xs.push_back(line[1].x);
+            } else if (std::abs(line[0].x - line[1].x) < 1.e-5) {
+                xs.push_back(line[0].x);
+                ys.push_back(line[0].y);
+                ys.push_back(line[1].y);
+            } else {
+                xs.push_back(line[0].x);
+                xs.push_back(line[1].x);
+                ys.push_back(line[0].y);
+                ys.push_back(line[1].y);
+            }
         }
         const auto unique = [](auto &values) {
             std::sort(values.begin(), values.end());
@@ -854,7 +866,8 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
         unique(ys);
         unique(xs);
         for (auto y : ys)
-            v.sectionDimensions.push_back({{hi.x, 0}, {hi.x, y}, y, ""});
+            if (y > 1.e-5 && y < hi.y - 1.e-5)
+                v.sectionDimensions.push_back({{hi.x, 0}, {hi.x, y}, y, ""});
         if (xs.size() > 2)
             for (std::size_t i = 1; i < xs.size(); ++i)
                 v.axialDimensions.push_back(

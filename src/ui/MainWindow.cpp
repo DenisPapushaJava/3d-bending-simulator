@@ -558,7 +558,7 @@ class MainWindow::Impl {
                 details += QStringLiteral("\nB%1: Ri %2 · K %3 · BA %4 мм · L %5 мм")
                                .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
                                .arg(number(b.radiusMm), number(b.k), number(b.allowanceMm),
-                                    number(b.maximumX - b.minimumX));
+                                    number(b.lengthMm()));
             flatStatus->setToolTip(details);
             if (checkFlatStatus)
                 checkFlatStatus->setToolTip(details);

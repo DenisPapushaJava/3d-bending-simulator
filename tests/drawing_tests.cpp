@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "TrayFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
@@ -1093,6 +1094,32 @@ void flatDrawing(const QString &folder) {
             ui::DrawingSheet::pageCount(*branched) == 1 &&
             ui::DrawingSheet::writePdf(folder + "/unfold-branches.pdf", *branched, {}).isEmpty(),
         "Branched blank lost grouped coordinates, axial gaps or one-sheet layout");
+    const auto tray = build(load(fixtures::tray(), folder + "/unfold-tray.step"), request);
+    require(tray->flatPattern && tray->flatPattern->info.bends.size() == 4 &&
+                tray->flatPattern->view.paths.size() >= 5,
+            "Tray blank lost bend directions or hole contours");
+    const auto &trayFlat = *tray->flatPattern;
+    for (const auto &bend : trayFlat.info.bends) {
+        const auto line = bend.centreLine();
+        const bool horizontal = std::abs(line[0].y - line[1].y) < 1.e-5;
+        const auto &coordinates =
+            horizontal ? trayFlat.view.sectionDimensions : trayFlat.view.axialDimensions;
+        require(std::any_of(coordinates.begin(), coordinates.end(),
+                            [&](const auto &dim) {
+                                return horizontal ? std::abs(dim.valueMm - line[0].y) < 1.e-5
+                                                  : (std::abs(dim.start.x - line[0].x) < 1.e-5 ||
+                                                     std::abs(dim.end.x - line[0].x) < 1.e-5);
+                            }),
+                "A tray bend has no dimension in its own direction");
+    }
+    require(ui::DrawingSheet::writePdf(folder + "/unfold-tray.pdf", *tray, {}).isEmpty(),
+            "Two-direction blank dimensions cannot be exported");
+    const auto oblique =
+        build(load(fixtures::obliqueTray(), folder + "/unfold-oblique.step"), request);
+    require(oblique->flatPattern && !oblique->flatPattern->view.sectionDimensions.empty() &&
+                !oblique->flatPattern->view.axialDimensions.empty() &&
+                ui::DrawingSheet::writePdf(folder + "/unfold-oblique.pdf", *oblique, {}).isEmpty(),
+            "Oblique bend axes lost coordinate dimensions or PDF layout");
     ui::DrawingTitle profileTitle;
     profileTitle.layout = ui::DrawingLayout::Profiles;
     auto withoutFlat = *result;

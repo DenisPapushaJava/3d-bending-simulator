@@ -108,14 +108,24 @@ Wall wall(const RecognizedBend &b, std::size_t side) {
     std::sort(w.begin(), w.end());
     return w;
 }
-TopoDS_Shape transformed(const TopoDS_Shape &s, gp_Pnt origin, gp_Dir axis, gp_Dir along,
-                         double offset = 0) {
-    gp_Trsf tr;
-    tr.SetTransformation(gp_Ax3(origin, gp_Dir(gp_Vec(axis).Crossed(gp_Vec(along))), axis));
-    auto result = BRepBuilderAPI_Transform(s, tr, true).Shape();
-    gp_Trsf shift;
-    shift.SetTranslation(gp_Vec(0, offset, 0));
-    return BRepBuilderAPI_Transform(result, shift, true).Shape();
+gp_Trsf placementMap(gp_Pnt source, gp_Dir axis, gp_Dir across, gp_Pnt target, gp_Dir flatAxis,
+                     gp_Dir flatAcross) {
+    const gp_Vec normal = gp_Vec(axis).Crossed(gp_Vec(across));
+    const gp_Vec flatNormal = gp_Vec(flatAxis).Crossed(gp_Vec(flatAcross));
+    double m[3][3]{};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            m[i][j] = flatAxis.Coord(i + 1) * axis.Coord(j + 1) +
+                      flatAcross.Coord(i + 1) * across.Coord(j + 1) +
+                      flatNormal.Coord(i + 1) * normal.Coord(j + 1);
+    const auto shift = [&](int i) {
+        return target.Coord(i + 1) - m[i][0] * source.X() - m[i][1] * source.Y() -
+               m[i][2] * source.Z();
+    };
+    gp_Trsf result;
+    result.SetValues(m[0][0], m[0][1], m[0][2], shift(0), m[1][0], m[1][1], m[1][2], shift(1),
+                     m[2][0], m[2][1], m[2][2], shift(2));
+    return result;
 }
 BoundsMm bounds(const TopoDS_Shape &s) {
     Bnd_Box b;
@@ -135,10 +145,15 @@ TopoDS_Shape extruded(const TopoDS_Face &f, gp_Vec v) {
     require(BRepCheck_Analyzer(result).IsValid(), "Invalid wall prism");
     return result;
 }
-TopoDS_Shape rectangle(double x0, double x1, double y0, double y1) {
-    return BRepBuilderAPI_MakeFace(
-               gp_Pln(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0))), x0, x1, y0, y1)
-        .Face();
+TopoDS_Shape strip(gp_Pnt start, gp_Pnt end, gp_Vec offset) {
+    BRepBuilderAPI_MakePolygon wire;
+    wire.Add(start);
+    wire.Add(end);
+    wire.Add(end.Translated(offset));
+    wire.Add(start.Translated(offset));
+    wire.Close();
+    require(wire.IsDone(), "Invalid bend strip");
+    return BRepBuilderAPI_MakeFace(wire.Wire()).Face();
 }
 TopoDS_Shape bendSolid(const RecognizedBend &b, const TopTools_IndexedMapOfShape &faces,
                        double tolerance) {
@@ -177,17 +192,9 @@ TopoDS_Shape bendSolid(const RecognizedBend &b, const TopTools_IndexedMapOfShape
                     gp_Vec(cylinder.Axis().Direction()) * (v1 - v0));
 }
 struct WallPlacement {
-    gp_Pnt anchor;
-    gp_Dir along; // World direction mapped to flat +Y; all walls share axial X.
-    double y;
+    gp_Trsf map; // Rigid world-to-flat placement of this wall's reference surface at Z=0.
     std::optional<std::size_t> incoming;
 };
-gp_Pnt flatPoint(gp_Pnt p, const WallPlacement &placement, gp_Dir axis, double zShift) {
-    const gp_Vec offset(placement.anchor, p);
-    return {gp_Vec(gp_Pnt(0, 0, 0), p).Dot(gp_Vec(axis)),
-            offset.Dot(gp_Vec(placement.along)) + placement.y,
-            offset.Dot(gp_Vec(axis).Crossed(gp_Vec(placement.along))) + zShift};
-}
 // A full outer tangency rail must belong to this wall. A local point on one
 // side alone cannot prove attachment along the complete axial span.
 int materialSide(const TopoDS_Face &wallFace, const gp_Pln &wallPlane, const RecognizedBend &bend,
@@ -222,12 +229,6 @@ int materialSide(const TopoDS_Face &wallFace, const gp_Pln &wallPlane, const Rec
         side = current;
     }
     return side;
-}
-TopoDS_Shape flatWall(const TopoDS_Face &f, const WallPlacement &placement, gp_Dir axis) {
-    auto patch = transformed(f, placement.anchor, axis, placement.along, placement.y);
-    gp_Trsf shift;
-    shift.SetTranslation(gp_Vec(gp_Vec(gp_Pnt(0, 0, 0), placement.anchor).Dot(gp_Vec(axis)), 0, 0));
-    return BRepBuilderAPI_Transform(patch, shift, true).Shape();
 }
 } // namespace
 bool OcctFlatPatternAccess::belongsTo(const FlatPattern &pattern, const Document &document) {
@@ -281,9 +282,8 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         std::map<Wall, std::vector<std::size_t>> graph;
         for (std::size_t i = 0; i < bends.size(); ++i) {
             const auto &b = bends[i];
-            require(std::abs(b.thicknessMm - t) <= tolerance && !b.trimmedEnds &&
-                        axis.IsParallel(gp_Dir(gp_Vec(point(b.axisStart), point(b.axisEnd))), 1e-7),
-                    "Requires constant thickness and parallel complete bends");
+            require(std::abs(b.thicknessMm - t) <= tolerance && !b.trimmedEnds,
+                    "Requires constant thickness and complete straight bends");
             graph[wall(b, 0)].push_back(i);
             graph[wall(b, 1)].push_back(i);
         }
@@ -306,9 +306,17 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             rootNormal * gp_Vec(rootPlane.Location(), rootOther.Location()).Dot(rootNormal);
         require(toOther.Magnitude() > tolerance, "Degenerate reference wall");
         std::map<Wall, WallPlacement> placements;
-        placements.emplace(root,
-                           WallPlacement{projected(gp_Pnt(0, 0, 0), rootPlane),
-                                         gp_Dir(toOther.Crossed(gp_Vec(axis))), 0, std::nullopt});
+        if (std::abs(rootNormal.Dot(gp_Vec(axis))) > 1.e-7) {
+            const auto &reference = bends[graph.at(root).front()];
+            axis = gp_Dir(gp_Vec(point(reference.axisStart), point(reference.axisEnd)));
+        }
+        require(std::abs(rootNormal.Dot(gp_Vec(axis))) < 1.e-7,
+                "Reference bend axis is outside its wall plane");
+        placements.emplace(
+            root, WallPlacement{placementMap(projected(gp_Pnt(0, 0, 0), rootPlane), axis,
+                                             gp_Dir(toOther.Crossed(gp_Vec(axis))), gp_Pnt(0, 0, 0),
+                                             gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)),
+                                std::nullopt});
         std::vector<Wall> pending{root};
         std::vector<bool> used(bends.size());
         auto result = std::make_shared<CadFlatPattern>();
@@ -327,26 +335,25 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             const auto &placement = placements.at(w);
             const auto pa = plane(faces, w[0]), pb = plane(faces, w[1]);
             require(pa.Axis().Direction().IsParallel(pb.Axis().Direction(), 1e-7) &&
-                        std::abs(pa.Axis().Direction().Dot(axis)) < 1e-7 &&
                         std::abs(pa.Distance(pb.Location()) - t) <= tolerance,
-                    "Inconsistent wall thickness or axial direction");
+                    "Inconsistent wall thickness");
             const gp_Vec n(pa.Axis().Direction());
             const auto wallSolid =
                 extruded(face(faces, w[0]), n * gp_Vec(pa.Location(), pb.Location()).Dot(n));
             builder.Add(original, wallSolid);
-            const double zShift =
-                gp_Vec(pa.Location(), pb.Location())
-                            .Dot(gp_Vec(axis).Crossed(gp_Vec(placement.along))) < 0
-                    ? t
-                    : 0;
-            const auto wallMap = [placement, axis, zShift](gp_Pnt p) {
-                return flatPoint(p, placement, axis, zShift);
+            const auto mappedThickness =
+                gp_Vec(pa.Location(), pb.Location()).Transformed(placement.map);
+            const double zShift = mappedThickness.Z() < 0 ? t : 0;
+            const auto wallMap = [placement, zShift](gp_Pnt p) {
+                return p.Transformed(placement.map).Translated(gp_Vec(0, 0, zShift));
             };
             regions.push_back({wallSolid, wallMap});
-            patches.push_back(flatWall(face(faces, w[0]), placement, axis));
-            const auto wallBox = bounds(patches.back());
-            result->data.wallBoundaries.push_back(wallBox.minimum.y);
-            result->data.wallBoundaries.push_back(wallBox.maximum.y);
+            patches.push_back(
+                BRepBuilderAPI_Transform(face(faces, w[0]), placement.map, true).Shape());
+            const auto flatBounds = bounds(patches.back());
+            require(std::max(std::abs(flatBounds.minimum.z), std::abs(flatBounds.maximum.z)) <=
+                        tolerance,
+                    "A wall placement is outside the common flat plane");
             for (auto index : graph.at(w)) {
                 if (placement.incoming == index)
                     continue;
@@ -355,62 +362,79 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                 const auto child = wall(b, 0) == w ? wall(b, 1) : wall(b, 0);
                 require(!placements.contains(child),
                         "A sheet cycle cannot be unfolded without an explicit seam");
-                const int outward =
-                    -materialSide(face(faces, w[0]), pa, b, placement.along, tolerance, stop);
+                const gp_Dir bendAxis(gp_Vec(point(b.axisStart), point(b.axisEnd)));
+                require(std::abs(pa.Axis().Direction().Dot(bendAxis)) < 1.e-7,
+                        "A bend axis is outside its parent wall plane");
+                gp_Dir outward(gp_Vec(bendAxis).Crossed(gp_Vec(pa.Axis().Direction())));
+                if (materialSide(face(faces, w[0]), pa, b, outward, tolerance, stop) > 0)
+                    outward.Reverse();
                 const auto childPlane = plane(faces, child[0]);
-                const auto childAnchor = projected(point(b.axisStart), childPlane);
-                gp_Dir childAlong(gp_Vec(axis).Crossed(gp_Vec(childPlane.Axis().Direction())));
-                const int childInside =
-                    materialSide(face(faces, child[0]), childPlane, b, childAlong, tolerance, stop);
-                if (childInside * outward < 0)
+                require(std::abs(childPlane.Axis().Direction().Dot(bendAxis)) < 1.e-7,
+                        "A bend axis is outside its child wall plane");
+                gp_Dir childAlong(gp_Vec(bendAxis).Crossed(gp_Vec(childPlane.Axis().Direction())));
+                if (materialSide(face(faces, child[0]), childPlane, b, childAlong, tolerance,
+                                 stop) < 0)
                     childAlong.Reverse();
-                require(std::abs(std::acos(std::clamp(placement.along.Dot(childAlong), -1., 1.)) -
-                                 b.angleRadians) < 1e-6,
+                require(std::abs(std::acos(std::clamp(outward.Dot(childAlong), -1., 1.)) -
+                                 b.angleRadians) < 1.e-6,
                         "Wall directions do not match the measured bend");
-                const double y0 =
-                    placement.y + gp_Vec(placement.anchor, projected(point(b.axisStart), pa))
-                                      .Dot(gp_Vec(placement.along));
+                const gp_Dir flatAxis(gp_Vec(bendAxis).Transformed(placement.map));
+                const gp_Dir flatAcross(gp_Vec(outward).Transformed(placement.map));
+                require(std::abs(flatAxis.Z()) < 1.e-7 && std::abs(flatAcross.Z()) < 1.e-7,
+                        "A bend does not map into the flat plane");
+                auto start = projected(point(b.axisStart), pa).Transformed(placement.map);
+                auto end = projected(point(b.axisEnd), pa).Transformed(placement.map);
+                start.SetZ(0);
+                end.SetZ(0);
                 const double k = *core::unfoldK(request.settings, b.innerRadiusMm, t);
                 const auto ba = core::bendAllowance(b.innerRadiusMm, t, b.angleRadians, k);
                 require(ba.has_value(), "Invalid bend parameters");
-                const double y1 = y0 + outward * *ba;
-                placements.emplace(child, WallPlacement{childAnchor, childAlong, y1, index});
+                const gp_Vec offset = gp_Vec(flatAcross) * *ba;
+                placements.emplace(
+                    child,
+                    WallPlacement{placementMap(projected(point(b.axisStart), childPlane), bendAxis,
+                                               childAlong, start.Translated(offset), flatAxis,
+                                               flatAcross),
+                                  index});
                 pending.push_back(child);
                 used[index] = true;
-                double x0 = gp_Vec(gp_Pnt(0, 0, 0), point(b.axisStart)).Dot(gp_Vec(axis));
-                double x1 = gp_Vec(gp_Pnt(0, 0, 0), point(b.axisEnd)).Dot(gp_Vec(axis));
-                if (x0 > x1)
-                    std::swap(x0, x1);
-                patches.push_back(rectangle(x0, x1, std::min(y0, y1), std::max(y0, y1)));
+                patches.push_back(strip(start, end, offset));
                 const double turn =
-                    gp_Vec(axis).Dot(gp_Vec(placement.along).Crossed(gp_Vec(childAlong)));
-                result->data.bends.push_back({index, std::min(y0, y1), std::max(y0, y1), x0, x1,
-                                              b.angleRadians, outward * (turn >= 0 ? 1 : -1),
-                                              b.innerRadiusMm, k, *ba});
-                result->data.wallBoundaries.push_back(y0);
-                result->data.wallBoundaries.push_back(y1);
+                    gp_Vec(bendAxis).Dot(gp_Vec(outward).Crossed(gp_Vec(childAlong)));
+                const double side = gp_Vec(flatAxis).Crossed(gp_Vec(flatAcross)).Z();
+                result->data.bends.push_back({index,
+                                              {start.X(), start.Y(), 0},
+                                              {end.X(), end.Y(), 0},
+                                              {offset.X(), offset.Y(), 0},
+                                              b.angleRadians,
+                                              turn * side >= 0 ? 1 : -1,
+                                              b.innerRadiusMm,
+                                              k,
+                                              *ba});
                 const auto sector = bendSolid(b, faces, tolerance);
                 builder.Add(original, sector);
                 const auto center = point(b.axisStart);
                 const gp_Dir radial(gp_Vec(center, projected(center, pa)));
                 const gp_Dir otherRadial(gp_Vec(center, projected(center, childPlane)));
                 const double sign =
-                    gp_Vec(axis).Dot(gp_Vec(radial).Crossed(gp_Vec(otherRadial))) >= 0 ? 1 : -1;
+                    gp_Vec(bendAxis).Dot(gp_Vec(radial).Crossed(gp_Vec(otherRadial))) >= 0 ? 1 : -1;
                 const double zInner =
                     wallMap(center.Translated(gp_Vec(radial) * b.innerRadiusMm)).Z();
-                const double zSign =
-                    gp_Vec(radial).Dot(gp_Vec(axis).Crossed(gp_Vec(placement.along)));
+                const double zSign = gp_Vec(radial).Transformed(placement.map).Z();
                 regions.push_back(
-                    {sector, [center, axis, radial, sign, y0, y1, zInner, zSign, b](gp_Pnt p) {
+                    {sector, [center, bendAxis, radial, sign, start, flatAxis, offset, zInner,
+                              zSign, b](gp_Pnt p) {
                          auto r = gp_Vec(center, p);
-                         r -= gp_Vec(axis) * r.Dot(gp_Vec(axis));
+                         const double axial = r.Dot(gp_Vec(bendAxis));
+                         r -= gp_Vec(bendAxis) * axial;
                          const double angle = std::clamp(
-                             std::atan2(sign * gp_Vec(axis).Dot(gp_Vec(radial).Crossed(r)),
+                             std::atan2(sign * gp_Vec(bendAxis).Dot(gp_Vec(radial).Crossed(r)),
                                         gp_Vec(radial).Dot(r)),
                              0., b.angleRadians);
-                         return gp_Pnt(gp_Vec(gp_Pnt(0, 0, 0), p).Dot(gp_Vec(axis)),
-                                       y0 + (y1 - y0) * angle / b.angleRadians,
-                                       zInner + zSign * (r.Magnitude() - b.innerRadiusMm));
+                         auto mapped = start.Translated(gp_Vec(flatAxis) * axial +
+                                                        offset * (angle / b.angleRadians));
+                         mapped.SetZ(zInner + zSign * (r.Magnitude() - b.innerRadiusMm));
+                         return mapped;
                      }});
             }
         }
@@ -445,6 +469,8 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                              "Flat patch union failed");
         }
         ShapeUpgrade_UnifySameDomain unify(flat, true, true, true);
+        unify.SetLinearTolerance(tolerance);
+        unify.SetAngularTolerance(1.e-7);
         unify.Build();
         flat = unify.Shape();
         TopTools_IndexedMapOfShape flatFaces;
@@ -456,18 +482,11 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         origin.SetTranslation(gp_Vec(-box.minimum.x, -box.minimum.y, 0));
         flat = BRepBuilderAPI_Transform(flat, origin, true).Shape();
         for (auto &b : result->data.bends) {
-            b.minimumX -= box.minimum.x;
-            b.maximumX -= box.minimum.x;
-            b.firstY -= box.minimum.y;
-            b.secondY -= box.minimum.y;
+            b.start.x -= box.minimum.x;
+            b.end.x -= box.minimum.x;
+            b.start.y -= box.minimum.y;
+            b.end.y -= box.minimum.y;
         }
-        for (auto &boundary : result->data.wallBoundaries)
-            boundary -= box.minimum.y;
-        std::sort(result->data.wallBoundaries.begin(), result->data.wallBoundaries.end());
-        result->data.wallBoundaries.erase(
-            std::unique(result->data.wallBoundaries.begin(), result->data.wallBoundaries.end(),
-                        [tolerance](double a, double b) { return std::abs(a - b) <= tolerance; }),
-            result->data.wallBoundaries.end());
         result->display =
             extruded(TopoDS::Face(TopExp_Explorer(flat, TopAbs_FACE).Current()), gp_Vec(0, 0, t));
         result->geometry = result->display;
@@ -503,10 +522,10 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             }
         }
         for (const auto &b : result->data.bends) {
-            auto line =
-                BRepBuilderAPI_MakeEdge(gp_Pnt(b.minimumX, (b.firstY + b.secondY) / 2, t + .005),
-                                        gp_Pnt(b.maximumX, (b.firstY + b.secondY) / 2, t + .005))
-                    .Shape();
+            const auto ends = b.centreLine();
+            auto line = BRepBuilderAPI_MakeEdge(gp_Pnt(ends[0].x, ends[0].y, t + .005),
+                                                gp_Pnt(ends[1].x, ends[1].y, t + .005))
+                            .Shape();
             result->lines.push_back(line);
             builder.Add(display, line);
         }

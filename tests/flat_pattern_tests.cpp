@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "TrayFixtures.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -178,7 +179,7 @@ void treePatterns(const std::filesystem::path &folder) {
           "Mirrored tab directions are not retained");
     for (const auto &b : info.bends) {
         check(std::abs(b.allowanceMm - ba) < 1e-5, "Branch allowance mismatch");
-        check(std::abs(b.maximumX - b.minimumX -
+        check(std::abs(b.lengthMm() -
                        document->metadata().bendAnalysis.bends[b.bendIndex].lengthMm) < 1e-4,
               "Branch length changed");
     }
@@ -292,8 +293,106 @@ void ignoredCutouts(const std::filesystem::path &folder) {
           "Ignoring internal cutouts also discarded unrecognized external material");
 }
 
+void trayPatterns(const std::filesystem::path &folder) {
+    const auto document = load(fixtures::tray(), folder / "tray.step");
+    check(document->metadata().bendAnalysis.bends.size() == 4, "Tray must have four bends");
+    const auto bytes = std::string(document->sourceStep());
+    const auto flat = build(document);
+    const auto &info = flat->info();
+    const double ba = std::numbers::pi / 2 * (2 + .38 * 2), extension = 16 + ba;
+    const double small = 100 + 2 * extension, large = 200 + 2 * extension;
+    const auto dimensionCheck = [&](const auto &p) {
+        const auto &b = p->info().bounds.maximum;
+        check(std::abs(std::min(b.x, b.y) - small) < 1.e-4 &&
+                  std::abs(std::max(b.x, b.y) - large) < 1.e-4,
+              "Tray blank dimensions incorrect");
+    };
+    dimensionCheck(flat);
+    const double area = 200 * 100 + 2 * (180 + 80) * extension;
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*flat), props);
+    check(info.cutoutsIgnored && std::abs(std::abs(props.Mass()) - area * 2) < 1.e-3,
+          "Tray area/coverage mismatch");
+    check(std::abs(displayVolume(*flat) - (area - 4 * std::numbers::pi * 1.5 * 1.5) * 2) < 2,
+          "Tray display filled the holes");
+    check(cad::OcctFlatPatternAccess::openingContours(*flat).size() == 4,
+          "Tray hole outlines missing");
+    std::size_t horizontal = 0, vertical = 0;
+    for (const auto &b : info.bends) {
+        const auto line = b.centreLine();
+        horizontal += std::abs(line[0].y - line[1].y) < 1.e-5;
+        vertical += std::abs(line[0].x - line[1].x) < 1.e-5;
+        check(std::abs(b.lengthMm() -
+                       document->metadata().bendAnalysis.bends[b.bendIndex].lengthMm) < 1.e-5,
+              "Bend axis length changed");
+        check(std::abs(std::hypot(b.offset.x, b.offset.y) - ba) < 1.e-5,
+              "2D allowance vector changed");
+    }
+    check(horizontal == 2 && vertical == 2, "Tray bend directions collapsed into one axis");
+    check(std::all_of(info.bends.begin(), info.bends.end(),
+                      [&](const auto &b) { return b.direction == info.bends.front().direction; }),
+          "Tray flange directions inconsistent");
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(2, 3, 4), gp_Dir(1, 2, 3)), .71);
+    dimensionCheck(build(load(BRepBuilderAPI_Transform(fixtures::tray(), rotation, true).Shape(),
+                              folder / "tray-rotated.step")));
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(2, 3, 4), gp_Dir(1, 2, 0)));
+    dimensionCheck(build(load(BRepBuilderAPI_Transform(fixtures::tray(), mirror, true).Shape(),
+                              folder / "tray-mirrored.step")));
+    auto angled = build(
+        load(fixtures::tray(false, 200, 100, std::numbers::pi / 3), folder / "tray-angled.step"));
+    check(angled->info().bends.size() == 4 &&
+              std::count_if(angled->info().bends.begin(), angled->info().bends.end(),
+                            [](const auto &b) {
+                                return std::abs(b.turnRadians - std::numbers::pi / 3) < 1.e-6;
+                            }) == 1,
+          "Inclined tray wall not unfolded");
+    auto largeDoc = load(fixtures::tray(true, 2000, 1000), folder / "tray-large.step");
+    check(largeDoc->metadata().closedCutouts.status == application::ClosedCutoutStatus::Filled &&
+              std::abs(largeDoc->metadata().closedCutouts.addedVolumeMm3 -
+                       4 * std::numbers::pi * 1.5 * 1.5 * 2) < 1.e-3,
+          "Small holes on large panel not filled");
+    check(build(largeDoc)->info().bends.size() == 4, "Large panel failed");
+    const auto branch = build(load(fixtures::branchedTray(), folder / "tray-branch.step"));
+    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*branch), props);
+    check(branch->info().bends.size() == 5 &&
+              std::abs(std::abs(props.Mass()) - (area + 12 * extension) * 2) < 1.e-3 &&
+              cad::OcctFlatPatternAccess::openingContours(*branch).size() == 4,
+          "A bend on a non-root flange lost placement, area or holes");
+    const auto oblique = build(load(fixtures::obliqueTray(), folder / "tray-oblique.step"));
+    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*oblique), props);
+    check(oblique->info().bends.size() == 2 &&
+              std::abs(std::abs(props.Mass()) -
+                       (35000 + (180 + 100 * std::sqrt(2.) - 20) * extension) * 2) < 1.e-3,
+          "Oblique bend axes lost placement or area");
+    auto overlap = load(fixtures::concaveTray(), folder / "tray-overlap.step");
+    check(overlap->metadata().bendAnalysis.bends.size() == 2,
+          "Concave fixture bends not recognized");
+    const auto failed =
+        cad::FlatPatternBuilder{}.build(overlap, {{core::SheetMaterial::MildSteel, {}, 1}, {}}, {});
+    check(std::holds_alternative<application::FlatPatternError>(failed) &&
+              std::get<application::FlatPatternError>(failed).detail == "Flat wall patches overlap",
+          "Overlapping non-parallel flanges accepted");
+    check(document->sourceStep() == bytes, "Tray source modified");
+}
+
 int main(int argc, char **argv) {
     try {
+        if (argc == 3 && (std::string_view(argv[1]) == "--write-tray" ||
+                          std::string_view(argv[1]) == "--write-tray-rotated")) {
+            auto shape = fixtures::tray();
+            if (std::string_view(argv[1]) == "--write-tray-rotated") {
+                gp_Trsf tr;
+                tr.SetRotation(gp_Ax1(gp_Pnt(2, 3, 4), gp_Dir(1, 2, 3)), .71);
+                shape = BRepBuilderAPI_Transform(shape, tr, true).Shape();
+            }
+            STEPControl_Writer writer;
+            check(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone &&
+                      writer.Write(argv[2]) == IFSelect_RetDone,
+                  "Tray fixture export failed");
+            return 0;
+        }
         if (argc == 3 && std::string_view(argv[1]) == "--write-tree") {
             STEPControl_Writer writer;
             check(writer.Transfer(segmentedWall(), STEPControl_AsIs) == IFSelect_RetDone,
@@ -339,6 +438,7 @@ int main(int argc, char **argv) {
                            angle * .07 * 2) < 1e-4,
                   "K did not change the blank");
         }
+        trayPatterns(folder);
         treePatterns(folder);
         ignoredCutouts(folder);
         auto channel = load(fixtures::channel(), folder / "channel.step");
