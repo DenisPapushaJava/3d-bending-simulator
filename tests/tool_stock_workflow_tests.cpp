@@ -13,6 +13,7 @@
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDoubleSpinBox>
@@ -94,6 +95,133 @@ int main(int argc, char **argv) {
         require(window.findChild<QLabel *>("toolAssemblySummary")->text().contains("835"),
                 "Longer legacy tool not offered");
         QString dialogError;
+        if (app.arguments().contains("--sets-only")) {
+            QTimer::singleShot(0, [&] {
+                try {
+                    auto *dialog = window.findChild<QDialog *>("toolStockDialog");
+                    require(dialog, "No set library");
+                    auto *rows = dialog->findChild<QTableWidget *>("stockRows");
+                    auto *sets = dialog->findChild<QComboBox *>("stockSetPreset");
+                    auto *copies = dialog->findChild<QSpinBox *>("stockSetCount");
+                    auto *add = dialog->findChild<QPushButton *>("stockAddSet");
+                    require(rows->rowCount() == 12 &&
+                                !dialog->findChild<QCheckBox *>("stockEnabled")->isChecked(),
+                            "Reference lengths missing or stock silently enabled");
+                    for (int i = 0; i < rows->rowCount(); ++i)
+                        require(static_cast<QSpinBox *>(rows->cellWidget(i, 1))->value() == 0,
+                                "Reference picture invented stock");
+                    const auto amount = [&](double length, int shape = 0) {
+                        for (int i = 0; i < rows->rowCount(); ++i)
+                            if (static_cast<QDoubleSpinBox *>(rows->cellWidget(i, 0))->value() ==
+                                    length &&
+                                static_cast<QComboBox *>(rows->cellWidget(i, 2))->currentIndex() ==
+                                    shape)
+                                return static_cast<QSpinBox *>(rows->cellWidget(i, 1))->value();
+                        return -1;
+                    };
+                    const auto ordinaryTotal = [&] {
+                        double total = 0;
+                        for (int i = 0; i < rows->rowCount(); ++i)
+                            if (static_cast<QComboBox *>(rows->cellWidget(i, 2))->currentIndex() ==
+                                0)
+                                total +=
+                                    static_cast<QDoubleSpinBox *>(rows->cellWidget(i, 0))->value() *
+                                    static_cast<QSpinBox *>(rows->cellWidget(i, 1))->value();
+                        return total;
+                    };
+                    require(sets->findData("die-805") == -1, "A die set was offered for the punch");
+                    sets->setCurrentIndex(sets->findData("punch-805"));
+                    require(copies->value() == 0 && !add->isEnabled(),
+                            "A set was automatically counted as available");
+                    require(
+                        dialog->findChild<QLabel *>("stockSetDescription")->text().contains("805"),
+                        "Set composition missing");
+                    if (const auto output = qEnvironmentVariable("BENDING_STOCK_SNAPSHOT");
+                        !output.isEmpty()) {
+                        QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+                        QApplication::processEvents();
+                        auto *description = dialog->findChild<QLabel *>("stockSetDescription");
+                        require(description->height() >=
+                                    description->heightForWidth(description->width()),
+                                "Set description is clipped");
+                        require(dialog->grab().save(output + "-sets.png"), "Set library snapshot");
+                    }
+                    copies->setValue(1);
+                    add->click();
+                    require(ordinaryTotal() == 605 && amount(100) == 0 && amount(100, 1) == 1 &&
+                                amount(100, 2) == 1 && amount(835) == 0 && amount(415) == 0 &&
+                                amount(10) == 1 && amount(15) == 1 && amount(20) == 1 &&
+                                amount(40) == 1 && amount(50) == 1 && amount(200) == 1 &&
+                                amount(270) == 1,
+                            "805 set does not match the nine pictured sections");
+                    add->click();
+                    require(ordinaryTotal() == 1210 && amount(100, 1) == 2 && amount(100, 2) == 2,
+                            "Adding a second set replaced existing quantities");
+                    copies->setValue(1000);
+                    add->click();
+                    require(ordinaryTotal() == 1210 && amount(100, 1) == 2 && amount(100, 2) == 2,
+                            "Overflow partially changed the inventory");
+                    copies->setValue(1);
+                    sets->setCurrentIndex(sets->findData("whole-835"));
+                    add->click();
+                    sets->setCurrentIndex(sets->findData("whole-415"));
+                    add->click();
+                    require(amount(835) == 1 && amount(415) == 1 && ordinaryTotal() == 2460,
+                            "Whole tools were merged into the segmented set");
+                    sets->setCurrentIndex(sets->findData("left-horn-100"));
+                    add->click();
+                    sets->setCurrentIndex(sets->findData("right-horn-100"));
+                    add->click();
+                    require(amount(100, 1) == 3 && amount(100, 2) == 3 && amount(100) == 0,
+                            "Horn variants were merged with ordinary sections");
+                    sets->setCurrentIndex(0);
+                    dialog->findChild<QPushButton *>("stockTemplate")->click();
+                    require(ordinaryTotal() == 2460 && amount(100) == 0 && amount(100, 1) == 3,
+                            "Reference template erased quantities");
+                    dialog->findChild<QPushButton *>("stockSave")->click();
+                    require(dialog->findChild<QLabel *>("stockStatus")
+                                ->text()
+                                .contains(QStringLiteral("сохранено")),
+                            "Set inventory not saved");
+                    auto *tools = dialog->findChild<QComboBox *>("stockTool");
+                    tools->setCurrentIndex(1);
+                    require(rows->rowCount() == 10 && amount(370) == 0 && amount(270) == -1 &&
+                                amount(100, 1) == -1 && copies->value() == 0 &&
+                                sets->findData("punch-805") == -1 &&
+                                sets->findData("left-horn-100") == -1,
+                            "Punch references leaked into the die set");
+                    sets->setCurrentIndex(sets->findData("die-805"));
+                    copies->setValue(1);
+                    add->click();
+                    require(ordinaryTotal() == 805 && amount(370) == 1 && amount(200) == 1 &&
+                                amount(100) == 1 && amount(50) == 1 && amount(40) == 1 &&
+                                amount(20) == 1 && amount(15) == 1 && amount(10) == 1 &&
+                                amount(835) == 0 && amount(415) == 0,
+                            "The eight-piece die set has the wrong composition");
+                    dialog->findChild<QPushButton *>("stockSave")->click();
+                    require(dialog->findChild<QLabel *>("stockStatus")
+                                ->text()
+                                .contains(QStringLiteral("сохранено")),
+                            "Die set inventory not saved");
+                    tools->setCurrentIndex(0);
+                    require(amount(100, 1) == 3 && amount(100, 2) == 3 && ordinaryTotal() == 2460 &&
+                                amount(370) == -1,
+                            "Switching profiles lost or mixed the saved inventory");
+                    dialog->reject();
+                } catch (const std::exception &e) {
+                    dialogError = QString::fromUtf8(e.what());
+                    if (auto *dialog = window.findChild<QDialog *>("toolStockDialog"))
+                        dialog->reject();
+                }
+            });
+            window.findChild<QPushButton *>("toolStock")->click();
+            require(dialogError.isEmpty(), qPrintable(dialogError));
+            require(!c.session().modified(), "Reference inventory edited the part project");
+            c.shutdown();
+            std::cout << "Reference sets, zero defaults, 805 mm multiplicity and additive "
+                         "inventory passed\n";
+            return 0;
+        }
         QTimer::singleShot(0, [&] {
             try {
                 auto *dialog = window.findChild<QDialog *>("toolStockDialog");
@@ -106,7 +234,8 @@ int main(int argc, char **argv) {
                     for (int i = 0; i < rows->rowCount(); ++i) {
                         auto *q = static_cast<QSpinBox *>(rows->cellWidget(i, 1));
                         require(q->value() == 0, "Template invented inventory");
-                        if (static_cast<QDoubleSpinBox *>(rows->cellWidget(i, 0))->value() == 100)
+                        if (static_cast<QDoubleSpinBox *>(rows->cellWidget(i, 0))->value() == 100 &&
+                            static_cast<QComboBox *>(rows->cellWidget(i, 2))->currentIndex() == 0)
                             q->setValue(2);
                     }
                     dialog->findChild<QPushButton *>("stockSave")->click();

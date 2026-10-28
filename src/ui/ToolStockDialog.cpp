@@ -6,17 +6,73 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <iterator>
 namespace bending::ui {
+namespace {
+struct SectionSet {
+    const char *id;
+    QString title;
+    std::vector<core::ToolSegment> sections; // Multiplicity in one reference set, not stock.
+};
+const std::vector<SectionSet> &sectionSets(core::ToolKind kind) {
+    static const std::vector<SectionSet> punches{
+        {"whole-835", QStringLiteral("Цельный инструмент · 835 мм"), {{835, 1}}},
+        {"whole-415", QStringLiteral("Цельный инструмент · 415 мм"), {{415, 1}}},
+        {"punch-805",
+         QStringLiteral("Пуансон 805 мм · 9 секций с рожками"),
+         {{100, 1, core::SegmentShape::LeftHorn},
+          {270, 1},
+          {10, 1},
+          {15, 1},
+          {20, 1},
+          {40, 1},
+          {50, 1},
+          {200, 1},
+          {100, 1, core::SegmentShape::RightHorn}}},
+        {"left-horn-100",
+         QStringLiteral("Левый рог · 100 мм"),
+         {{100, 1, core::SegmentShape::LeftHorn}}},
+        {"right-horn-100",
+         QStringLiteral("Правый рог · 100 мм"),
+         {{100, 1, core::SegmentShape::RightHorn}}}};
+    static const std::vector<SectionSet> dies{
+        {"whole-835", QStringLiteral("Цельный инструмент · 835 мм"), {{835, 1}}},
+        {"whole-415", QStringLiteral("Цельный инструмент · 415 мм"), {{415, 1}}},
+        {"die-805",
+         QStringLiteral("Матрица 805 мм · 8 секций"),
+         {{200, 1}, {10, 1}, {15, 1}, {20, 1}, {40, 1}, {50, 1}, {370, 1}, {100, 1}}}};
+    return kind == core::ToolKind::Punch ? punches : dies;
+}
+std::vector<core::ToolSegment> referenceSections(core::ToolKind kind, int index) {
+    const auto &sets = sectionSets(kind);
+    if (index > 0 && static_cast<std::size_t>(index) <= sets.size())
+        return sets[static_cast<std::size_t>(index - 1)].sections;
+    // A plain 100 mm section may also be entered individually; it is not a horn.
+    std::vector<core::ToolSegment> rows{{100, 0}};
+    for (const auto &set : sets)
+        for (const auto &section : set.sections)
+            if (std::none_of(rows.begin(), rows.end(), [&](const auto &s) {
+                    return s.lengthMm == section.lengthMm && s.shape == section.shape;
+                }))
+                rows.push_back({section.lengthMm, 0, section.shape});
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) {
+        return a.shape != b.shape ? a.shape < b.shape : a.lengthMm > b.lengthMm;
+    });
+    return rows;
+}
+} // namespace
 ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
                                  std::function<QString(core::ToolPreset)> writer, QWidget *parent)
     : QDialog(parent), catalog_(std::move(catalog)), writer_(std::move(writer)) {
     setObjectName("toolStockDialog");
     setWindowTitle(QStringLiteral("Библиотека секций инструмента"));
-    resize(620, 580);
+    resize(720, 740);
     auto *layout = new QVBoxLayout(this);
     tool_ = new QComboBox(this);
     tool_->setObjectName("stockTool");
@@ -33,6 +89,24 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
         this);
     help->setWordWrap(true);
     layout->addWidget(help);
+    auto *setRow = new QHBoxLayout;
+    set_ = new QComboBox(this);
+    set_->setObjectName("stockSetPreset");
+    setRow->addWidget(set_, 1);
+    copies_ = new QSpinBox(this);
+    copies_->setObjectName("stockSetCount");
+    copies_->setRange(0, 1000);
+    copies_->setPrefix(QStringLiteral("Комплектов: "));
+    copies_->setAccessibleName(QStringLiteral("Количество комплектов для добавления в наличие"));
+    setRow->addWidget(copies_);
+    addSet_ = new QPushButton(QStringLiteral("Добавить в наличие"), this);
+    addSet_->setObjectName("stockAddSet");
+    setRow->addWidget(addSet_);
+    layout->addLayout(setRow);
+    setDescription_ = new QLabel(this);
+    setDescription_->setObjectName("stockSetDescription");
+    setDescription_->setWordWrap(true);
+    layout->addWidget(setDescription_);
     enabled_ = new QCheckBox(QStringLiteral("Подбирать из указанного наличия секций"), this);
     enabled_->setObjectName("stockEnabled");
     layout->addWidget(enabled_);
@@ -47,7 +121,7 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     auto *addRow = new QPushButton(QStringLiteral("Добавить"), this);
     addRow->setObjectName("stockAdd");
     auto *remove = new QPushButton(QStringLiteral("Удалить строку"), this);
-    auto *standard = new QPushButton(QStringLiteral("Типовой шаблон…"), this);
+    auto *standard = new QPushButton(QStringLiteral("Добавить размеры без наличия"), this);
     standard->setObjectName("stockTemplate");
     actions->addWidget(addRow);
     actions->addWidget(remove);
@@ -75,23 +149,16 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
         if (rows_->currentRow() >= 0)
             rows_->removeRow(rows_->currentRow());
     });
-    connect(standard, &QPushButton::clicked, this, [this] {
-        // Append missing template lengths; never discard entered quantities.
-        enabled_->setChecked(true);
-        for (const double length : {835., 415., 270., 200., 100., 50., 40., 20., 15., 10.}) {
-            bool exists = false;
-            for (int i = 0; i < rows_->rowCount(); ++i)
-                exists |=
-                    static_cast<QDoubleSpinBox *>(rows_->cellWidget(i, 0))->value() == length &&
-                    static_cast<QComboBox *>(rows_->cellWidget(i, 2))->currentIndex() == 0;
-            if (!exists)
-                add({length, 0});
-        }
-        status_->setText(
-            QStringLiteral("Шаблон добавлен. Заполните фактическое количество и сохраните."));
-    });
+    connect(standard, &QPushButton::clicked, this, [this] { addSet(false); });
+    connect(set_, &QComboBox::currentIndexChanged, this, [this] { updateSet(); });
+    connect(copies_, &QSpinBox::valueChanged, this, [this] { updateSet(); });
+    connect(addSet_, &QPushButton::clicked, this, [this] { addSet(true); });
     if (!catalog_.empty())
         load();
+}
+core::ToolKind ToolStockDialog::toolKind() const {
+    const auto index = static_cast<std::size_t>(tool_->currentIndex());
+    return index < catalog_.size() ? catalog_[index].kind : core::ToolKind::Punch;
 }
 void ToolStockDialog::add(core::ToolSegment s) {
     if (rows_->rowCount() >= 64)
@@ -118,16 +185,110 @@ void ToolStockDialog::load() {
     if (index >= catalog_.size())
         return;
     const auto &s = catalog_[index].segments;
+    {
+        const QSignalBlocker blocked(set_);
+        const auto previous = set_->currentData();
+        set_->clear();
+        set_->addItem(QStringLiteral("Все типовые размеры"), "all");
+        for (const auto &set : sectionSets(toolKind()))
+            set_->addItem(set.title, QLatin1String(set.id));
+        set_->setCurrentIndex(std::max(0, set_->findData(previous)));
+    }
+    copies_->setValue(0);
+    updateSet();
     rows_->setRowCount(0);
     enabled_->setChecked(s.has_value());
     rows_->setEnabled(s.has_value());
     if (s)
         for (const auto &r : *s)
             add(r);
+    for (const auto &r : referenceSections(toolKind(), 0)) {
+        bool exists = false;
+        for (int i = 0; i < rows_->rowCount(); ++i)
+            exists |=
+                static_cast<QDoubleSpinBox *>(rows_->cellWidget(i, 0))->value() == r.lengthMm &&
+                static_cast<QComboBox *>(rows_->cellWidget(i, 2))->currentIndex() ==
+                    static_cast<int>(r.shape);
+        if (!exists)
+            add(r);
+    }
+    status_->setText(s ? QStringLiteral("Изменения применяются к библиотеке после сохранения.")
+                       : QStringLiteral("Типовые размеры уже заполнены. Наличие ещё не указано; "
+                                        "сохраняется прежний выбор цельного инструмента."));
+}
+void ToolStockDialog::updateSet() {
+    const bool specific = set_->currentIndex() > 0;
+    copies_->setEnabled(specific);
+    addSet_->setEnabled(specific && copies_->value() > 0);
+    if (!specific) {
+        setDescription_->setText(
+            (toolKind() == core::ToolKind::Punch
+                 ? QStringLiteral("Цельные 835 / 415 мм; набор 805 мм — 7 обычных секций "
+                                  "и два рожка по 100 мм. ")
+                 : QStringLiteral("Цельные 835 / 415 мм; набор 805 мм — 8 обычных секций, "
+                                  "в том числе 370 мм. ")) +
+            QStringLiteral("Это редактируемый типовой состав; проверьте его для вашего профиля. "
+                           "Наличие вводится отдельно."));
+        return;
+    }
+    const auto parts = referenceSections(toolKind(), set_->currentIndex());
+    double length = 0;
+    unsigned count = 0;
+    QStringList values;
+    for (const auto &p : parts) {
+        length += p.lengthMm * p.quantity;
+        count += p.quantity;
+        auto value = p.quantity > 1 ? QStringLiteral("%1 × %2").arg(p.lengthMm).arg(p.quantity)
+                                    : QString::number(p.lengthMm);
+        if (p.shape == core::SegmentShape::LeftHorn)
+            value += QStringLiteral(" (левый рог)");
+        else if (p.shape == core::SegmentShape::RightHorn)
+            value += QStringLiteral(" (правый рог)");
+        values << value;
+    }
+    setDescription_->setText(QStringLiteral("В одном комплекте: %1 = %2 мм · секций: %3. "
+                                            "При добавлении количества суммируются с уже "
+                                            "указанными; сохраняются кнопкой «Сохранить».")
+                                 .arg(values.join(QStringLiteral(" + ")))
+                                 .arg(length)
+                                 .arg(count));
+}
+void ToolStockDialog::addSet(bool available) {
+    if (available && (set_->currentIndex() <= 0 || copies_->value() <= 0))
+        return;
+    std::vector<core::ToolSegment> merged;
+    for (int i = 0; i < rows_->rowCount(); ++i)
+        merged.push_back(
+            {static_cast<QDoubleSpinBox *>(rows_->cellWidget(i, 0))->value(),
+             static_cast<unsigned>(static_cast<QSpinBox *>(rows_->cellWidget(i, 1))->value()),
+             static_cast<core::SegmentShape>(
+                 static_cast<QComboBox *>(rows_->cellWidget(i, 2))->currentIndex())});
+    for (const auto &s : referenceSections(toolKind(), set_->currentIndex())) {
+        auto found = std::find_if(merged.begin(), merged.end(), [&](const auto &r) {
+            return r.lengthMm == s.lengthMm && r.shape == s.shape;
+        });
+        if (found == merged.end()) {
+            merged.push_back({s.lengthMm, 0, s.shape});
+            found = std::prev(merged.end());
+        }
+        if (available)
+            found->quantity += s.quantity * static_cast<unsigned>(copies_->value());
+    }
+    if (!core::validToolSegments(merged)) {
+        status_->setText(QStringLiteral(
+            "Комплект не добавлен: проверьте повторяющиеся строки, "
+            "предел 64 размеров и количество не более 1000 шт. в строке. Данные не изменены."));
+        return;
+    }
+    rows_->setRowCount(0);
+    for (const auto &s : merged)
+        add(s);
+    enabled_->setChecked(true);
     status_->setText(
-        s ? QStringLiteral("Изменения применяются к библиотеке после сохранения.")
-          : QStringLiteral(
-                "Наличие секций ещё не учтено. Сохраняется прежний выбор цельного инструмента."));
+        available
+            ? QStringLiteral("Комплект добавлен в черновик наличия. Сохраните изменения.")
+            : QStringLiteral(
+                  "Размеры добавлены с нулевым новым наличием; введённые количества сохранены."));
 }
 void ToolStockDialog::save() {
     const auto index = static_cast<std::size_t>(tool_->currentIndex());

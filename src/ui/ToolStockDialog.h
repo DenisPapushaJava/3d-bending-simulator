@@ -6,6 +6,8 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QTableWidget;
+class QSpinBox;
+class QPushButton;
 namespace bending::ui {
 class ToolStockDialog final : public QDialog {
     Q_OBJECT
@@ -15,10 +17,17 @@ class ToolStockDialog final : public QDialog {
   private:
     void load();
     void add(core::ToolSegment);
+    void addSet(bool available);
+    void updateSet();
+    core::ToolKind toolKind() const;
     void save();
     core::ToolCatalog catalog_;
     std::function<QString(core::ToolPreset)> writer_;
     QComboBox *tool_;
+    QComboBox *set_;
+    QSpinBox *copies_;
+    QPushButton *addSet_;
+    QLabel *setDescription_;
     QCheckBox *enabled_;
     QTableWidget *rows_;
     QLabel *status_;
