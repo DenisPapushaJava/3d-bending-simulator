@@ -1,5 +1,6 @@
 #include "ToolImportDialog.h"
 #include "ToolDrawingWidget.h"
+#include "bending/core/ToolGeometry.h"
 #include "bending/ui/ImportController.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -9,12 +10,15 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSignalBlocker>
+#include <QTableWidget>
 #include <QUuid>
 #include <QVBoxLayout>
 #include <cmath>
@@ -123,6 +127,23 @@ ToolImportDialog::ToolImportDialog(ImportController &controller,
     openings_->setMaxLength(256);
     openings_->setPlaceholderText(QStringLiteral("Например: 12 или 10; 16; 22; 35"));
     form->addRow(QStringLiteral("Раскрытие V, мм:"), openings_);
+    recognizeButton_ = new QPushButton(QStringLiteral("Распознать ручьи по контуру"), form_);
+    recognizeButton_->setObjectName(QStringLiteral("recognizeToolGrooves"));
+    form->addRow(recognizeButton_);
+    grooves_ = new QTableWidget(0, 3, form_);
+    grooves_->setObjectName(QStringLiteral("importToolGrooves"));
+    grooves_->setAccessibleName(
+        QStringLiteral("Рабочие положения матрицы. Выберите ручей для просмотра."));
+    grooves_->setHorizontalHeaderLabels(
+        {QStringLiteral("V, мм"), QStringLiteral("Угол, °"), QStringLiteral("Поворот, °")});
+    grooves_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    grooves_->verticalHeader()->hide();
+    grooves_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    grooves_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    grooves_->setSelectionMode(QAbstractItemView::SingleSelection);
+    grooves_->setMinimumHeight(140);
+    grooves_->setMaximumHeight(160);
+    form->addRow(grooves_);
     form->addRow(label(
         QStringLiteral("Неизвестные длину и параметры можно оставить пустыми: запись сохранится "
                        "для просмотра, без подбора. Форма не определяет допустимую нагрузку."),
@@ -158,12 +179,27 @@ ToolImportDialog::ToolImportDialog(ImportController &controller,
     connect(buttons, &QDialogButtonBox::rejected, this, &ToolImportDialog::reject);
     root->addWidget(buttons);
     connect(target_, &QComboBox::currentIndexChanged, this, [this] { selectTarget(); });
-    connect(kind_, &QComboBox::currentIndexChanged, this, [this] { updatePreview(); });
+    connect(kind_, &QComboBox::currentIndexChanged, this, [this] {
+        clearGrooves();
+        updatePreview();
+    });
     for (auto *c : {units_, contour_})
-        connect(c, &QComboBox::currentIndexChanged, this, [this] { updatePreview(); });
-    for (auto *s : {rotation_, length_, angle_, radius_})
+        connect(c, &QComboBox::currentIndexChanged, this, [this] {
+            clearGrooves();
+            updatePreview();
+        });
+    connect(rotation_, &QDoubleSpinBox::valueChanged, this, [this] {
+        clearGrooves();
+        updatePreview();
+    });
+    for (auto *s : {length_, angle_, radius_})
         connect(s, &QDoubleSpinBox::valueChanged, this, [this] { updatePreview(); });
-    connect(mirror_, &QCheckBox::toggled, this, [this] { updatePreview(); });
+    connect(mirror_, &QCheckBox::toggled, this, [this] {
+        clearGrooves();
+        updatePreview();
+    });
+    connect(recognizeButton_, &QPushButton::clicked, this, [this] { recognizeGrooves(); });
+    connect(grooves_, &QTableWidget::currentCellChanged, this, [this] { updatePreview(); });
     for (auto *e : {code_, manufacturer_, openings_})
         connect(e, &QLineEdit::textChanged, this, [this] { updatePreview(); });
     updatePreview();
@@ -196,6 +232,7 @@ void ToolImportDialog::loadFile(const QString &path) {
                         QStringLiteral("Импортёр вернул неожиданный результат."));
                     return;
                 }
+                self->clearGrooves();
                 self->file_ = std::get<application::ToolProfileFile>(std::move(result));
                 self->source_->setText(QStringLiteral("Файл: %1 · контуров: %2")
                                            .arg(QFileInfo(path).fileName())
@@ -260,6 +297,8 @@ std::optional<core::ToolPreset> ToolImportDialog::preset() const {
     t.lengthMm = length_->value();
     t.angleRadians = angle_->value() * std::numbers::pi / 180;
     t.drawing = *d;
+    t.grooveSettings =
+        kind_->currentIndex() == 1 ? grooveSettings_ : std::vector<core::DieGroove>{};
     t.noseRadiusMm.reset();
     t.openingsMm.clear();
     if (t.kind == core::ToolKind::Punch && radius_->value() > 0)
@@ -286,6 +325,7 @@ std::optional<core::ToolPreset> ToolImportDialog::preset() const {
     return core::validToolPreset(t) ? std::optional{t} : std::nullopt;
 }
 void ToolImportDialog::selectTarget() {
+    clearGrooves();
     if (target_->currentIndex() <= 0) {
         kind_->setEnabled(true);
         saveButton_->setText(QStringLiteral("Добавить в библиотеку"));
@@ -308,19 +348,92 @@ void ToolImportDialog::selectTarget() {
         for (double v : t.openingsMm)
             values << QString::number(v, 'g', 12);
         openings_->setText(values.join(QStringLiteral("; ")));
+        // Saved rotations belong to that captured section, not an unrelated replacement DXF.
+        if (!file_ || t.drawing == drawing())
+            grooveSettings_ = t.grooveSettings;
+        showGrooves();
         saveButton_->setText(QStringLiteral("Сохранить сечение инструмента"));
     }
     updatePreview();
+}
+void ToolImportDialog::clearGrooves() {
+    grooveSettings_.clear();
+    showGrooves();
+}
+void ToolImportDialog::showGrooves() {
+    const QSignalBlocker block(grooves_);
+    grooves_->setRowCount(static_cast<int>(grooveSettings_.size()));
+    const auto values = openings_->text().split(QLatin1Char(';'));
+    for (std::size_t i = 0; i < grooveSettings_.size(); ++i) {
+        const auto row = static_cast<int>(i);
+        grooves_->setItem(row, 0, new QTableWidgetItem(values.value(row).trimmed()));
+        grooves_->setItem(row, 1,
+                          new QTableWidgetItem(QString::number(
+                              grooveSettings_[i].angleRadians * 180 / std::numbers::pi, 'g', 8)));
+        grooves_->setItem(
+            row, 2,
+            new QTableWidgetItem(QString::number(
+                grooveSettings_[i].rotationRadians * 180 / std::numbers::pi, 'g', 8)));
+    }
+    if (!grooveSettings_.empty())
+        grooves_->setCurrentCell(0, 0);
+    recognizeButton_->setText(grooveSettings_.empty()
+                                  ? QStringLiteral("Распознать ручьи по контуру")
+                                  : QStringLiteral("Ввести ручьи вручную"));
+}
+void ToolImportDialog::recognizeGrooves() {
+    if (!grooveSettings_.empty()) {
+        clearGrooves();
+        updatePreview();
+        return;
+    }
+    const auto d = drawing();
+    if (!d)
+        return;
+    const auto found = core::detectDieGrooves(*d);
+    const bool duplicate =
+        std::adjacent_find(found.begin(), found.end(), [](const auto &a, const auto &b) {
+            return std::abs(a.openingMm - b.openingMm) < 1.e-5;
+        }) != found.end();
+    if (found.empty() || duplicate) {
+        status_->setText(QStringLiteral(
+            "Ручьи не распознаны однозначно. Поддержаны симметричные скруглённые V в положениях "
+            "0/±90/180°. Можно сохранить контур с ручными параметрами."));
+        return;
+    }
+    const QSignalBlocker blockV(openings_), blockAngle(angle_);
+    QStringList values;
+    for (const auto &g : found) {
+        values << QString::number(g.openingMm, 'g', 12);
+        grooveSettings_.push_back(g.settings);
+    }
+    openings_->setText(values.join(QStringLiteral("; ")));
+    angle_->setValue(found.front().settings.angleRadians * 180 / std::numbers::pi);
+    showGrooves();
+    updatePreview();
+    status_->setText(QStringLiteral("Распознано ручьёв: %1. Выберите строку для просмотра. При "
+                                    "выборе V корпус будет поворачиваться автоматически.")
+                         .arg(found.size()));
 }
 void ToolImportDialog::updatePreview() {
     if (!saveButton_)
         return;
     radius_->setVisible(kind_->currentIndex() == 0);
     openings_->setVisible(kind_->currentIndex() == 1);
+    recognizeButton_->setVisible(kind_->currentIndex() == 1);
+    recognizeButton_->setEnabled(drawing().has_value());
+    grooves_->setVisible(kind_->currentIndex() == 1 && !grooveSettings_.empty());
+    openings_->setReadOnly(!grooveSettings_.empty());
+    angle_->setEnabled(grooveSettings_.empty());
     auto *form = qobject_cast<QFormLayout *>(form_->layout());
     form->labelForField(radius_)->setVisible(kind_->currentIndex() == 0);
     form->labelForField(openings_)->setVisible(kind_->currentIndex() == 1);
-    const auto d = drawing();
+    auto d = drawing();
+    const auto row = grooves_->currentRow();
+    if (d && kind_->currentIndex() == 1 && row >= 0 &&
+        static_cast<std::size_t>(row) < grooveSettings_.size())
+        d = core::rotateToolDrawing(*d,
+                                    grooveSettings_[static_cast<std::size_t>(row)].rotationRadians);
     while (auto *item = previewLayout_->takeAt(0)) {
         delete item->widget();
         delete item;

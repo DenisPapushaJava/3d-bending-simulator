@@ -15,4 +15,10 @@ struct ToolGeometry {
 };
 // Derived from the immutable assignment, never from an article name or external file.
 [[nodiscard]] std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &assignment);
+struct DetectedDieGroove {
+    double openingMm;
+    DieGroove settings;
+};
+// Recognizes one unambiguous supported groove at each quarter-turn; no article lookup.
+[[nodiscard]] std::vector<DetectedDieGroove> detectDieGrooves(const ToolDrawing &);
 } // namespace bending::core

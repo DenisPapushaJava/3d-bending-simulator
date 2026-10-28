@@ -10,6 +10,7 @@ class QCheckBox;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
+class QTableWidget;
 namespace bending::ui {
 class ImportController;
 class ToolImportDialog final : public QDialog {
@@ -26,6 +27,9 @@ class ToolImportDialog final : public QDialog {
     void updatePreview();
     void selectTarget();
     void setBusy(bool);
+    void recognizeGrooves();
+    void clearGrooves();
+    void showGrooves();
     std::optional<core::ToolDrawing> drawing() const;
     std::optional<core::ToolPreset> preset() const;
     ImportController &controller_;
@@ -41,6 +45,9 @@ class ToolImportDialog final : public QDialog {
     QWidget *form_, *previewHost_;
     QVBoxLayout *previewLayout_;
     QPushButton *saveButton_, *chooseButton_;
+    QPushButton *recognizeButton_;
+    QTableWidget *grooves_;
+    std::vector<core::DieGroove> grooveSettings_;
     bool busy_ = false;
 };
 } // namespace bending::ui

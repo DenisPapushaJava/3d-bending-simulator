@@ -44,6 +44,12 @@ class ProfileImportTests(unittest.TestCase):
             self.assertEqual(len(catalog['tools'][0]['drawing']['sha256']), 64)
             PROFILES.import_profiles(catalog, Path(directory), {'ST1'})
             self.assertTrue(catalog['tools'][0]['drawing']['millimeters'])
+            catalog['version'] = 3
+            PROFILES.import_profiles(catalog, Path(directory), {'ST1'})
+            self.assertEqual(catalog['version'], 3)
+            catalog['tools'][0]['grooveSettings'] = [{'angleRadians': 1.5, 'rotationRadians': 0}]
+            with self.assertRaises(ValueError):
+                PROFILES.import_profiles(catalog, Path(directory), {'ST1'})
             write('0\nINSERT\n2\nunknown-block\n')
             with self.assertRaises(ValueError):
                 PROFILES.parse_dxf(path)

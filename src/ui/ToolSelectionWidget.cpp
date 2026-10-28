@@ -326,8 +326,14 @@ void ToolSelectionWidget::populateGrooves(std::size_t selected) {
     const QSignalBlocker block(groove_);
     groove_->clear();
     if (const auto *p = preset(die_)) {
-        for (const auto v : p->openingsMm)
-            groove_->addItem(QStringLiteral("V %1 мм").arg(v));
+        for (std::size_t i = 0; i < p->openingsMm.size(); ++i) {
+            const auto g = core::dieGroove(*p, i);
+            groove_->addItem(p->grooveSettings.empty()
+                                 ? QStringLiteral("V %1 мм").arg(p->openingsMm[i])
+                                 : QStringLiteral("V %1 мм · %2°")
+                                       .arg(p->openingsMm[i])
+                                       .arg(g->angleRadians * 180 / std::numbers::pi));
+        }
         groove_->setCurrentIndex(selected < p->openingsMm.size() ? static_cast<int>(selected) : 0);
     }
 }
@@ -563,7 +569,7 @@ void ToolSelectionWidget::updateDetails() {
                           .arg(p.lengthMm)
                           .arg(title(d))
                           .arg(d.openingsMm[a->groove])
-                          .arg(d.angleRadians * 180 / std::numbers::pi)
+                          .arg(core::dieGroove(d, a->groove)->angleRadians * 180 / std::numbers::pi)
                           .arg(d.lengthMm));
     details_->setMinimumHeight(details_->heightForWidth(240));
     sources_->setText(text(p.source + "\n" + p.notes + "\n\n" + d.source + "\n" + d.notes));

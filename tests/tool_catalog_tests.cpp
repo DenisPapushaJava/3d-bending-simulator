@@ -17,6 +17,27 @@ int main() {
     using namespace bending::core;
     try {
         const auto drawn = tool_fixture::pair();
+        const auto multi = tool_fixture::fourWayDie();
+        require(validToolPreset(multi) && multi.grooveSettings.size() == 4,
+                "Four-way die not recognized");
+        for (std::size_t g = 0; g < 4; ++g) {
+            const ToolAssignment a{drawn.punch, multi, g, 3, "", true};
+            require(toolParameters(a).has_value() && drawingToolGeometry(a).has_value(),
+                    "Quarter-turn groove not recognized");
+            require(std::abs(toolParameters(a)->dieAngleRadians -
+                             (60 + 10 * static_cast<double>(g)) * std::numbers::pi / 180) < 1.e-10,
+                    "Global angle leaked into active groove");
+        }
+        auto wrongMulti = multi;
+        wrongMulti.grooveSettings.pop_back();
+        require(!validToolPreset(wrongMulti), "Unbound groove rotation accepted");
+        wrongMulti = multi;
+        wrongMulti.grooveSettings[0].rotationRadians = std::numeric_limits<double>::quiet_NaN();
+        require(!validToolPreset(wrongMulti), "NaN rotation accepted");
+        const ToolSelectionRequest angleRequest{1, 95 * std::numbers::pi / 180, 8, 40};
+        require(screenTools(angleRequest, drawn.punch, multi, 0) == ToolRejection::None &&
+                    screenTools(angleRequest, drawn.punch, multi, 3) == ToolRejection::Angle,
+                "Selection ignored per-groove angle");
         const auto geometry = drawingToolGeometry(drawn);
         require(geometry && toolParameters(drawn) &&
                     std::abs(geometry->shoulderHalfSpanMm - (6 + .8 / std::sqrt(3.))) < 1.e-8 &&

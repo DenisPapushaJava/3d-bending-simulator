@@ -15,10 +15,13 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
@@ -321,6 +324,38 @@ int main(int argc, char **argv) {
         require(catalog.size() == 4 && !catalog.back().parametersConfirmed &&
                     catalog.back().drawing,
                 "Incomplete tool became assignable or was lost");
+        write(path, wrap(poly(*tool_fixture::fourWayDie().drawing)));
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = QApplication::activeModalWidget();
+            dialog->findChild<QComboBox *>("importToolKind")->setCurrentIndex(1);
+            QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path));
+            wait([&] { return !controller.hasWork(); });
+            dialog->findChild<QPushButton *>("recognizeToolGrooves")->click();
+            auto *table = dialog->findChild<QTableWidget *>("importToolGrooves");
+            require(table->rowCount() == 4 && table->item(3, 1)->text() == QStringLiteral("90"),
+                    "Four-way import table missing");
+            table->setCurrentCell(3, 0);
+            dialog->findChild<QDoubleSpinBox *>("importToolLength")->setValue(80);
+            require(!dialog->findChild<QDoubleSpinBox *>("importToolAngle")->isEnabled(),
+                    "Common angle overrides recognized grooves");
+            dialog->findChild<QPushButton *>("saveImportedTool")->click();
+            wait([&] { return !controller.hasWork(); });
+        });
+        button->click();
+        catalog = std::get<core::ToolCatalog>(project::readToolCatalog(native(library)));
+        require(catalog.size() == 5 && catalog.back().grooveSettings.size() == 4 &&
+                    catalog.back().parametersConfirmed,
+                "Recognized settings lost on save");
+        QFile libraryFile(library);
+        require(libraryFile.open(QIODevice::ReadOnly), "Read catalogue version");
+        auto legacyRoot = QJsonDocument::fromJson(libraryFile.readAll()).object();
+        libraryFile.close();
+        require(legacyRoot.value("version").toInt() == 3, "Catalogue version not advanced");
+        legacyRoot.insert("version", 2);
+        const auto legacyPath = dir.path() + QStringLiteral("/legacy.json");
+        write(legacyPath, QJsonDocument(legacyRoot).toJson());
+        require(std::holds_alternative<std::string>(project::readToolCatalog(native(legacyPath))),
+                "Old catalogue accepted orientation metadata");
         // Cancellation suppresses late callbacks without changing the loaded STEP or preview.
         struct Slow final : application::ToolProfileImporter {
             mutable std::atomic_bool entered{false};

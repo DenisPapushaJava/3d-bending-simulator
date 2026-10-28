@@ -76,3 +76,46 @@ inline bending::core::ToolAssignment hook() {
     return a;
 }
 } // namespace tool_fixture
+namespace tool_fixture {
+inline bending::core::ToolPreset fourWayDie() {
+    using namespace bending::core;
+    constexpr double pi = std::numbers::pi;
+    auto t = pair().die;
+    t.id = "own-four-way";
+    t.code = "Own four-way";
+    t.heightMm = 70;
+    t.openingsMm = {12, 18, 24, 30};
+    t.angleRadians = pi / 3;
+    ToolDrawing drawing{"own-four-way.dxf", std::string(64, 'c'), true, {}};
+    for (std::size_t i = 0; i < 4; ++i) {
+        const double beta = (60 + 10 * static_cast<double>(i)) * pi / 180;
+        const double tilt = (pi - beta) / 2, r = .6 + .3 * static_cast<double>(i),
+                     c = t.openingsMm[i] / 2 + r * std::tan(tilt / 2);
+        const auto arc = [&](DrawingPoint centre, double angle, double sweep) {
+            const auto at = [&](double a) {
+                return DrawingPoint{centre.x + r * std::cos(a), centre.y + r * std::sin(a)};
+            };
+            return DrawingEdge{at(angle), at(angle + sweep), centre, sweep};
+        };
+        const auto l = arc({-c, 35 - r}, pi / 2, -tilt),
+                   right = arc({c, 35 - r}, pi / 2 + tilt, -tilt);
+        const DrawingPoint bottom{0, l.end.y + l.end.x * std::tan(tilt)};
+        ToolDrawing side{"own.dxf",
+                         std::string(64, 'd'),
+                         true,
+                         {{{-35, 35}, l.start, {}, 0},
+                          l,
+                          {l.end, bottom, {}, 0},
+                          {bottom, right.start, {}, 0},
+                          right,
+                          {right.end, {35, 35}, {}, 0}}};
+        const double turn = i == 3 ? pi / 2 : -static_cast<double>(i) * pi / 2;
+        const auto placed = rotateToolDrawing(side, turn);
+        drawing.edges.insert(drawing.edges.end(), placed.edges.begin(), placed.edges.end());
+    }
+    t.drawing = std::move(drawing);
+    for (const auto &g : detectDieGrooves(*t.drawing))
+        t.grooveSettings.push_back(g.settings);
+    return t;
+}
+} // namespace tool_fixture

@@ -37,6 +37,7 @@ void ToolProfilesWidget::setTools(std::optional<core::PressTools> tools) {
 }
 void ToolProfilesWidget::setDrawingAssignment(std::optional<core::ToolAssignment> a) {
     drawing_ = a && a->useDrawingGeometry ? a : std::nullopt;
+    dieDrawing_ = drawing_ ? core::activeDieDrawing(drawing_->die, drawing_->groove) : std::nullopt;
     if (drawing_)
         setAccessibleDescription(
             QStringLiteral("Пуансон: %1. Матрица: %2. Эти формы участвуют в проверке. Держатели и "
@@ -93,8 +94,8 @@ void ToolProfilesWidget::paintEvent(QPaintEvent *) {
         };
         if (drawing_->punch.drawing)
             punch = path(*drawing_->punch.drawing);
-        if (drawing_->die.drawing)
-            die = path(*drawing_->die.drawing);
+        if (dieDrawing_)
+            die = path(*dieDrawing_);
     }
     const auto punchBounds = punch.boundingRect(), dieBounds = die.boundingRect();
     const double half = width() / 2.;

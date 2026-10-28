@@ -59,6 +59,15 @@ bool validToolPreset(const ToolPreset &t) {
         (t.heightMm && !size(*t.heightMm, .1, 100000))) {
         return false;
     }
+    if (!t.grooveSettings.empty()) {
+        if (t.kind != ToolKind::Die || t.grooveSettings.size() != t.openingsMm.size() ||
+            t.grooveSettings.size() > 16 || !t.drawing || !t.drawing->millimeters ||
+            !std::all_of(t.grooveSettings.begin(), t.grooveSettings.end(), [](const auto &g) {
+                return size(g.angleRadians * 180 / std::numbers::pi, 30 - 1.e-9, 120 + 1.e-9) &&
+                       size(g.rotationRadians, -std::numbers::pi, std::numbers::pi);
+            }))
+            return false;
+    }
     if (!t.parametersConfirmed) {
         return (t.kind == ToolKind::Punch || t.kind == ToolKind::Die) &&
                size(degrees, 0, 120 + 1e-9) &&
@@ -79,6 +88,30 @@ bool validToolPreset(const ToolPreset &t) {
         return size(opening, 1, 1000) && openings.insert(opening).second;
     });
 }
+std::optional<DieGroove> dieGroove(const ToolPreset &t, std::size_t g) {
+    if (t.kind != ToolKind::Die || g >= t.openingsMm.size() ||
+        (!t.grooveSettings.empty() && t.grooveSettings.size() != t.openingsMm.size()))
+        return {};
+    return t.grooveSettings.empty() ? DieGroove{t.angleRadians, 0} : t.grooveSettings[g];
+}
+ToolDrawing rotateToolDrawing(const ToolDrawing &drawing, double radians) {
+    auto result = drawing;
+    const double c = std::cos(radians), s = std::sin(radians);
+    const auto rotate = [&](DrawingPoint &p) { p = {p.x * c - p.y * s, p.x * s + p.y * c}; };
+    for (auto &e : result.edges) {
+        rotate(e.start);
+        rotate(e.end);
+        if (e.center)
+            rotate(*e.center);
+    }
+    return result;
+}
+std::optional<ToolDrawing> activeDieDrawing(const ToolPreset &t, std::size_t g) {
+    const auto settings = dieGroove(t, g);
+    if (!settings || !t.drawing)
+        return {};
+    return rotateToolDrawing(*t.drawing, settings->rotationRadians);
+}
 bool validToolCatalog(const ToolCatalog &catalog) {
     if (catalog.empty() || catalog.size() > 512) {
         return false;
@@ -98,7 +131,7 @@ std::optional<PressTools> toolParameters(const ToolAssignment &a) {
     if (a.useDrawingGeometry && !drawingToolGeometry(a))
         return {};
     PressTools result{a.die.openingsMm[a.groove],
-                      a.die.angleRadians,
+                      dieGroove(a.die, a.groove)->angleRadians,
                       a.punch.angleRadians,
                       *a.punch.noseRadiusMm,
                       a.die.lengthMm,

@@ -97,7 +97,8 @@ std::array<TopoDS_Shape, 2> makeDrawingTools(const core::ToolAssignment &a,
                                              const core::ToolGeometry &g, double tip) {
     std::array<TopoDS_Shape, 2> result;
     if (g.hasDie)
-        result[0] = sectionPrism(a.die.drawing->edges, g.dieTopCentre, 0, a.die.lengthMm, 0);
+        result[0] = sectionPrism(core::activeDieDrawing(a.die, a.groove)->edges, g.dieTopCentre, 0,
+                                 a.die.lengthMm, 0);
     if (g.hasPunch)
         result[1] = sectionPrism(a.punch.drawing->edges, g.punchTip, tip, a.punch.lengthMm,
                                  (a.die.lengthMm - a.punch.lengthMm) / 2);

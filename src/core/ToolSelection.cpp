@@ -24,7 +24,8 @@ ToolRejection screenValidTools(const ToolSelectionRequest &r, const ToolPreset &
     constexpr double tolerance = 1e-5;
     if (std::min(p.lengthMm, d.lengthMm) + tolerance < r.bendLengthMm)
         return ToolRejection::TooShort;
-    if (r.bendAngleRadians + std::max(p.angleRadians, d.angleRadians) > std::numbers::pi + 1e-12)
+    if (r.bendAngleRadians + std::max(p.angleRadians, dieGroove(d, groove)->angleRadians) >
+        std::numbers::pi + 1e-12)
         return ToolRejection::Angle;
     if (*p.noseRadiusMm > r.innerRadiusMm - tolerance)
         return ToolRejection::Radius;

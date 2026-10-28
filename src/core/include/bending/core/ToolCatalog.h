@@ -29,6 +29,11 @@ struct ToolDrawing {
     bool operator==(const ToolDrawing &) const = default;
 };
 [[nodiscard]] bool validToolDrawing(const ToolDrawing &drawing);
+struct DieGroove {
+    double angleRadians = 0;
+    double rotationRadians = 0; // Counterclockwise rotation of the captured section.
+    bool operator==(const DieGroove &) const = default;
+};
 // Catalogue facts; the assignment selects idealized or supported drawing geometry.
 struct ToolPreset {
     std::string id;
@@ -45,6 +50,7 @@ struct ToolPreset {
     bool teaching = false;
     bool parametersConfirmed = true; // False: inventory entry, unavailable for assignment/search.
     std::optional<ToolDrawing> drawing = std::nullopt;
+    std::vector<DieGroove> grooveSettings = {}; // Empty: legacy common angle, upright section.
     bool operator==(const ToolPreset &) const = default;
 };
 using ToolCatalog = std::vector<ToolPreset>;
@@ -59,5 +65,8 @@ struct ToolAssignment {
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);
 [[nodiscard]] bool validToolCatalog(const ToolCatalog &catalog);
+[[nodiscard]] std::optional<DieGroove> dieGroove(const ToolPreset &, std::size_t);
+[[nodiscard]] ToolDrawing rotateToolDrawing(const ToolDrawing &, double radians);
+[[nodiscard]] std::optional<ToolDrawing> activeDieDrawing(const ToolPreset &, std::size_t);
 [[nodiscard]] std::optional<PressTools> toolParameters(const ToolAssignment &assignment);
 } // namespace bending::core

@@ -20,5 +20,6 @@ class ToolProfilesWidget final : public QWidget {
     std::optional<core::PressTools> tools_;
     bool enlarged_;
     std::optional<core::ToolAssignment> drawing_;
+    std::optional<core::ToolDrawing> dieDrawing_;
 };
 } // namespace bending::ui

@@ -43,7 +43,8 @@ ToolCatalogResult readFile(QFile &file) {
     }
     const auto root = json.object();
     if (root.value("format") != QStringLiteral("bending-tool-catalog") ||
-        (root.value("version").toDouble(-1) != 1 && root.value("version").toDouble(-1) != 2) ||
+        (root.value("version").toDouble(-1) != 1 && root.value("version").toDouble(-1) != 2 &&
+         root.value("version").toDouble(-1) != 3) ||
         !root.value("tools").isArray() || root.value("tools").toArray().size() > 512) {
         return std::string("Unsupported catalogue format/version");
     }
@@ -53,6 +54,8 @@ ToolCatalogResult readFile(QFile &file) {
         if (!item.isObject() || !readPreset(item.toObject(), preset)) {
             return std::string("Invalid tool definition");
         }
+        if (root.value("version").toInt() < 3 && !preset.grooveSettings.empty())
+            return std::string("Groove orientations require catalogue version 3");
         tools.push_back(std::move(preset));
     }
     if (!core::validToolCatalog(tools)) {
@@ -62,6 +65,10 @@ ToolCatalogResult readFile(QFile &file) {
 }
 } // namespace
 QJsonObject presetJson(const core::ToolPreset &t) {
+    QJsonArray grooves;
+    for (const auto &g : t.grooveSettings)
+        grooves.append(
+            QJsonObject{{"angleRadians", g.angleRadians}, {"rotationRadians", g.rotationRadians}});
     QJsonArray openings;
     for (double v : t.openingsMm) {
         openings.append(v);
@@ -90,6 +97,7 @@ QJsonObject presetJson(const core::ToolPreset &t) {
             {"heightMm", number(t.heightMm)},
             {"noseRadiusMm", number(t.noseRadiusMm)},
             {"openingsMm", openings},
+            {"grooveSettings", grooves},
             {"source", QString::fromStdString(t.source)},
             {"notes", QString::fromStdString(t.notes)},
             {"teaching", t.teaching},
@@ -167,6 +175,19 @@ bool readPreset(const QJsonObject &o, core::ToolPreset &t) {
         t.drawing = std::move(drawing);
     }
     t.openingsMm.clear();
+    t.grooveSettings.clear();
+    if (o.contains("grooveSettings")) {
+        if (!o.value("grooveSettings").isArray() || o.value("grooveSettings").toArray().size() > 16)
+            return false;
+        for (const auto &item : o.value("grooveSettings").toArray()) {
+            const auto g = item.toObject();
+            if (!item.isObject() || !g.value("angleRadians").isDouble() ||
+                !g.value("rotationRadians").isDouble())
+                return false;
+            t.grooveSettings.push_back(
+                {g.value("angleRadians").toDouble(), g.value("rotationRadians").toDouble()});
+        }
+    }
     if (o.value("openingsMm").toArray().size() > 16) {
         return false;
     }
@@ -245,7 +266,7 @@ std::optional<std::string> writeToolCatalog(const std::filesystem::path &path,
         tools.append(presetJson(tool));
     const auto bytes =
         QJsonDocument(
-            QJsonObject{{"format", "bending-tool-catalog"}, {"version", 2}, {"tools", tools}})
+            QJsonObject{{"format", "bending-tool-catalog"}, {"version", 3}, {"tools", tools}})
             .toJson();
     if (bytes.size() > 4 * 1024 * 1024)
         return "Библиотека превышает 4 МиБ. Инструмент не добавлен.";
