@@ -30,6 +30,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
@@ -336,7 +337,8 @@ class MainWindow::Impl {
         showSelectedBend(false);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
         if (drawingAction)
-            drawingAction->setEnabled(document && drawingBuilder && !controller->hasWork());
+            drawingAction->setEnabled(drawingDialog ||
+                                      (document && drawingBuilder && !controller->hasWork()));
         const bool cancellable =
             session.activeRequest().has_value() || controller->isPreparingPreview() ||
             controller->isPreparingDrawing() || controller->isPreparingFlatPattern();
@@ -1345,6 +1347,7 @@ class MainWindow::Impl {
                 *checkFlatSource = nullptr;
     QLabel *flatStatus = nullptr, *checkFlatStatus = nullptr;
     QAction *drawingAction = nullptr;
+    QPointer<DrawingDialog> drawingDialog;
     std::optional<std::size_t> drawingBase;
     std::uint64_t drawingBaseRevision = 0;
     application::BendPreviewPtr displayedPreview;
@@ -1511,15 +1514,30 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->drawingAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
     impl_->drawingAction->setEnabled(false);
     connect(impl_->drawingAction, &QAction::triggered, this, [this] {
+        if (impl_->drawingDialog) {
+            if (impl_->drawingDialog->isMinimized())
+                impl_->drawingDialog->showNormal();
+            impl_->drawingDialog->show();
+            impl_->drawingDialog->raise();
+            impl_->drawingDialog->activateWindow();
+            return;
+        }
         const auto &session = impl_->controller->session();
         if (!impl_->drawingBuilder || !session.document() || impl_->controller->hasWork())
             return;
         impl_->stopPlayback();
-        DrawingDialog dialog(*impl_->controller, impl_->drawingBuilder,
-                             impl_->drawingBaseRevision == session.revision() ? impl_->drawingBase
-                                                                              : std::nullopt,
-                             this);
-        dialog.exec();
+        auto *dialog = new DrawingDialog(
+            *impl_->controller, impl_->drawingBuilder,
+            impl_->drawingBaseRevision == session.revision() ? impl_->drawingBase : std::nullopt,
+            this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        impl_->drawingDialog = dialog;
+        connect(dialog, &QDialog::finished, this, [this, dialog] {
+            if (impl_->drawingDialog == dialog)
+                impl_->drawingDialog.clear();
+            impl_->refresh();
+        });
+        dialog->show();
     });
     fileMenu->addSeparator();
     auto *exit = fileMenu->addAction(QStringLiteral("Выход"));
@@ -2335,6 +2353,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
 
 MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
+    delete impl_->drawingDialog.data();
     impl_->controller->shutdown();
 }
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {

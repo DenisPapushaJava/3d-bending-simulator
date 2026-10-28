@@ -28,8 +28,10 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -39,6 +41,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
+#include <QWheelEvent>
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1236,184 +1239,267 @@ void workflow(const QString &folder) {
     require(action && action->isEnabled(), "Drawing action missing");
     bool inspected = false, pdf = false;
     int exportedPages = 0;
-    QTimer timer;
-    QObject::connect(&timer, &QTimer::timeout, &window, [&] {
-        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
-        if (!dialog || dialog->objectName() != "bendingDrawingDialog" || c.hasWork())
-            return;
-        auto *exportButton = dialog->findChild<QPushButton *>("exportDrawingPdf");
-        if (!exportButton || !exportButton->isEnabled())
-            return;
-        timer.stop();
-        auto *qty = dialog->findChild<QSpinBox *>("drawingQuantity");
-        qty->setValue(37);
-        const auto oldDrawing = c.drawing();
-        require(oldDrawing && oldDrawing->flatPattern,
-                "Dialog did not automatically prepare the blank");
-        auto *layout = dialog->findChild<QComboBox *>("drawingLayout");
-        require(layout && layout->currentIndex() == 0, "Classical layout is not the default");
-        auto *page = dialog->findChild<QSpinBox *>("drawingPage");
-        auto *navigation = dialog->findChild<QWidget *>("drawingPageNavigation");
-        auto *previous = dialog->findChild<QToolButton *>("previousDrawingPageButton");
-        auto *next = dialog->findChild<QToolButton *>("nextDrawingPageButton");
-        auto *scroll = dialog->findChild<QScrollArea *>("drawingPreviewScroll");
-        auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
-        require(page && navigation && previous && next && scroll && preview,
-                "Missing page navigation controls");
-        const auto basePages = page->maximum();
-        require(navigation->isVisible() == (basePages > 1),
-                "Single-page navigation visibility is wrong");
-        layout->setCurrentIndex(1);
-        QApplication::processEvents();
-        require(page->maximum() > 1 && navigation->isVisible() && page->value() == 1 &&
-                    !previous->isEnabled() && next->isEnabled(),
-                "Multipage navigation or its first boundary is wrong");
-        const auto firstPage = preview->pixmap().toImage();
-        next->click();
-        require(page->value() == 2 && previous->isEnabled() &&
-                    preview->pixmap().toImage() != firstPage,
-                "Next did not display the second page");
-        page->setValue(page->maximum());
-        require(!next->isEnabled(), "Next remains enabled on the final page");
-        next->click();
-        require(page->value() == page->maximum(), "Final-page click wrapped around");
-        previous->click();
-        require(page->value() == page->maximum() - 1, "Previous did not select the preceding page");
-        const auto key = [&](int code, Qt::KeyboardModifiers modifiers = Qt::NoModifier,
-                             const QString &text = QString{}) {
-            QKeyEvent press(QEvent::KeyPress, code, modifiers, text);
-            QApplication::sendEvent(page, &press);
-            QKeyEvent release(QEvent::KeyRelease, code, modifiers, text);
-            QApplication::sendEvent(page, &release);
-        };
-        page->setFocus();
-        key(Qt::Key_Right, Qt::AltModifier);
-        require(page->value() == page->maximum(), "Alt+Right did not use the next-page action");
-        key(Qt::Key_Left, Qt::AltModifier);
-        require(page->value() == page->maximum() - 1,
-                "Alt+Left did not use the previous-page action");
-        page->findChild<QLineEdit *>()->setText(QStringLiteral("1"));
-        key(Qt::Key_Return);
-        require(page->value() == 1 && !previous->isEnabled(),
-                "Typed page number was not committed");
-        const auto clearOfPaper = [&] {
-            if (!navigation->isVisible())
-                return;
-            const auto nav = navigation->geometry();
-            require(scroll->rect().contains(nav) && !nav.intersects(scroll->viewport()->geometry()),
-                    "Navigation overlaps the paper viewport or escapes its preview frame");
-            for (auto *bar : {scroll->horizontalScrollBar(), scroll->verticalScrollBar()})
-                if (bar->isVisible())
-                    require(!nav.intersects(QRect(bar->mapTo(scroll, QPoint{}), bar->size())),
-                            "Navigation overlaps a scrollbar");
-        };
-        clearOfPaper();
-        const auto normal = dialog->size();
-        const auto snapshot = qEnvironmentVariable("BENDING_DRAWING_DIALOG_SNAPSHOT");
-        const auto fittedPaper = [&] {
-            QApplication::processEvents();
-            wait([&] {
-                return !preview->pixmap().isNull() &&
-                       preview->pixmap().width() ==
-                           qRound(preview->width() * preview->devicePixelRatioF());
-            });
-            require(scroll->viewport()->rect().contains(preview->geometry()),
-                    "Resized paper does not fit inside the preview viewport");
-            require(std::abs(preview->width() * ui::DrawingSheet::heightMm -
-                             preview->height() * ui::DrawingSheet::widthMm) <=
-                        ui::DrawingSheet::widthMm,
-                    "Resizing distorted the A3 sheet proportions");
-            require(!scroll->horizontalScrollBar()->isVisible() &&
-                        !scroll->verticalScrollBar()->isVisible(),
-                    "Fitted paper still requires scrolling");
-            clearOfPaper();
-            return preview->size();
-        };
-        const auto originalPaper = fittedPaper();
-        const auto selectedPage = page->value();
-        const auto totalPages = page->maximum();
-        dialog->resize(1500, 950);
-        const auto expandedPaper = fittedPaper();
-        require(expandedPaper.width() > originalPaper.width() &&
-                    expandedPaper.height() > originalPaper.height(),
-                "Expanding the window did not enlarge the paper and its sharp raster");
-        if (!snapshot.isEmpty())
-            require(dialog->grab().save(snapshot + ".expanded.png"),
-                    "Cannot save the expanded preview snapshot");
-        dialog->resize(900, 560);
-        const auto compactPaper = fittedPaper();
-        require(compactPaper.width() < originalPaper.width() &&
-                    compactPaper.height() < originalPaper.height(),
-                "Shrinking the window did not reduce the paper and its sharp raster");
-        require(page->value() == selectedPage && page->maximum() == totalPages,
-                "Window resizing changed the selected page or page count");
-        auto *name = dialog->findChild<QLineEdit *>("drawingName");
-        auto *options = dialog->findChild<QScrollArea *>("drawingOptionsScroll");
-        require(options && options->verticalScrollBar()->isVisible() &&
-                    name->height() >= name->minimumSizeHint().height() &&
-                    dialog->rect().contains(
-                        QRect(exportButton->mapTo(dialog, QPoint{}), exportButton->size())),
-                "Compact window crushed the input fields or hid the PDF action");
-        if (!snapshot.isEmpty())
-            require(dialog->grab().save(snapshot + ".compact.png"),
-                    "Cannot save the compact preview snapshot");
-        next->click();
-        fittedPaper();
-        dialog->resize(normal);
-        layout->setCurrentIndex(0);
-        fittedPaper();
-        require(page->maximum() == basePages && page->value() <= basePages &&
-                    navigation->isVisible() == (basePages > 1),
-                "Page count reduction left a stale selector");
-        if (basePages == 1)
-            require(page->value() == 1 && !previous->isEnabled() && !next->isEnabled(),
-                    "Single-page layout retained active navigation actions");
-        require(c.drawing() == oldDrawing && !c.hasWork() && exportButton->isEnabled(),
-                "Changing presentation recomputed or invalidated the CAD snapshot");
-        dialog->findChild<QLineEdit *>("drawingExecution")->setText(QStringLiteral("Исполнение Л"));
-        inspected = !dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().isNull() &&
-                    c.session().editRevision() == revision;
-        if (!snapshot.isEmpty()) {
-            if (page->maximum() > 1)
-                page->setValue(page->maximum());
-            scroll->setFocus();
-            QApplication::processEvents();
-            inspected = inspected && dialog->grab().save(snapshot);
-        }
-        layout->setCurrentIndex(1);
-        page->setValue(page->maximum());
-        exportedPages = page->maximum();
-        require(exportedPages > 1 && c.drawing() == oldDrawing && !c.hasWork() &&
-                    c.session().editRevision() == revision,
-                "Page changes recomputed CAD or changed the project");
-        const auto output = qEnvironmentVariable("BENDING_DRAWING_OUTPUT");
-        const auto target = output.isEmpty() ? folder + "/ui.pdf" : output;
-        QTimer::singleShot(30, dialog, [target] {
-            auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
-            if (!file)
-                return;
-            file->setOption(QFileDialog::DontConfirmOverwrite, true);
-            file->selectFile(target);
-            if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
-                input->setText(target);
-            QTimer::singleShot(0, file, [file] {
-                QMetaObject::invokeMethod(file, "accept", Qt::DirectConnection);
-            });
-        });
-        exportButton->click();
-        pdf = QFile::exists(target);
-        dialog->findChild<QComboBox *>("drawingOrientation")->setCurrentIndex(1);
-        require(!navigation->isVisible() && !previous->isEnabled() && !next->isEnabled() &&
-                    preview->pixmap().isNull() && !exportButton->isEnabled(),
-                "Invalidated views retained an active page navigator or stale paper");
-        dialog->reject();
-    });
-    timer.start(20);
-    QTimer::singleShot(30000, &window, [&] {
-        if (auto *d = qobject_cast<QDialog *>(QApplication::activeModalWidget()))
-            d->reject();
-    });
     action->trigger();
+    auto *dialog = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(dialog && dialog->isVisible() && !dialog->isModal() &&
+                QApplication::activeModalWidget() == nullptr && window.isEnabled() &&
+                (dialog->windowFlags() & Qt::WindowMinMaxButtonsHint),
+            "Drawing window is modal or lacks normal window controls");
+    auto *exportButton = dialog->findChild<QPushButton *>("exportDrawingPdf");
+    require(exportButton, "Missing PDF action");
+    wait([&] { return !c.hasWork() && exportButton->isEnabled(); });
+    dialog->showMinimized();
+    action->trigger();
+    QApplication::processEvents();
+    require(!dialog->isMinimized() &&
+                window.findChildren<QDialog *>("bendingDrawingDialog").size() == 1,
+            "Reopening did not restore the existing drawing window");
+    dialog->showMaximized();
+    QApplication::processEvents();
+    require(dialog->isMaximized(), "Drawing window cannot be maximized");
+    dialog->showNormal();
+    dialog->resize(1200, 720);
+    QApplication::processEvents();
+    auto *qty = dialog->findChild<QSpinBox *>("drawingQuantity");
+    qty->setValue(37);
+    const auto oldDrawing = c.drawing();
+    require(oldDrawing && oldDrawing->flatPattern,
+            "Dialog did not automatically prepare the blank");
+    auto *layout = dialog->findChild<QComboBox *>("drawingLayout");
+    require(layout && layout->currentIndex() == 0, "Classical layout is not the default");
+    auto *page = dialog->findChild<QSpinBox *>("drawingPage");
+    auto *navigation = dialog->findChild<QWidget *>("drawingPageNavigation");
+    auto *controls = dialog->findChild<QWidget *>("drawingPreviewControls");
+    auto *previous = dialog->findChild<QToolButton *>("previousDrawingPageButton");
+    auto *next = dialog->findChild<QToolButton *>("nextDrawingPageButton");
+    auto *scroll = dialog->findChild<QScrollArea *>("drawingPreviewScroll");
+    auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
+    require(page && navigation && controls && previous && next && scroll && preview,
+            "Missing page navigation controls");
+    const auto basePages = page->maximum();
+    require(navigation->isVisible() == (basePages > 1),
+            "Single-page navigation visibility is wrong");
+    layout->setCurrentIndex(1);
+    QApplication::processEvents();
+    require(page->maximum() > 1 && navigation->isVisible() && page->value() == 1 &&
+                !previous->isEnabled() && next->isEnabled(),
+            "Multipage navigation or its first boundary is wrong");
+    const auto firstPage = preview->pixmap().toImage();
+    next->click();
+    require(page->value() == 2 && previous->isEnabled() && preview->pixmap().toImage() != firstPage,
+            "Next did not display the second page");
+    page->setValue(page->maximum());
+    require(!next->isEnabled(), "Next remains enabled on the final page");
+    next->click();
+    require(page->value() == page->maximum(), "Final-page click wrapped around");
+    previous->click();
+    require(page->value() == page->maximum() - 1, "Previous did not select the preceding page");
+    const auto key = [&](int code, Qt::KeyboardModifiers modifiers = Qt::NoModifier,
+                         const QString &text = QString{}) {
+        QKeyEvent press(QEvent::KeyPress, code, modifiers, text);
+        QApplication::sendEvent(page, &press);
+        QKeyEvent release(QEvent::KeyRelease, code, modifiers, text);
+        QApplication::sendEvent(page, &release);
+    };
+    page->setFocus();
+    key(Qt::Key_Right, Qt::AltModifier);
+    require(page->value() == page->maximum(), "Alt+Right did not use the next-page action");
+    key(Qt::Key_Left, Qt::AltModifier);
+    require(page->value() == page->maximum() - 1, "Alt+Left did not use the previous-page action");
+    page->findChild<QLineEdit *>()->setText(QStringLiteral("1"));
+    key(Qt::Key_Return);
+    require(page->value() == 1 && !previous->isEnabled(), "Typed page number was not committed");
+    const auto clearOfPaper = [&] {
+        if (!controls->isVisible())
+            return;
+        const auto nav = controls->geometry();
+        require(scroll->rect().contains(nav) && !nav.intersects(scroll->viewport()->geometry()),
+                "Navigation overlaps the paper viewport or escapes its preview frame");
+        for (auto *bar : {scroll->horizontalScrollBar(), scroll->verticalScrollBar()})
+            if (bar->isVisible())
+                require(!nav.intersects(QRect(bar->mapTo(scroll, QPoint{}), bar->size())),
+                        "Navigation overlaps a scrollbar");
+    };
+    clearOfPaper();
+    const auto normal = dialog->size();
+    const auto snapshot = qEnvironmentVariable("BENDING_DRAWING_DIALOG_SNAPSHOT");
+    const auto fittedPaper = [&] {
+        QApplication::processEvents();
+        wait([&] {
+            return !preview->pixmap().isNull() &&
+                   preview->pixmap().width() ==
+                       std::clamp(qRound(preview->width() * preview->devicePixelRatioF()), 2, 4096);
+        });
+        require(scroll->viewport()->rect().contains(preview->geometry()),
+                "Resized paper does not fit inside the preview viewport");
+        require(std::abs(preview->width() * ui::DrawingSheet::heightMm -
+                         preview->height() * ui::DrawingSheet::widthMm) <=
+                    ui::DrawingSheet::widthMm,
+                "Resizing distorted the A3 sheet proportions");
+        require(!scroll->horizontalScrollBar()->isVisible() &&
+                    !scroll->verticalScrollBar()->isVisible(),
+                "Fitted paper still requires scrolling");
+        clearOfPaper();
+        return preview->size();
+    };
+    const auto originalPaper = fittedPaper();
+    const auto selectedPage = page->value();
+    const auto totalPages = page->maximum();
+    dialog->resize(1500, 950);
+    const auto expandedPaper = fittedPaper();
+    require(expandedPaper.width() > originalPaper.width() &&
+                expandedPaper.height() > originalPaper.height(),
+            "Expanding the window did not enlarge the paper and its sharp raster");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".expanded.png"),
+                "Cannot save the expanded preview snapshot");
+    dialog->resize(900, 560);
+    const auto compactPaper = fittedPaper();
+    require(compactPaper.width() < originalPaper.width() &&
+                compactPaper.height() < originalPaper.height(),
+            "Shrinking the window did not reduce the paper and its sharp raster");
+    require(page->value() == selectedPage && page->maximum() == totalPages,
+            "Window resizing changed the selected page or page count");
+    auto *name = dialog->findChild<QLineEdit *>("drawingName");
+    auto *options = dialog->findChild<QScrollArea *>("drawingOptionsScroll");
+    require(options && options->verticalScrollBar()->isVisible() &&
+                name->height() >= name->minimumSizeHint().height() &&
+                dialog->rect().contains(
+                    QRect(exportButton->mapTo(dialog, QPoint{}), exportButton->size())),
+            "Compact window crushed the input fields or hid the PDF action");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".compact.png"),
+                "Cannot save the compact preview snapshot");
+    next->click();
+    fittedPaper();
+    dialog->resize(normal);
+    layout->setCurrentIndex(0);
+    fittedPaper();
+    require(page->maximum() == basePages && page->value() <= basePages &&
+                navigation->isVisible() == (basePages > 1),
+            "Page count reduction left a stale selector");
+    if (basePages == 1)
+        require(page->value() == 1 && !previous->isEnabled() && !next->isEnabled(),
+                "Single-page layout retained active navigation actions");
+    require(c.drawing() == oldDrawing && !c.hasWork() && exportButton->isEnabled(),
+            "Changing presentation recomputed or invalidated the CAD snapshot");
+    auto *fit = dialog->findChild<QToolButton *>("fitDrawingPageButton");
+    auto *zoom = dialog->findChild<QLabel *>("drawingPreviewZoom");
+    require(fit && zoom && fit->isChecked() && controls->isVisible(),
+            "Missing zoom controls on a single-page or fitted sheet");
+    const auto sharp = [&] {
+        QApplication::processEvents();
+        wait([&] {
+            return preview->pixmap().width() ==
+                   std::clamp(qRound(preview->width() * preview->devicePixelRatioF()), 2, 4096);
+        });
+    };
+    const auto wheel = [&](QWidget *target, int delta, const QPoint &position,
+                           bool pixels = false) {
+        QWheelEvent event(QPointF(position), QPointF(target->mapToGlobal(position)),
+                          pixels ? QPoint(0, delta) : QPoint{},
+                          pixels ? QPoint{} : QPoint(0, delta), Qt::NoButton, Qt::NoModifier,
+                          Qt::NoScrollPhase, false);
+        QApplication::sendEvent(target, &event);
+        QApplication::processEvents();
+    };
+    const auto anchor = scroll->viewport()->rect().center() + QPoint(40, 20);
+    const auto point = preview->mapFrom(scroll->viewport(), anchor);
+    const auto beforeZoom = preview->size();
+    wheel(preview, 120, point);
+    sharp();
+    const auto after = preview->mapFrom(scroll->viewport(), anchor);
+    require(
+        preview->width() > beforeZoom.width() && !fit->isChecked() &&
+            scroll->horizontalScrollBar()->isVisible() &&
+            scroll->verticalScrollBar()->isVisible() &&
+            std::abs(after.x() * double(beforeZoom.width()) / preview->width() - point.x()) < 2 &&
+            std::abs(after.y() * double(beforeZoom.height()) / preview->height() - point.y()) < 2,
+        "Wheel zoom failed to enlarge the sheet around the cursor");
+    auto *horizontal = scroll->horizontalScrollBar();
+    auto *vertical = scroll->verticalScrollBar();
+    horizontal->setValue(horizontal->maximum() / 2);
+    vertical->setValue(vertical->maximum() / 2);
+    const QPoint oldScroll(horizontal->value(), vertical->value());
+    const QPoint dragDelta(std::min(20, horizontal->maximum() / 4),
+                           std::min(15, vertical->maximum() / 4));
+    const auto mouse = [&](QEvent::Type type, const QPoint &position, Qt::MouseButton button,
+                           Qt::MouseButtons buttons) {
+        QMouseEvent event(type, QPointF(position),
+                          QPointF(scroll->viewport()->mapToGlobal(position)), button, buttons,
+                          Qt::NoModifier);
+        QApplication::sendEvent(scroll->viewport(), &event);
+    };
+    mouse(QEvent::MouseButtonPress, anchor, Qt::LeftButton, Qt::LeftButton);
+    mouse(QEvent::MouseMove, anchor - dragDelta, Qt::NoButton, Qt::LeftButton);
+    mouse(QEvent::MouseButtonRelease, anchor - dragDelta, Qt::LeftButton, Qt::NoButton);
+    require(horizontal->value() == oldScroll.x() + dragDelta.x() &&
+                vertical->value() == oldScroll.y() + dragDelta.y(),
+            "Dragging did not move the enlarged sheet");
+    const auto manualSize = preview->size();
+    dialog->resize(normal + QSize(80, 60));
+    QApplication::processEvents();
+    require(preview->size() == manualSize, "Window resize overrode manual zoom");
+    dialog->resize(normal);
+    for (int i = 0; i < 8; ++i)
+        wheel(scroll->viewport(), 480, anchor);
+    sharp();
+    require(zoom->text() == QStringLiteral("400%") && preview->pixmap().width() <= 4096,
+            "Zoom exceeded its scale or raster memory limit");
+    clearOfPaper();
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".zoom.png"), "Cannot save zoomed preview");
+    for (int i = 0; i < 10; ++i)
+        wheel(scroll->viewport(), -480, anchor);
+    sharp();
+    require(zoom->text() == QStringLiteral("10%"), "Zoom-out did not stop at its minimum");
+    const auto smallWidth = preview->width();
+    wheel(scroll->viewport(), 25, anchor, true);
+    require(preview->width() > smallWidth, "Pixel-delta touchpad gesture did not zoom");
+    fit->click();
+    fittedPaper();
+    require(fit->isChecked() && c.drawing() == oldDrawing && !c.hasWork() &&
+                c.session().editRevision() == revision,
+            "Fit/zoom/pan changed CAD or the project");
+    dialog->findChild<QLineEdit *>("drawingExecution")->setText(QStringLiteral("Исполнение Л"));
+    inspected = !dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().isNull() &&
+                c.session().editRevision() == revision;
+    if (!snapshot.isEmpty()) {
+        if (page->maximum() > 1)
+            page->setValue(page->maximum());
+        scroll->setFocus();
+        QApplication::processEvents();
+        inspected = inspected && dialog->grab().save(snapshot);
+    }
+    layout->setCurrentIndex(1);
+    page->setValue(page->maximum());
+    exportedPages = page->maximum();
+    require(exportedPages > 1 && c.drawing() == oldDrawing && !c.hasWork() &&
+                c.session().editRevision() == revision,
+            "Page changes recomputed CAD or changed the project");
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_OUTPUT");
+    const auto target = output.isEmpty() ? folder + "/ui.pdf" : output;
+    QTimer::singleShot(30, dialog, [target] {
+        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+        if (!file)
+            return;
+        file->setOption(QFileDialog::DontConfirmOverwrite, true);
+        file->selectFile(target);
+        if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
+            input->setText(target);
+        QTimer::singleShot(
+            0, file, [file] { QMetaObject::invokeMethod(file, "accept", Qt::DirectConnection); });
+    });
+    exportButton->click();
+    pdf = QFile::exists(target);
+    dialog->findChild<QComboBox *>("drawingOrientation")->setCurrentIndex(1);
+    require(!controls->isVisible() && !navigation->isVisible() && !previous->isEnabled() &&
+                !next->isEnabled() && preview->pixmap().isNull() && !exportButton->isEnabled(),
+            "Invalidated views retained an active page navigator or stale paper");
+    QPointer<QDialog> closedDialog = dialog;
+    dialog->reject();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    require(closedDialog.isNull(), "Closed drawing window retained its widgets");
     require(inspected && pdf, "Dialog/quantity/PDF workflow failed");
     {
         const auto output = qEnvironmentVariable("BENDING_DRAWING_OUTPUT");
@@ -1437,12 +1523,36 @@ void workflow(const QString &folder) {
     const auto old = c.drawing();
     require(c.prepareDrawing(builder, {}) && !c.hasWork() && c.drawing() == old,
             "Reopening recomputed current drawing");
+    action->trigger();
+    QPointer<QDialog> reopened = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(reopened && reopened->isVisible(), "Closed drawing window cannot be reopened");
+    wait([&] {
+        return !c.hasWork() && reopened->findChild<QPushButton *>("exportDrawingPdf")->isEnabled();
+    });
     require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .5, 1}) && !c.drawing(),
             "Material rule change retained an obsolete PDF snapshot");
-    application::DrawingRequest another;
-    another.reverseView = true;
-    require(c.prepareDrawing(builder, another), "Second drawing did not start");
+    require(reopened->findChild<QLabel *>("drawingPreviewImage")->pixmap().isNull() &&
+                !reopened->findChild<QPushButton *>("exportDrawingPdf")->isEnabled(),
+            "Main-window parameter change left an exportable obsolete sheet");
+    reopened->findChild<QPushButton *>("prepareDrawing")->click();
+    require(c.isPreparingDrawing(), "Second drawing did not start");
+    reopened->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    require(reopened.isNull(), "Closing a busy preview did not delete the window");
+    wait([&] { return !c.hasWork(); });
+    require(!c.drawing(), "Closing a busy preview published its cancelled sheet");
+    action->trigger();
+    QPointer<QDialog> last = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(last, "Cannot reopen the cancelled preview");
+    wait([&] {
+        return !c.hasWork() && last->findChild<QPushButton *>("exportDrawingPdf")->isEnabled();
+    });
+    last->findChild<QComboBox *>("drawingOrientation")->setCurrentIndex(1);
+    last->findChild<QPushButton *>("prepareDrawing")->click();
+    require(c.isPreparingDrawing(), "Drawing did not start before closing the part");
     c.closeDocument();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    require(last.isNull(), "Closing the part left its drawing window open");
     wait([&] { return !c.hasWork(); });
     require(!c.drawing() && !c.session().document(), "Stale drawing published after close");
     window.close();

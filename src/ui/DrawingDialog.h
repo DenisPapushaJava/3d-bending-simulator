@@ -11,7 +11,7 @@ class DrawingDialog final : public QDialog {
     ~DrawingDialog() override;
 
   protected:
-    bool eventFilter(QObject *object, QEvent *event) override;
+    void done(int result) override;
 
   private:
     class Impl;

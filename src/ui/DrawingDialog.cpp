@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -22,6 +23,10 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWheelEvent>
+#include <algorithm>
+#include <cmath>
+#include <functional>
 
 namespace bending::ui {
 namespace {
@@ -30,19 +35,26 @@ class DrawingPreviewArea final : public QScrollArea {
     explicit DrawingPreviewArea(QWidget *parent) : QScrollArea(parent) {
         setObjectName(QStringLiteral("drawingPreviewScroll"));
         setAlignment(Qt::AlignCenter);
-        navigation_ = new QFrame(this);
+        footer_ = new QFrame(this);
+        footer_->setObjectName(QStringLiteral("drawingPreviewControls"));
+        navigation_ = new QWidget(footer_);
         navigation_->setObjectName(QStringLiteral("drawingPageNavigation"));
-        navigation_->setStyleSheet(QStringLiteral(
-            "QFrame#drawingPageNavigation{background:#FFFFFF;border:1px solid #D4DCE2;"
+        footer_->setStyleSheet(QStringLiteral(
+            "QFrame#drawingPreviewControls{background:#FFFFFF;border:1px solid #D4DCE2;"
             "border-radius:10px;}"
             "QToolButton{background:transparent;color:#334155;border:0;border-radius:6px;}"
             "QToolButton:hover{background:#EEF4F5;}"
+            "QToolButton:checked{background:#E5F3F3;}"
             "QToolButton:focus{border:2px solid #087F83;}"
             "QToolButton:disabled{color:#B6BEC7;}"
             "QSpinBox{background:transparent;color:#263542;border:0;padding:2px;}"
             "QSpinBox:focus{background:#E5F3F3;border-radius:4px;}"));
+        auto *bar = new QHBoxLayout(footer_);
+        bar->setContentsMargins(6, 4, 6, 4);
+        bar->setSpacing(8);
+        bar->addWidget(navigation_);
         auto *row = new QHBoxLayout(navigation_);
-        row->setContentsMargins(6, 4, 6, 4);
+        row->setContentsMargins(0, 0, 0, 0);
         row->setSpacing(4);
         const auto action = [&](const QString &text, const char *name,
                                 const QKeySequence &shortcut) {
@@ -90,14 +102,52 @@ class DrawingPreviewArea final : public QScrollArea {
         setTabOrder(page_, nextButton);
         connect(previous_, &QAction::triggered, page_, &QSpinBox::stepDown);
         connect(next_, &QAction::triggered, page_, &QSpinBox::stepUp);
+        zoomLabel_ = new QLabel(footer_);
+        zoomLabel_->setObjectName(QStringLiteral("drawingPreviewZoom"));
+        zoomLabel_->setAlignment(Qt::AlignCenter);
+        zoomLabel_->setMinimumWidth(48);
+        zoomLabel_->setToolTip(QStringLiteral("Масштаб предпросмотра. Изменяется колёсиком мыши."));
+        bar->addWidget(zoomLabel_);
+        fit_ =
+            action(QStringLiteral("Вписать"), "fitDrawingPage", QKeySequence(Qt::CTRL | Qt::Key_0));
+        fit_->setCheckable(true);
+        auto *fitButton = new QToolButton(footer_);
+        fitButton->setObjectName(QStringLiteral("fitDrawingPageButton"));
+        fitButton->setDefaultAction(fit_);
+        fitButton->setMinimumHeight(32);
+        bar->addWidget(fitButton);
+        connect(fit_, &QAction::triggered, this, [this] {
+            fitToWindow_ = true;
+            fitPaper();
+        });
+        auto *zoomIn = action(QStringLiteral("Увеличить"), "zoomInDrawingPage",
+                              QKeySequence(Qt::CTRL | Qt::Key_Plus));
+        zoomIn->setShortcuts(
+            {QKeySequence(Qt::CTRL | Qt::Key_Plus), QKeySequence(Qt::CTRL | Qt::Key_Equal)});
+        auto *zoomOut = action(QStringLiteral("Уменьшить"), "zoomOutDrawingPage",
+                               QKeySequence(Qt::CTRL | Qt::Key_Minus));
+        connect(zoomIn, &QAction::triggered, this,
+                [this] { zoomAt(1.2, viewport()->rect().center()); });
+        connect(zoomOut, &QAction::triggered, this,
+                [this] { zoomAt(1 / 1.2, viewport()->rect().center()); });
+        viewport()->setToolTip(QStringLiteral("Колесо — масштаб · перетаскивание — перемещение · "
+                                              "Ctrl+0 — вписать лист"));
         viewport()->installEventFilter(this);
         setPageCount(0);
-        setMinimumWidth(navigation_->sizeHint().width() + 32);
+        setMinimumWidth(footer_->sizeHint().width() + 32);
+    }
+    std::function<void()> viewChanged;
+    void setPaper(QWidget *paper) {
+        setWidget(paper);
+        paper->installEventFilter(this);
     }
     QSpinBox *pageControl() const {
         return page_;
     }
     QSize paperSize() const {
+        if (!fitToWindow_)
+            return {paperWidth_,
+                    static_cast<int>(paperWidth_ * DrawingSheet::heightMm / DrawingSheet::widthMm)};
         const auto available = viewport()->size() - QSize(24, 24);
         if (available.width() < 2 || available.height() < 2)
             return {};
@@ -107,8 +157,14 @@ class DrawingPreviewArea final : public QScrollArea {
         return {width, static_cast<int>(width * DrawingSheet::heightMm / DrawingSheet::widthMm)};
     }
     void fitPaper() {
-        if (widget())
+        if (widget() && !paperSize().isEmpty())
             widget()->resize(paperSize());
+        fit_->setChecked(fitToWindow_);
+        zoomLabel_->setText(
+            QStringLiteral("%1%").arg(qRound(paperSize().width() / referenceWidth * 100)));
+        viewport()->setCursor(fitToWindow_ ? Qt::ArrowCursor : Qt::OpenHandCursor);
+        if (viewChanged)
+            viewChanged();
     }
     void setPageCount(int count) {
         const QSignalBlocker blocker(page_);
@@ -121,9 +177,11 @@ class DrawingPreviewArea final : public QScrollArea {
         next_->setEnabled(count > 1 && page_->value() < count);
         page_->setEnabled(count > 1);
         navigation_->setVisible(count > 1);
-        navigation_->adjustSize();
+        footer_->setVisible(count > 0);
+        fit_->setEnabled(count > 0);
+        footer_->adjustSize();
         // Reserve a footer inside the preview frame, outside the paper viewport.
-        setViewportMargins(0, 0, 0, count > 1 ? navigation_->height() + 16 : 0);
+        setViewportMargins(0, 0, 0, count > 0 ? footer_->height() + 16 : 0);
         positionNavigation();
         fitPaper();
     }
@@ -139,21 +197,79 @@ class DrawingPreviewArea final : public QScrollArea {
             positionNavigation();
             fitPaper();
         }
+        if ((object == viewport() || object == widget()) && footer_->isVisible()) {
+            if (event->type() == QEvent::Wheel) {
+                auto *wheel = static_cast<QWheelEvent *>(event);
+                const auto delta = wheel->angleDelta().y() != 0 ? wheel->angleDelta().y()
+                                                                : wheel->pixelDelta().y();
+                if (delta != 0) {
+                    const auto anchor =
+                        viewport()->mapFromGlobal(wheel->globalPosition().toPoint());
+                    zoomAt(std::pow(1.2, std::clamp(delta / 120.0, -4.0, 4.0)), anchor);
+                }
+                wheel->accept();
+                return true;
+            }
+            if (event->type() == QEvent::MouseButtonPress) {
+                const auto *mouse = static_cast<QMouseEvent *>(event);
+                if (mouse->button() == Qt::LeftButton || mouse->button() == Qt::MiddleButton) {
+                    dragging_ = true;
+                    dragPosition_ = mouse->globalPosition().toPoint();
+                    viewport()->setCursor(Qt::ClosedHandCursor);
+                    return true;
+                }
+            } else if (event->type() == QEvent::MouseMove && dragging_) {
+                const auto position = static_cast<QMouseEvent *>(event)->globalPosition().toPoint();
+                const auto delta = position - dragPosition_;
+                horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
+                verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+                dragPosition_ = position;
+                return true;
+            } else if (event->type() == QEvent::MouseButtonRelease && dragging_) {
+                dragging_ = false;
+                viewport()->setCursor(fitToWindow_ ? Qt::ArrowCursor : Qt::OpenHandCursor);
+                return true;
+            }
+        }
         return QScrollArea::eventFilter(object, event);
     }
 
   private:
-    QFrame *navigation_ = nullptr;
+    static constexpr double referenceWidth = DrawingSheet::widthMm * 96 / 25.4;
+    QFrame *footer_ = nullptr;
+    QWidget *navigation_ = nullptr;
+    QLabel *zoomLabel_ = nullptr;
+    QAction *fit_ = nullptr;
+    bool fitToWindow_ = true;
+    bool dragging_ = false;
+    int paperWidth_ = 0;
+    QPoint dragPosition_;
     QSpinBox *page_ = nullptr;
     QAction *previous_ = nullptr;
     QAction *next_ = nullptr;
+    void zoomAt(double factor, const QPoint &anchor) {
+        if (!widget() || !footer_->isVisible() || widget()->width() < 1)
+            return;
+        const auto point = widget()->mapFrom(viewport(), anchor);
+        const QPointF fraction(static_cast<double>(point.x()) / widget()->width(),
+                               static_cast<double>(point.y()) / widget()->height());
+        paperWidth_ = std::clamp(qRound(widget()->width() * factor), qRound(referenceWidth * .1),
+                                 qRound(referenceWidth * 4));
+        fitToWindow_ = false;
+        fitPaper();
+        const auto offset = widget()->mapTo(viewport(), QPoint{}) +
+                            QPoint(qRound(fraction.x() * widget()->width()),
+                                   qRound(fraction.y() * widget()->height())) -
+                            anchor;
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() + offset.x());
+        verticalScrollBar()->setValue(verticalScrollBar()->value() + offset.y());
+    }
     void positionNavigation() {
-        if (!navigation_)
+        if (!footer_)
             return;
         const auto area = viewport()->geometry();
-        navigation_->move(area.left() + (area.width() - navigation_->width()) / 2,
-                          area.bottom() + 9);
-        navigation_->raise();
+        footer_->move(area.left() + (area.width() - footer_->width()) / 2, area.bottom() + 9);
+        footer_->raise();
     }
 };
 } // namespace
@@ -216,7 +332,8 @@ class DrawingDialog::Impl {
             if (fit.isEmpty())
                 return;
             const auto ratio = preview->devicePixelRatioF();
-            const int pixels = std::max(2, qRound(fit.width() * ratio));
+            // Bound the full-page raster while allowing a larger logical zoom.
+            const int pixels = std::clamp(qRound(fit.width() * ratio), 2, 4096);
             const auto current = image->pixmap();
             if (!contentChanged && !current.isNull() && current.width() == pixels &&
                 qFuzzyCompare(current.devicePixelRatioF(), ratio))
@@ -250,6 +367,7 @@ class DrawingDialog::Impl {
                 QStringLiteral("Документ изменился. Откройте лист заново для новой детали."));
         } else if (controller.isPreparingDrawing()) {
             preview->setPageCount(0);
+            image->clear();
             status->setText(QStringLiteral("Подготовка видов и размеров…"));
         } else if (const auto error = controller.drawingError()) {
             preview->setPageCount(0);
@@ -293,9 +411,17 @@ class DrawingDialog::Impl {
                 status->setToolTip(QString::fromStdString(drawing->flatPatternError->detail));
             }
             render();
+        } else {
+            preview->setPageCount(0);
+            image->clear();
+            status->setText(
+                busy ? QStringLiteral("Ожидание завершения текущей операции…")
+                     : QStringLiteral("Данные детали изменены. Нажмите «Сформировать виды»."));
         }
     }
     void build() {
+        if (!controller.session().document() || controller.session().revision() != revision)
+            return;
         application::DrawingRequest request;
         if (base->currentIndex() == 1)
             request.baseFace = selected;
@@ -312,6 +438,9 @@ DrawingDialog::DrawingDialog(ImportController &c,
                              std::shared_ptr<const application::BendingDrawingBuilder> builder,
                              std::optional<std::size_t> selected, QWidget *parent)
     : QDialog(parent), impl_(std::make_unique<Impl>(c, std::move(builder), selected)) {
+    setWindowFlags(Qt::Window | Qt::WindowTitleHint | Qt::WindowSystemMenuHint |
+                   Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint);
+    setWindowModality(Qt::NonModal);
     setObjectName(QStringLiteral("bendingDrawingDialog"));
     setWindowTitle(QStringLiteral("Лист гибки из STEP"));
     resize(1200, 720);
@@ -393,6 +522,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     optionLayout->addWidget(scope);
     optionLayout->addStretch();
     impl_->exportPdf = new QPushButton(QStringLiteral("Сохранить PDF…"), panel);
+    impl_->exportPdf->setEnabled(false);
     impl_->exportPdf->setObjectName(QStringLiteral("exportDrawingPdf"));
     impl_->exportPdf->setMinimumHeight(40);
     left->addWidget(impl_->exportPdf);
@@ -406,19 +536,19 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->image->setObjectName(QStringLiteral("drawingPreviewImage"));
     impl_->image->setAlignment(Qt::AlignCenter);
     impl_->image->setScaledContents(true);
-    impl_->image->setToolTip(QStringLiteral("Лист автоматически вписывается в размер окна"));
-    scroll->setWidget(impl_->image);
+    scroll->setPaper(impl_->image);
     impl_->refit = new QTimer(this);
     impl_->refit->setSingleShot(true);
     impl_->refit->setInterval(80);
     connect(impl_->refit, &QTimer::timeout, this, [this] { impl_->render(false); });
-    scroll->viewport()->installEventFilter(this);
+    scroll->viewChanged = [this] { impl_->refit->start(); };
     layout->addWidget(panel);
     layout->addWidget(scroll, 1);
     // No edit signal runs before all controls and the preview exist.
     const auto utf8 = c.session().document()->metadata().sourcePath.stem().u8string();
     impl_->name->setText(QString::fromUtf8(reinterpret_cast<const char *>(utf8.data()),
                                            static_cast<qsizetype>(utf8.size())));
+    setWindowTitle(QStringLiteral("Лист гибки — %1").arg(impl_->name->text()));
     connect(impl_->quantity, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
     connect(impl_->layoutMode, &QComboBox::currentIndexChanged, this, [this] { impl_->refresh(); });
     connect(impl_->page, &QSpinBox::valueChanged, this, [this] {
@@ -430,7 +560,14 @@ DrawingDialog::DrawingDialog(ImportController &c,
     for (auto *check : {impl_->reverse, impl_->breaks})
         connect(check, &QCheckBox::toggled, this, [this] { impl_->invalidate(); });
     connect(impl_->prepare, &QPushButton::clicked, this, [this] { impl_->build(); });
-    connect(&c, &ImportController::stateChanged, this, [this] { impl_->refresh(); });
+    connect(&c, &ImportController::stateChanged, this, [this] {
+        if (!impl_->controller.session().document() ||
+            impl_->revision != impl_->controller.session().revision()) {
+            reject();
+            return;
+        }
+        impl_->refresh();
+    });
     connect(impl_->exportPdf, &QPushButton::clicked, this, [this] {
         if (!impl_->exportPdf->isEnabled())
             return;
@@ -454,13 +591,14 @@ DrawingDialog::DrawingDialog(ImportController &c,
     });
     QTimer::singleShot(0, this, [this] { impl_->build(); });
 }
-bool DrawingDialog::eventFilter(QObject *object, QEvent *event) {
-    if (object == impl_->preview->viewport() && event->type() == QEvent::Resize)
-        impl_->refit->start();
-    return QDialog::eventFilter(object, event);
-}
-DrawingDialog::~DrawingDialog() {
-    if (impl_->controller.isPreparingDrawing())
+void DrawingDialog::done(int result) {
+    impl_->refit->stop();
+    const bool cancel = impl_->started && impl_->controller.isPreparingDrawing() &&
+                        impl_->controller.session().revision() == impl_->revision;
+    impl_->started = false;
+    if (cancel)
         impl_->controller.cancelDrawing();
+    QDialog::done(result);
 }
+DrawingDialog::~DrawingDialog() = default;
 } // namespace bending::ui
