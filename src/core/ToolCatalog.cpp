@@ -56,7 +56,8 @@ bool validToolPreset(const ToolPreset &t) {
         !text(t.source, 2048) || !text(t.notes, 4096, true) ||
         !size(t.lengthMm, t.parametersConfirmed ? 1 : 0, 100000) ||
         (t.drawing && !validToolDrawing(*t.drawing)) ||
-        (t.heightMm && !size(*t.heightMm, .1, 100000))) {
+        (t.heightMm && !size(*t.heightMm, .1, 100000)) ||
+        (t.segments && !validToolSegments(*t.segments))) {
         return false;
     }
     if (!t.grooveSettings.empty()) {
@@ -130,13 +131,23 @@ std::optional<PressTools> toolParameters(const ToolAssignment &a) {
     }
     if (a.useDrawingGeometry && !drawingToolGeometry(a))
         return {};
+    const auto punchLength = toolLength(a.punch, a.punchAssembly);
+    const auto dieLength = toolLength(a.die, a.dieAssembly);
+    if (!punchLength || !dieLength)
+        return {};
     PressTools result{a.die.openingsMm[a.groove],
                       dieGroove(a.die, a.groove)->angleRadians,
                       a.punch.angleRadians,
                       *a.punch.noseRadiusMm,
-                      a.die.lengthMm,
+                      *dieLength,
                       a.clearanceMm,
-                      a.punch.lengthMm};
+                      *punchLength};
     return validPressTools(result) ? std::optional{result} : std::nullopt;
+}
+std::optional<double> toolLength(const ToolPreset &tool,
+                                 const std::optional<ToolAssembly> &assembly) {
+    if (assembly)
+        return tool.segments ? assemblyLength(*tool.segments, *assembly) : std::nullopt;
+    return tool.segments ? std::nullopt : std::optional{tool.lengthMm};
 }
 } // namespace bending::core

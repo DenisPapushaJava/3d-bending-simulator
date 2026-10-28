@@ -4,6 +4,9 @@
 #include <array>
 #include <stop_token>
 namespace bending::cad {
+TopoDS_Shape segmentToolBody(const TopoDS_Shape &, const core::ToolPreset &,
+                             const std::optional<core::ToolAssembly> &, double startZ,
+                             std::stop_token);
 // Private immutable source contours; independently built bodies, never the imported STEP.
 std::array<TopoDS_Shape, 2> makeDrawingTools(const core::ToolAssignment &,
                                              const core::ToolGeometry &, double tipY);

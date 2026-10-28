@@ -877,7 +877,7 @@ void testSingleBendWorkflow(bool graphics) {
         throw std::runtime_error(controller.bendPreviewError()->detail);
     }
     require(controller.bendPreview() && slider->isEnabled() && slider->maximum() == 20 &&
-                status->text().contains(QStringLiteral("Заготовка")) &&
+                status->text().contains(QStringLiteral("Местные габариты")) &&
                 !controller.session().modified() && controller.session().document() == source,
             "Preview changed source or lost blank parameters");
     const auto snapshot = [&](const char *suffix) {
@@ -1103,8 +1103,8 @@ void testSingleBendWorkflow(bool graphics) {
     controller.open(std::filesystem::path(BENDING_EXAMPLE_DIR) / "channel-2mm.step");
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
-    require(!prepare->isEnabled() && !controller.bendPreview(),
-            "Multi-bend solid enabled single-bend preview");
+    require(prepare->isEnabled() && !controller.bendPreview(),
+            "A selected complete bend of a multi-bend solid is unavailable");
     controller.open(path);
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
@@ -1410,8 +1410,8 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
                 "Cannot confirm approximate bend");
         applyTarget->click();
         const auto edits = controller.session().editRevision();
-        require(prepare->isEnabled() == (count == 1) && applyTools->isEnabled() == (count == 1),
-                "Multiple bends bypassed single bend limit");
+        require(prepare->isEnabled() && applyTools->isEnabled(),
+                "A selected complete bend of the whole part is disabled");
         require(window.findChild<QLabel *>(QStringLiteral("bendPreviewStatus"))
                     ->text()
                     .contains(QStringLiteral("ПРИБЛИЖЕНИЕ")),

@@ -1,14 +1,19 @@
 #include "bending/cad/occt/DrawingTools.h"
 #include "bending/cad/ToolProfileValidation.h"
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_TrimmedCurve.hxx>
@@ -16,6 +21,7 @@
 #include <ShapeExtend_Status.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <algorithm>
 #include <cmath>
 #include <gp_Vec.hxx>
@@ -98,20 +104,65 @@ std::array<TopoDS_Shape, 2> makeDrawingTools(const core::ToolAssignment &a,
     std::array<TopoDS_Shape, 2> result;
     if (g.hasDie)
         result[0] = sectionPrism(core::activeDieDrawing(a.die, a.groove)->edges, g.dieTopCentre, 0,
-                                 a.die.lengthMm, 0);
+                                 *core::toolLength(a.die, a.dieAssembly), 0);
     if (g.hasPunch)
-        result[1] = sectionPrism(a.punch.drawing->edges, g.punchTip, tip, a.punch.lengthMm,
-                                 (a.die.lengthMm - a.punch.lengthMm) / 2);
+        result[1] = sectionPrism(a.punch.drawing->edges, g.punchTip, tip,
+                                 *core::toolLength(a.punch, a.punchAssembly),
+                                 (*core::toolLength(a.die, a.dieAssembly) -
+                                  *core::toolLength(a.punch, a.punchAssembly)) /
+                                     2);
     return result;
+}
+TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &tool,
+                             const std::optional<core::ToolAssembly> &assembly, double startZ,
+                             std::stop_token stop) {
+    if (!assembly)
+        return whole;
+    if (!tool.segments || !core::assemblyLength(*tool.segments, *assembly))
+        throw std::runtime_error("Invalid tool assembly");
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(whole, box, false, false);
+    const auto lo = box.CornerMin(), hi = box.CornerMax();
+    BRep_Builder builder;
+    TopoDS_Compound parts;
+    builder.MakeCompound(parts);
+    for (const auto row : assembly->pieces) {
+        if (stop.stop_requested())
+            return {};
+        const double length = (*tool.segments)[row].lengthMm;
+        const auto slab = BRepPrimAPI_MakeBox(gp_Pnt(lo.X() - 1, lo.Y() - 1, startZ),
+                                              hi.X() - lo.X() + 2, hi.Y() - lo.Y() + 2, length)
+                              .Shape();
+        BRepAlgoAPI_Common cut;
+        TopTools_ListOfShape args, tools;
+        args.Append(whole);
+        tools.Append(slab);
+        cut.SetArguments(args);
+        cut.SetTools(tools);
+        cut.SetNonDestructive(true);
+        cut.SetFuzzyValue(1.e-7);
+        cut.Build();
+        if (!cut.IsDone() || cut.HasErrors() || !BRepCheck_Analyzer(cut.Shape()).IsValid())
+            throw std::runtime_error("Cannot build an individual tool segment");
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(cut.Shape(), properties);
+        if (!std::isfinite(properties.Mass()) || std::abs(properties.Mass()) <= 1.e-10)
+            throw std::runtime_error("Tool segment has no valid positive volume");
+        builder.Add(parts, cut.Shape());
+        startZ += length + assembly->gapMm;
+    }
+    return parts;
 }
 TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGeometry &g,
                                double tip, double lift, std::stop_token stop) {
     if (!g.hasPunch || !a.punch.drawing || !std::isfinite(lift) || lift <= 0)
         throw std::runtime_error("Invalid DXF punch lift");
     const auto &p = *a.punch.drawing;
-    const double z = (a.die.lengthMm - a.punch.lengthMm) / 2;
+    const double z =
+        (*core::toolLength(a.die, a.dieAssembly) - *core::toolLength(a.punch, a.punchAssembly)) / 2;
     TopTools_ListOfShape arguments, tools;
-    arguments.Append(sectionPrism(p.edges, g.punchTip, tip, a.punch.lengthMm, z));
+    arguments.Append(
+        sectionPrism(p.edges, g.punchTip, tip, *core::toolLength(a.punch, a.punchAssembly), z));
     // Sweep of a region = original region union the swept boundary. Split circular
     // edges at X extrema: each strip then is the region between y(x) and y(x)+lift.
     for (const auto &e : p.edges) {
@@ -146,7 +197,7 @@ TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGe
                 back.center->y += lift;
             tools.Append(
                 sectionPrism({edge, line(edge.end, upEnd), back, line(upStart, edge.start)},
-                             g.punchTip, tip, a.punch.lengthMm, z));
+                             g.punchTip, tip, *core::toolLength(a.punch, a.punchAssembly), z));
         }
     }
     if (tools.IsEmpty())

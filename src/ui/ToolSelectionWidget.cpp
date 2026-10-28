@@ -2,6 +2,7 @@
 #include "ToolDrawingWidget.h"
 #include "ToolImportDialog.h"
 #include "ToolProfilesWidget.h"
+#include "ToolStockDialog.h"
 #include "bending/core/ToolGeometry.h"
 #include <QCheckBox>
 
@@ -59,6 +60,45 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     recommend_ = new QPushButton(QStringLiteral("Подобрать по детали"), this);
     recommend_->setObjectName(QStringLiteral("recommendTools"));
     layout->addWidget(recommend_);
+    stock_ = new QPushButton(QStringLiteral("Секции и наличие…"), this);
+    stock_->setObjectName("toolStock");
+    stock_->setEnabled(false);
+    layout->addWidget(stock_);
+    segmentGap_ = new QDoubleSpinBox(this);
+    segmentGap_->setObjectName("segmentGapLimit");
+    segmentGap_->setRange(0, 1000);
+    segmentGap_->setDecimals(3);
+    segmentGap_->setPrefix(QStringLiteral("Макс. зазор: "));
+    segmentGap_->setSuffix(QStringLiteral(" мм"));
+    segmentGap_->setValue(preferences()->value("tools/segmentGap", 3).toDouble());
+    segmentGap_->setToolTip(
+        QStringLiteral("Сначала сборка без зазоров. Увеличьте предел, если секций не хватает. "
+                       "Качество гиба в промежутках не рассчитывается."));
+    layout->addWidget(segmentGap_);
+    assemblySummary_ = wrapped(this);
+    assemblySummary_->setObjectName("toolAssemblySummary");
+    layout->addWidget(assemblySummary_);
+    connect(segmentGap_, &QDoubleSpinBox::valueChanged, this, [this] {
+        if (!updating_) {
+            preferences()->setValue("tools/segmentGap", segmentGap_->value());
+            fitAssemblies();
+            changed();
+        }
+    });
+    connect(stock_, &QPushButton::clicked, this, [this] {
+        const auto previous = currentPair();
+        const auto previousMode = mode_->currentIndex();
+        ToolStockDialog dialog(
+            core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_),
+            [this](core::ToolPreset tool) { return saveImportedTool(std::move(tool)); }, this);
+        dialog.exec();
+        updating_ = true;
+        selectPair(previous);
+        mode_->setCurrentIndex(previousMode);
+        updating_ = false;
+        fitAssemblies();
+        changed();
+    });
     recommendation_ = wrapped(this);
     recommendation_->setObjectName(QStringLiteral("toolRecommendation"));
     recommendation_->hide();
@@ -248,16 +288,20 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
                                   "Держатели, станок и допустимая нагрузка не проверяются."));
     setupLayout->addWidget(scope);
     const auto selected = [this] {
-        if (!updating_)
+        if (!updating_) {
+            fitAssemblies();
             chooseDrawingGeometry();
+        }
         changed();
     };
     connect(mode_, &QComboBox::currentIndexChanged, this, selected);
     connect(punch_, &QComboBox::currentIndexChanged, this, selected);
     connect(die_, &QComboBox::currentIndexChanged, this, [this] {
         populateGrooves();
-        if (!updating_)
+        if (!updating_) {
+            fitAssemblies();
             chooseDrawingGeometry();
+        }
         changed();
     });
     connect(groove_, &QComboBox::currentIndexChanged, this, selected);
@@ -351,6 +395,8 @@ std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
                            fields_[5]->value(),
                            machine_->text().toStdString(),
                            realGeometry_->isChecked()};
+    a.punchAssembly = punchAssembly_;
+    a.dieAssembly = dieAssembly_;
     return core::toolParameters(a) ? std::optional{a} : std::nullopt;
 }
 std::optional<core::PressTools> ToolSelectionWidget::parameters() const {
@@ -421,6 +467,8 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
                                     const std::optional<core::ToolAssignment> &a) {
     updating_ = true;
     if (a) {
+        punchAssembly_ = a->punchAssembly;
+        dieAssembly_ = a->dieAssembly;
         selectPreset(punch_, a->punch);
         selectPreset(die_, a->die);
         populateGrooves(a->groove);
@@ -429,6 +477,8 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         realGeometry_->setChecked(a->useDrawingGeometry);
         mode_->setCurrentIndex(0);
     } else if (tools) {
+        punchAssembly_.reset();
+        dieAssembly_.reset();
         const auto &t = *tools;
         const std::array<double, 7> values{t.openingMm,
                                            t.dieAngleRadians * 180 / std::numbers::pi,
@@ -442,6 +492,17 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         realGeometry_->setChecked(false);
         mode_->setCurrentIndex(1);
     } else {
+        // New/unassigned bend: use workshop stock, never a previous project's captured stock.
+        for (auto *combo : {punch_, die_}) {
+            const auto *selected = preset(combo);
+            const auto id = selected ? selected->id : std::string{};
+            const auto end = catalog_.begin() + workshopSize_;
+            const auto found =
+                std::find_if(catalog_.begin(), end, [&](const auto &t) { return t.id == id; });
+            combo->setCurrentIndex(
+                found == end ? 0 : combo->findData(static_cast<int>(found - catalog_.begin())));
+        }
+        fitAssemblies();
         chooseDrawingGeometry();
     }
     updating_ = false;
@@ -467,6 +528,8 @@ void ToolSelectionWidget::selectPair(const Pair &pair) {
     }
     populateGrooves(pair.groove < 0 ? 0 : static_cast<std::size_t>(pair.groove));
     updating_ = wasUpdating;
+    if (!updating_)
+        fitAssemblies();
 }
 void ToolSelectionWidget::refreshFavorites() {
     const QSignalBlocker block(favorites_);
@@ -487,6 +550,39 @@ void ToolSelectionWidget::refreshFavorites() {
     }
 }
 void ToolSelectionWidget::updateDetails() {
+    QStringList assemblyLines;
+    const auto describe = [&](const core::ToolPreset *tool,
+                              const std::optional<core::ToolAssembly> &a, const QString &name) {
+        if (!tool)
+            return;
+        if (!tool->segments) {
+            assemblyLines << name + QStringLiteral(": цельный · %1 мм (наличие не учтено)")
+                                        .arg(tool->lengthMm);
+            return;
+        }
+        if (!a) {
+            assemblyLines << name + QStringLiteral(": нет сборки из указанного наличия. Заполните "
+                                                   "секции или измените предел зазора.");
+            return;
+        }
+        QStringList pieces;
+        for (const auto row : a->pieces)
+            pieces << QString::number((*tool->segments)[row].lengthMm);
+        assemblyLines << name + QStringLiteral(": %1 · общая длина %2 мм · %3 секц. · зазор %4 мм")
+                                    .arg(pieces.join(QStringLiteral(" + ")))
+                                    .arg(*core::toolLength(*tool, a))
+                                    .arg(a->pieces.size())
+                                    .arg(a->gapMm);
+    };
+    describe(preset(punch_), punchAssembly_, QStringLiteral("Пуансон"));
+    describe(preset(die_), dieAssembly_, QStringLiteral("Матрица"));
+    assemblySummary_->setText(assemblyLines.join(QLatin1Char('\n')));
+    assemblySummary_->setMinimumHeight(std::max(0, assemblySummary_->heightForWidth(240)));
+    const auto *stockPunch = preset(punch_), *stockDie = preset(die_);
+    const bool stockConfigured =
+        (stockPunch && stockPunch->segments) || (stockDie && stockDie->segments);
+    assemblySummary_->setVisible(usesCatalog() && stockConfigured);
+    segmentGap_->setVisible(usesCatalog() && stockConfigured);
     recommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
     const auto *selectedPunch = preset(punch_);
     const auto *selectedDie = preset(die_);
@@ -566,11 +662,11 @@ void ToolSelectionWidget::updateDetails() {
                           .arg(title(p))
                           .arg(p.angleRadians * 180 / std::numbers::pi)
                           .arg(*p.noseRadiusMm)
-                          .arg(p.lengthMm)
+                          .arg(*core::toolLength(p, a->punchAssembly))
                           .arg(title(d))
                           .arg(d.openingsMm[a->groove])
                           .arg(core::dieGroove(d, a->groove)->angleRadians * 180 / std::numbers::pi)
-                          .arg(d.lengthMm));
+                          .arg(*core::toolLength(d, a->dieAssembly)));
     details_->setMinimumHeight(details_->heightForWidth(240));
     sources_->setText(text(p.source + "\n" + p.notes + "\n\n" + d.source + "\n" + d.notes));
     sources_->setMinimumHeight(sources_->heightForWidth(240));
@@ -622,8 +718,11 @@ void ToolSelectionWidget::rememberChoice() {
     settings->setValue(QStringLiteral("tools/machine"), machine_->text());
 }
 void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionRequest> request) {
+    const bool different = selectionRequest_ != request;
     if (selectionRequest_ != request) {
         selectionRequest_ = request;
+        if (different)
+            fitAssemblies();
         recommendation_->clear();
         recommendation_->hide();
         updateDetails();
@@ -634,7 +733,9 @@ void ToolSelectionWidget::recommend() {
     if (!selectionRequest_)
         return;
     const core::ToolCatalog workshop(catalog_.begin(), catalog_.begin() + workshopSize_);
-    auto result = core::selectTools(workshop, *selectionRequest_);
+    auto request = *selectionRequest_;
+    request.maximumSegmentGapMm = segmentGap_->value();
+    auto result = core::selectTools(workshop, request);
     std::erase_if(result.candidates, [&](const auto &c) {
         const auto &p = workshop[c.punch], &d = workshop[c.die];
         // A recommendation is a new choice: known drawings will be enabled regardless of
@@ -659,6 +760,8 @@ void ToolSelectionWidget::recommend() {
         const auto &d = workshop[c.die];
         mode_->setCurrentIndex(0);
         selectPair({text(p.id), text(d.id), static_cast<int>(c.groove)});
+        punchAssembly_ = c.punchAssembly ? std::optional{*c.punchAssembly} : std::nullopt;
+        dieAssembly_ = c.dieAssembly ? std::optional{*c.dieAssembly} : std::nullopt;
         chooseDrawingGeometry();
         changed();
         message = QStringLiteral("Предварительно: %1 / %2 · V %3 мм (%4 толщин). Вариантов: %5. "
@@ -669,12 +772,33 @@ void ToolSelectionWidget::recommend() {
                       .arg(result.candidates.size());
     }
     recommendation_->setText(message);
+    if (result.segmentSearchLimited)
+        recommendation_->setText(message +
+                                 QStringLiteral(" Достигнут предел поиска секций; отсутствие "
+                                                "варианта не означает невозможность сборки."));
     recommendation_->setToolTip(QStringLiteral(
         "Отбор по длине гиба, углу и радиусу носика. V ближе к 8t — ориентир ранжирования, не "
         "расчёт материала. Учебный инструмент и записи без подтверждённых параметров исключены. "
         "Материал, усилие, пружинение и крепления не проверены."));
     recommendation_->setMinimumHeight(recommendation_->heightForWidth(240));
     recommendation_->show();
+}
+void ToolSelectionWidget::fitAssemblies() {
+    punchAssembly_.reset();
+    dieAssembly_.reset();
+    if (!selectionRequest_)
+        return;
+    const auto fit = [&](const core::ToolPreset *tool,
+                         std::optional<core::ToolAssembly> &assembly) {
+        if (!tool || !tool->segments)
+            return;
+        const auto plan = core::planToolSegments(*tool->segments, selectionRequest_->bendLengthMm,
+                                                 200000, segmentGap_->value());
+        if (plan.status == core::SegmentPlanStatus::Complete)
+            assembly = plan.assembly;
+    };
+    fit(preset(punch_), punchAssembly_);
+    fit(preset(die_), dieAssembly_);
 }
 void ToolSelectionWidget::showDrawings() {
     QDialog dialog(this);
@@ -767,6 +891,7 @@ void ToolSelectionWidget::setToolProfileImport(
     profileImporter_ = std::move(importer);
     libraryWriter_ = std::move(writer);
     importDxf_->setEnabled(profileImporter_ && libraryWriter_);
+    stock_->setEnabled(static_cast<bool>(libraryWriter_));
 }
 void ToolSelectionWidget::importDxf() {
     if (!controller_ || !profileImporter_ || !libraryWriter_)
@@ -830,6 +955,7 @@ QString ToolSelectionWidget::saveImportedTool(core::ToolPreset tool) {
                        QStringLiteral("tools/tool-catalog.json"));
     settings->sync();
     refreshFavorites();
+    fitAssemblies();
     changed();
     return {};
 }

@@ -60,6 +60,7 @@ class ToolSelectionWidget final : public QWidget {
     void selectPair(const Pair &pair);
     void refreshFavorites();
     void recommend();
+    void fitAssemblies();
     void showDrawings();
     void importCatalog();
     void importDxf();
@@ -85,12 +86,16 @@ class ToolSelectionWidget final : public QWidget {
     QPushButton *enlargeProfiles_;
     QPushButton *drawings_;
     QPushButton *recommend_;
+    QPushButton *stock_;
+    QDoubleSpinBox *segmentGap_;
+    QLabel *assemblySummary_;
     QPushButton *importDxf_;
     QLabel *recommendation_;
     std::optional<core::ToolSelectionRequest> selectionRequest_;
     std::array<QDoubleSpinBox *, 7> fields_{};
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;
+    std::optional<core::ToolAssembly> punchAssembly_, dieAssembly_;
     ImportController *controller_ = nullptr;
     std::shared_ptr<const application::ToolProfileImporter> profileImporter_;
     application::ToolLibraryWriter libraryWriter_;

@@ -392,7 +392,8 @@ void test(const std::filesystem::path &path) {
                         application::BendPreviewErrorCode::UnsupportedGeometry,
                 "Unsupported shape was animated");
     };
-    reject(load(fixtures::channel(), path));
+    const auto channel = load(fixtures::channel(), path);
+    check(preview(channel, false), modelVolume(channel));
     reject(load(fixtures::trimmedBend(), path));
     for (const auto &shape :
          {fixtures::bendWithZoneOpening(), fixtures::bendWithZoneOpening(false)}) {
@@ -400,7 +401,8 @@ void test(const std::filesystem::path &path) {
         check(preview(interrupted, false), modelVolume(interrupted));
         check(preview(interrupted, true), modelVolume(interrupted));
     }
-    reject(load(fixtures::channelWithZoneOpening(), path));
+    const auto interruptedChannel = load(fixtures::channelWithZoneOpening(), path);
+    check(preview(interruptedChannel, false), modelVolume(interruptedChannel));
     reject(load(BRepPrimAPI_MakePrism(
                     BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(), gp_Dir(0, 0, 1)), 0, 20, 0, 20).Face(),
                     gp_Vec(0, 0, 2))

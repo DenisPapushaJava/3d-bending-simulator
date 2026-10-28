@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/core/PressTools.h"
+#include "bending/core/ToolSegments.h"
 
 #include <optional>
 #include <string>
@@ -51,6 +52,7 @@ struct ToolPreset {
     bool parametersConfirmed = true; // False: inventory entry, unavailable for assignment/search.
     std::optional<ToolDrawing> drawing = std::nullopt;
     std::vector<DieGroove> grooveSettings = {}; // Empty: legacy common angle, upright section.
+    std::optional<std::vector<ToolSegment>> segments = std::nullopt; // Null: legacy single tool.
     bool operator==(const ToolPreset &) const = default;
 };
 using ToolCatalog = std::vector<ToolPreset>;
@@ -61,6 +63,8 @@ struct ToolAssignment {
     double clearanceMm = 10;
     std::string machineName;
     bool useDrawingGeometry = false; // Use each known drawing; preserve saved legacy choice.
+    std::optional<ToolAssembly> punchAssembly = std::nullopt;
+    std::optional<ToolAssembly> dieAssembly = std::nullopt;
     bool operator==(const ToolAssignment &) const = default;
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);
@@ -69,4 +73,6 @@ struct ToolAssignment {
 [[nodiscard]] ToolDrawing rotateToolDrawing(const ToolDrawing &, double radians);
 [[nodiscard]] std::optional<ToolDrawing> activeDieDrawing(const ToolPreset &, std::size_t);
 [[nodiscard]] std::optional<PressTools> toolParameters(const ToolAssignment &assignment);
+[[nodiscard]] std::optional<double> toolLength(const ToolPreset &,
+                                               const std::optional<ToolAssembly> &);
 } // namespace bending::core

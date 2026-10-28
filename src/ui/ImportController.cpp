@@ -449,19 +449,18 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
             BendPreviewResult result =
                 BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
             try {
-                result = mode == BendPreviewMode::ToolMotion
-                             ? (assignment && assignment->useDrawingGeometry
-                                    ? builder->buildAssignedToolMotion(document, recognizedIndex,
-                                                                       target, *assignment, stop)
-                                    : builder->buildToolMotion(document, recognizedIndex, target,
-                                                               *tools, stop))
-                         : tools
-                             ? (assignment && assignment->useDrawingGeometry
-                                    ? builder->buildAssignedToolSetup(document, recognizedIndex,
-                                                                      target, *assignment, stop)
-                                    : builder->buildToolSetup(document, recognizedIndex, target,
-                                                              *tools, stop))
-                             : builder->build(document, recognizedIndex, target, fixedSecond, stop);
+                result =
+                    mode == BendPreviewMode::ToolMotion
+                        ? (assignment ? builder->buildAssignedToolMotion(document, recognizedIndex,
+                                                                         target, *assignment, stop)
+                                      : builder->buildToolMotion(document, recognizedIndex, target,
+                                                                 *tools, stop))
+                    : tools
+                        ? (assignment ? builder->buildAssignedToolSetup(document, recognizedIndex,
+                                                                        target, *assignment, stop)
+                                      : builder->buildToolSetup(document, recognizedIndex, target,
+                                                                *tools, stop))
+                        : builder->build(document, recognizedIndex, target, fixedSecond, stop);
             } catch (const std::exception &error) {
                 result = BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
             } catch (...) {

@@ -350,7 +350,7 @@ int main(int argc, char **argv) {
         require(libraryFile.open(QIODevice::ReadOnly), "Read catalogue version");
         auto legacyRoot = QJsonDocument::fromJson(libraryFile.readAll()).object();
         libraryFile.close();
-        require(legacyRoot.value("version").toInt() == 3, "Catalogue version not advanced");
+        require(legacyRoot.value("version").toInt() == 4, "Catalogue version not advanced");
         legacyRoot.insert("version", 2);
         const auto legacyPath = dir.path() + QStringLiteral("/legacy.json");
         write(legacyPath, QJsonDocument(legacyRoot).toJson());

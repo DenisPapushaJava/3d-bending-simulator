@@ -24,6 +24,13 @@ enum class ToolCollisionPair { SheetDie, SheetPunch, DiePunch };
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    // One operation: every other bend remains in its imported formed state.
+    [[nodiscard]] virtual std::size_t otherFormedBends() const noexcept {
+        return 0;
+    }
+    [[nodiscard]] virtual std::array<double, 2> toolSegmentGaps() const noexcept {
+        return {0, 0};
+    }
     [[nodiscard]] virtual bool usesDrawingTools() const noexcept {
         return false;
     }
@@ -72,6 +79,7 @@ enum class BendPreviewErrorCode {
     SupportNotProven,
     ToolIntersection,
     ContactLost,
+    SheetIntersection,
     RetractionNotProven,
     Cancelled,
     Failed
@@ -88,7 +96,7 @@ class SingleBendPreviewBuilder {
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
                            core::ToolAssignment assignment, std::stop_token stop) const {
-        if (assignment.useDrawingGeometry)
+        if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF setup unavailable"};
         const auto tools = core::toolParameters(assignment);
@@ -101,7 +109,7 @@ class SingleBendPreviewBuilder {
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolMotion(DocumentPtr document, std::size_t index, core::BendTarget target,
                             core::ToolAssignment assignment, std::stop_token stop) const {
-        if (assignment.useDrawingGeometry)
+        if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF tool contact unavailable"};
         const auto tools = core::toolParameters(assignment);

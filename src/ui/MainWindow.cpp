@@ -267,7 +267,7 @@ class MainWindow::Impl {
             fillThicknessControls();
         }
         if (newGeometry) {
-            if (document && document->metadata().bendAnalysis.bends.size() == 1)
+            if (document && !document->metadata().bendAnalysis.bends.empty())
                 bendList->setCurrentIndex(bendModel->index(0, 0));
             viewingSource = false;
             propertyTabs->setCurrentIndex(0);
@@ -677,6 +677,10 @@ class MainWindow::Impl {
                 : 0.0;
         const auto approximation =
             preview->ignoresClosedCutouts() ? QStringLiteral("Проверка без вырезов · ") : QString{};
+        const auto gaps = preview->toolSegmentGaps();
+        const auto segmented = (gaps[0] > 0 || gaps[1] > 0)
+                                   ? QStringLiteral("Зазоры инструмента — без расчёта влияния · ")
+                                   : QString{};
         if (preview->collision()) {
             frameLabel->setText(
                 QStringLiteral("Обнаружено столкновение · диагностическое положение"));
@@ -684,7 +688,7 @@ class MainWindow::Impl {
         }
         if (const auto *state = preview->pressState(index)) {
             frameLabel->setText(
-                approximation +
+                approximation + segmented +
                 QStringLiteral("%1 · %2% · поворот %3° · ход пуансона %4 мм")
                     .arg(state->phase == simulation::PressPhase::Approach ? QStringLiteral("Подвод")
                          : state->phase == simulation::PressPhase::Retracting
@@ -712,14 +716,17 @@ class MainWindow::Impl {
         const bool hasInteriorContours =
             document && !document->metadata().bendAnalysis.interiorContourDiagnostics.empty() &&
             document->metadata().closedCutouts.status != ClosedCutoutStatus::Filled;
-        bool supported = document && !hasInteriorContours && row == 0 &&
-                         document->metadata().bendAnalysis.bends.size() == 1 &&
-                         !document->metadata().bendAnalysis.bends[0].trimmedEnds;
+        bool supported =
+            document && !hasInteriorContours && row >= 0 &&
+            static_cast<std::size_t>(row) < document->metadata().bendAnalysis.bends.size() &&
+            !document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)].trimmedEnds;
         bool matchingThickness = true;
         if (supported && session.manualThicknessMm()) {
-            matchingThickness = std::abs(*session.manualThicknessMm() -
-                                         document->metadata().bendAnalysis.bends[0].thicknessMm) <=
-                                document->metadata().bendAnalysis.lengthToleranceMm;
+            matchingThickness =
+                std::abs(*session.manualThicknessMm() -
+                         document->metadata()
+                             .bendAnalysis.bends[static_cast<std::size_t>(row)]
+                             .thicknessMm) <= document->metadata().bendAnalysis.lengthToleranceMm;
         }
         preparePreview->setEnabled(
             previewBuilder && supported && matchingThickness && entry && included(entry->review) &&
@@ -825,6 +832,10 @@ class MainWindow::Impl {
                     ? QStringLiteral("Обнаружено столкновение с инструментом в положении %1. "
                                      "Конфликтующие тела выделены красным.")
                           .arg(failure->frameIndex.value_or(0) + 1)
+                : failure->code == BendPreviewErrorCode::SheetIntersection
+                    ? QStringLiteral("Части детали пересекаются при раскрытии выбранного гиба. "
+                                     "Эта зона не подтверждена как последняя операция; нужен "
+                                     "другой порядок гибов.")
                 : failure->code == BendPreviewErrorCode::ContactLost
                     ? QStringLiteral("Не удалось подтвердить рабочий контакт в положении %1. "
                                      "Просмотр движения не подготовлен.")
@@ -850,10 +861,10 @@ class MainWindow::Impl {
                                      "Выберите диагностику D слева для подсветки.")
                 : failure->code == BendPreviewErrorCode::UnsupportedGeometry
                     ? QStringLiteral(
-                          "Геометрия не поддерживается первым сценарием. Нужна одна "
-                          "целая прямая зона и две плоские полки в пределах ширины сгиба. "
-                          "Отверстия и контур полок сохраняются; геометрия всей детали "
-                          "должна пройти проверку восстановления.")
+                          "Не удалось выделить две части детали по выбранному полному прямому "
+                          "гибу. "
+                          "Полная геометрия должна пройти проверку восстановления; "
+                          "замкнутые связи и подрезанные зоны не раскрываются произвольно.")
                     : QStringLiteral("Не удалось подготовить кинематический просмотр. Исходная "
                                      "деталь сохранена."));
             previewStatus->setToolTip(text(failure->detail));
@@ -890,8 +901,8 @@ class MainWindow::Impl {
             const auto &m = preview->model();
             previewStatus->setText(
                 QStringLiteral(
-                    "Заготовка (габарит): %1 × %2 × %3 мм\nГабарит неподвижной полки: %4 "
-                    "мм\nГабарит подвижной полки: %5 "
+                    "Местные габариты у сгиба: %1 × %2 × %3 мм\nГабарит стороны A: %4 "
+                    "мм\nГабарит стороны B: %5 "
                     "мм\nДуга средней поверхности: %6 мм\n\nСиняя — неподвижная полка; оранжевая — "
                     "зона сгиба; зелёная — подвижная полка.")
                     .arg(number(simulation::blankLengthMm(m)), number(m.widthMm),
@@ -906,10 +917,8 @@ class MainWindow::Impl {
                                      "диагностику D слева. Отверстия и карманы внутри самой "
                                      "зоны пока не поддерживаются для движения.")
                 : !supported ? QStringLiteral(
-                                   "Выберите единственный прямой сгиб детали с двумя "
-                                   "плоскими полками. Отверстия и скошенные края полок допустимы. "
-                                   "Многогибовые детали и подрезанные "
-                                   "торцы пока поддерживаются только для просмотра исходного STEP.")
+                                   "Выберите полный прямой сгиб. Остальная геометрия сохраняется "
+                                   "и участвует в проверке; подрезанные торцы пока не поддержаны.")
                 : entry && !included(entry->review)
                     ? QStringLiteral("Зона исключена или ожидает решения из сохранённого проекта. "
                                      "Откройте параметры выбранного сгиба и выберите участие.")
@@ -976,7 +985,12 @@ class MainWindow::Impl {
             : toolDraftChanged
                 ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                 : QStringLiteral("Деталь и пара инструмента выбраны. Можно проверить гибку."));
+        checkSummary->setMinimumHeight(std::max(0, checkSummary->heightForWidth(240)));
         checkScope->setText(
+            (document && document->metadata().bendAnalysis.bends.size() > 1
+                 ? QStringLiteral("Выбранный гиб — как последняя операция; остальные гибы "
+                                  "сохраняют форму STEP. Полный порядок не проверен.\n")
+                 : QString{}) +
             (preview && preview->usesDrawingTools()
                  ? QStringLiteral("Пуансон: %1. Матрица: %2. ")
                        .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
@@ -987,12 +1001,17 @@ class MainWindow::Impl {
                  ? QStringLiteral("Выбрана форма DXF; результат её проверки ещё не подготовлен. ")
                  : QStringLiteral("Упрощённые рабочие профили. ")) +
             QStringLiteral("Станок, держатели, усилие и пружинение не проверяются.") +
+            (preview && (preview->toolSegmentGaps()[0] > 0 || preview->toolSegmentGaps()[1] > 0)
+                 ? QStringLiteral("\nЗазоры между секциями сохранены в 3D. Местная опора и "
+                                  "качество гиба в промежутках не рассчитываются.")
+                 : QString{}) +
             (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled
                  ? QStringLiteral(
                        "\nВырезы видимы; опоры и зазоры проверяются по заполненной копии. "
                        "Физика и реальная опора у вырезов не проверены.")
                  : QString{}));
         checkScope->setVisible(document != nullptr);
+        checkScope->setMinimumHeight(std::max(0, checkScope->heightForWidth(240)));
         checkBend->setEnabled(applyTools->isEnabled() && toolSelection->parameters().has_value());
         checkBend->setVisible(!preview);
         checkBend->setText(busy ? QStringLiteral("Проверяем…") : QStringLiteral("Проверить гибку"));

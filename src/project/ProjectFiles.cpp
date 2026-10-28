@@ -219,6 +219,10 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
             (!bend.catalogTools->punch.grooveSettings.empty() ||
              !bend.catalogTools->die.grooveSettings.empty()))
             return false;
+        if (version < 10 && bend.catalogTools &&
+            (bend.catalogTools->punch.segments || bend.catalogTools->die.segments ||
+             bend.catalogTools->punchAssembly || bend.catalogTools->dieAssembly))
+            return false;
         if (version == 7 && bend.catalogTools && bend.catalogTools->useDrawingGeometry &&
             (!bend.catalogTools->punch.drawing || !bend.catalogTools->die.drawing))
             return false;
@@ -265,9 +269,10 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (!version.isDouble() ||
         (version.toDouble() != 1.0 && version.toDouble() != 2.0 && version.toDouble() != 3.0 &&
          version.toDouble() != 4.0 && version.toDouble() != 5.0 && version.toDouble() != 6.0 &&
-         version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0)) {
+         version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0 &&
+         version.toDouble() != 10.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 9",
+                           "Supported project format versions are 1 through 10",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -392,7 +397,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 9},
+        {QStringLiteral("version"), 10},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},
