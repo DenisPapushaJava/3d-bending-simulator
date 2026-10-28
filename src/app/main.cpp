@@ -20,10 +20,27 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QPalette>
+#include <QProxyStyle>
 #include <QSslSocket>
 #include <QStatusBar>
 #include <QTimer>
 #include <algorithm>
+
+namespace {
+class ApplicationStyle final : public QProxyStyle {
+  public:
+    ApplicationStyle() : QProxyStyle(QStringLiteral("Fusion")) {}
+
+    int styleHint(StyleHint hint, const QStyleOption *option = nullptr,
+                  const QWidget *widget = nullptr,
+                  QStyleHintReturn *returnData = nullptr) const override {
+        // Windows otherwise paints disabled captions twice, with a shifted light copy.
+        if (hint == SH_EtchDisabledText)
+            return 0;
+        return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+};
+} // namespace
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -41,7 +58,7 @@ int main(int argc, char *argv[]) {
     resource("CSF_SHMessage", "SHMessage");
     resource("CSF_UnitsLexicon", "UnitsAPI/Lexi_Expr.dat");
     resource("CSF_UnitsDefinition", "UnitsAPI/Units.dat");
-    QApplication::setStyle(QStringLiteral("Fusion"));
+    QApplication::setStyle(new ApplicationStyle);
     QPalette palette;
     palette.setColor(QPalette::Window, QColor("#F7F9FB"));
     palette.setColor(QPalette::Base, Qt::white);
