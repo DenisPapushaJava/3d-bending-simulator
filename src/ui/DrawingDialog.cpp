@@ -1,21 +1,145 @@
 #include "DrawingDialog.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
+#include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QEvent>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QFrame>
 #include <QHBoxLayout>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
+#include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace bending::ui {
+namespace {
+class DrawingPreviewArea final : public QScrollArea {
+  public:
+    explicit DrawingPreviewArea(QWidget *parent) : QScrollArea(parent) {
+        setObjectName(QStringLiteral("drawingPreviewScroll"));
+        setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+        navigation_ = new QFrame(this);
+        navigation_->setObjectName(QStringLiteral("drawingPageNavigation"));
+        navigation_->setStyleSheet(QStringLiteral(
+            "QFrame#drawingPageNavigation{background:#FFFFFF;border:1px solid #D4DCE2;"
+            "border-radius:10px;}"
+            "QToolButton{background:transparent;color:#334155;border:0;border-radius:6px;}"
+            "QToolButton:hover{background:#EEF4F5;}"
+            "QToolButton:focus{border:2px solid #087F83;}"
+            "QToolButton:disabled{color:#B6BEC7;}"
+            "QSpinBox{background:transparent;color:#263542;border:0;padding:2px;}"
+            "QSpinBox:focus{background:#E5F3F3;border-radius:4px;}"));
+        auto *row = new QHBoxLayout(navigation_);
+        row->setContentsMargins(6, 4, 6, 4);
+        row->setSpacing(4);
+        const auto action = [&](const QString &text, const char *name,
+                                const QKeySequence &shortcut) {
+            auto *a = new QAction(text, this);
+            a->setObjectName(QLatin1String(name));
+            a->setShortcut(shortcut);
+            a->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+            a->setToolTip(text + QStringLiteral(" · ") +
+                          shortcut.toString(QKeySequence::NativeText));
+            parent->addAction(a);
+            return a;
+        };
+        previous_ = action(QStringLiteral("Предыдущий лист"), "previousDrawingPage",
+                           QKeySequence(Qt::ALT | Qt::Key_Left));
+        next_ = action(QStringLiteral("Следующий лист"), "nextDrawingPage",
+                       QKeySequence(Qt::ALT | Qt::Key_Right));
+        const auto button = [&](QAction *a, Qt::ArrowType direction, const char *name) {
+            auto *b = new QToolButton(navigation_);
+            b->setObjectName(QLatin1String(name));
+            a->setIconText(direction == Qt::LeftArrow ? QStringLiteral("‹") : QStringLiteral("›"));
+            b->setDefaultAction(a);
+            b->setToolButtonStyle(Qt::ToolButtonTextOnly);
+            auto glyphFont = b->font();
+            glyphFont.setPixelSize(24);
+            b->setFont(glyphFont);
+            b->setAccessibleName(a->text());
+            b->setFocusPolicy(Qt::StrongFocus);
+            b->setFixedSize(32, 32);
+            return b;
+        };
+        auto *previousButton = button(previous_, Qt::LeftArrow, "previousDrawingPageButton");
+        row->addWidget(previousButton);
+        page_ = new QSpinBox(navigation_);
+        page_->setObjectName(QStringLiteral("drawingPage"));
+        page_->setRange(1, 1);
+        page_->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        page_->setKeyboardTracking(false);
+        page_->setAlignment(Qt::AlignCenter);
+        page_->setAccessibleName(QStringLiteral("Номер листа предпросмотра"));
+        page_->setToolTip(QStringLiteral("Введите номер листа и нажмите Enter"));
+        row->addWidget(page_);
+        auto *nextButton = button(next_, Qt::RightArrow, "nextDrawingPageButton");
+        row->addWidget(nextButton);
+        setTabOrder(previousButton, page_);
+        setTabOrder(page_, nextButton);
+        connect(previous_, &QAction::triggered, page_, &QSpinBox::stepDown);
+        connect(next_, &QAction::triggered, page_, &QSpinBox::stepUp);
+        viewport()->installEventFilter(this);
+        setPageCount(0);
+        setMinimumWidth(navigation_->sizeHint().width() + 32);
+    }
+    QSpinBox *pageControl() const {
+        return page_;
+    }
+    void setPageCount(int count) {
+        const QSignalBlocker blocker(page_);
+        page_->setRange(1, std::max(1, count));
+        page_->setSuffix(QStringLiteral(" из %1").arg(std::max(1, count)));
+        page_->setFixedWidth(std::max(72, page_->fontMetrics().horizontalAdvance(
+                                              QStringLiteral("%1 из %1").arg(std::max(1, count))) +
+                                              16));
+        previous_->setEnabled(count > 1 && page_->value() > 1);
+        next_->setEnabled(count > 1 && page_->value() < count);
+        page_->setEnabled(count > 1);
+        navigation_->setVisible(count > 1);
+        navigation_->adjustSize();
+        // Reserve a footer inside the preview frame, outside the paper viewport.
+        setViewportMargins(0, 0, 0, count > 1 ? navigation_->height() + 16 : 0);
+        positionNavigation();
+    }
+
+  protected:
+    void resizeEvent(QResizeEvent *event) override {
+        QScrollArea::resizeEvent(event);
+        positionNavigation();
+    }
+    bool eventFilter(QObject *object, QEvent *event) override {
+        if (object == viewport() && event->type() == QEvent::Resize)
+            positionNavigation();
+        return QScrollArea::eventFilter(object, event);
+    }
+
+  private:
+    QFrame *navigation_ = nullptr;
+    QSpinBox *page_ = nullptr;
+    QAction *previous_ = nullptr;
+    QAction *next_ = nullptr;
+    void positionNavigation() {
+        if (!navigation_)
+            return;
+        const auto area = viewport()->geometry();
+        navigation_->move(area.left() + (area.width() - navigation_->width()) / 2,
+                          area.bottom() + 9);
+        navigation_->raise();
+    }
+};
+} // namespace
 class DrawingDialog::Impl {
   public:
     DrawingDialog *dialog;
@@ -33,6 +157,7 @@ class DrawingDialog::Impl {
     QLineEdit *execution;
     QSpinBox *quantity;
     QSpinBox *page;
+    DrawingPreviewArea *preview;
     QLabel *image;
     QLabel *status;
     QPushButton *prepare;
@@ -59,18 +184,24 @@ class DrawingDialog::Impl {
         exportPdf->setEnabled(false);
         status->setText(QStringLiteral("Ориентация изменена. Нажмите «Сформировать виды»."));
         image->clear();
+        preview->setPageCount(0);
     }
     void render() {
         const auto drawing = controller.drawing();
         if (!drawing || settingsChanged || controller.session().revision() != revision)
             return;
-        page->setMaximum(DrawingSheet::pageCount(*drawing, title()));
         try {
+            const auto previousPage = page->value();
+            preview->setPageCount(DrawingSheet::pageCount(*drawing, title()));
+            if (page->value() != previousPage)
+                preview->verticalScrollBar()->setValue(0);
             image->setPixmap(QPixmap::fromImage(DrawingSheet::preview(
                 *drawing, title(), page->value() - 1, std::max(600, dialog->width() - 370))));
             image->adjustSize();
             exportPdf->setEnabled(!controller.hasWork());
         } catch (const std::exception &e) {
+            image->clear();
+            image->adjustSize();
             exportPdf->setEnabled(false);
             status->setText(QString::fromUtf8(e.what()));
         }
@@ -86,12 +217,15 @@ class DrawingDialog::Impl {
         const auto drawing = controller.drawing();
         exportPdf->setEnabled(same && !busy && drawing && !settingsChanged);
         if (!same) {
+            preview->setPageCount(0);
             image->clear();
             status->setText(
                 QStringLiteral("Документ изменился. Откройте лист заново для новой детали."));
         } else if (controller.isPreparingDrawing()) {
+            preview->setPageCount(0);
             status->setText(QStringLiteral("Подготовка видов и размеров…"));
         } else if (const auto error = controller.drawingError()) {
+            preview->setPageCount(0);
             image->clear();
             status->setText(QStringLiteral("Лист не сформирован: %1")
                                 .arg(QString::fromStdString(error->detail)));
@@ -203,10 +337,6 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->breaks->setObjectName(QStringLiteral("drawingAllowBreaks"));
     impl_->breaks->setChecked(true);
     form->addRow(impl_->breaks);
-    impl_->page = new QSpinBox(panel);
-    impl_->page->setObjectName(QStringLiteral("drawingPage"));
-    impl_->page->setRange(1, 1);
-    form->addRow(QStringLiteral("Лист предпросмотра"), impl_->page);
     left->addLayout(form);
     impl_->prepare = new QPushButton(QStringLiteral("Сформировать виды"), panel);
     impl_->prepare->setObjectName(QStringLiteral("prepareDrawing"));
@@ -231,8 +361,9 @@ DrawingDialog::DrawingDialog(ImportController &c,
     auto *close = new QPushButton(QStringLiteral("Закрыть"), panel);
     left->addWidget(close);
     connect(close, &QPushButton::clicked, this, &QDialog::reject);
-    auto *scroll = new QScrollArea(this);
-    scroll->setObjectName(QStringLiteral("drawingPreviewScroll"));
+    auto *scroll = new DrawingPreviewArea(this);
+    impl_->preview = scroll;
+    impl_->page = scroll->pageControl();
     impl_->image = new QLabel(scroll);
     impl_->image->setObjectName(QStringLiteral("drawingPreviewImage"));
     impl_->image->setAlignment(Qt::AlignCenter);
@@ -245,7 +376,10 @@ DrawingDialog::DrawingDialog(ImportController &c,
                                            static_cast<qsizetype>(utf8.size())));
     connect(impl_->quantity, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
     connect(impl_->layoutMode, &QComboBox::currentIndexChanged, this, [this] { impl_->refresh(); });
-    connect(impl_->page, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
+    connect(impl_->page, &QSpinBox::valueChanged, this, [this] {
+        impl_->render();
+        impl_->preview->verticalScrollBar()->setValue(0);
+    });
     for (auto *combo : {impl_->base, impl_->turn})
         connect(combo, &QComboBox::currentIndexChanged, this, [this] { impl_->invalidate(); });
     for (auto *check : {impl_->reverse, impl_->breaks})
