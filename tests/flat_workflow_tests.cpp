@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFile>
@@ -87,6 +88,7 @@ int main(int argc, char **argv) {
         auto &c = window.importController();
         wait([&] { return !c.hasWork(); });
         check(c.session().document() != nullptr, "No document");
+        wait([&] { return window.findChild<QDialog *>("partInputDialog") != nullptr; });
         auto *material = window.findChild<QComboBox *>("sheetMaterial");
         auto *button = window.findChild<QPushButton *>("showFlatPattern");
         auto *custom = window.findChild<QCheckBox *>("customUnfoldK");
@@ -94,6 +96,8 @@ int main(int argc, char **argv) {
         check(material && button && custom && k && material->currentIndex() == 0,
               "Missing material controls or silently selected material");
         material->setCurrentIndex(1);
+        window.findChild<QPushButton *>("partInputContinue")->click();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         check(c.session().modified() &&
                   c.session().unfoldSettings().material == core::SheetMaterial::MildSteel,
               "Material not edited in project");
@@ -168,8 +172,13 @@ int main(int argc, char **argv) {
             viewer->setDimensionsVisible(false);
             viewer->setDimensionsVisible(true);
         }
+        window.findChild<QPushButton *>("editPartInputs")->click();
+        custom = window.findChild<QCheckBox *>("customUnfoldK");
+        k = window.findChild<QDoubleSpinBox *>("unfoldK");
         custom->setChecked(true);
         k->setValue(.42);
+        window.findChild<QPushButton *>("partInputContinue")->click();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         check(!c.flatPattern() && c.session().unfoldSettings().manualK == .42,
               "Rule change retained obsolete flat");
         QTemporaryDir dir;
@@ -184,6 +193,7 @@ int main(int argc, char **argv) {
         check(c.session().unfoldSettings().material == core::SheetMaterial::MildSteel &&
                   c.session().unfoldSettings().manualK == .42 && !c.session().modified(),
               "Material/K not portable");
+        window.setAutomaticPartInputPrompt(false);
         // Malformed rule data is rejected before it can modify the session.
         QFile saved(qtPath(path));
         check(saved.open(QIODevice::ReadOnly), "Cannot read saved project");

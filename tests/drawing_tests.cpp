@@ -1259,6 +1259,7 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
 void workflow(const QString &folder) {
     auto importer = std::make_shared<cad::StepImporter>();
     ui::MainWindow window({"test", "test"}, importer);
+    window.setAutomaticPartInputPrompt(false);
     auto builder = std::make_shared<cad::BendingDrawingBuilder>();
     window.setDrawingBuilder(builder);
     window.show();

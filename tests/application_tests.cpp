@@ -15,8 +15,9 @@ void require(bool value, const char *message) {
 }
 class TestDocument final : public Document {
   public:
-    explicit TestDocument(BendAnalysis analysis = {}) {
+    explicit TestDocument(BendAnalysis analysis = {}, ThicknessAnalysis thickness = {}) {
         metadata_.bendAnalysis = std::move(analysis);
+        metadata_.thickness = std::move(thickness);
     }
     const DocumentMetadata &metadata() const noexcept override {
         return metadata_;
@@ -131,6 +132,45 @@ void testProjectState() {
     analysis.evidence.clear();
     require(!suggestThickness(analysis), "Missing geometry invented a default thickness");
 }
+void testPartInputs() {
+    using namespace bending;
+    DocumentSession s;
+    ThicknessAnalysis thickness{ThicknessStatus::Detected, 6.00000004, 1.e-6, {}};
+    auto doc = std::make_shared<TestDocument>(BendAnalysis{}, thickness);
+    s.complete(s.beginImport("six.step"), DocumentPtr(doc));
+    const auto rev = s.revision(), edit = s.editRevision();
+    core::UnfoldSettings steel{core::SheetMaterial::MildSteel, {}, 1};
+    require(!s.hasPartInputs(), "Missing material was silently filled");
+    require(!s.setPartInputs(rev, edit, 3., steel) && !s.modified() && !s.manualThicknessMm() &&
+                s.unfoldSettings().material == core::SheetMaterial::Unknown,
+            "Conflicting transaction partially edited the session");
+    auto badRule = steel;
+    badRule.referenceVersion = 9;
+    require(!s.setPartInputs(rev, edit, 6., badRule) && s.editRevision() == edit,
+            "Invalid rule committed thickness");
+    require(s.setPartInputs(rev, edit, {}, steel) && s.hasPartInputs() && !s.manualThicknessMm() &&
+                s.editRevision() == edit + 1 &&
+                suggestThickness(s.document()->metadata().thickness) == thickness.thicknessMm,
+            "Auto origin/precision was lost or transaction was not atomic");
+    require(!s.setPartInputs(rev, edit, 6., steel), "Stale edit was applied");
+    auto current = s.editRevision();
+    require(s.setPartInputs(rev, current, {}, steel) && s.editRevision() == current,
+            "Unchanged form invalidates caches");
+    const auto pending = s.beginImport("other.step");
+    require(!s.setPartInputs(rev, current, 6., steel), "Edited during import");
+    s.cancel();
+    s.close();
+    require(!s.setPartInputs(rev, current, 6., steel), "Closed document accepted a draft");
+    s.complete(s.beginImport("unknown.step"), DocumentPtr(std::make_shared<TestDocument>()));
+    require(!s.setPartInputs(s.revision(), s.editRevision(), {}, steel),
+            "Missing thickness was filled with a default");
+    core::UnfoldSettings expert{core::SheetMaterial::Unknown, .42, 1};
+    current = s.editRevision();
+    require(s.setPartInputs(s.revision(), current, 2., expert) && s.hasPartInputs() &&
+                s.manualThicknessMm() == 2. && s.editRevision() == current + 1,
+            "Expert mode or manual thickness was lost");
+    require(!s.complete(pending, DocumentPtr(doc)), "Old request replaced edited part");
+}
 void testBendPreparation() {
     BendAnalysis analysis;
     analysis.status = BendRecognitionStatus::Completed;
@@ -235,6 +275,7 @@ int main() {
     try {
         testSession();
         testProjectState();
+        testPartInputs();
         testBendPreparation();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

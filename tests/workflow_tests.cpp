@@ -157,6 +157,7 @@ void testFileDrop(bool graphics) {
             "Cannot copy file drop fixture");
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1280, 820);
     window.show();
     auto &controller = window.importController();
@@ -256,6 +257,7 @@ void testWorkflow(bool graphics) {
             "Cannot copy Unicode fixture");
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1280, 820);
     window.show();
     auto &controller = window.importController();
@@ -376,6 +378,7 @@ void testWorkflow(bool graphics) {
 void testProjectWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1440, 960);
     window.show();
     auto &controller = window.importController();
@@ -473,6 +476,7 @@ void testInitialThickness(bool graphics, const QString &path, double expected) {
     using namespace bending::application;
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1440, 960);
     auto &controller = window.importController();
     auto *viewer = window.findChild<bending::viewer::ViewerWidget *>();
@@ -555,6 +559,7 @@ void testInitialThickness(bool graphics, const QString &path, double expected) {
 void testBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1360, 900);
     window.show();
     auto &controller = window.importController();
@@ -673,6 +678,7 @@ void testBendPreparationWorkflow(bool graphics) {
     using namespace bending::application;
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1360, 1000);
     window.show();
     auto &controller = window.importController();
@@ -817,6 +823,7 @@ void testSingleBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     const auto builder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files, builder);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1360, 1000);
     window.show();
     auto &controller = window.importController();
@@ -1241,6 +1248,7 @@ void testProfiledBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     const auto builder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files, builder);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1360, 1000);
     window.show();
     auto &controller = window.importController();
@@ -1368,6 +1376,7 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     const auto builder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files, builder);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1360, 1000);
     window.show();
     auto &controller = window.importController();
@@ -1516,6 +1525,7 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
 void testTrimmedBendWorkflow(bool graphics) {
     const auto files = std::make_shared<bending::project::ProjectFiles>();
     bending::ui::MainWindow window({"test", bending::cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1360, 900);
     window.show();
     auto &controller = window.importController();
@@ -1584,6 +1594,7 @@ void testViewportControls(bool graphics) {
     using namespace bending;
     auto files = std::make_shared<project::ProjectFiles>();
     ui::MainWindow window({"test", cad::kernelVersion()}, files, files);
+    window.setAutomaticPartInputPrompt(false);
     window.setDrawingBuilder(std::make_shared<cad::BendingDrawingBuilder>());
     window.resize(1366, 768);
     window.show();
@@ -1699,6 +1710,7 @@ void testGuidedWorkflow(bool graphics) {
     }
     ui::MainWindow window({"test", cad::kernelVersion()}, files, files, builder,
                           std::get<core::ToolCatalog>(catalog));
+    window.setAutomaticPartInputPrompt(false);
     window.resize(1366, 768);
     window.show();
     auto &controller = window.importController();
@@ -2025,6 +2037,7 @@ void testGuidedWorkflow(bool graphics) {
     require(!controller.session().modified(), "Guided save failed");
     // Open without the bundled catalogue: the saved definitions are sufficient.
     ui::MainWindow restored({"test", cad::kernelVersion()}, files, files, builder);
+    restored.setAutomaticPartInputPrompt(false);
     restored.show();
     restored.openStep(filename);
     waitUntil([&] {

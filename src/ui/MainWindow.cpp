@@ -1,5 +1,6 @@
 #include "bending/ui/MainWindow.h"
 #include "DrawingDialog.h"
+#include "PartInputDialog.h"
 #include "ProcessStepButton.h"
 #include "ToolSelectionWidget.h"
 #include "UpdateDialog.h"
@@ -271,6 +272,7 @@ class MainWindow::Impl {
             viewingSource = false;
             propertyTabs->setCurrentIndex(0);
         }
+        promptPartInputs(newGeometry);
         const bool editable = document && !controller->hasWork();
         thicknessInput->setEnabled(editable);
         applyThickness->setEnabled(editable && thicknessInput->value() > 0.0);
@@ -449,14 +451,47 @@ class MainWindow::Impl {
         }
     }
 
+    void editPartInputs() {
+        if (partInputDialog) {
+            partInputDialog->raise();
+            partInputDialog->activateWindow();
+            return;
+        }
+        if (!controller->session().document() || controller->hasWork())
+            return;
+        partInputDialog = new PartInputDialog(*controller, window);
+        auto *dialog = partInputDialog.data();
+        QObject::connect(dialog, &QDialog::finished, window, [this, dialog] {
+            if (partInputDialog == dialog)
+                partInputDialog.clear();
+        });
+        dialog->show();
+    }
+    void promptPartInputs(bool newGeometry) {
+        // A new request invalidates queued prompts, including a request later cancelled/failed.
+        if (controller->session().activeRequest())
+            ++inputPromptSerial;
+        if (!newGeometry || !automaticInputPrompt || !controller->session().document())
+            return;
+        const auto &session = controller->session();
+        if (!session.projectPath().empty() && session.hasPartInputs())
+            return;
+        const auto serial = ++inputPromptSerial;
+        const auto revision = session.revision();
+        const auto edit = session.editRevision();
+        QTimer::singleShot(0, window, [this, serial, revision, edit] {
+            const auto &current = controller->session();
+            if (automaticInputPrompt && serial == inputPromptSerial &&
+                current.revision() == revision && current.editRevision() == edit &&
+                !controller->hasWork() && !current.activeRequest())
+                editPartInputs();
+        });
+    }
     void showFlat() {
         if (controller->hasWork() || !flatBuilder || !controller->session().document())
             return;
-        const auto &settings = controller->session().unfoldSettings();
-        if (!settings.manualK && settings.material == core::SheetMaterial::Unknown) {
-            propertyTabs->setCurrentIndex(0);
-            material->setFocus();
-            material->showPopup();
+        if (!controller->session().hasPartInputs()) {
+            editPartInputs();
             return;
         }
         stopPlayback();
@@ -469,28 +504,17 @@ class MainWindow::Impl {
         controller->prepareFlatPattern(flatBuilder);
     }
     void refreshFlat() {
-        if (!material)
-            return;
         const auto &s = controller->session();
         const auto settings = s.unfoldSettings();
-        {
-            const QSignalBlocker a(material), b(customK), c(kInput);
-            material->setCurrentIndex(static_cast<int>(settings.material));
-            customK->setChecked(settings.manualK.has_value());
-            if (settings.manualK)
-                kInput->setValue(*settings.manualK);
-        }
         const bool editable = s.document() && !controller->hasWork();
-        material->setEnabled(editable);
-        customK->setEnabled(editable);
-        kInput->setEnabled(editable && customK->isChecked());
+        partInputs->setText(partInputsSummary(s));
+        editInputs->setEnabled(editable);
         flatAction->setEnabled(editable && flatBuilder);
         flatAction->setText(controller->isPreparingFlatPattern()
                                 ? QStringLiteral("Готовим развёртку…")
                             : controller->flatPattern() ? QStringLiteral("Показать развёртку")
-                            : settings.material == core::SheetMaterial::Unknown && !settings.manualK
-                                ? QStringLiteral("Развёртка: выбрать материал…")
-                                : QStringLiteral("Подготовить развёртку"));
+                            : !s.hasPartInputs() ? QStringLiteral("Развёртка: исходные данные…")
+                                                 : QStringLiteral("Подготовить развёртку"));
         for (auto *button : {flatButton, checkFlatButton})
             if (button) {
                 button->setText(flatAction->text());
@@ -1412,9 +1436,11 @@ class MainWindow::Impl {
     std::shared_ptr<const application::FlatPatternBuilder> flatBuilder;
     application::FlatPatternPtr displayedFlat;
     bool wantFlat = false;
-    QComboBox *material = nullptr;
-    QCheckBox *customK = nullptr;
-    QDoubleSpinBox *kInput = nullptr;
+    QLabel *partInputs = nullptr;
+    QPushButton *editInputs = nullptr;
+    QPointer<PartInputDialog> partInputDialog;
+    bool automaticInputPrompt = true;
+    std::uint64_t inputPromptSerial = 0;
     QAction *flatAction = nullptr;
     QPushButton *flatButton = nullptr, *checkFlatButton = nullptr, *flatSource = nullptr,
                 *checkFlatSource = nullptr;
@@ -1733,45 +1759,12 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->properties = label(QStringLiteral("documentProperties"));
     impl_->projectState = label(QStringLiteral("projectState"));
     impl_->thickness = label(QStringLiteral("thicknessProperties"));
-    layout->addWidget(new QLabel(QStringLiteral("Материал для развёртки"), panel));
-    impl_->material = new QComboBox(panel);
-    impl_->material->setObjectName(QStringLiteral("sheetMaterial"));
-    impl_->material->setAccessibleName(
-        QStringLiteral("Материал листа для теоретической развёртки"));
-    impl_->material->addItems({QStringLiteral("Не указан"),
-                               QStringLiteral("Низкоуглеродистая сталь"),
-                               QStringLiteral("Нержавеющая сталь"), QStringLiteral("Алюминий")});
-    layout->addWidget(impl_->material);
-    auto *kToggle = new QToolButton(panel);
-    kToggle->setText(QStringLiteral("Параметры развёртки…"));
-    kToggle->setCheckable(true);
-    layout->addWidget(kToggle);
-    auto *kPanel = new QWidget(panel);
-    auto *kLayout = new QHBoxLayout(kPanel);
-    kLayout->setContentsMargins(0, 0, 0, 0);
-    impl_->customK = new QCheckBox(QStringLiteral("Свой K"), kPanel);
-    impl_->customK->setObjectName(QStringLiteral("customUnfoldK"));
-    impl_->kInput = new QDoubleSpinBox(kPanel);
-    impl_->kInput->setObjectName(QStringLiteral("unfoldK"));
-    impl_->kInput->setRange(0, .5);
-    impl_->kInput->setDecimals(4);
-    impl_->kInput->setSingleStep(.01);
-    impl_->kInput->setValue(.4);
-    kLayout->addWidget(impl_->customK);
-    kLayout->addWidget(impl_->kInput);
-    layout->addWidget(kPanel);
-    kPanel->hide();
-    connect(kToggle, &QToolButton::toggled, kPanel, &QWidget::setVisible);
-    const auto updateUnfold = [this] {
-        auto settings = impl_->controller->session().unfoldSettings();
-        settings.material = static_cast<core::SheetMaterial>(impl_->material->currentIndex());
-        settings.manualK =
-            impl_->customK->isChecked() ? std::optional{impl_->kInput->value()} : std::nullopt;
-        impl_->controller->setUnfoldSettings(settings);
-    };
-    connect(impl_->material, &QComboBox::currentIndexChanged, this, updateUnfold);
-    connect(impl_->customK, &QCheckBox::toggled, this, updateUnfold);
-    connect(impl_->kInput, &QDoubleSpinBox::valueChanged, this, updateUnfold);
+    impl_->partInputs = label(QStringLiteral("partInputsSummary"));
+    impl_->editInputs = new QPushButton(QStringLiteral("Изменить…"), panel);
+    impl_->editInputs->setObjectName(QStringLiteral("editPartInputs"));
+    impl_->editInputs->setAccessibleName(QStringLiteral("Изменить материал и толщину детали"));
+    layout->addWidget(impl_->editInputs);
+    connect(impl_->editInputs, &QPushButton::clicked, this, [this] { impl_->editPartInputs(); });
     impl_->flatAction = new QAction(QStringLiteral("Подготовить развёртку"), this);
     impl_->flatAction->setObjectName(QStringLiteral("flatPatternAction"));
     impl_->flatAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+U")));
@@ -2459,6 +2452,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
 
 MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
+    delete impl_->partInputDialog.data();
     delete impl_->drawingDialog.data();
     delete impl_->updateDialog.data();
     impl_->controller->shutdown();
@@ -2526,5 +2520,14 @@ void MainWindow::setFlatPatternBuilder(
     std::shared_ptr<const application::FlatPatternBuilder> builder) {
     impl_->flatBuilder = std::move(builder);
     impl_->refresh();
+}
+} // namespace bending::ui
+
+namespace bending::ui {
+void MainWindow::setAutomaticPartInputPrompt(bool enabled) {
+    impl_->automaticInputPrompt = enabled;
+    ++impl_->inputPromptSerial;
+    if (!enabled && impl_->partInputDialog)
+        impl_->partInputDialog->reject();
 }
 } // namespace bending::ui

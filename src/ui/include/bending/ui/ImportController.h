@@ -52,6 +52,8 @@ class ImportController final : public QObject {
     [[nodiscard]] bool isPreparingDrawing() const;
     void cancelDrawing();
     bool setUnfoldSettings(core::UnfoldSettings);
+    bool setPartInputs(std::uint64_t revision, std::uint64_t editRevision,
+                       std::optional<double> manualThicknessMm, core::UnfoldSettings);
     bool prepareFlatPattern(std::shared_ptr<const application::FlatPatternBuilder>);
     [[nodiscard]] application::FlatPatternPtr flatPattern() const;
     [[nodiscard]] std::optional<application::FlatPatternError> flatPatternError() const;

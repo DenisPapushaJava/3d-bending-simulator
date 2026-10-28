@@ -212,4 +212,41 @@ bool DocumentSession::setUnfoldSettings(core::UnfoldSettings settings) {
     }
     return true;
 }
+
+bool DocumentSession::hasPartInputs() const {
+    if (!document_ || !core::validUnfoldSettings(unfold_) ||
+        (unfold_.material == core::SheetMaterial::Unknown && !unfold_.manualK))
+        return false;
+    const auto thickness =
+        manualThickness_ ? manualThickness_ : suggestThickness(document_->metadata().thickness);
+    if (!thickness)
+        return false;
+    const auto validation = validateThickness(*thickness, document_->metadata().thickness);
+    return validation != ThicknessValidation::Invalid &&
+           validation != ThicknessValidation::ConflictsWithGeometry;
+}
+
+bool DocumentSession::setPartInputs(std::uint64_t revision, std::uint64_t editRevision,
+                                    std::optional<double> manualThicknessMm,
+                                    core::UnfoldSettings settings) {
+    if (!document_ || active_ || revision != revision_ || editRevision != editRevision_ ||
+        !core::validUnfoldSettings(settings) ||
+        (settings.material == core::SheetMaterial::Unknown && !settings.manualK))
+        return false;
+    const auto thickness =
+        manualThicknessMm ? manualThicknessMm : suggestThickness(document_->metadata().thickness);
+    if (!thickness)
+        return false;
+    const auto validation = validateThickness(*thickness, document_->metadata().thickness);
+    if (validation == ThicknessValidation::Invalid ||
+        validation == ThicknessValidation::ConflictsWithGeometry)
+        return false;
+    if (manualThickness_ != manualThicknessMm || unfold_ != settings) {
+        manualThickness_ = manualThicknessMm;
+        unfold_ = settings;
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
 } // namespace bending::application

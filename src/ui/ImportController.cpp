@@ -552,6 +552,25 @@ void ImportController::cancelDrawing() {
 } // namespace bending::ui
 
 namespace bending::ui {
+bool ImportController::setPartInputs(std::uint64_t revision, std::uint64_t editRevision,
+                                     std::optional<double> manualThicknessMm,
+                                     core::UnfoldSettings settings) {
+    if (impl_->stopping || hasWork())
+        return false;
+    const auto before = impl_->session.editRevision();
+    const auto oldThickness = impl_->session.manualThicknessMm();
+    const bool accepted =
+        impl_->session.setPartInputs(revision, editRevision, manualThicknessMm, settings);
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidateFlat();
+        impl_->invalidateDrawing();
+        if (oldThickness != impl_->session.manualThicknessMm())
+            impl_->invalidatePreview();
+    }
+    emit stateChanged();
+    return accepted;
+}
+
 bool ImportController::setUnfoldSettings(core::UnfoldSettings settings) {
     if (impl_->stopping || hasWork())
         return false;

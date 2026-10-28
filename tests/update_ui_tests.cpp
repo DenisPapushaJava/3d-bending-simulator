@@ -98,6 +98,7 @@ int main(int argc, char **argv) {
         auto files = std::make_shared<project::ProjectFiles>();
         auto writer = std::make_shared<Writer>();
         ui::MainWindow window({"2026.1.0-alpha.1", "test"}, files, writer);
+        window.setAutomaticPartInputPrompt(false);
         window.setUpdateClient(&client);
         window.show();
         QApplication::processEvents();

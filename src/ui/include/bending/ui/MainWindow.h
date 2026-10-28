@@ -34,6 +34,8 @@ class MainWindow final : public QMainWindow {
                core::ToolCatalog catalog = {});
     ~MainWindow() override;
     void openStep(const QString &path);
+    // Interactive imports prompt by default; scripted workflows may collect inputs themselves.
+    void setAutomaticPartInputPrompt(bool enabled);
     [[nodiscard]] ImportController &importController() const;
     void setToolCatalogLoader(
         std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>

@@ -24,6 +24,10 @@ class DocumentSession final {
     [[nodiscard]] ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
     bool setUnfoldSettings(core::UnfoldSettings);
+    // One revision-checked transaction for the part-input form. nullopt preserves auto origin.
+    bool setPartInputs(std::uint64_t revision, std::uint64_t editRevision,
+                       std::optional<double> manualThicknessMm, core::UnfoldSettings);
+    [[nodiscard]] bool hasPartInputs() const;
     [[nodiscard]] const core::UnfoldSettings &unfoldSettings() const {
         return unfold_;
     }
