@@ -18,6 +18,7 @@
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QToolButton>
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
@@ -115,6 +116,29 @@ int main(int argc, char **argv) {
         if (graphics) {
             wait([&] { return viewer->isReady(); });
             check(viewer->dimensionsVisible(), "Flat dimensions are not shown");
+            const auto *dimensions = viewer->findChild<QToolButton *>("showDimensions");
+            check(dimensions != nullptr, "Missing dimensions control");
+            const auto labels = dimensions->accessibleDescription().split(QLatin1Char('\n'));
+            int coordinates = 0, callouts = 0;
+            for (const auto &label : labels) {
+                if (!label.startsWith(QLatin1Char('B')))
+                    continue;
+                if (label.contains(QChar(0x2191)) || label.contains(QChar(0x2193)))
+                    ++callouts;
+                else
+                    ++coordinates;
+            }
+            check(callouts == static_cast<int>(first->info().bends.size()),
+                  "Flat annotations lost individual bend IDs");
+            if (app.arguments().contains(QStringLiteral("--expect-coordinate-rows"))) {
+                bool ok = false;
+                const auto expected =
+                    app.arguments()
+                        .at(app.arguments().indexOf(QStringLiteral("--expect-coordinate-rows")) + 1)
+                        .toInt(&ok);
+                check(ok && coordinates == expected,
+                      "Coincident bend coordinates were not grouped");
+            }
             wait([&] { return !viewer->captureImage().isNull(); });
             if (const auto output = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT");
                 !output.isEmpty()) {

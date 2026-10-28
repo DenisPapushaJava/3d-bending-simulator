@@ -159,12 +159,42 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
            QStringLiteral("Ширина %1 мм").arg(number(hi.x)), height);
     length(result, {0, 0, hi.z}, {0, hi.y, hi.z}, {-gap, 0, 0},
            QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), height);
-    for (std::size_t i = 0; i < info.bends.size(); ++i) {
-        const auto &b = info.bends[i];
+    const auto bendId = [](std::size_t index) {
+        return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
+    };
+    struct CoordinateRow {
+        double y;
+        std::vector<std::size_t> ids;
+    };
+    std::vector<CoordinateRow> rows;
+    for (const auto &b : info.bends) {
         const double y = (b.firstY + b.secondY) / 2;
-        const auto id = QStringLiteral("B%1").arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'));
-        length(result, {hi.x, 0, hi.z}, {hi.x, y, hi.z}, {gap * (1 + i * .65), 0, 0},
-               QStringLiteral("%1 · %2 мм").arg(id, number(y)), height, bendColor);
+        auto row = std::find_if(rows.begin(), rows.end(),
+                                [&](const auto &r) { return std::abs(r.y - y) <= 1e-5; });
+        if (row == rows.end())
+            rows.push_back({y, {b.bendIndex}});
+        else
+            row->ids.push_back(b.bendIndex);
+    }
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) { return a.y < b.y; });
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        auto &row = rows[i];
+        std::sort(row.ids.begin(), row.ids.end());
+        QString ids;
+        if (row.ids.size() > 1 && row.ids.back() - row.ids.front() + 1 == row.ids.size())
+            ids = bendId(row.ids.front()) + QChar(0x2013) + bendId(row.ids.back());
+        else {
+            QStringList names;
+            for (auto id : row.ids)
+                names << bendId(id);
+            ids = names.join(QLatin1Char('/'));
+        }
+        length(result, {hi.x, 0, hi.z}, {hi.x, row.y, hi.z}, {gap * (1 + i * .65), 0, 0},
+               QStringLiteral("%1 · %2 мм").arg(ids, number(row.y)), height, bendColor);
+    }
+    for (const auto &b : info.bends) {
+        const double y = (b.firstY + b.secondY) / 2;
+        const auto id = bendId(b.bendIndex);
         callout(result, {b.minimumX, y, hi.z}, -layout.right * 1.8 + layout.up * .3,
                 QStringLiteral("%1 %2 · %3° · L %4 мм")
                     .arg(id, b.direction > 0 ? QStringLiteral("↑") : QStringLiteral("↓"),
