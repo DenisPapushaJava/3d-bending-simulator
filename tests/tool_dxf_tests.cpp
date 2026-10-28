@@ -1,0 +1,364 @@
+#include "ToolFixtures.h"
+#include "bending/core/ToolGeometry.h"
+#include "bending/project/DxfToolImporter.h"
+#include "bending/project/ProjectFiles.h"
+#include "bending/project/ToolCatalog.h"
+#include "bending/ui/ImportController.h"
+#include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
+#include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPointer>
+#include <QPushButton>
+#include <QTemporaryDir>
+#include <QThread>
+#include <QTimer>
+#include <atomic>
+#include <iostream>
+#include <stdexcept>
+using namespace bending;
+void require(bool b, const char *s) {
+    if (!b)
+        throw std::runtime_error(s);
+}
+void pump() {
+    QApplication::processEvents();
+    QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+void wait(const std::function<bool()> &f) {
+    QElapsedTimer t;
+    t.start();
+    while (!f() && t.elapsed() < 30000) {
+        pump();
+        QThread::msleep(2);
+    }
+    require(f(), "Timeout");
+    pump();
+}
+std::filesystem::path native(const QString &s) {
+#ifdef _WIN32
+    return std::filesystem::path(s.toStdWString());
+#else
+    return std::filesystem::path(s.toUtf8().constData());
+#endif
+}
+QByteArray tag(int c, const QByteArray &v) {
+    return QByteArray::number(c) + '\n' + v + '\n';
+}
+QByteArray tag(int c, double v) {
+    return tag(c, QByteArray::number(v, 'g', 16));
+}
+QByteArray wrap(const QByteArray &entities, int units = 4) {
+    return "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n" + tag(70, units) +
+           "0\nENDSEC\n0\nSECTION\n2\nENTITIES\n" + entities + "0\nENDSEC\n0\nEOF\n";
+}
+QByteArray poly(const core::ToolDrawing &d, const QByteArray &layer = "PROFILE") {
+    QByteArray s = "0\nLWPOLYLINE\n" + tag(8, layer) +
+                   tag(90, static_cast<double>(d.edges.size())) + tag(70, 1);
+    for (const auto &e : d.edges)
+        s += tag(10, e.start.x) + tag(20, e.start.y) + tag(42, std::tan(e.sweepRadians / 4));
+    return s;
+}
+void write(const QString &path, const QByteArray &bytes) {
+    QFile f(path);
+    require(f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(bytes) == bytes.size(),
+            "Write fixture");
+}
+application::ToolProfileFile load(project::DxfToolImporter &i, const QString &path) {
+    auto r = i.run(native(path), {});
+    if (auto *e = std::get_if<application::ToolProfileError>(&r))
+        throw std::runtime_error(e->message);
+    return std::get<application::ToolProfileFile>(std::move(r));
+}
+bool checked(project::DxfToolImporter &i, core::ToolDrawing d) {
+    d.millimeters = true;
+    return std::holds_alternative<application::CheckedToolProfile>(i.run(d, {}));
+}
+int main(int argc, char **argv) {
+    QApplication app(argc, argv);
+    try {
+        QTemporaryDir dir;
+        require(dir.isValid(), "No temp folder");
+        ui::setPreferencesFile(dir.path() + "/settings.ini");
+        const auto path = dir.path() + QStringLiteral("/Мой профиль.dxf");
+        project::DxfToolImporter importer;
+        if (app.arguments().contains("--inspect")) {
+            for (int i = 2; i < app.arguments().size(); ++i) {
+                auto result = importer.run(native(app.arguments().at(i)), {});
+                if (const auto *e = std::get_if<application::ToolProfileError>(&result)) {
+                    std::cout << QFileInfo(app.arguments().at(i)).fileName().toStdString() << ": "
+                              << e->message << '\n';
+                    continue;
+                }
+                const auto &f = std::get<application::ToolProfileFile>(result);
+                std::cout << QFileInfo(app.arguments().at(i)).fileName().toStdString()
+                          << ": contours=" << f.contours.size()
+                          << " units=" << f.millimetersPerUnit.value_or(0) << '\n';
+                for (const auto &c : f.contours)
+                    std::cout << "  " << c.layer << " edges=" << c.drawing.edges.size()
+                              << " solid_at_1unit_1mm=" << checked(importer, c.drawing) << '\n';
+                for (const auto &n : f.notices)
+                    std::cout << "  " << n << '\n';
+            }
+            return 0;
+        }
+        const auto tools = tool_fixture::pair();
+        write(path, wrap(poly(*tools.punch.drawing)));
+        auto parsed = load(importer, path);
+        require(parsed.millimetersPerUnit == 1 && parsed.contours.size() == 1,
+                "Units/contour count");
+        require(checked(importer, parsed.contours[0].drawing), "Bulge body invalid");
+        require(parsed.contours[0].drawing.sha256.size() == 64 &&
+                    parsed.contours[0].drawing.sourceFile == "Мой профиль.dxf",
+                "Provenance lost");
+        const auto arc = std::find_if(parsed.contours[0].drawing.edges.begin(),
+                                      parsed.contours[0].drawing.edges.end(),
+                                      [](const auto &e) { return e.center.has_value(); });
+        require(arc != parsed.contours[0].drawing.edges.end() &&
+                    std::abs(std::abs(arc->sweepRadians) - 2 * std::numbers::pi / 3) < 1e-10,
+                "Bulge was tessellated or changed");
+        write(
+            path,
+            wrap(poly(*tools.punch.drawing) +
+                     "0\nLINE\n8\nAXES\n10\n0\n20\n0\n11\n100\n21\n0\n0\nTEXT\n8\nNOTES\n1\nTest\n",
+                 0));
+        parsed = load(importer, path);
+        require(!parsed.millimetersPerUnit && parsed.contours.size() == 1 &&
+                    !parsed.notices.empty(),
+                "Unknown units or omissions hidden");
+        write(path, wrap(poly(*tools.punch.drawing) + poly(*tools.die.drawing, "OTHER"), 1));
+        parsed = load(importer, path);
+        require(parsed.millimetersPerUnit == 25.4 && parsed.contours.size() == 2,
+                "Layer candidates lost");
+        const auto rejected = [&](const QByteArray &b) {
+            write(path, b);
+            return std::holds_alternative<application::ToolProfileError>(
+                importer.run(native(path), {}));
+        };
+        require(rejected(wrap(poly(*tools.punch.drawing) + "0\nSPLINE\n8\nPROFILE\n")),
+                "Unsupported same-layer entity silently dropped");
+        require(rejected(wrap("0\nINSERT\n2\nTOOL\n")), "Block interpreted as profile");
+        require(rejected("AutoCAD Binary DXF\r\n"), "Binary accepted");
+        require(rejected("0\nSECTION\n2\nENTITIES\n"), "Truncated DXF accepted");
+        auto wrong = poly(*tools.punch.drawing);
+        wrong.replace("70\n1\n", "70\n9\n");
+        require(rejected(wrap(wrong)), "3D polyline flags accepted");
+        wrong = poly(*tools.punch.drawing) + tag(210, 1);
+        require(rejected(wrap(wrong)), "OCS ignored");
+        wrong = poly(*tools.punch.drawing) + tag(43, 2);
+        require(rejected(wrap(wrong)), "Polyline width ignored");
+        const QByteArray bow = "0\nLWPOLYLINE\n90\n4\n70\n1\n10\n0\n20\n0\n10\n10\n20\n10\n10\n0\n2"
+                               "0\n10\n10\n10\n20\n0\n";
+        write(path, wrap(bow));
+        parsed = load(importer, path);
+        require(!checked(importer, parsed.contours[0].drawing),
+                "Self-crossing contour accepted as a body");
+        const QByteArray oldpoly = "0\nPOLYLINE\n70\n1\n0\nVERTEX\n10\n0\n20\n0\n0\nVERTEX\n10\n10"
+                                   "\n20\n0\n0\nVERTEX\n10\n0\n20\n10\n0\nSEQEND\n";
+        write(path, wrap(oldpoly));
+        require(checked(importer, load(importer, path).contours[0].drawing), "Old POLYLINE failed");
+        const QByteArray arcLines = "0\nARC\n10\n0\n20\n0\n40\n10\n50\n0\n51\n180\n0\nLINE\n10\n-"
+                                    "10\n20\n0\n11\n10\n21\n0\n";
+        write(path, wrap(arcLines));
+        require(checked(importer, load(importer, path).contours[0].drawing),
+                "LINE/ARC ordering failed");
+        auto paper = oldpoly;
+        paper.replace("0\nPOLYLINE\n", "0\nPOLYLINE\n67\n1\n");
+        write(path, wrap(paper + arcLines));
+        require(load(importer, path).contours.size() == 1,
+                "Paper-space polyline vertices corrupted model geometry");
+        const QByteArray precise = "0\nLINE\n10\n0\n20\n0\n11\n10.0000004\n21\n0\n"
+                                   "0\nLINE\n10\n10\n20\n0\n11\n0\n21\n10\n"
+                                   "0\nLINE\n10\n0\n20\n10\n11\n0\n21\n0\n";
+        write(path, wrap(precise));
+        require(checked(importer, load(importer, path).contours[0].drawing),
+                "DXF rounding precision broke closure");
+        auto gap = precise;
+        gap.replace("10.0000004", "10.01");
+        require(rejected(wrap(gap)), "Open gap was silently filled");
+        write(path, wrap("0\nCIRCLE\n10\n0\n20\n0\n40\n10\n"));
+        require(checked(importer, load(importer, path).contours[0].drawing), "CIRCLE failed");
+        std::stop_source stop;
+        stop.request_stop();
+        require(std::holds_alternative<application::ToolProfileError>(
+                    importer.run(native(path), stop.get_token())),
+                "Cancel ignored");
+        write(path, QByteArray(4 * 1024 * 1024 + 1, 'x'));
+        require(
+            std::holds_alternative<application::ToolProfileError>(importer.run(native(path), {})),
+            "Size limit ignored");
+
+        auto files = std::make_shared<project::ProjectFiles>();
+        auto service = std::make_shared<project::DxfToolImporter>();
+        ui::MainWindow window({"test", "test"}, files, files, {},
+                              core::ToolCatalog{tools.punch, tools.die});
+        window.setAutomaticPartInputPrompt(false);
+        window.setToolProfileImport(service, project::writeToolCatalog);
+        window.show();
+        auto &controller = window.importController();
+        window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                        QStringLiteral("/bend-90-6mm.step"));
+        wait([&] { return !controller.hasWork(); });
+        auto *button = window.findChild<QPushButton *>("importToolDxf");
+        require(button && button->isEnabled(), "DXF entry unavailable");
+        write(path, wrap(poly(*tools.punch.drawing), 0));
+        bool completed = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = QApplication::activeModalWidget();
+            require(dialog, "No import dialog");
+            require(QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path)),
+                    "No load command");
+            wait([&] { return !controller.hasWork(); });
+            auto *save = dialog->findChild<QPushButton *>("saveImportedTool");
+            require(!save->isEnabled(), "Unknown units silently treated as mm");
+            dialog->findChild<QComboBox *>("importToolUnits")->setCurrentIndex(1);
+            dialog->findChild<QLineEdit *>("importToolCode")
+                ->setText(QStringLiteral("Мой пуансон"));
+            dialog->findChild<QDoubleSpinBox *>("importToolLength")->setValue(80);
+            dialog->findChild<QDoubleSpinBox *>("importToolAngle")->setValue(60);
+            dialog->findChild<QDoubleSpinBox *>("importToolRadius")->setValue(.8);
+            auto *mirror = dialog->findChild<QCheckBox *>("importToolMirror");
+            mirror->setChecked(true);
+            mirror->setChecked(false);
+            require(save->isEnabled(), "Complete tool not saveable");
+            const auto snapshot = qEnvironmentVariable("BENDING_DXF_SNAPSHOT");
+            if (!snapshot.isEmpty()) {
+                wait([&] {
+                    const auto *canvas = dialog->findChild<QWidget *>("toolDrawingCanvas");
+                    return canvas && canvas->isVisible() && canvas->width() > 100;
+                });
+                require(dialog->grab().save(snapshot), "Snapshot failed");
+            }
+            save->click();
+            wait([&] { return !controller.hasWork(); });
+            completed = true;
+        });
+        button->click();
+        require(completed, "Import callback missed");
+        const auto library = ui::toolCatalogPath();
+        require(!library.isEmpty(), "Library path not saved");
+        auto saved = project::readToolCatalog(native(library));
+        require(std::holds_alternative<core::ToolCatalog>(saved), "Library unreadable");
+        auto catalog = std::get<core::ToolCatalog>(saved);
+        require(catalog.size() == 3 && catalog.back().parametersConfirmed &&
+                    catalog.back().drawing && catalog.back().code == "Мой пуансон",
+                "New tool not persisted");
+        require(core::drawingToolGeometry({catalog.back(), tools.die, 0, 3, "", true}).has_value(),
+                "Imported analytic nose no longer supports existing contact");
+        require(window.findChild<QComboBox *>("punchPreset")
+                    ->currentText()
+                    .contains(QStringLiteral("Мой пуансон")),
+                "New tool not selected");
+        QFile::remove(path);
+        require(checked(importer, *catalog.back().drawing),
+                "Library depends on source DXF after import");
+        const auto before = catalog;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = QApplication::activeModalWidget();
+            require(dialog, "No cancel dialog");
+            QMetaObject::invokeMethod(dialog, "reject");
+        });
+        button->click();
+        require(std::get<core::ToolCatalog>(project::readToolCatalog(native(library))) == before,
+                "Cancel modified library");
+        require(project::writeToolCatalog(native(dir.path()), before).has_value(),
+                "Failed write not reported");
+        require(std::get<core::ToolCatalog>(project::readToolCatalog(native(library))) == before,
+                "Failed write damaged library");
+        // A crossing section must stay in the editor and cannot change the library.
+        write(path, wrap(bow));
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = QApplication::activeModalWidget();
+            QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path));
+            wait([&] { return !controller.hasWork(); });
+            dialog->findChild<QPushButton *>("saveImportedTool")->click();
+            wait([&] { return !controller.hasWork(); });
+            require(dialog->isVisible() && dialog->findChild<QLabel *>("toolImportStatus")
+                                               ->text()
+                                               .contains(QStringLiteral("Сечение")),
+                    "Bad section closed editor as success");
+            QMetaObject::invokeMethod(dialog, "reject");
+        });
+        button->click();
+        require(std::get<core::ToolCatalog>(project::readToolCatalog(native(library))) == before,
+                "Bad section modified catalogue");
+        // Updating an existing record retains its identity, other grooves and neighbouring tools.
+        write(path, wrap(poly(*tools.punch.drawing)));
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = QApplication::activeModalWidget();
+            dialog->findChild<QComboBox *>("importToolTarget")->setCurrentIndex(1);
+            QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path));
+            wait([&] { return !controller.hasWork(); });
+            dialog->findChild<QPushButton *>("saveImportedTool")->click();
+            wait([&] { return !controller.hasWork(); });
+        });
+        button->click();
+        catalog = std::get<core::ToolCatalog>(project::readToolCatalog(native(library)));
+        require(catalog.size() == before.size() && catalog[0].id == before[0].id &&
+                    catalog[1] == before[1],
+                "Profile update duplicated a tool or lost neighbour");
+        // Unknown parameters remain inventory data, rather than an assignable machine tool.
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = QApplication::activeModalWidget();
+            QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path));
+            wait([&] { return !controller.hasWork(); });
+            dialog->findChild<QLineEdit *>("importToolCode")
+                ->setText(QStringLiteral("Только контур"));
+            dialog->findChild<QPushButton *>("saveImportedTool")->click();
+            wait([&] { return !controller.hasWork(); });
+        });
+        button->click();
+        catalog = std::get<core::ToolCatalog>(project::readToolCatalog(native(library)));
+        require(catalog.size() == 4 && !catalog.back().parametersConfirmed &&
+                    catalog.back().drawing,
+                "Incomplete tool became assignable or was lost");
+        // Cancellation suppresses late callbacks without changing the loaded STEP or preview.
+        struct Slow final : application::ToolProfileImporter {
+            mutable std::atomic_bool entered{false};
+            application::ToolProfileResult run(const application::ToolProfileInput &,
+                                               std::stop_token token) const override {
+                entered = true;
+                while (!token.stop_requested())
+                    QThread::msleep(1);
+                return application::ToolProfileFile{};
+            }
+        };
+        auto slow = std::make_shared<Slow>();
+        bool late = false;
+        const auto document = controller.session().document();
+        require(controller.prepareToolProfile(native(path), slow, [&](auto) { late = true; }),
+                "Cannot start worker cancellation test");
+        wait([&] { return slow->entered.load(); });
+        controller.cancelToolProfile();
+        wait([&] { return !controller.hasWork(); });
+        require(!late && controller.session().document() == document,
+                "Cancelled library job published or changed CAD document");
+        QTemporaryDir moved;
+        require(
+            QDir().mkpath(moved.path() + QStringLiteral("/tools")) &&
+                QFile::copy(library, moved.path() + QStringLiteral("/tools/tool-catalog.json")) &&
+                QFile::copy(dir.path() + QStringLiteral("/settings.ini"),
+                            moved.path() + QStringLiteral("/settings.ini")),
+            "Prepare portable relocation");
+        ui::setPreferencesFile(moved.path() + QStringLiteral("/settings.ini"));
+        require(std::get<core::ToolCatalog>(
+                    project::readToolCatalog(native(ui::toolCatalogPath()))) == catalog,
+                "Portable library path depended on previous installation directory");
+        ui::setPreferencesFile(dir.path() + QStringLiteral("/settings.ini"));
+        controller.shutdown();
+        window.close();
+        return 0;
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << '\n';
+        return 1;
+    }
+}

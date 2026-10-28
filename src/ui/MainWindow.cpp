@@ -2547,6 +2547,12 @@ void MainWindow::setDrawingBuilder(
     impl_->drawingBuilder = std::move(builder);
     impl_->refresh();
 }
+void MainWindow::setToolProfileImport(
+    std::shared_ptr<const application::ToolProfileImporter> importer,
+    application::ToolLibraryWriter writer) {
+    impl_->toolSelection->setToolProfileImport(*impl_->controller, std::move(importer),
+                                               std::move(writer));
+}
 void MainWindow::setFlatPatternBuilder(
     std::shared_ptr<const application::FlatPatternBuilder> builder) {
     impl_->flatBuilder = std::move(builder);

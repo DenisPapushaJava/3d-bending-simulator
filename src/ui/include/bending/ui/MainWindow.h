@@ -8,6 +8,7 @@
 #include "bending/application/FlatPattern.h"
 #include "bending/application/ProjectWriter.h"
 #include "bending/application/SingleBendPreview.h"
+#include "bending/application/ToolProfileImport.h"
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -40,6 +41,8 @@ class MainWindow final : public QMainWindow {
     void setToolCatalogLoader(
         std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
             loader);
+    void setToolProfileImport(std::shared_ptr<const application::ToolProfileImporter>,
+                              application::ToolLibraryWriter);
     void setDrawingBuilder(std::shared_ptr<const application::BendingDrawingBuilder> builder);
     void setFlatPatternBuilder(std::shared_ptr<const application::FlatPatternBuilder> builder);
     // Borrowed client; app keeps it alive until after this window is destroyed.

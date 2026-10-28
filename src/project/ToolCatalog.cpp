@@ -4,6 +4,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QResource>
+#include <QSaveFile>
 #include <cmath>
 #include <limits>
 
@@ -234,5 +235,27 @@ ToolCatalogResult builtInToolCatalog() {
     (void)initialized;
     QFile file(QStringLiteral(":/bending/tool-catalog.json"));
     return readFile(file);
+}
+std::optional<std::string> writeToolCatalog(const std::filesystem::path &path,
+                                            const core::ToolCatalog &catalog) {
+    if (!core::validToolCatalog(catalog))
+        return "Некорректный каталог или повторяющиеся идентификаторы.";
+    QJsonArray tools;
+    for (const auto &tool : catalog)
+        tools.append(presetJson(tool));
+    const auto bytes =
+        QJsonDocument(
+            QJsonObject{{"format", "bending-tool-catalog"}, {"version", 2}, {"tools", tools}})
+            .toJson();
+    if (bytes.size() > 4 * 1024 * 1024)
+        return "Библиотека превышает 4 МиБ. Инструмент не добавлен.";
+#ifdef _WIN32
+    QSaveFile file(QString::fromStdWString(path.native()));
+#else
+    QSaveFile file(QString::fromUtf8(path.native().c_str()));
+#endif
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+        return "Не удалось сохранить библиотеку. Проверьте доступ к папке настроек.";
+    return {};
 }
 } // namespace bending::project

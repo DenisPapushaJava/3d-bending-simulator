@@ -1,5 +1,6 @@
 #include "ToolSelectionWidget.h"
 #include "ToolDrawingWidget.h"
+#include "ToolImportDialog.h"
 #include "ToolProfilesWidget.h"
 #include "bending/core/ToolGeometry.h"
 #include <QCheckBox>
@@ -8,8 +9,10 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -64,6 +67,11 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     catalogPanel_ = new QWidget(this);
     auto *catalogLayout = new QVBoxLayout(catalogPanel_);
     catalogLayout->setContentsMargins(0, 0, 0, 0);
+    importDxf_ = new QPushButton(QStringLiteral("Добавить инструмент из DXF…"), catalogPanel_);
+    importDxf_->setObjectName(QStringLiteral("importToolDxf"));
+    importDxf_->setEnabled(false);
+    catalogLayout->addWidget(importDxf_);
+    connect(importDxf_, &QPushButton::clicked, this, [this] { importDxf(); });
     auto *form = new QFormLayout;
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
@@ -745,5 +753,78 @@ void ToolSelectionWidget::importCatalog() {
     settings->setValue(QStringLiteral("tools/catalogPath"), path);
     refreshFavorites();
     changed();
+}
+void ToolSelectionWidget::setToolProfileImport(
+    ImportController &controller, std::shared_ptr<const application::ToolProfileImporter> importer,
+    application::ToolLibraryWriter writer) {
+    controller_ = &controller;
+    profileImporter_ = std::move(importer);
+    libraryWriter_ = std::move(writer);
+    importDxf_->setEnabled(profileImporter_ && libraryWriter_);
+}
+void ToolSelectionWidget::importDxf() {
+    if (!controller_ || !profileImporter_ || !libraryWriter_)
+        return;
+    ToolImportDialog dialog(
+        *controller_, profileImporter_,
+        core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_),
+        [this](core::ToolPreset tool) { return saveImportedTool(std::move(tool)); }, this);
+    dialog.exec();
+}
+QString ToolSelectionWidget::saveImportedTool(core::ToolPreset tool) {
+    auto merged = core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_);
+    const auto found =
+        std::find_if(merged.begin(), merged.end(), [&](const auto &t) { return t.id == tool.id; });
+    if (found == merged.end())
+        merged.push_back(tool);
+    else
+        *found = tool;
+    if (!core::validToolCatalog(merged))
+        return QStringLiteral("Каталог переполнен или данные инструмента некорректны.");
+    auto settings = preferences();
+    // A separate writable copy beside settings: portable data/ on Windows, user config on Linux.
+    const auto folder = QDir(toolLibraryDirectory());
+    if (!QDir().mkpath(folder.filePath(QStringLiteral("tools"))))
+        return QStringLiteral("Не удалось создать папку локальной библиотеки.");
+    const auto path = folder.filePath(QStringLiteral("tools/tool-catalog.json"));
+#ifdef _WIN32
+    const auto native = std::filesystem::path(path.toStdWString());
+#else
+    const auto native = std::filesystem::path(path.toUtf8().constData());
+#endif
+    if (const auto error = libraryWriter_(native, merged))
+        return text(*error);
+    const core::ToolCatalog projectOnly(catalog_.begin() + workshopSize_, catalog_.end());
+    auto pair = currentPair();
+    if (tool.kind == core::ToolKind::Punch)
+        pair.punchId = text(tool.id);
+    else {
+        pair.dieId = text(tool.id);
+        pair.groove = 0;
+    }
+    updating_ = true;
+    catalog_ = std::move(merged);
+    workshopSize_ = catalog_.size();
+    for (const auto &entry : projectOnly)
+        if (std::none_of(catalog_.begin(), catalog_.end(),
+                         [&](const auto &t) { return t.id == entry.id; }))
+            catalog_.push_back(entry);
+    punch_->clear();
+    die_->clear();
+    punch_->addItem(QStringLiteral("Выберите пуансон…"), -1);
+    die_->addItem(QStringLiteral("Выберите матрицу…"), -1);
+    for (std::size_t i = 0; i < catalog_.size(); ++i)
+        (catalog_[i].kind == core::ToolKind::Punch ? punch_ : die_)
+            ->addItem(title(catalog_[i]), static_cast<int>(i));
+    selectPair(pair);
+    mode_->setCurrentIndex(0);
+    updating_ = false;
+    chooseDrawingGeometry();
+    settings->setValue(QStringLiteral("tools/catalogPath"),
+                       QStringLiteral("tools/tool-catalog.json"));
+    settings->sync();
+    refreshFavorites();
+    changed();
+    return {};
 }
 } // namespace bending::ui

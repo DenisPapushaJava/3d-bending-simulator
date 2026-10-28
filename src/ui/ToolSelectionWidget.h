@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/ToolProfileImport.h"
 #include "bending/core/ToolCatalog.h"
 #include "bending/core/ToolSelection.h"
 #include <QWidget>
@@ -20,6 +21,7 @@ class QToolButton;
 namespace bending::ui {
 // UI drafts and local preferences; only MainWindow commits a choice to DocumentSession.
 class ToolProfilesWidget;
+class ImportController;
 class ToolSelectionWidget final : public QWidget {
   public:
     ToolSelectionWidget(core::ToolCatalog catalog, QWidget *parent);
@@ -33,6 +35,9 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] QString shortSummary() const;
     void rememberChoice();
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request);
+    void setToolProfileImport(ImportController &,
+                              std::shared_ptr<const application::ToolProfileImporter>,
+                              application::ToolLibraryWriter);
     std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
         loadCatalog;
     std::function<void()> onChanged;
@@ -57,6 +62,8 @@ class ToolSelectionWidget final : public QWidget {
     void recommend();
     void showDrawings();
     void importCatalog();
+    void importDxf();
+    QString saveImportedTool(core::ToolPreset);
     core::ToolCatalog catalog_;
     std::size_t workshopSize_ = 0;
     QCheckBox *realGeometry_;
@@ -78,10 +85,14 @@ class ToolSelectionWidget final : public QWidget {
     QPushButton *enlargeProfiles_;
     QPushButton *drawings_;
     QPushButton *recommend_;
+    QPushButton *importDxf_;
     QLabel *recommendation_;
     std::optional<core::ToolSelectionRequest> selectionRequest_;
     std::array<QDoubleSpinBox *, 7> fields_{};
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;
+    ImportController *controller_ = nullptr;
+    std::shared_ptr<const application::ToolProfileImporter> profileImporter_;
+    application::ToolLibraryWriter libraryWriter_;
 };
 } // namespace bending::ui

@@ -1,4 +1,5 @@
 #pragma once
+#include "bending/application/ToolProfileImport.h"
 
 #include "bending/application/BendingDrawing.h"
 #include "bending/application/DocumentSession.h"
@@ -37,6 +38,10 @@ class ImportController final : public QObject {
     [[nodiscard]] QString saveError() const;
     [[nodiscard]] const application::DocumentSession &session() const;
     [[nodiscard]] bool hasWork() const;
+    bool prepareToolProfile(application::ToolProfileInput,
+                            std::shared_ptr<const application::ToolProfileImporter>,
+                            std::function<void(application::ToolProfileResult)>);
+    void cancelToolProfile();
     bool
     prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
                        std::shared_ptr<const application::SingleBendPreviewBuilder> builder,

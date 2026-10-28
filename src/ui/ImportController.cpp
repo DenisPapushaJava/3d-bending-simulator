@@ -110,6 +110,8 @@ class ImportController::Impl {
     bool running = false;
     bool stopping = false;
     bool saving = false;
+    bool preparingToolProfile = false;
+    std::uint64_t toolProfileId = 0;
     std::uint64_t saveId = 0;
     QString writeError;
     BendPreviewPtr preview;
@@ -220,6 +222,54 @@ const DocumentSession &ImportController::session() const {
 
 bool ImportController::hasWork() const {
     return impl_->running || impl_->pending.has_value();
+}
+
+bool ImportController::prepareToolProfile(ToolProfileInput input,
+                                          std::shared_ptr<const ToolProfileImporter> importer,
+                                          std::function<void(ToolProfileResult)> completion) {
+    if (impl_->stopping || hasWork() || !importer || !completion)
+        return false;
+    auto *s = impl_.get();
+    const auto id = ++s->toolProfileId;
+    s->stop = std::stop_source{};
+    const auto stop = s->stop.get_token();
+    s->running = s->preparingToolProfile = true;
+    QMetaObject::invokeMethod(
+        s->worker,
+        [s, id, input = std::move(input), importer = std::move(importer),
+         completion = std::move(completion), stop]() mutable {
+            ToolProfileResult result = ToolProfileError{"Импорт отменён."};
+            try {
+                if (!stop.stop_requested())
+                    result = importer->run(input, stop);
+            } catch (...) {
+                result = ToolProfileError{"Не удалось обработать сечение инструмента."};
+            }
+            QMetaObject::invokeMethod(
+                s->owner,
+                [s, id, stop, result = std::move(result),
+                 completion = std::move(completion)]() mutable {
+                    s->running = s->preparingToolProfile = false;
+                    if (s->stopping)
+                        return;
+                    if (id == s->toolProfileId)
+                        completion(stop.stop_requested()
+                                       ? ToolProfileResult{ToolProfileError{"Обработка отменена."}}
+                                       : std::move(result));
+                    s->dispatch();
+                    emit s->owner->stateChanged();
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
+    emit stateChanged();
+    return true;
+}
+void ImportController::cancelToolProfile() {
+    if (impl_->preparingToolProfile) {
+        ++impl_->toolProfileId;
+        impl_->stop.request_stop();
+    }
 }
 
 ThicknessValidation ImportController::setManualThickness(double valueMm) {

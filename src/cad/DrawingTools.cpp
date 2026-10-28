@@ -1,13 +1,16 @@
 #include "bending/cad/occt/DrawingTools.h"
+#include "bending/cad/ToolProfileValidation.h"
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GProp_GProps.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <ShapeAnalysis_Wire.hxx>
 #include <ShapeExtend_Status.hxx>
@@ -71,6 +74,25 @@ TopoDS_Shape sectionPrism(const std::vector<DrawingEdge> &edges, DrawingPoint or
     return solid;
 }
 } // namespace
+std::optional<std::string> validateToolProfile(const core::ToolDrawing &drawing,
+                                               std::stop_token stop) {
+    if (stop.stop_requested())
+        return "Проверка отменена.";
+    if (!drawing.millimeters || !core::validToolDrawing(drawing))
+        return "Некорректный контур или единицы. Требуется замкнутое сечение в мм.";
+    try {
+        const auto body = sectionPrism(drawing.edges, {}, 0, 1, 0);
+        if (body.IsNull() || stop.stop_requested())
+            return "Проверка отменена или тело не построено.";
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(body, properties);
+        if (!std::isfinite(properties.Mass()) || std::abs(properties.Mass()) <= 1.e-10)
+            return "Площадь сечения нулевая или не подтверждена.";
+        return {};
+    } catch (...) {
+        return "Сечение не образует корректное тело. Проверьте пересечения, дубликаты и дуги.";
+    }
+}
 std::array<TopoDS_Shape, 2> makeDrawingTools(const core::ToolAssignment &a,
                                              const core::ToolGeometry &g, double tip) {
     std::array<TopoDS_Shape, 2> result;

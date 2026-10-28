@@ -3,6 +3,7 @@
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/project/DxfToolImporter.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
@@ -149,10 +150,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     auto tools = std::get<bending::core::ToolCatalog>(std::move(catalogue));
-    const auto savedCatalog =
-        (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
-            ? QString{}
-            : bending::ui::preferences()->value(QStringLiteral("tools/catalogPath")).toString();
+    const auto savedCatalog = (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
+                                  ? QString{}
+                                  : bending::ui::toolCatalogPath();
     if (parser.isSet(toolCatalogOption) || !savedCatalog.isEmpty()) {
         const auto argument =
             parser.isSet(toolCatalogOption) ? parser.value(toolCatalogOption) : savedCatalog;
@@ -188,6 +188,8 @@ int main(int argc, char *argv[]) {
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
     window.setToolCatalogLoader(bending::project::readToolCatalog);
+    window.setToolProfileImport(std::make_shared<bending::project::DxfToolImporter>(),
+                                bending::project::writeToolCatalog);
     window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
     window.setFlatPatternBuilder(std::make_shared<bending::cad::FlatPatternBuilder>());
     window.setUpdateClient(&updates);
