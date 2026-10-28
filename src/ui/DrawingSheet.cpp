@@ -1,4 +1,5 @@
 #include "bending/ui/DrawingSheet.h"
+#include <QColor>
 #include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QPageSize>
@@ -81,7 +82,12 @@ void pen(QPainter &p, double width = .25, Qt::PenStyle style = Qt::SolidLine) {
     p.setPen(line);
     p.setBrush(Qt::NoBrush);
 }
-void arrow(QPainter &p, QPointF tip, QPointF from) {
+const QColor dimensionColor(96, 96, 96);
+void dimensionPen(QPainter &p) {
+    p.setPen(QPen(dimensionColor, .18));
+    p.setBrush(Qt::NoBrush);
+}
+void arrow(QPainter &p, QPointF tip, QPointF from, const QColor &color = Qt::black) {
     const auto delta = from - tip;
     const double length = std::hypot(delta.x(), delta.y());
     if (length < 1e-9)
@@ -89,7 +95,7 @@ void arrow(QPainter &p, QPointF tip, QPointF from) {
     const auto d = delta / length;
     const QPointF n(-d.y(), d.x());
     p.save();
-    p.setBrush(Qt::black);
+    p.setBrush(color);
     p.setPen(Qt::NoPen);
     p.drawPolygon(QPolygonF{tip, tip + d * 3 + n * .45, tip + d * 3 - n * .45});
     p.restore();
@@ -213,12 +219,12 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
             QStringLiteral("Не удалось разместить размер %1. Измените ориентацию.")
                 .arg(value)
                 .toStdString());
-    pen(p);
+    dimensionPen(p);
     p.drawLine(firstWitness + normal * gap, da + normal * 2);
     p.drawLine(secondWitness + normal * gap, db + normal * 2);
     p.drawLine(da - direction * (outside ? 6 : 0), db + direction * (outside ? 6 : 0));
-    arrow(p, da, outside ? da - direction * 4 : db);
-    arrow(p, db, outside ? db + direction * 4 : da);
+    arrow(p, da, outside ? da - direction * 4 : db, dimensionColor);
+    arrow(p, db, outside ? db + direction * 4 : da, dimensionColor);
     p.save();
     p.translate(label);
     p.rotate(angle);
@@ -247,7 +253,7 @@ void angularDimension(QPainter &p, QPointF vertex, QPointF first, QPointF second
         if (!area.contains(box) || overlaps(box, occupied))
             continue;
         occupied.push_back(box);
-        pen(p);
+        dimensionPen(p);
         p.drawLine(vertex, at(start, radius + 2));
         p.drawLine(vertex, at(start + sweep, radius + 2));
         QPainterPath arc;
@@ -255,8 +261,8 @@ void angularDimension(QPainter &p, QPointF vertex, QPointF first, QPointF second
         for (int i = 1; i <= 64; ++i)
             arc.lineTo(at(start + sweep * i / 64, radius));
         p.drawPath(arc);
-        arrow(p, at(start, radius), at(start + sweep * .08, radius));
-        arrow(p, at(start + sweep, radius), at(start + sweep * .92, radius));
+        arrow(p, at(start, radius), at(start + sweep * .08, radius), dimensionColor);
+        arrow(p, at(start + sweep, radius), at(start + sweep * .92, radius), dimensionColor);
         text(p, box, value, fullProfile && !standardText ? 2.5 : 3.5);
         return;
     }
@@ -318,9 +324,9 @@ void leaderNote(QPainter &p, QPointF anchor, QRectF bounds, const QString &value
             throw std::runtime_error("Flat bend callouts do not fit the available area");
         occupied.push_back(best->box);
         lines->emplace_back(anchor, best->end);
-        pen(p);
+        dimensionPen(p);
         p.drawLine(anchor, best->end);
-        arrow(p, anchor, best->end);
+        arrow(p, anchor, best->end, dimensionColor);
         p.drawLine(best->box.bottomLeft(), best->box.bottomRight());
         text(p, best->box, value, 2.5);
         return;
@@ -335,9 +341,9 @@ void leaderNote(QPainter &p, QPointF anchor, QRectF bounds, const QString &value
                     crossesText(anchor, end, occupied))
                     continue;
                 occupied.push_back(box);
-                pen(p);
+                dimensionPen(p);
                 p.drawLine(anchor, end);
-                arrow(p, anchor, end);
+                arrow(p, anchor, end, dimensionColor);
                 p.drawLine(QPointF(box.left(), box.bottom()), QPointF(box.right(), box.bottom()));
                 text(p, box, value, 2.5);
                 return;
@@ -354,9 +360,9 @@ void leaderNote(QPainter &p, QPointF anchor, QRectF bounds, const QString &value
                 occupied.push_back(box);
                 const double y = above ? box.bottom() : box.top();
                 const QPointF end(box.center().x(), y);
-                pen(p);
+                dimensionPen(p);
                 p.drawLine(anchor, end);
-                arrow(p, anchor, end);
+                arrow(p, anchor, end, dimensionColor);
                 p.drawLine(QPointF(box.left(), y), QPointF(box.right(), y));
                 text(p, box, value, 2.5);
                 return;
@@ -705,9 +711,9 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             }
         if (!placed)
             throw std::runtime_error("Bend labels do not fit; choose another orientation");
-        pen(p);
+        dimensionPen(p);
         p.drawLine(a, end);
-        arrow(p, a, end);
+        arrow(p, a, end, dimensionColor);
         if (!v.detailCircles.empty())
             p.drawLine(end - QPointF(6, 0), end + QPointF(6, 0));
         text(p, QRectF(end.x() - 6, end.y() - 5, 12, 5), QString::fromStdString(value), 3.5);
