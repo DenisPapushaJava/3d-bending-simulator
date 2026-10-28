@@ -955,6 +955,27 @@ void classicalDrawing(const QString &folder) {
                 slot->sections[0].view.sectionLoops.size() == 2 &&
                 std::abs(area(base->sections[0].view) - area(slot->sections[0].view) - 28) < .1,
             "A true section filled an internal cutout or lost the material boundary");
+    auto compact = *base;
+    compact.auxiliaryViews.push_back({(*base->classicalViews)[2], "Х", 2});
+    const auto compactCoverage = ui::DrawingSheet::coverage(compact);
+    require(
+        ui::DrawingSheet::pageCount(compact) == 1 &&
+            compactCoverage.dimensioned == ui::DrawingSheet::coverage(*base).dimensioned &&
+            ui::DrawingSheet::writePdf(folder + "/classical-compact.pdf", compact, {}).isEmpty(),
+        "A readable auxiliary view was unnecessarily moved to another sheet");
+    requireCompactOrientation(ui::DrawingSheet::preview(compact, {}, 0, 1680));
+    if (!output.isEmpty())
+        require(ui::DrawingSheet::writePdf(output + ".compact.pdf", compact, {}).isEmpty(),
+                "Compact layout sample export failed");
+    auto crowded = compact;
+    for (int i = 0; i < 12; ++i)
+        crowded.auxiliaryViews.push_back(compact.auxiliaryViews.back());
+    require(ui::DrawingSheet::pageCount(crowded) > 1 &&
+                !ui::DrawingSheet::preview(crowded, {}, ui::DrawingSheet::pageCount(crowded) - 1)
+                     .isNull(),
+            "An overcrowded sheet lost its readable continuation views");
+    requireCompactOrientation(
+        ui::DrawingSheet::preview(crowded, {}, ui::DrawingSheet::pageCount(crowded) - 1, 1680));
     const auto occludedDocument = load(
         BRepAlgoAPI_Cut(fixtures::channel(),
                         BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-7, 20, 40), gp_Dir(1, 0, 0)), 3, 4))
@@ -1081,6 +1102,8 @@ void flatDrawing(const QString &folder) {
                 ui::DrawingSheet::writePdf(folder + "/unfold-separate.pdf", *result, profileTitle)
                     .isEmpty(),
             "Fallback flat page was lost or could not be exported");
+    requireCompactOrientation(ui::DrawingSheet::preview(
+        *result, profileTitle, ui::DrawingSheet::pageCount(*result, profileTitle) - 1, 1680));
     auto invalid = *result;
     invalid.flatPattern->info.bends.clear();
     const auto failurePath = folder + "/failed-flat.pdf";
