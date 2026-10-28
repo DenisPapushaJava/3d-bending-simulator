@@ -1,6 +1,7 @@
 #include "BendFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
+#include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -20,8 +21,14 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSpinBox>
@@ -36,6 +43,7 @@
 #include <cmath>
 #include <gp_Circ.hxx>
 #include <iostream>
+#include <numbers>
 #include <stdexcept>
 
 namespace {
@@ -88,6 +96,15 @@ TopoDS_Shape withVertexGap(double gap) {
         }
     }
     throw std::runtime_error("Fixture has no free flange vertex");
+}
+void requireCompactOrientation(const QImage &preview) {
+    const double ratio = preview.width() / ui::DrawingSheet::widthMm;
+    int pixels = 0;
+    for (int y = static_cast<int>(259 * ratio); y < static_cast<int>(288 * ratio); ++y)
+        for (int x = static_cast<int>(25 * ratio); x < static_cast<int>(220 * ratio); ++x)
+            if (qGray(preview.pixel(x, y)) < 160)
+                ++pixels;
+    require(pixels > 100, "The sheet lost its compact isometric geometry below the caption");
 }
 void drawingMeasurements(const QString &folder) {
     const auto trimmedDoc = load(fixtures::cornerTrimmedBend(), folder + "/split-cap.step");
@@ -406,6 +423,7 @@ void variableProfile(const QString &folder) {
     require(ui::DrawingSheet::pageCount(*drawing) == 1 &&
                 ui::DrawingSheet::writePdf(folder + "/variable.pdf", *drawing, {}).isEmpty(),
             "Two sections, stations and oval coordinates do not fit A3");
+    requireCompactOrientation(ui::DrawingSheet::preview(*drawing, {}, 0, 1680));
     const auto output = qEnvironmentVariable("BENDING_DRAWING_VARIABLE_OUTPUT");
     if (!output.isEmpty())
         require(ui::DrawingSheet::writePdf(output, *drawing, {}).isEmpty(),
@@ -981,6 +999,8 @@ void flatDrawing(const QString &folder) {
     const auto result = build(doc, request);
     require(result->flatPattern && !result->flatPatternError, "Flat drawing snapshot missing");
     const auto &flat = *result->flatPattern;
+    const auto preview = ui::DrawingSheet::preview(*result, {}, 0, 1680);
+    requireCompactOrientation(preview);
     require(flat.info.bends.size() == 2 && !flat.view.paths.empty() &&
                 flat.view.dimensions.size() == 2 && flat.view.sectionDimensions.size() == 2,
             "Blank contour, overall sizes or bend coordinates missing");
@@ -1058,6 +1078,140 @@ void flatDrawing(const QString &folder) {
             "Combined blank and folded PDF failed");
     require(ui::DrawingSheet::pageCount(*result) == 1,
             "Simple blank was unnecessarily split from the folded shape");
+}
+void auditSample(const QString &path, const QString &reportPath, const QString &pdfPath) {
+    QElapsedTimer timer;
+    timer.start();
+    QJsonObject report{{"file", path}};
+    const auto loaded = cad::StepImporter{}.load(native(path), {}, {});
+    const auto doc = application::resultDocument(loaded);
+    report.insert("importOk", bool(doc));
+    report.insert("importMs", static_cast<double>(timer.elapsed()));
+    if (!doc) {
+        if (const auto *error = std::get_if<application::ImportError>(&loaded))
+            report.insert("importError", QString::fromStdString(error->detail));
+    } else {
+        const auto &m = doc->metadata();
+        report.insert("faces", static_cast<int>(m.faceCount));
+        report.insert("thicknessStatus", static_cast<int>(m.thickness.status));
+        if (m.thickness.thicknessMm)
+            report.insert("thickness", *m.thickness.thicknessMm);
+        report.insert("recognitionStatus", static_cast<int>(m.bendAnalysis.status));
+        report.insert("strictBends", static_cast<int>(m.bendAnalysis.bends.size()));
+        report.insert("zoneOpenings",
+                      static_cast<int>(m.bendAnalysis.interiorContourDiagnostics.size()));
+        QJsonArray warnings, bends;
+        for (const auto &warning : m.diagnostics)
+            warnings.append(QString::fromStdString(warning.message));
+        report.insert("importDiagnostics", warnings);
+        for (const auto &b : m.bendAnalysis.bends)
+            bends.append(
+                QJsonObject{{"length", b.lengthMm},
+                            {"t", b.thicknessMm},
+                            {"radius", b.innerRadiusMm},
+                            {"internalAngle", 180 - b.angleRadians * 180 / std::numbers::pi},
+                            {"trimmedEnds", b.trimmedEnds}});
+        report.insert("bends", bends);
+        application::DrawingRequest request;
+        request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+        const auto result = cad::BendingDrawingBuilder{}.build(doc, request, {});
+        if (const auto *error = std::get_if<application::DrawingError>(&result)) {
+            report.insert("drawingOk", false);
+            report.insert("drawingError", QString::fromStdString(error->detail));
+        } else {
+            const auto &d = *std::get<application::BendingDrawingPtr>(result);
+            report.insert("drawingOk", true);
+            const auto coverage = ui::DrawingSheet::coverage(d);
+            report.insert("drawingBends", static_cast<int>(coverage.total));
+            report.insert("dimensionedBends", static_cast<int>(coverage.dimensioned));
+            report.insert("drawingOnlyRecognition", d.drawingOnlyRecognition);
+            report.insert("unrecognizedCylinders",
+                          static_cast<int>(d.unrecognizedCylindricalFaces));
+            report.insert("sections", static_cast<int>(d.sections.size()));
+            report.insert("flatOk", bool(d.flatPattern));
+            if (d.flatPattern) {
+                report.insert("flatWidth", d.flatPattern->info.bounds.maximum.x);
+                report.insert("flatLength", d.flatPattern->info.bounds.maximum.y);
+            }
+            if (d.flatPatternError)
+                report.insert("flatError", QString::fromStdString(d.flatPatternError->detail));
+            QJsonArray missing;
+            for (auto index : coverage.missing)
+                missing.append(static_cast<int>(index + 1));
+            report.insert("missingBends", missing);
+            ui::DrawingTitle title;
+            title.name = QFileInfo(path).completeBaseName();
+            const auto exportError = ui::DrawingSheet::writePdf(pdfPath, d, title);
+            report.insert("pdfOk", exportError.isEmpty());
+            if (!exportError.isEmpty())
+                report.insert("pdfError", exportError);
+            report.insert("pages", ui::DrawingSheet::pageCount(d));
+            QJsonArray views;
+            const auto &projections =
+                d.classicalViews
+                    ? *d.classicalViews
+                    : std::array<application::DrawingView, 3>{d.views[0], d.views[1], d.views[2]};
+            for (const auto &v : projections) {
+                QJsonArray sizes, holes, axial;
+                for (const auto &dimension : v.dimensions)
+                    sizes.append(dimension.valueMm);
+                for (const auto &dimension : v.holeDimensions)
+                    holes.append(dimension.valueMm);
+                for (const auto &dimension : v.axialDimensions)
+                    axial.append(dimension.valueMm);
+                views.append(QJsonObject{{"width", v.maximum.x - v.minimum.x},
+                                         {"height", v.maximum.y - v.minimum.y},
+                                         {"dimensions", sizes},
+                                         {"holeDimensions", holes},
+                                         {"axialDimensions", axial}});
+            }
+            report.insert("views", views);
+            const auto &iso = d.views[3];
+            QImage shape(720, 520, QImage::Format_RGB32);
+            shape.fill(Qt::white);
+            QPainter painter(&shape);
+            painter.setRenderHint(QPainter::Antialiasing);
+            const double scale = std::min(660 / (iso.maximum.x - iso.minimum.x),
+                                          460 / (iso.maximum.y - iso.minimum.y));
+            const auto map = [&](application::DrawingPoint point) {
+                return QPointF(360 + (point.x - (iso.minimum.x + iso.maximum.x) / 2) * scale,
+                               260 - (point.y - (iso.minimum.y + iso.maximum.y) / 2) * scale);
+            };
+            for (bool hidden : {true, false}) {
+                painter.setPen(QPen(hidden ? Qt::lightGray : Qt::black, hidden ? .7 : 1.2,
+                                    hidden ? Qt::DashLine : Qt::SolidLine));
+                for (const auto &path : iso.paths) {
+                    if (path.hidden != hidden || path.points.empty())
+                        continue;
+                    QPainterPath outline;
+                    outline.moveTo(map(path.points.front()));
+                    for (std::size_t i = 1; i < path.points.size(); ++i)
+                        outline.lineTo(map(path.points[i]));
+                    painter.drawPath(outline);
+                }
+            }
+            painter.end();
+            require(shape.save(reportPath + ".png"), "Cannot save the audit projection");
+        }
+        if (m.bendAnalysis.bends.size() == 1 && m.bendAnalysis.interiorContourDiagnostics.empty()) {
+            const auto &b = m.bendAnalysis.bends.front();
+            const auto result = cad::SingleBendPreviewBuilder{}.build(
+                doc, 0, {b.angleRadians, b.innerRadiusMm}, false, {});
+            if (const auto *error = std::get_if<application::BendPreviewError>(&result)) {
+                report.insert("kinematicOk", false);
+                report.insert("kinematicError", QString::fromStdString(error->detail));
+            } else {
+                report.insert("kinematicOk", true);
+                report.insert(
+                    "kinematicFrames",
+                    static_cast<int>(std::get<application::BendPreviewPtr>(result)->frameCount()));
+            }
+        }
+    }
+    report.insert("totalMs", static_cast<double>(timer.elapsed()));
+    QFile output(reportPath);
+    require(output.open(QIODevice::WriteOnly), "Cannot write sample audit");
+    require(output.write(QJsonDocument(report).toJson()) > 0, "Cannot save sample audit");
 }
 void workflow(const QString &folder) {
     auto importer = std::make_shared<cad::StepImporter>();
@@ -1161,6 +1315,10 @@ int main(int argc, char **argv) {
     app.setQuitOnLastWindowClosed(false);
     QTemporaryDir temp;
     try {
+        if (app.arguments().size() == 5 && app.arguments().at(1) == "--audit-sample") {
+            auditSample(app.arguments().at(2), app.arguments().at(3), app.arguments().at(4));
+            return 0;
+        }
         if (app.arguments().size() == 4 && app.arguments().at(1) == "--flat-sample") {
             const auto doc = application::resultDocument(
                 cad::StepImporter{}.load(native(app.arguments().at(2)), {}, {}));

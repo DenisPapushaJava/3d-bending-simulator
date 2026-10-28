@@ -1106,6 +1106,23 @@ double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt =
     }
     return *scale;
 }
+void compactOrientation(QPainter &p, const BendingDrawing &drawing) {
+    // The source projection is already prepared in the CAD worker. Leave only
+    // visible contours: this small view is an orientation aid, not a measured view.
+    DrawingView orientation;
+    const auto &source = drawing.views[3];
+    orientation.minimum = source.minimum;
+    orientation.maximum = source.maximum;
+    for (const auto &path : source.paths)
+        if (!path.hidden)
+            orientation.paths.push_back(path);
+    if (orientation.paths.empty())
+        throw std::runtime_error("Missing isometric orientation view");
+    const double scale = fittedScale(orientation, 175, 27);
+    view(p, drawing, orientation, {122.5, 273}, scale,
+         QStringLiteral("Наглядный вид (%1)").arg(scaleName(scale)), false, false, false, nullptr,
+         false, QRectF(25, 251, 195, 38), true);
+}
 bool classicalLayout(const BendingDrawing &d, const DrawingTitle &title) {
     return title.layout == DrawingLayout::Classical && d.classicalViews &&
            d.variableProfile != DrawingVariableProfile::Measured;
@@ -1268,14 +1285,6 @@ double classicalSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &
                     view(trial, d, classicalSource(d, (*d.classicalViews)[2], 2),
                          {left.center().x(), front.center().y()}, scale, {}, false, false, false,
                          &occupied, false, left, true);
-                    if (top.height() >= 45) {
-                        const QRectF iso(x, top.top(), width, top.height());
-                        const double isoScale =
-                            fittedScale(d.views[3], width - 35, top.height() - 28);
-                        view(trial, d, d.views[3], iso.center() + QPointF(0, 4), isoScale,
-                             QStringLiteral("Наглядный вид (%1)").arg(scaleName(isoScale)), true,
-                             false, false, &occupied, false, iso, true);
-                    }
                 } else if (d.sections.size() == 1)
                     section(0, QRectF(x, 37, width, 175));
                 else {
@@ -1598,6 +1607,8 @@ void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitl
          Qt::AlignLeft | Qt::AlignVCenter);
     text(p, QRectF(161, 237, 58, 13),
          t.quantity ? QString::number(*t.quantity) : QStringLiteral("-"), 5);
+    if (page == 0 && (classical || d.variableProfile == DrawingVariableProfile::Measured))
+        compactOrientation(p, d);
 }
 QImage DrawingSheet::preview(const BendingDrawing &d, const DrawingTitle &t, int page, int width) {
     QImage image(width, static_cast<int>(width * heightMm / widthMm), QImage::Format_RGB32);
