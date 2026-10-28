@@ -150,6 +150,30 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
     return result;
 }
 
+DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &info, double height,
+                                           const DimensionLayout &layout) {
+    DimensionAnnotations result;
+    const auto &hi = info.bounds.maximum;
+    const double gap = std::max(hi.x, hi.y) * .12;
+    length(result, {0, 0, hi.z}, {hi.x, 0, hi.z}, {0, -gap, 0},
+           QStringLiteral("Ширина %1 мм").arg(number(hi.x)), height);
+    length(result, {0, 0, hi.z}, {0, hi.y, hi.z}, {-gap, 0, 0},
+           QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), height);
+    for (std::size_t i = 0; i < info.bends.size(); ++i) {
+        const auto &b = info.bends[i];
+        const double y = (b.firstY + b.secondY) / 2;
+        const auto id = QStringLiteral("B%1").arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'));
+        length(result, {hi.x, 0, hi.z}, {hi.x, y, hi.z}, {gap * (1 + i * .65), 0, 0},
+               QStringLiteral("%1 · %2 мм").arg(id, number(y)), height, bendColor);
+        callout(result, {b.minimumX, y, hi.z}, -layout.right * 1.8 + layout.up * .3,
+                QStringLiteral("%1 %2 · %3° · L %4 мм")
+                    .arg(id, b.direction > 0 ? QStringLiteral("↑") : QStringLiteral("↓"),
+                         number(180 - b.turnRadians * 180 / std::numbers::pi),
+                         number(b.maximumX - b.minimumX)),
+                height);
+    }
+    return result;
+}
 DimensionAnnotations previewDimensions(const cad::PreviewFrame &frame,
                                        const simulation::SingleBend &model, double height,
                                        const DimensionLayout &layout) {

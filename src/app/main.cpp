@@ -1,5 +1,6 @@
 #include "bending/Version.h"
 #include "bending/cad/BendingDrawingBuilder.h"
+#include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
@@ -130,6 +131,7 @@ int main(int argc, char *argv[]) {
                                    previewBuilder, std::move(tools));
     window.setToolCatalogLoader(bending::project::readToolCatalog);
     window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
+    window.setFlatPatternBuilder(std::make_shared<bending::cad::FlatPatternBuilder>());
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());

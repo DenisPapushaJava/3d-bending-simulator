@@ -23,6 +23,10 @@ class DocumentSession final {
     void close();
     [[nodiscard]] ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
+    bool setUnfoldSettings(core::UnfoldSettings);
+    [[nodiscard]] const core::UnfoldSettings &unfoldSettings() const {
+        return unfold_;
+    }
     bool setBendReview(std::size_t recognizedIndex, BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
@@ -78,5 +82,6 @@ class DocumentSession final {
     bool modified_ = false;
     std::vector<BendPreparation> bends_;
     BendBindings bendBindings_;
+    core::UnfoldSettings unfold_;
 };
 } // namespace bending::application

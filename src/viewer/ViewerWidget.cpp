@@ -1,6 +1,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include "Dimensions.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/FlatPatternAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
 
 #include <AIS_ColoredShape.hxx>
@@ -258,6 +259,7 @@ class OcctCanvas final : public QWidget {
                                             : FaceHighlights{};
         presentation_ = candidate;
         preview_.reset();
+        flat_.reset();
         shape_ = shape;
         faces_ = std::move(faces);
         document_ = std::move(document);
@@ -343,6 +345,7 @@ class OcctCanvas final : public QWidget {
         evidence_.Nullify();
         support_.Nullify();
         preview_ = std::move(preview);
+        flat_.reset();
         previewFrame_ = index;
         refreshDimensions();
         if (onSelection) {
@@ -353,7 +356,7 @@ class OcctCanvas final : public QWidget {
     QString endPreview() {
         QString error;
         try {
-            error = preview_ ? present(shape_, document_, revision_) : QString{};
+            error = (preview_ || flat_) ? present(shape_, document_, revision_) : QString{};
         } catch (const Standard_Failure &failure) {
             error = failureText(failure);
         } catch (const std::exception &failure) {
@@ -363,6 +366,54 @@ class OcctCanvas final : public QWidget {
             fail(error);
         }
         return error;
+    }
+
+    QString presentFlat(application::FlatPatternPtr flat, quint64 revision) {
+        if (revision != revision_ || !document_ || !flat)
+            return QStringLiteral("Неактуальная развёртка");
+        const bool entering = flat_ != flat;
+        Handle(AIS_ColoredShape) candidate;
+        if (ready_) {
+            try {
+                candidate = new AIS_ColoredShape(cad::OcctFlatPatternAccess::shape(*flat));
+                candidate->Attributes()->SetAutoTriangulation(false);
+                candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
+                candidate->SetColor(Quantity_Color(.25, .64, .73, Quantity_TOC_RGB));
+                for (const auto &line : cad::OcctFlatPatternAccess::bendLines(*flat)) {
+                    candidate->SetCustomColor(line, Quantity_Color(1., .45, .08, Quantity_TOC_RGB));
+                    candidate->SetCustomWidth(line, 2.5);
+                }
+                context_->Display(candidate,
+                                  displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
+                                                                           : AIS_Shaded,
+                                  -1, false);
+                for (const auto &old : {Handle(AIS_Shape)(presentation_), evidence_, support_})
+                    if (!old.IsNull())
+                        context_->Remove(old, false);
+                removeDimensions();
+                context_->ClearSelected(false);
+                if (entering) {
+                    view_->SetProj(V3d_Zpos);
+                    view_->FitAll(.25, false);
+                }
+                view_->ZFitAll();
+            } catch (const Standard_Failure &e) {
+                restore(candidate);
+                return failureText(e);
+            } catch (const std::exception &e) {
+                restore(candidate);
+                return QString::fromUtf8(e.what());
+            }
+        }
+        presentation_ = candidate;
+        evidence_.Nullify();
+        support_.Nullify();
+        preview_.reset();
+        flat_ = std::move(flat);
+        refreshDimensions();
+        if (onSelection)
+            onSelection(revision_, 0);
+        return {};
     }
 
     void clearDocument(quint64 revision) {
@@ -381,6 +432,7 @@ class OcctCanvas final : public QWidget {
         faces_.Clear();
         document_.reset();
         preview_.reset();
+        flat_.reset();
         revision_ = revision;
         diagnostic_ = false;
         updateDimensionButton();
@@ -447,7 +499,7 @@ class OcctCanvas final : public QWidget {
         sanitize(state.cutouts);
         state.bend = state.bend && !state.primary.empty();
         highlights_ = std::move(state);
-        if (preview_) {
+        if (preview_ || flat_) {
             return;
         }
         guarded([&] {
@@ -659,7 +711,7 @@ class OcctCanvas final : public QWidget {
                     fitAll();
                     return;
                 }
-                if (!preview_) {
+                if (!preview_ && !flat_) {
                     context_->SelectDetected(AIS_SelectionScheme_Replace);
                     context_->InitSelected();
                     int face = 0;
@@ -805,11 +857,13 @@ class OcctCanvas final : public QWidget {
         updateNavigationCube();
         dimensionsAction_->setEnabled(ready_ && document_ != nullptr);
         const auto description = dimensions_.labels.join(QStringLiteral("\n"));
-        const auto scope = preview_
-                               ? QStringLiteral("Размеры текущего положения. A/B — прямые участки "
-                                                "полок от касания зоны, по их габаритам.")
-                               : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
-                                                "измерения исходной модели.");
+        const auto scope =
+            flat_ ? QStringLiteral(
+                        "Теоретическая развёртка: габариты и координаты линий гиба, не X упора.")
+            : preview_ ? QStringLiteral("Размеры текущего положения. A/B — прямые участки "
+                                        "полок от касания зоны, по их габаритам.")
+                       : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
+                                        "измерения исходной модели.");
         dimensionsButton_->setToolTip(
             QStringLiteral("Показать / скрыть размеры · Ctrl+D\n%1\n%2").arg(scope, description));
         dimensionsButton_->setAccessibleDescription(scope + QLatin1Char('\n') + description);
@@ -830,7 +884,8 @@ class OcctCanvas final : public QWidget {
                 const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
                 const DimensionLayout layout{right, up};
                 dimensions_ =
-                    preview_
+                    flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout)
+                    : preview_
                         ? previewDimensions(cad::OcctPreviewAccess::frame(*preview_, previewFrame_),
                                             preview_->model(), 14.0 * devicePixelRatioF(), layout)
                         : documentDimensions(document_->metadata(), faces_,
@@ -852,7 +907,8 @@ class OcctCanvas final : public QWidget {
             }
             if (!presentation_.IsNull()) {
                 context_->Display(presentation_, AIS_Shaded,
-                                  preview_ ? -1 : AIS_Shape::SelectionMode(TopAbs_FACE), false);
+                                  (preview_ || flat_) ? -1 : AIS_Shape::SelectionMode(TopAbs_FACE),
+                                  false);
             }
             view_->Redraw();
             refreshDimensions();
@@ -922,7 +978,13 @@ class OcctCanvas final : public QWidget {
 
             ready_ = true;
             updateDimensionButton();
-            if (preview_) {
+            if (flat_) {
+                const auto flat = flat_;
+                flat_.reset();
+                const auto error = presentFlat(flat, revision_);
+                if (!error.isEmpty())
+                    throw std::runtime_error(error.toStdString());
+            } else if (preview_) {
                 // Rebuild native resources from the same immutable worker snapshot.
                 const auto preview = preview_;
                 const auto index = previewFrame_;
@@ -998,6 +1060,7 @@ class OcctCanvas final : public QWidget {
     DimensionAnnotations dimensions_;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
+    application::FlatPatternPtr flat_;
     std::size_t previewFrame_ = 0;
     quint64 revision_ = 0;
     bool diagnostic_ = false;
@@ -1173,4 +1236,11 @@ void ViewerWidget::showDiagnosticBox() {
     }
 }
 
+} // namespace bending::viewer
+
+namespace bending::viewer {
+QString ViewerWidget::presentFlatPattern(std::shared_ptr<const application::FlatPattern> flat,
+                                         quint64 revision) {
+    return impl_->canvas ? impl_->canvas->presentFlat(std::move(flat), revision) : impl_->error;
+}
 } // namespace bending::viewer

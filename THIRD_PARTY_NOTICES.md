@@ -65,3 +65,11 @@ The exact notice and license are retained in `src/ui/data/fonts/OFL.txt` and ins
 `share/doc/BendingSimulator/licenses/fonts/OFL.txt` in packaged builds.
 The repository's Apache license describes its tooling; this embedded font retains its own OFL.
 No glyph outlines were changed. Font embedding does not change the license of generated PDF documents.
+
+## Reference bend-allowance data — D056
+
+The theoretical air-bending presets use numerical K-factor recommendations published in
+[Wiz Parts, Sheet Metal Fabrication Design Guide v1.0, September 2024, printed page 4](https://www.wiz-parts.co.uk/wp-content/uploads/2024/08/Wiz-Parts-Sheet-Metal-Fabrication-Design-Guide-v1.0.pdf).
+Only numerical reference facts and attribution are included; the PDF, illustrations and third-party source code are not distributed.
+The application's interval-boundary policy and limitations are documented in docs/flat-pattern.md.
+These reference presets do not constitute calibration or endorsement for the user's press brake.

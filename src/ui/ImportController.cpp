@@ -120,6 +120,21 @@ class ImportController::Impl {
     std::uint64_t drawingId = 0;
     bool preparingDrawing = false;
     std::optional<DrawingRequest> drawingRequest;
+    FlatPatternPtr flat;
+    std::optional<FlatPatternError> flatError;
+    std::optional<FlatPatternRequest> flatRequest;
+    std::uint64_t flatId = 0;
+    bool preparingFlat = false;
+    void invalidateFlat() {
+        ++flatId;
+        flat.reset();
+        flatError.reset();
+        flatRequest.reset();
+        if (preparingFlat) {
+            stop.request_stop();
+            preparingFlat = false;
+        }
+    }
     void invalidateDrawing() {
         ++drawingId;
         drawing.reset();
@@ -155,6 +170,7 @@ void ImportController::open(std::filesystem::path path) {
         return;
     }
     impl_->stop.request_stop();
+    impl_->invalidateFlat();
     impl_->invalidatePreview();
     impl_->invalidateDrawing();
     ++impl_->saveId;
@@ -165,6 +181,7 @@ void ImportController::open(std::filesystem::path path) {
 }
 
 void ImportController::cancel() {
+    impl_->invalidateFlat();
     impl_->stop.request_stop();
     impl_->invalidatePreview();
     impl_->invalidateDrawing();
@@ -176,6 +193,7 @@ void ImportController::cancel() {
 }
 
 void ImportController::closeDocument() {
+    impl_->invalidateFlat();
     cancel();
     impl_->presenter({}, impl_->session.revision() + 1);
     impl_->session.close();
@@ -207,6 +225,7 @@ ThicknessValidation ImportController::setManualThickness(double valueMm) {
     const auto before = impl_->session.editRevision();
     const auto result = impl_->session.setManualThickness(valueMm);
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateFlat();
         impl_->invalidatePreview();
         impl_->invalidateDrawing();
     }
@@ -217,6 +236,7 @@ void ImportController::useAutomaticThickness() {
     const auto before = impl_->session.editRevision();
     impl_->session.useAutomaticThickness();
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateFlat();
         impl_->invalidatePreview();
         impl_->invalidateDrawing();
     }
@@ -286,6 +306,7 @@ void ImportController::saveProject(std::filesystem::path path,
     auto *state = impl_.get();
     const auto document = state->session.document();
     const auto manual = state->session.manualThicknessMm();
+    const auto unfold = state->session.unfoldSettings();
     const auto bends = state->session.bends();
     const auto revision = state->session.editRevision();
     const auto id = ++state->saveId;
@@ -296,11 +317,11 @@ void ImportController::saveProject(std::filesystem::path path,
     state->writeError.clear();
     QMetaObject::invokeMethod(
         state->worker,
-        [state, document, manual, bends, revision, id, stop, path = std::move(path),
+        [state, document, manual, unfold, bends, revision, id, stop, path = std::move(path),
          writer = std::move(writer)] {
             std::optional<std::string> error;
             try {
-                error = writer->save(path, *document, manual, bends, stop);
+                error = writer->save(path, *document, manual, bends, stop, unfold);
             } catch (const std::exception &failure) {
                 error = failure.what();
             } catch (...) {
@@ -525,5 +546,95 @@ bool ImportController::isPreparingDrawing() const {
 void ImportController::cancelDrawing() {
     impl_->invalidateDrawing();
     emit stateChanged();
+}
+} // namespace bending::ui
+
+namespace bending::ui {
+bool ImportController::setUnfoldSettings(core::UnfoldSettings settings) {
+    if (impl_->stopping || hasWork())
+        return false;
+    const auto before = impl_->session.editRevision();
+    const bool changed = impl_->session.setUnfoldSettings(settings);
+    if (before != impl_->session.editRevision())
+        impl_->invalidateFlat();
+    emit stateChanged();
+    return changed;
+}
+bool ImportController::prepareFlatPattern(
+    std::shared_ptr<const application::FlatPatternBuilder> builder) {
+    if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
+        return false;
+    auto *s = impl_.get();
+    const application::FlatPatternRequest request{s->session.unfoldSettings(),
+                                                  s->session.manualThicknessMm()};
+    if (s->flat && s->flatRequest == request) {
+        emit stateChanged();
+        return true;
+    }
+    s->invalidateFlat();
+    s->flatRequest = request;
+    const auto id = s->flatId, revision = s->session.revision();
+    const auto document = s->session.document();
+    s->stop = std::stop_source{};
+    const auto stop = s->stop.get_token();
+    s->running = true;
+    s->preparingFlat = true;
+    QMetaObject::invokeMethod(
+        s->worker,
+        [s, builder = std::move(builder), id, revision, document, request, stop] {
+            application::FlatPatternResult result = application::FlatPatternError{
+                application::FlatPatternErrorCode::Failed, "Flat pattern failed"};
+            try {
+                result = builder->build(document, request, stop);
+            } catch (const std::exception &e) {
+                result = application::FlatPatternError{application::FlatPatternErrorCode::Failed,
+                                                       e.what()};
+            } catch (...) {
+                result = application::FlatPatternError{application::FlatPatternErrorCode::Failed,
+                                                       "Unexpected flat pattern failure"};
+            }
+            QMetaObject::invokeMethod(
+                s->owner,
+                [s, id, revision, result = std::move(result), stop] {
+                    s->running = false;
+                    s->preparingFlat = false;
+                    if (s->stopping)
+                        return;
+                    if (!stop.stop_requested() && id == s->flatId &&
+                        revision == s->session.revision() && !s->session.activeRequest()) {
+                        if (const auto *flat = std::get_if<application::FlatPatternPtr>(&result);
+                            flat && *flat &&
+                            (*flat)->info().settings == s->session.unfoldSettings() &&
+                            std::isfinite((*flat)->info().thicknessMm) &&
+                            (*flat)->info().thicknessMm > 0 &&
+                            std::isfinite((*flat)->info().bounds.maximum.x) &&
+                            (*flat)->info().bounds.maximum.x > 0 &&
+                            std::isfinite((*flat)->info().bounds.maximum.y) &&
+                            (*flat)->info().bounds.maximum.y > 0)
+                            s->flat = *flat;
+                        else if (const auto *error =
+                                     std::get_if<application::FlatPatternError>(&result))
+                            s->flatError = *error;
+                        else
+                            s->flatError = application::FlatPatternError{
+                                application::FlatPatternErrorCode::Failed, "Empty flat pattern"};
+                    }
+                    s->dispatch();
+                    emit s->owner->stateChanged();
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
+    emit stateChanged();
+    return true;
+}
+application::FlatPatternPtr ImportController::flatPattern() const {
+    return impl_->flat;
+}
+std::optional<application::FlatPatternError> ImportController::flatPatternError() const {
+    return impl_->flatError;
+}
+bool ImportController::isPreparingFlatPattern() const {
+    return impl_->preparingFlat;
 }
 } // namespace bending::ui

@@ -9,6 +9,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDir>
@@ -249,6 +250,8 @@ class MainWindow::Impl {
         }
         const bool newGeometry = shownBendRevision != session.revision();
         if (newGeometry) {
+            wantFlat = false;
+            displayedFlat.reset();
             shownBendRevision = session.revision();
             fillBends();
         }
@@ -334,14 +337,17 @@ class MainWindow::Impl {
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
         if (drawingAction)
             drawingAction->setEnabled(document && drawingBuilder && !controller->hasWork());
-        const bool cancellable = session.activeRequest().has_value() ||
-                                 controller->isPreparingPreview() ||
-                                 controller->isPreparingDrawing();
+        const bool cancellable =
+            session.activeRequest().has_value() || controller->isPreparingPreview() ||
+            controller->isPreparingDrawing() || controller->isPreparingFlatPattern();
         cancelAction->setVisible(cancellable);
         cancelAction->setEnabled(cancellable);
         progress->setVisible(session.activeRequest().has_value() || controller->isSaving() ||
-                             controller->isPreparingPreview() || controller->isPreparingDrawing());
-        if (controller->isPreparingDrawing()) {
+                             controller->isPreparingPreview() || controller->isPreparingDrawing() ||
+                             controller->isPreparingFlatPattern());
+        if (controller->isPreparingFlatPattern()) {
+            window->statusBar()->showMessage(QStringLiteral("Подготовка теоретической развёртки…"));
+        } else if (controller->isPreparingDrawing()) {
             window->statusBar()->showMessage(
                 QStringLiteral("Подготовка проекций и размеров листа…"));
         } else if (controller->isPreparingPreview()) {
@@ -391,6 +397,7 @@ class MainWindow::Impl {
         diagnostics->setPlainText(detail);
         diagnostics->setVisible(!detail.isEmpty());
         refreshPreview();
+        refreshFlat();
     }
 
     void checkTools() {
@@ -429,10 +436,114 @@ class MainWindow::Impl {
     void showSource() {
         stopPlayback();
         viewingSource = true;
-        if (displayedPreview) {
+        wantFlat = false;
+        if (displayedPreview || displayedFlat) {
             displayedPreview.reset();
+            displayedFlat.reset();
             previewDisplayError = viewer->endBendPreview();
         }
+    }
+
+    void showFlat() {
+        if (controller->hasWork() || !flatBuilder || !controller->session().document())
+            return;
+        const auto &settings = controller->session().unfoldSettings();
+        if (!settings.manualK && settings.material == core::SheetMaterial::Unknown) {
+            propertyTabs->setCurrentIndex(0);
+            material->setFocus();
+            material->showPopup();
+            return;
+        }
+        stopPlayback();
+        viewingSource = true;
+        wantFlat = true;
+        if (displayedPreview) {
+            displayedPreview.reset();
+            (void)viewer->endBendPreview();
+        }
+        controller->prepareFlatPattern(flatBuilder);
+    }
+    void refreshFlat() {
+        if (!material)
+            return;
+        const auto &s = controller->session();
+        const auto settings = s.unfoldSettings();
+        {
+            const QSignalBlocker a(material), b(customK), c(kInput);
+            material->setCurrentIndex(static_cast<int>(settings.material));
+            customK->setChecked(settings.manualK.has_value());
+            if (settings.manualK)
+                kInput->setValue(*settings.manualK);
+        }
+        const bool editable = s.document() && !controller->hasWork();
+        material->setEnabled(editable);
+        customK->setEnabled(editable);
+        kInput->setEnabled(editable && customK->isChecked());
+        flatAction->setEnabled(editable && flatBuilder);
+        flatAction->setText(controller->isPreparingFlatPattern()
+                                ? QStringLiteral("Готовим развёртку…")
+                            : controller->flatPattern() ? QStringLiteral("Показать развёртку")
+                            : settings.material == core::SheetMaterial::Unknown && !settings.manualK
+                                ? QStringLiteral("Развёртка: выбрать материал…")
+                                : QStringLiteral("Подготовить развёртку"));
+        for (auto *button : {flatButton, checkFlatButton})
+            if (button) {
+                button->setText(flatAction->text());
+                button->setEnabled(flatAction->isEnabled());
+            }
+        const auto flat = controller->flatPattern();
+        if (displayedFlat && displayedFlat != flat) {
+            (void)viewer->endBendPreview();
+            displayedFlat.reset();
+        }
+        QString status;
+        if (controller->isPreparingFlatPattern())
+            status = QStringLiteral("Раскладываем стенки и проверяем полный контур…");
+        else if (const auto error = controller->flatPatternError()) {
+            status = error->code == FlatPatternErrorCode::ThicknessConflict
+                         ? QStringLiteral("Толщина отличается от CAD.")
+                     : error->code == FlatPatternErrorCode::MissingMaterial
+                         ? QStringLiteral("Выберите материал или свой K.")
+                         : QStringLiteral("Развёртка этой формы пока не поддерживается.");
+            flatStatus->setToolTip(text(error->detail));
+        } else if (flat) {
+            const auto &info = flat->info();
+            status = QStringLiteral(
+                         "Расчётная развёртка %1 × %2 мм · t %3 · гибов %4\nСвободная гибка · %5")
+                         .arg(QLocale::system().toString(info.bounds.maximum.x, 'f', 2),
+                              QLocale::system().toString(info.bounds.maximum.y, 'f', 2),
+                              number(info.thicknessMm))
+                         .arg(info.bends.size())
+                         .arg(settings.manualK ? QStringLiteral("K задан вручную")
+                                               : QStringLiteral("справочник Wiz Parts v1"));
+            QString details =
+                QStringLiteral("Теоретический расчёт без калибровки станка. Координаты линий гибов "
+                               "— от края заготовки, не X упора.");
+            for (const auto &b : info.bends)
+                details += QStringLiteral("\nB%1: Ri %2 · K %3 · BA %4 мм · L %5 мм")
+                               .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
+                               .arg(number(b.radiusMm), number(b.k), number(b.allowanceMm),
+                                    number(b.maximumX - b.minimumX));
+            flatStatus->setToolTip(details);
+            if (checkFlatStatus)
+                checkFlatStatus->setToolTip(details);
+            if (wantFlat && displayedFlat != flat) {
+                const auto error = viewer->presentFlatPattern(flat, s.revision());
+                if (error.isEmpty()) {
+                    displayedFlat = flat;
+                    viewer->setDimensionsVisible(true);
+                } else
+                    status = QStringLiteral("Развёртка рассчитана; ошибка показа: %1").arg(error);
+            }
+        } else
+            status = QStringLiteral("Развёртка: теоретический расчёт по материалу. Столкновения и "
+                                    "пружинение не рассчитываются.");
+        flatStatus->setText(status);
+        if (checkFlatStatus)
+            checkFlatStatus->setText(status);
+        flatSource->setVisible(displayedFlat != nullptr);
+        if (checkFlatSource)
+            checkFlatSource->setVisible(displayedFlat != nullptr);
     }
 
     void refreshWorkflow() {
@@ -504,6 +615,8 @@ class MainWindow::Impl {
         if (!preview || viewingSource) {
             return;
         }
+        wantFlat = false;
+        displayedFlat.reset();
         const auto index = static_cast<std::size_t>(bendFrame->value());
         const auto failure =
             viewer->presentBendPreview(preview, index, controller->session().revision());
@@ -1221,6 +1334,16 @@ class MainWindow::Impl {
     QPushButton *resetBendTarget = nullptr;
     std::shared_ptr<const SingleBendPreviewBuilder> previewBuilder;
     std::shared_ptr<const BendingDrawingBuilder> drawingBuilder;
+    std::shared_ptr<const application::FlatPatternBuilder> flatBuilder;
+    application::FlatPatternPtr displayedFlat;
+    bool wantFlat = false;
+    QComboBox *material = nullptr;
+    QCheckBox *customK = nullptr;
+    QDoubleSpinBox *kInput = nullptr;
+    QAction *flatAction = nullptr;
+    QPushButton *flatButton = nullptr, *checkFlatButton = nullptr, *flatSource = nullptr,
+                *checkFlatSource = nullptr;
+    QLabel *flatStatus = nullptr, *checkFlatStatus = nullptr;
     QAction *drawingAction = nullptr;
     std::optional<std::size_t> drawingBase;
     std::uint64_t drawingBaseRevision = 0;
@@ -1514,6 +1637,70 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->properties = label(QStringLiteral("documentProperties"));
     impl_->projectState = label(QStringLiteral("projectState"));
     impl_->thickness = label(QStringLiteral("thicknessProperties"));
+    layout->addWidget(new QLabel(QStringLiteral("Материал для развёртки"), panel));
+    impl_->material = new QComboBox(panel);
+    impl_->material->setObjectName(QStringLiteral("sheetMaterial"));
+    impl_->material->setAccessibleName(
+        QStringLiteral("Материал листа для теоретической развёртки"));
+    impl_->material->addItems({QStringLiteral("Не указан"),
+                               QStringLiteral("Низкоуглеродистая сталь"),
+                               QStringLiteral("Нержавеющая сталь"), QStringLiteral("Алюминий")});
+    layout->addWidget(impl_->material);
+    auto *kToggle = new QToolButton(panel);
+    kToggle->setText(QStringLiteral("Параметры развёртки…"));
+    kToggle->setCheckable(true);
+    layout->addWidget(kToggle);
+    auto *kPanel = new QWidget(panel);
+    auto *kLayout = new QHBoxLayout(kPanel);
+    kLayout->setContentsMargins(0, 0, 0, 0);
+    impl_->customK = new QCheckBox(QStringLiteral("Свой K"), kPanel);
+    impl_->customK->setObjectName(QStringLiteral("customUnfoldK"));
+    impl_->kInput = new QDoubleSpinBox(kPanel);
+    impl_->kInput->setObjectName(QStringLiteral("unfoldK"));
+    impl_->kInput->setRange(0, .5);
+    impl_->kInput->setDecimals(4);
+    impl_->kInput->setSingleStep(.01);
+    impl_->kInput->setValue(.4);
+    kLayout->addWidget(impl_->customK);
+    kLayout->addWidget(impl_->kInput);
+    layout->addWidget(kPanel);
+    kPanel->hide();
+    connect(kToggle, &QToolButton::toggled, kPanel, &QWidget::setVisible);
+    const auto updateUnfold = [this] {
+        auto settings = impl_->controller->session().unfoldSettings();
+        settings.material = static_cast<core::SheetMaterial>(impl_->material->currentIndex());
+        settings.manualK =
+            impl_->customK->isChecked() ? std::optional{impl_->kInput->value()} : std::nullopt;
+        impl_->controller->setUnfoldSettings(settings);
+    };
+    connect(impl_->material, &QComboBox::currentIndexChanged, this, updateUnfold);
+    connect(impl_->customK, &QCheckBox::toggled, this, updateUnfold);
+    connect(impl_->kInput, &QDoubleSpinBox::valueChanged, this, updateUnfold);
+    impl_->flatAction = new QAction(QStringLiteral("Подготовить развёртку"), this);
+    impl_->flatAction->setObjectName(QStringLiteral("flatPatternAction"));
+    impl_->flatAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+U")));
+    addAction(impl_->flatAction);
+    connect(impl_->flatAction, &QAction::triggered, this, [this] { impl_->showFlat(); });
+    if (auto *menu = impl_->viewer->navigationMenu()) {
+        menu->addSeparator();
+        menu->addAction(impl_->flatAction);
+        auto *source = menu->addAction(QStringLiteral("Показать деталь (STEP)"));
+        connect(source, &QAction::triggered, this, [this] {
+            impl_->showSource();
+            impl_->refreshFlat();
+        });
+    }
+    impl_->flatButton = new QPushButton(panel);
+    impl_->flatButton->setObjectName(QStringLiteral("showFlatPattern"));
+    connect(impl_->flatButton, &QPushButton::clicked, impl_->flatAction, &QAction::trigger);
+    layout->addWidget(impl_->flatButton);
+    impl_->flatSource = new QPushButton(QStringLiteral("Показать деталь"), panel);
+    connect(impl_->flatSource, &QPushButton::clicked, this, [this] {
+        impl_->showSource();
+        impl_->refreshFlat();
+    });
+    layout->addWidget(impl_->flatSource);
+    impl_->flatStatus = label(QStringLiteral("flatPatternStatus"));
     leftLayout->removeWidget(impl_->project);
     leftLayout->setContentsMargins(0, 0, 0, 0);
     impl_->bendList->setMaximumHeight(180);
@@ -1756,6 +1943,19 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *operationTitle = new QLabel(QStringLiteral("Проверка и симуляция гибки"), operationPanel);
     operationTitle->setWordWrap(true);
     operationLayout->addWidget(operationTitle);
+    impl_->checkFlatButton = new QPushButton(operationPanel);
+    impl_->checkFlatButton->setObjectName(QStringLiteral("checkFlatPattern"));
+    connect(impl_->checkFlatButton, &QPushButton::clicked, impl_->flatAction, &QAction::trigger);
+    operationLayout->addWidget(impl_->checkFlatButton);
+    impl_->checkFlatSource = new QPushButton(QStringLiteral("Показать деталь"), operationPanel);
+    connect(impl_->checkFlatSource, &QPushButton::clicked, this, [this] {
+        impl_->showSource();
+        impl_->refreshFlat();
+    });
+    operationLayout->addWidget(impl_->checkFlatSource);
+    impl_->checkFlatStatus = new QLabel(operationPanel);
+    impl_->checkFlatStatus->setWordWrap(true);
+    operationLayout->addWidget(impl_->checkFlatStatus);
     impl_->checkBend = new QPushButton(QStringLiteral("Проверить гибку"), operationPanel);
     impl_->checkBend->setObjectName(QStringLiteral("checkBend"));
     impl_->checkBend->setMinimumHeight(40);
@@ -2183,6 +2383,11 @@ void MainWindow::setToolCatalogLoader(
 void MainWindow::setDrawingBuilder(
     std::shared_ptr<const application::BendingDrawingBuilder> builder) {
     impl_->drawingBuilder = std::move(builder);
+    impl_->refresh();
+}
+void MainWindow::setFlatPatternBuilder(
+    std::shared_ptr<const application::FlatPatternBuilder> builder) {
+    impl_->flatBuilder = std::move(builder);
     impl_->refresh();
 }
 } // namespace bending::ui

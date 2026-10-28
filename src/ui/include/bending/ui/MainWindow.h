@@ -5,6 +5,7 @@
 
 #include "bending/application/BendingDrawing.h"
 #include "bending/application/DocumentImporter.h"
+#include "bending/application/FlatPattern.h"
 #include "bending/application/ProjectWriter.h"
 #include "bending/application/SingleBendPreview.h"
 #include <filesystem>
@@ -35,6 +36,7 @@ class MainWindow final : public QMainWindow {
         std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
             loader);
     void setDrawingBuilder(std::shared_ptr<const application::BendingDrawingBuilder> builder);
+    void setFlatPatternBuilder(std::shared_ptr<const application::FlatPatternBuilder> builder);
 
   protected:
     void closeEvent(QCloseEvent *event) override;

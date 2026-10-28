@@ -13,6 +13,7 @@ class Document;
 struct RecognizedBend;
 struct BendInteriorContourDiagnostic;
 class SingleBendPreview;
+class FlatPattern;
 } // namespace bending::application
 namespace bending::viewer {
 
@@ -50,6 +51,8 @@ class ViewerWidget final : public QWidget {
     presentBendPreview(std::shared_ptr<const application::SingleBendPreview> preview,
                        std::size_t frameIndex, quint64 documentRevision);
     [[nodiscard]] QString endBendPreview();
+    [[nodiscard]] QString presentFlatPattern(std::shared_ptr<const application::FlatPattern>,
+                                             quint64 documentRevision);
     // Explicit diagnostic scene, never shown by the normal application startup.
     void showDiagnosticBox();
 

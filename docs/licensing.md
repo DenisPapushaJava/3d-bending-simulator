@@ -78,3 +78,7 @@ D042, 2026-10-27: в автоматическом выпуске остаютс�
 Windows OCCT включает FreeType 2.14.3 без optional features. Для библиотеки выбран FreeType License (FTL); credit/disclaimer сохранён в THIRD_PARTY_NOTICES.md, полный текст — в share/licenses/FreeType-copyright.txt. Включённые в FreeType MIT/X11/zlib notices сохранены дополнительно в share/licenses/freetype вместе с исходными файлами-носителями; исходники с четырьмя применёнными патчами и рецепт порта входят в companion ZIP. Подпроект GPL не выбран как лицензия нашей поставки FreeType.
 
 Шрифт fallback Font_DejavuSans_Latin_woff внутри OCCT сохраняет Bitstream Vera notice и public-domain статус изменений DejaVu; упаковщик извлекает его неизменённые условия в share/licenses/OCCT-DejaVu-copyright.txt. Системные Arial/DejaVu не копируются. Это дополнение фактического состава, а не замена лицензий собственным MIT.
+
+### Справочные припуски — D056, 2026-10-28
+
+Используются численные рекомендации K для свободной гибки из Wiz Parts Design Guide v1.0; источник/область и наша политика границ сохранены в [контракте](flat-pattern.md) и THIRD_PARTY_NOTICES. PDF, иллюстрации и чужой код в комплект не добавлены. Новых библиотек нет; алгоритм написан на уже подключённых C++/OCCT/Qt. Данные SendCutSend/Cincinnati не активированы как производственные настройки SPEED BEND.

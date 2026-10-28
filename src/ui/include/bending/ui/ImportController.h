@@ -2,6 +2,7 @@
 
 #include "bending/application/BendingDrawing.h"
 #include "bending/application/DocumentSession.h"
+#include "bending/application/FlatPattern.h"
 #include "bending/application/ProjectWriter.h"
 #include "bending/application/SingleBendPreview.h"
 
@@ -50,6 +51,11 @@ class ImportController final : public QObject {
     [[nodiscard]] std::optional<application::DrawingError> drawingError() const;
     [[nodiscard]] bool isPreparingDrawing() const;
     void cancelDrawing();
+    bool setUnfoldSettings(core::UnfoldSettings);
+    bool prepareFlatPattern(std::shared_ptr<const application::FlatPatternBuilder>);
+    [[nodiscard]] application::FlatPatternPtr flatPattern() const;
+    [[nodiscard]] std::optional<application::FlatPatternError> flatPatternError() const;
+    [[nodiscard]] bool isPreparingFlatPattern() const;
 
   signals:
     void stateChanged();

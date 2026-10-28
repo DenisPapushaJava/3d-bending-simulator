@@ -4,7 +4,8 @@
 
 namespace bending::application {
 std::optional<std::string> projectSettingsError(const OpenedProject &project) {
-    if (!project.document || !validBendPreparations(project.bends)) {
+    if (!project.document || !validBendPreparations(project.bends) ||
+        !core::validUnfoldSettings(project.unfold)) {
         return "Invalid saved bend preparations";
     }
     if (project.manualThicknessMm) {
@@ -58,6 +59,7 @@ bool DocumentSession::complete(const ImportRequest &request, ImportResult result
         ++revision_;
         ++editRevision_;
         manualThickness_ = project ? project->manualThicknessMm : std::nullopt;
+        unfold_ = project ? project->unfold : core::UnfoldSettings{};
         projectPath_ = project ? project->path : std::filesystem::path{};
         modified_ = false;
         error_.reset();
@@ -87,6 +89,7 @@ void DocumentSession::close() {
     modified_ = false;
     bends_.clear();
     bendBindings_ = {};
+    unfold_ = {};
 }
 
 const BendPreparation *DocumentSession::bend(std::size_t recognizedIndex) const {
@@ -197,6 +200,16 @@ bool DocumentSession::markSaved(std::uint64_t editRevision, std::filesystem::pat
     }
     projectPath_ = std::move(path);
     modified_ = false;
+    return true;
+}
+bool DocumentSession::setUnfoldSettings(core::UnfoldSettings settings) {
+    if (!document_ || active_ || !core::validUnfoldSettings(settings))
+        return false;
+    if (unfold_ != settings) {
+        unfold_ = settings;
+        ++editRevision_;
+        modified_ = true;
+    }
     return true;
 }
 } // namespace bending::application

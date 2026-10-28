@@ -255,9 +255,9 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     const auto version = root.value(QStringLiteral("version"));
     if (!version.isDouble() ||
         (version.toDouble() != 1.0 && version.toDouble() != 2.0 && version.toDouble() != 3.0 &&
-         version.toDouble() != 4.0 && version.toDouble() != 5.0)) {
+         version.toDouble() != 4.0 && version.toDouble() != 5.0 && version.toDouble() != 6.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 5",
+                           "Supported project format versions are 1 through 6",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -298,6 +298,35 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
         return invalid("Thickness is outside the supported range");
     }
     std::vector<BendPreparation> bends;
+    core::UnfoldSettings unfold;
+    if (version.toDouble() >= 6) {
+        const auto parameters = root.value(QStringLiteral("parameters")).toObject();
+        const auto value = parameters.value(QStringLiteral("unfold"));
+        if (!value.isObject())
+            return invalid("Missing unfold settings");
+        const auto obj = value.toObject();
+        const auto material = obj.value(QStringLiteral("material")).toString();
+        if (material == QStringLiteral("unknown"))
+            unfold.material = core::SheetMaterial::Unknown;
+        else if (material == QStringLiteral("mild-steel"))
+            unfold.material = core::SheetMaterial::MildSteel;
+        else if (material == QStringLiteral("stainless"))
+            unfold.material = core::SheetMaterial::StainlessSteel;
+        else if (material == QStringLiteral("aluminium"))
+            unfold.material = core::SheetMaterial::Aluminium;
+        else
+            return invalid("Unknown sheet material");
+        const auto k = obj.value(QStringLiteral("manualK"));
+        if (k.isDouble())
+            unfold.manualK = k.toDouble();
+        else if (!k.isNull())
+            return invalid("Invalid K factor");
+        const auto rule = obj.value(QStringLiteral("referenceVersion"));
+        if (!rule.isDouble() || rule.toDouble() != 1)
+            return invalid("Unknown unfold reference version");
+        if (!core::validUnfoldSettings(unfold))
+            return invalid("Invalid unfold settings");
+    }
     if (version.toDouble() >= 2.0) {
         if (!readBends(root.value(QStringLiteral("bends")), bends,
                        static_cast<int>(version.toDouble()))) {
@@ -316,21 +345,22 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (manual && rejected(*manual, document->metadata().thickness)) {
         return invalid("Saved thickness conflicts with embedded geometry");
     }
-    return OpenedProject{std::move(document), manual, absolute, std::move(bends)};
+    return OpenedProject{std::move(document), manual, absolute, std::move(bends), unfold};
 }
 
 std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                               const Document &document,
                                               std::optional<double> manualThicknessMm,
                                               const std::vector<BendPreparation> &bends,
-                                              std::stop_token stop) const {
+                                              std::stop_token stop,
+                                              core::UnfoldSettings unfold) const {
     if (qtPath(path.extension()).compare(QStringLiteral(".bend"), Qt::CaseInsensitive) != 0) {
         return "Project filename must end with .bend";
     }
     if (manualThicknessMm && rejected(*manualThicknessMm, document.metadata().thickness)) {
         return "Thickness conflicts with geometry";
     }
-    if (!validBendPreparations(bends)) {
+    if (!validBendPreparations(bends) || !core::validUnfoldSettings(unfold)) {
         return "Invalid bend preparations";
     }
     const auto source = document.sourceStep();
@@ -341,9 +371,18 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
         return "Save cancelled";
     }
     const QByteArray bytes(source.data(), static_cast<qsizetype>(source.size()));
+    const auto material = unfold.material == core::SheetMaterial::MildSteel        ? "mild-steel"
+                          : unfold.material == core::SheetMaterial::StainlessSteel ? "stainless"
+                          : unfold.material == core::SheetMaterial::Aluminium      ? "aluminium"
+                                                                                   : "unknown";
+    const QJsonObject unfoldJson{{QStringLiteral("material"), QLatin1String(material)},
+                                 {QStringLiteral("manualK"), unfold.manualK
+                                                                 ? QJsonValue(*unfold.manualK)
+                                                                 : QJsonValue(QJsonValue::Null)},
+                                 {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 5},
+        {QStringLiteral("version"), 6},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},
@@ -352,7 +391,8 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                       QString::fromLatin1(
                           QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}}},
         {QStringLiteral("parameters"),
-         QJsonObject{{QStringLiteral("manualThicknessMm"), manualThicknessMm
+         QJsonObject{{QStringLiteral("unfold"), unfoldJson},
+                     {QStringLiteral("manualThicknessMm"), manualThicknessMm
                                                                ? QJsonValue(*manualThicknessMm)
                                                                : QJsonValue(QJsonValue::Null)}}},
         {QStringLiteral("bends"), bendsJson(bends)}};
