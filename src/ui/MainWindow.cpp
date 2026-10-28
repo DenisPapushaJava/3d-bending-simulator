@@ -2,6 +2,9 @@
 #include "DrawingDialog.h"
 #include "ProcessStepButton.h"
 #include "ToolSelectionWidget.h"
+#include "UpdateDialog.h"
+#include "bending/ui/Preferences.h"
+#include "bending/update/UpdateClient.h"
 
 #include "bending/ui/ImportController.h"
 #include "bending/viewer/ViewerWidget.h"
@@ -1305,6 +1308,70 @@ class MainWindow::Impl {
                    QMessageBox::Discard | QMessageBox::Cancel,
                    QMessageBox::Cancel) == QMessageBox::Discard;
     }
+    void advanceUpdate() {
+        if (!updatePending || !updateInstaller)
+            return;
+        if (controller->hasWork()) {
+            if (updateDialog)
+                updateDialog->exitStatus(
+                    QStringLiteral("Ждём завершения текущей операции. Перезапуск можно отменить."),
+                    true);
+            return;
+        }
+        const auto stop = [&](const QString &message) {
+            updatePending = false;
+            updateSaving = false;
+            if (updateDialog)
+                updateDialog->exitStatus(message, false);
+        };
+        if (updateSaving) {
+            updateSaving = false;
+            if (!controller->saveError().isEmpty() || controller->session().modified()) {
+                stop(QStringLiteral(
+                    "Проект не сохранён. Перезапуск отменён; изменения остались в программе."));
+                return;
+            }
+        }
+        if (controller->session().modified() && !updateDiscard) {
+            const auto choice = QMessageBox::question(
+                window, QStringLiteral("Сохранить проект перед обновлением?"),
+                QStringLiteral("В проекте есть несохранённые параметры."),
+                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+            if (choice == QMessageBox::Cancel) {
+                stop(QStringLiteral(
+                    "Перезапуск отменён. Проверенный пакет сохранён до закрытия программы."));
+                return;
+            }
+            if (choice == QMessageBox::Save) {
+                updateSaving = true;
+                save(false);
+                if (!controller->hasWork())
+                    stop(QStringLiteral("Сохранение отменено. Программа остаётся открытой."));
+                return;
+            }
+            updateDiscard = true;
+        }
+        QString reopen = displayPath(controller->session().projectPath());
+        if (reopen.isEmpty() && controller->session().document())
+            reopen = displayPath(controller->session().document()->metadata().sourcePath);
+        auto settings = preferences();
+        settings->sync();
+        if (settings->status() != QSettings::NoError) {
+            stop(QStringLiteral("Не удалось сохранить настройки. Перезапуск отменён; проверьте "
+                                "доступ к папке программы."));
+            return;
+        }
+        const auto error = updateInstaller(reopen);
+        if (!error.isEmpty()) {
+            stop(error);
+            return;
+        }
+        updatePending = false;
+        updateClosing = true;
+        if (updateDialog)
+            updateDialog->close();
+        window->close();
+    }
     void save(bool choosePath) {
         auto path = displayPath(controller->session().projectPath());
         if (choosePath || path.isEmpty()) {
@@ -1354,6 +1421,11 @@ class MainWindow::Impl {
     QLabel *flatStatus = nullptr, *checkFlatStatus = nullptr;
     QAction *drawingAction = nullptr;
     QPointer<DrawingDialog> drawingDialog;
+    QPointer<update::UpdateClient> updates;
+    QPointer<UpdateDialog> updateDialog;
+    QAction *updatesAction = nullptr;
+    bool updatePending = false, updateSaving = false, updateDiscard = false, updateClosing = false;
+    std::function<QString(const QString &)> updateInstaller;
     std::optional<std::size_t> drawingBase;
     std::uint64_t drawingBaseRevision = 0;
     application::BendPreviewPtr displayedPreview;
@@ -2316,7 +2388,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->progress->setAccessibleName(QStringLiteral("Загрузка STEP"));
     statusBar()->addPermanentWidget(impl_->progress);
 
-    connect(impl_->controller, &ImportController::stateChanged, this, [this] { impl_->refresh(); });
+    connect(impl_->controller, &ImportController::stateChanged, this, [this] {
+        impl_->refresh();
+        impl_->advanceUpdate();
+    });
     connect(impl_->viewer, &viewer::ViewerWidget::renderingChanged, this,
             [this](bool) { impl_->refresh(); });
     connect(impl_->viewer, &viewer::ViewerWidget::selectionChanged, this,
@@ -2342,6 +2417,31 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             });
 
     auto *help = menuBar()->addMenu(QStringLiteral("Справка"));
+    impl_->updatesAction = help->addAction(QStringLiteral("Проверить обновления…"));
+    impl_->updatesAction->setObjectName(QStringLiteral("checkUpdatesAction"));
+    impl_->updatesAction->setEnabled(false);
+    connect(impl_->updatesAction, &QAction::triggered, this, [this] {
+        if (!impl_->updates)
+            return;
+        if (impl_->updateDialog) {
+            impl_->updateDialog->showNormal();
+            impl_->updateDialog->raise();
+            impl_->updateDialog->activateWindow();
+            return;
+        }
+        impl_->updateDialog = new UpdateDialog(
+            *impl_->updates,
+            [this] {
+                requestUpdateRestart(
+                    [this](const QString &path) { return impl_->updates->startInstaller(path); });
+            },
+            this);
+        connect(impl_->updateDialog, &QDialog::finished, this, [this] {
+            impl_->updateDialog.clear();
+            impl_->updatePending = false;
+        });
+        impl_->updateDialog->show();
+    });
     auto *about = help->addAction(QStringLiteral("О программе"));
     connect(about, &QAction::triggered, this, [this, cadVersion = text(runtime.cadVersion)] {
         QMessageBox::about(
@@ -2360,6 +2460,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
 MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
     delete impl_->drawingDialog.data();
+    delete impl_->updateDialog.data();
     impl_->controller->shutdown();
 }
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
@@ -2392,8 +2493,19 @@ void MainWindow::openStep(const QString &path) {
 ImportController &MainWindow::importController() const {
     return *impl_->controller;
 }
+void MainWindow::setUpdateClient(update::UpdateClient *client) {
+    impl_->updates = client;
+    impl_->updatesAction->setEnabled(client != nullptr);
+}
+void MainWindow::requestUpdateRestart(std::function<QString(const QString &)> installer) {
+    impl_->updateInstaller = std::move(installer);
+    impl_->updatePending = static_cast<bool>(impl_->updateInstaller);
+    impl_->updateSaving = false;
+    impl_->updateDiscard = false;
+    impl_->advanceUpdate();
+}
 void MainWindow::closeEvent(QCloseEvent *event) {
-    if (!impl_->canDiscard()) {
+    if (!impl_->updateClosing && !impl_->canDiscard()) {
         event->ignore();
         return;
     }

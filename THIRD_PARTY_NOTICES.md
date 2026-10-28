@@ -8,6 +8,7 @@ retain their own licenses.
 The Ubuntu 24.04 build uses Qt 6.4.2 and OCCT 7.6.3 supplied by Ubuntu.
 The native viewer needs Qt and OCCT visualization/modeling libraries at runtime.
 The CAD module also uses OCCT Data Exchange, meshing, primitives and Boolean operations for single-solid STEP import, display preparation and flat-part thickness analysis.
+The manual update adapter also uses system Qt Network/TLS; no TLS library is copied into Linux packages.
 The project-file adapter uses the existing Qt Core JSON, SHA-256 and atomic-file APIs; it adds no new third-party library.
 Its SDK targets are loaded alongside OCCT Application Framework; no new third-party SDK is added.
 The `.deb` records the actual runtime dependencies with dpkg-shlibdeps, not a hand-written list.
@@ -17,7 +18,7 @@ Installed copyright notices are under `/usr/share/doc/` in the respective distri
 
 ## Windows packages
 
-- Qt base 6.8.3, Widgets/Core/Gui: LGPL-3.0 / GPL and applicable Qt exceptions.
+- Qt base 6.8.3, Widgets/Core/Gui/Network: LGPL-3.0 / GPL and applicable Qt exceptions.
   Exact sources: https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtbase-everywhere-src-6.8.3.tar.xz
 - Open CASCADE Technology 7.9.3, vcpkg port revision 1: LGPL-2.1 with Open CASCADE Exception 1.0.
   Sources: https://github.com/Open-Cascade-SAS/OCCT/tree/V7_9_3
@@ -73,3 +74,14 @@ The theoretical air-bending presets use numerical K-factor recommendations publi
 Only numerical reference facts and attribution are included; the PDF, illustrations and third-party source code are not distributed.
 The application's interval-boundary policy and limitations are documented in docs/flat-pattern.md.
 These reference presets do not constitute calibration or endorsement for the user's press brake.
+
+
+## Manual updates — D065
+
+Windows Qt Network uses the Qt Schannel TLS plugin (`tls/qschannelbackend.dll`) and the
+operating system TLS service. No Qt OpenSSL backend or OpenSSL DLL is distributed.
+Qt Network/Schannel sources and notices are part of the matching qtbase companion above.
+The native bootstrap and extraction script are original MIT project code. Windows PowerShell
+and .NET are operating system prerequisites, not bundled dependencies. The bootstrap uses
+the MSVC toolchain static CRT; the GUI still has the existing separate Visual C++ runtime
+prerequisite. Local Postman/PowerShell 7 development tools are not shipped with the app.

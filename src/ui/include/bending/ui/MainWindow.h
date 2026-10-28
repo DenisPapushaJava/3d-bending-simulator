@@ -14,6 +14,9 @@
 #include <string_view>
 #include <variant>
 
+namespace bending::update {
+class UpdateClient;
+}
 namespace bending::ui {
 class ImportController;
 
@@ -37,6 +40,9 @@ class MainWindow final : public QMainWindow {
             loader);
     void setDrawingBuilder(std::shared_ptr<const application::BendingDrawingBuilder> builder);
     void setFlatPatternBuilder(std::shared_ptr<const application::FlatPatternBuilder> builder);
+    // Borrowed client; app keeps it alive until after this window is destroyed.
+    void setUpdateClient(update::UpdateClient *client);
+    void requestUpdateRestart(std::function<QString(const QString &)> installer);
 
   protected:
     void closeEvent(QCloseEvent *event) override;

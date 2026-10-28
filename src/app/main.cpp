@@ -7,6 +7,8 @@
 #include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
+#include "bending/update/UpdateClient.h"
 #include "bending/viewer/ViewerWidget.h"
 #include <QSettings>
 
@@ -18,6 +20,8 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QPalette>
+#include <QSslSocket>
+#include <QStatusBar>
 #include <QTimer>
 #include <algorithm>
 
@@ -61,11 +65,38 @@ int main(int argc, char *argv[]) {
     QApplication::setWindowIcon(applicationIcon);
     QCoreApplication::setApplicationVersion(QString::fromUtf8(
         bending::version.data(), static_cast<qsizetype>(bending::version.size())));
+    const auto portableRoot = bending::update::discoverPortableRoot(
+        QCoreApplication::applicationDirPath(), QCoreApplication::applicationVersion());
+    if (!portableRoot.isEmpty()) {
+        const auto file = QDir(portableRoot).filePath(QStringLiteral("data/settings.ini"));
+        QDir().mkpath(QFileInfo(file).absolutePath());
+        if (!QFileInfo::exists(file)) {
+            QSettings legacy;
+            QSettings portable(file, QSettings::IniFormat);
+            for (const auto &key : legacy.allKeys())
+                portable.setValue(key, legacy.value(key));
+            portable.sync();
+        }
+        bending::ui::setPreferencesFile(file);
+    }
+#ifdef _WIN32
+    QSslSocket::setActiveBackend(QStringLiteral("schannel"));
+#endif
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Импорт и просмотр STEP · симулятор гибки"));
     parser.addHelpOption();
     parser.addVersionOption();
+    const QCommandLineOption updateProbe(
+        QStringLiteral("update-runtime-probe"),
+        QStringLiteral("Проверить TLS-комплект без сетевых запросов"));
+    const QCommandLineOption updateToken(QStringLiteral("update-token"),
+                                         QStringLiteral("Внутренний токен перезапуска"),
+                                         QStringLiteral("token"));
+    const QCommandLineOption updateRoot(QStringLiteral("portable-root"),
+                                        QStringLiteral("Внутренняя папка portable-комплекта"),
+                                        QStringLiteral("directory"));
+    parser.addOptions({updateProbe, updateToken, updateRoot});
     QCommandLineOption smokeTest(QStringLiteral("smoke-test"),
                                  QStringLiteral("Проверить создание окна и завершиться"));
     parser.addOption(smokeTest);
@@ -81,6 +112,14 @@ int main(int argc, char *argv[]) {
                                  QStringLiteral("STEP одной детали или проект .bend для открытия"),
                                  QStringLiteral("[step]"));
     parser.process(app);
+    if (parser.isSet(updateProbe)) {
+        const bool ready = QSslSocket::supportsSsl()
+#ifdef _WIN32
+                           && QSslSocket::activeBackend() == QStringLiteral("schannel")
+#endif
+            ;
+        return ready ? 0 : 1;
+    }
     if (parser.positionalArguments().size() > 1) {
         parser.showHelp(1);
     }
@@ -96,7 +135,7 @@ int main(int argc, char *argv[]) {
     const auto savedCatalog =
         (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
             ? QString{}
-            : QSettings().value(QStringLiteral("tools/catalogPath")).toString();
+            : bending::ui::preferences()->value(QStringLiteral("tools/catalogPath")).toString();
     if (parser.isSet(toolCatalogOption) || !savedCatalog.isEmpty()) {
         const auto argument =
             parser.isSet(toolCatalogOption) ? parser.value(toolCatalogOption) : savedCatalog;
@@ -127,11 +166,14 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
+    bending::update::UpdateClient updates({QCoreApplication::applicationVersion(), {}, 30000},
+                                          &app);
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
     window.setToolCatalogLoader(bending::project::readToolCatalog);
     window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
     window.setFlatPatternBuilder(std::make_shared<bending::cad::FlatPatternBuilder>());
+    window.setUpdateClient(&updates);
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());
@@ -141,6 +183,26 @@ int main(int argc, char *argv[]) {
         viewer->showDiagnosticBox();
     }
     window.show();
+    if (parser.isSet(updateToken) &&
+        QDir(parser.value(updateRoot)).canonicalPath() == portableRoot && !portableRoot.isEmpty()) {
+        auto *acknowledge = new QTimer(&app);
+        auto deadline = std::make_shared<QElapsedTimer>();
+        deadline->start();
+        QObject::connect(acknowledge, &QTimer::timeout, &app, [&, acknowledge, deadline, viewer] {
+            if (viewer && viewer->isReady() && window.isVisible()) {
+                if (bending::update::acknowledgeUpdate(portableRoot,
+                                                       QCoreApplication::applicationVersion(),
+                                                       parser.value(updateToken)))
+                    window.statusBar()->showMessage(
+                        QStringLiteral("Программа обновлена до %1")
+                            .arg(QCoreApplication::applicationVersion()),
+                        8000);
+                acknowledge->stop();
+            } else if (deadline->elapsed() > 25000)
+                acknowledge->stop();
+        });
+        acknowledge->start(100);
+    }
     if (parser.isSet(graphicsTest) || parser.isSet(smokeTest)) {
         auto *timer = new QTimer(&app);
         QElapsedTimer started;

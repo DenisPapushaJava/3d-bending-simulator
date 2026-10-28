@@ -2,6 +2,7 @@
 #include "ToolDrawingWidget.h"
 #include "ToolProfilesWidget.h"
 
+#include "bending/ui/Preferences.h"
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -14,7 +15,6 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QSettings>
 #include <QSignalBlocker>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -247,33 +247,33 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
             favoritePairs_.erase(it);
         else if (favoritePairs_.size() < 32)
             favoritePairs_.push_back(pair);
-        QSettings settings;
-        settings.beginWriteArray(QStringLiteral("tools/favorites"),
-                                 static_cast<int>(favoritePairs_.size()));
+        auto settings = preferences();
+        settings->beginWriteArray(QStringLiteral("tools/favorites"),
+                                  static_cast<int>(favoritePairs_.size()));
         for (std::size_t i = 0; i < favoritePairs_.size(); ++i) {
-            settings.setArrayIndex(static_cast<int>(i));
-            settings.setValue(QStringLiteral("punch"), favoritePairs_[i].punchId);
-            settings.setValue(QStringLiteral("die"), favoritePairs_[i].dieId);
-            settings.setValue(QStringLiteral("groove"), favoritePairs_[i].groove);
+            settings->setArrayIndex(static_cast<int>(i));
+            settings->setValue(QStringLiteral("punch"), favoritePairs_[i].punchId);
+            settings->setValue(QStringLiteral("die"), favoritePairs_[i].dieId);
+            settings->setValue(QStringLiteral("groove"), favoritePairs_[i].groove);
         }
-        settings.endArray();
+        settings->endArray();
         refreshFavorites();
         updateDetails();
     });
-    QSettings settings;
-    machine_->setText(settings.value(QStringLiteral("tools/machine")).toString().left(256));
-    const auto count = std::min(settings.beginReadArray(QStringLiteral("tools/favorites")), 32);
+    auto settings = preferences();
+    machine_->setText(settings->value(QStringLiteral("tools/machine")).toString().left(256));
+    const auto count = std::min(settings->beginReadArray(QStringLiteral("tools/favorites")), 32);
     for (int i = 0; i < count; ++i) {
-        settings.setArrayIndex(i);
-        favoritePairs_.push_back({settings.value(QStringLiteral("punch")).toString(),
-                                  settings.value(QStringLiteral("die")).toString(),
-                                  settings.value(QStringLiteral("groove")).toInt()});
+        settings->setArrayIndex(i);
+        favoritePairs_.push_back({settings->value(QStringLiteral("punch")).toString(),
+                                  settings->value(QStringLiteral("die")).toString(),
+                                  settings->value(QStringLiteral("groove")).toInt()});
     }
-    settings.endArray();
+    settings->endArray();
     refreshFavorites();
-    selectPair({settings.value(QStringLiteral("tools/lastPunch")).toString(),
-                settings.value(QStringLiteral("tools/lastDie")).toString(),
-                settings.value(QStringLiteral("tools/lastGroove")).toInt()});
+    selectPair({settings->value(QStringLiteral("tools/lastPunch")).toString(),
+                settings->value(QStringLiteral("tools/lastDie")).toString(),
+                settings->value(QStringLiteral("tools/lastGroove")).toInt()});
     if (catalog_.empty())
         mode_->setCurrentIndex(1);
     updateDetails();
@@ -490,11 +490,11 @@ void ToolSelectionWidget::rememberChoice() {
     if (!a)
         return;
     const auto pair = currentPair();
-    QSettings settings;
-    settings.setValue(QStringLiteral("tools/lastPunch"), pair.punchId);
-    settings.setValue(QStringLiteral("tools/lastDie"), pair.dieId);
-    settings.setValue(QStringLiteral("tools/lastGroove"), pair.groove);
-    settings.setValue(QStringLiteral("tools/machine"), machine_->text());
+    auto settings = preferences();
+    settings->setValue(QStringLiteral("tools/lastPunch"), pair.punchId);
+    settings->setValue(QStringLiteral("tools/lastDie"), pair.dieId);
+    settings->setValue(QStringLiteral("tools/lastGroove"), pair.groove);
+    settings->setValue(QStringLiteral("tools/machine"), machine_->text());
 }
 void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionRequest> request) {
     if (selectionRequest_ != request) {
@@ -619,8 +619,8 @@ void ToolSelectionWidget::importCatalog() {
             ->addItem(title(catalog_[i]), static_cast<int>(i));
     selectPair(pair);
     updating_ = false;
-    QSettings settings;
-    settings.setValue(QStringLiteral("tools/catalogPath"), path);
+    auto settings = preferences();
+    settings->setValue(QStringLiteral("tools/catalogPath"), path);
     refreshFavorites();
     changed();
 }

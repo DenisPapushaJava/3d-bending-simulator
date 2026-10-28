@@ -719,3 +719,27 @@ Native X11 `--workflow-only` при **100%** дополнительно пров
 Native `flat_workflow_tests --graphics --sample ...` при **100%** прошёл на `profiled-bend-6mm.step` и `bend-zone-hole-6mm.step`: mesh с реальными видимыми вырезами, размеры/переходы/кэш/поздний ответ проверены, снимки просмотрены. Контрольный PDF profiled содержит готовую форму/сечение и развёртку 80×76,619 мм на одном A3; Poppler подтверждает отверстия, оба обода зенковки, скошенный край и пометку приближения. Изолированные аудиты прежних отказов: НЛАС 350×175,671 мм (1 лист) и `01-36728…` 60×665,006 мм (2 листа) теперь проходят; страницы растеризованы/просмотрены. Все модели из частной папки повторно не гонялись.
 
 Артефакты/частные входы не публикуются: игнорируемый `out/ignored-unfold-cutouts`. Форматирование/diff/VERSION проверены. Новая единица компиляции — приватный CAD-helper, зависимостей/SDK/формата проекта нет; упаковка и Windows не проверены в локальном режиме D051. HiDPI и удалённые действия не выполнялись.
+
+## Ручной update-клиент и portable — D065
+
+Qt Network добавлен к Widgets из существующего Qtbase; новые vcpkg/OCCT SDK-настройки не нужны. Windows-упаковщик включает Schannel, исключает OpenSSL backend и проверяет TLS без сети. Основной EXE нового ZIP запускается через нативный root launcher; состав/миграция/откат описаны в [контракте](portable-releases-updates.md). PowerShell/.NET нужны только Windows-подготовке пакета, Postman/PowerShell 7 не являются runtime-зависимостями приложения.
+
+Затронутые проверки после обычной сборки `dev`:
+
+```bash
+ctest --preset core
+ctest --preset dev -R '^(application.release-version$|update[.])'
+# Наличие TLS backend без HTTP запроса:
+QT_QPA_PLATFORM=offscreen ./build/dev/bin/3d-bending-simulator --update-runtime-probe
+```
+
+`update.package` проверяет настоящий Python-упаковщик, C++-валидацию и, при найденном `powershell`/`pwsh`, собственный скрипт извлечения. На Windows отсутствие PowerShell — ошибка теста; на Linux ZIP engine проверяется дополнительно при наличии инструмента. `update.bootstrap` выполняет настоящий native launcher с маленьким дочерним fixture без Qt/CAD. `update.network` запускает HTTP loopback с реальным QNetworkAccessManager. `update.ui` использует изолированный INI, local HTTP и контролируемое сохранение; обычный CTest — offscreen/100%, не доказательство GPU.
+
+Дополнительная локальная интеграция с Postman — [команды и доказательства](../postman/simulations/github-updates.context.md), без авторизации/облачных операций. Для ручной проверки ZIP engine на Linux можно передать абсолютный путь к собственному PowerShell 7:
+
+```bash
+python3 tests/update_package_tests.py build/dev/bin/update_package_tests \
+  src/update/data/extract-package.ps1 /absolute/path/to/pwsh
+```
+
+Локально 2026-10-28 проверены core (7), четыре update-теста, Release с warnings-as-errors, затронутые `app.step-workflow`/`app.flat-pattern`, TLS backend Linux без сети, native UI при 100%, ZIP engine PowerShell 7 и Postman success/429/latency. Windows Win32/Schannel/PowerShell 5 и реальное обновление двух версий ещё не проверены; штатный CI/выпуск запрещён текущим D051 до отдельной команды. Не дублировать эти Linux-проверки полным CAD/GPU/HiDPI прогоном без новой причины.

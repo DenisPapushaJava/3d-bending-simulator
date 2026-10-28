@@ -14,9 +14,11 @@
 
 Целевая система: Windows 10 (1809+) / Windows 11, x64; [границы комплекта](docs/releases.md).
 
-В [релизах](https://github.com/DenisPapushaJava/3d-bending-simulator/releases) выберите Windows ZIP, распакуйте **весь** архив и запустите `bin/3d-bending-simulator.exe`. При отсутствии библиотек MSVC установите [Microsoft Visual C++ x64 Runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). Сохраняйте структуру папок комплекта. Учебные детали находятся в `share/3d-bending-simulator/examples`.
+В [релизах](https://github.com/DenisPapushaJava/3d-bending-simulator/releases) выберите Windows ZIP и распакуйте **весь** архив в отдельную папку. В новом формате запускайте `3d-bending-simulator.exe` в корне комплекта; в ранее опубликованном `2026.1.0-alpha.1` — `bin/3d-bending-simulator.exe`. При отсутствии библиотек MSVC установите [Microsoft Visual C++ x64 Runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). Сохраняйте структуру папок комплекта. В новом комплекте учебные детали находятся в `runtime/<VERSION>/share/3d-bending-simulator/examples` (в первом alpha — `share/3d-bending-simulator/examples`).
 
 Это экспериментальный alpha: интерактивный Windows/GPU ещё требует проверки. Состав возможностей и ограничения — в [истории изменений](CHANGELOG.md). `dependency-sources.zip` содержит исходники зависимостей и для обычного запуска не нужен.
+
+Ручная проверка в новой сборке: **Справка → Проверить обновления…**. Windows portable позволяет **Обновить и перезапустить** с проверкой пакета и сохранением проекта; Linux открывает страницу выпуска. Автопроверок нет. Настройки нового комплекта — `data/settings.ini`; проекты храните вне `runtime`. Первый переход со старого alpha выполняется вручную. Механизм пока проверен локально на Linux, применение настоящего Windows ZIP предстоит проверить; [контракт и ограничения](docs/portable-releases-updates.md).
 
 ## Сборка — Ubuntu 24.04 / Mint 22.x
 
