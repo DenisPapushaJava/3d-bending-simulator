@@ -73,13 +73,17 @@ TopoDS_Shape sectionPrism(const std::vector<DrawingEdge> &edges, DrawingPoint or
 } // namespace
 std::array<TopoDS_Shape, 2> makeDrawingTools(const core::ToolAssignment &a,
                                              const core::ToolGeometry &g, double tip) {
-    return {sectionPrism(a.die.drawing->edges, g.dieTopCentre, 0, a.die.lengthMm, 0),
-            sectionPrism(a.punch.drawing->edges, g.punchTip, tip, a.punch.lengthMm,
-                         (a.die.lengthMm - a.punch.lengthMm) / 2)};
+    std::array<TopoDS_Shape, 2> result;
+    if (g.hasDie)
+        result[0] = sectionPrism(a.die.drawing->edges, g.dieTopCentre, 0, a.die.lengthMm, 0);
+    if (g.hasPunch)
+        result[1] = sectionPrism(a.punch.drawing->edges, g.punchTip, tip, a.punch.lengthMm,
+                                 (a.die.lengthMm - a.punch.lengthMm) / 2);
+    return result;
 }
 TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGeometry &g,
                                double tip, double lift, std::stop_token stop) {
-    if (!std::isfinite(lift) || lift <= 0)
+    if (!g.hasPunch || !a.punch.drawing || !std::isfinite(lift) || lift <= 0)
         throw std::runtime_error("Invalid DXF punch lift");
     const auto &p = *a.punch.drawing;
     const double z = (a.die.lengthMm - a.punch.lengthMm) / 2;

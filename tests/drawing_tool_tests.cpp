@@ -127,6 +127,24 @@ int main() {
                     std::get<application::BendPreviewPtr>(setup)->frameCount() == 1 &&
                     !std::get<application::BendPreviewPtr>(setup)->pressMotion(),
                 "Static setup substituted idealized body");
+        for (bool knownPunch : {true, false}) {
+            auto partial = tools;
+            if (knownPunch)
+                partial.die.drawing.reset();
+            else
+                partial.punch.drawing.reset();
+            const auto mixed = build(partial);
+            if (const auto *e = std::get_if<application::BendPreviewError>(&mixed))
+                throw std::runtime_error("Mixed motion: " + e->detail);
+            const auto p = std::get<application::BendPreviewPtr>(mixed);
+            require(p->usesDrawingPunch() == knownPunch && p->usesDrawingDie() != knownPunch &&
+                        p->punchRetraction(),
+                    "Mixed body source/report mismatch");
+            const auto &f = cad::OcctPreviewAccess::frame(*p, 0);
+            require(std::abs(volume(f.tools[knownPunch ? 1 : 0]) -
+                             volume(bodies[knownPunch ? 1 : 0])) < 1.e-5,
+                    "Known body was replaced by idealized tool");
+        }
         auto blocked = tool_fixture::pair(12, .8, 100);
         result = build(blocked);
         const auto *e = std::get_if<application::BendPreviewError>(&result);

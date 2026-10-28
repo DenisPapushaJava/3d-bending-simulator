@@ -27,6 +27,12 @@ class SingleBendPreview {
     [[nodiscard]] virtual bool usesDrawingTools() const noexcept {
         return false;
     }
+    [[nodiscard]] virtual bool usesDrawingPunch() const noexcept {
+        return usesDrawingTools();
+    }
+    [[nodiscard]] virtual bool usesDrawingDie() const noexcept {
+        return usesDrawingTools();
+    }
     [[nodiscard]] virtual std::optional<ToolCollisionPair> collision() const noexcept {
         return {};
     }

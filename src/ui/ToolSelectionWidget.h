@@ -45,6 +45,7 @@ class ToolSelectionWidget final : public QWidget {
         bool operator==(const Pair &) const = default;
     };
     [[nodiscard]] std::optional<core::PressTools> rawParameters() const;
+    bool chooseDrawingGeometry();
     void changed();
     void updateDetails();
     void populateGrooves(std::size_t selected = 0);

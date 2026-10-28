@@ -840,7 +840,7 @@ class MainWindow::Impl {
                 : failure->code == BendPreviewErrorCode::UnsupportedToolGeometry
                     ? QStringLiteral(
                           "Для выбранной формы DXF не удалось подтвердить рабочие участки. Нужны "
-                          "круглый носик и симметричный V-ручей со скруглёнными плечами.")
+                          "поддержанные рабочие участки у каждого загруженного контура.")
                 : failure->code == BendPreviewErrorCode::UnsupportedParameters
                     ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
                                      "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
@@ -978,7 +978,11 @@ class MainWindow::Impl {
                 : QStringLiteral("Деталь и пара инструмента выбраны. Можно проверить гибку."));
         checkScope->setText(
             (preview && preview->usesDrawingTools()
-                 ? QStringLiteral("Полные корпуса по DXF. Скруглённые плечи и носик учтены. ")
+                 ? QStringLiteral("Пуансон: %1. Матрица: %2. ")
+                       .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
+                                                        : QStringLiteral("условный"),
+                            preview->usesDrawingDie() ? QStringLiteral("по DXF")
+                                                      : QStringLiteral("условная"))
              : entry && entry->catalogTools && entry->catalogTools->useDrawingGeometry
                  ? QStringLiteral("Выбрана форма DXF; результат её проверки ещё не подготовлен. ")
                  : QStringLiteral("Упрощённые рабочие профили. ")) +

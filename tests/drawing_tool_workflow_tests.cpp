@@ -69,9 +69,14 @@ int main(int argc, char **argv) {
         auto wider = tool_fixture::pair(50);
         wider.die.id = "own-v50";
         wider.die.code = "V50";
-        // Its profile is not used in this opening-selection test.
+        // Deliberately unknown: the punch must keep its drawing independently of this die.
         wider.die.drawing.reset();
-        core::ToolCatalog catalog{tools.punch, tools.die, wider.die};
+        auto unsupported = tool_fixture::pair(46).die;
+        unsupported.id = "own-unsupported-v48";
+        unsupported.code = "V48-unsupported";
+        // Better V/t score, but the groove does not match the confirmed opening.
+        unsupported.openingsMm = {48};
+        core::ToolCatalog catalog{tools.punch, tools.die, wider.die, unsupported};
         if (args.contains("--catalog")) {
             const auto loaded =
                 project::readToolCatalog(native(args.at(args.indexOf("--catalog") + 1)));
@@ -83,7 +88,7 @@ int main(int argc, char **argv) {
                                         [](const auto &t) { return t.id == "s-tool-st3412s"; });
             require(p != catalog.end() && d != catalog.end(), "Missing private profiles");
             tools = {*p, *d, 0, 3, "", true};
-            catalog = {*p, *d, wider.die};
+            catalog = {*p, *d, wider.die, unsupported};
         }
         auto files = std::make_shared<project::ProjectFiles>();
         auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
@@ -100,8 +105,8 @@ int main(int argc, char **argv) {
         p->setCurrentIndex(p->findData(0));
         d->setCurrentIndex(d->findData(1));
         auto *real = window.findChild<QCheckBox *>("useDrawingToolGeometry");
-        require(real && real->isEnabled() && !real->isChecked(),
-                "DXF was activated implicitly or unavailable");
+        require(real && real->isEnabled() && real->isChecked(),
+                "Explicit tool choice did not activate its known shape");
         real->setChecked(true);
         auto *check = window.findChild<QPushButton *>("checkBend");
         require(check && check->isEnabled(), "Cannot check real pair");
@@ -141,7 +146,15 @@ int main(int argc, char **argv) {
         require(json.open(QIODevice::ReadOnly), "Read saved");
         auto root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();
-        require(root.value("version").toInt() == 7, "Wrong version");
+        require(root.value("version").toInt() == 8, "Wrong version");
+        root.insert("version", 7);
+        require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Write full v7");
+        json.write(QJsonDocument(root).toJson());
+        json.close();
+        c.open(projectPath);
+        wait([&] { return !c.hasWork(); });
+        require(!c.session().error() && c.session().bend(0)->catalogTools->useDrawingGeometry,
+                "Full drawing pair from version 7 lost compatibility");
         root.insert("version", 6);
         require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Write legacy");
         json.write(QJsonDocument(root).toJson());
@@ -166,6 +179,9 @@ int main(int argc, char **argv) {
         require(!c.session().error() && !c.session().bend(0)->catalogTools->useDrawingGeometry &&
                     !real->isChecked(),
                 "Old project upgraded tool mode");
+        require(QMetaObject::invokeMethod(p, "activated", Q_ARG(int, p->currentIndex())) &&
+                    real->isChecked(),
+                "Explicit reselection of same legacy tool did not activate known shape");
         auto blocked = tool_fixture::pair(12, .8, 100);
         require(c.setBendToolAssignment(0, blocked), "Blocked assignment");
         require(c.prepareBendPreview(0, false, builder, application::BendPreviewMode::ToolMotion),
@@ -208,6 +224,43 @@ int main(int argc, char **argv) {
         window.findChild<QPushButton *>("recommendTools")->click();
         require(d->currentData().toInt() == 2 && check->isEnabled(),
                 "6 mm UI advice did not select available V50");
+        require(real->isChecked(), "Advice kept known punch as an idealized wedge");
+        check->click();
+        wait([&] { return !c.hasWork(); });
+        if (c.bendPreviewError())
+            throw std::runtime_error("Mixed UI motion: " + c.bendPreviewError()->detail);
+        require(c.bendPreview() && c.bendPreview()->usesDrawingPunch() &&
+                    !c.bendPreview()->usesDrawingDie(),
+                "Mixed UI source mismatch");
+        const auto scope = window.findChild<QLabel *>("bendCheckScope")->text();
+        require(scope.contains(QStringLiteral("Пуансон: по DXF")) &&
+                    scope.contains(QStringLiteral("Матрица: условная")),
+                "Mixed scope hidden");
+        if (graphics && args.contains("--snapshot"))
+            require(viewer->captureImage(true).save(args.at(args.indexOf("--snapshot") + 1) +
+                                                    "-mixed.png"),
+                    "Mixed snapshot failed");
+        c.saveProject(projectPath, files);
+        wait([&] { return !c.hasWork(); });
+        require(c.saveError().isEmpty(), "Mixed save failed");
+        c.closeDocument();
+        c.open(projectPath);
+        wait([&] { return !c.hasWork(); });
+        require(!c.session().error() && c.session().bend(0)->catalogTools->useDrawingGeometry &&
+                    !c.session().bend(0)->catalogTools->die.drawing && real->isChecked(),
+                "Mixed project not portable");
+        require(json.open(QIODevice::ReadOnly), "Read mixed project");
+        root = QJsonDocument::fromJson(json.readAll()).object();
+        json.close();
+        root.insert("version", 7);
+        require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Retag mixed legacy");
+        json.write(QJsonDocument(root).toJson());
+        json.close();
+        const auto current = c.session().document();
+        c.open(projectPath);
+        wait([&] { return !c.hasWork(); });
+        require(c.session().error() && c.session().document() == current,
+                "Version 7 accepted unsupported mixed semantics");
         c.closeDocument();
         c.shutdown();
         return 0;

@@ -1,15 +1,17 @@
 #pragma once
 #include "bending/core/ToolCatalog.h"
 namespace bending::core {
-// Strict upright, circular-nose punch and symmetric, single rounded V groove.
+// Strict upright, circular-nose punch and/or symmetric, single rounded V groove.
+// A missing drawing leaves its references unused; an unsupported present one fails.
 // These are working references, not a proof of compatibility with machine clamps.
 struct ToolGeometry {
     DrawingPoint punchTip;
     DrawingPoint dieTopCentre;
-    std::size_t noseEdge, leftShoulderEdge, rightShoulderEdge;
-    double shoulderHalfSpanMm;
-    double shoulderRadiusMm;
-    double leftSupportWidthMm, rightSupportWidthMm;
+    std::size_t noseEdge = 0, leftShoulderEdge = 0, rightShoulderEdge = 0;
+    double shoulderHalfSpanMm = 0;
+    double shoulderRadiusMm = 0;
+    double leftSupportWidthMm = 0, rightSupportWidthMm = 0;
+    bool hasPunch = false, hasDie = false;
 };
 // Derived from the immutable assignment, never from an article name or external file.
 [[nodiscard]] std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &assignment);

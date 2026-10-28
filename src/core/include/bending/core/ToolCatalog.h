@@ -54,7 +54,7 @@ struct ToolAssignment {
     std::size_t groove = 0;
     double clearanceMm = 10;
     std::string machineName;
-    bool useDrawingGeometry = false; // Explicit opt-in; legacy assignments remain idealized.
+    bool useDrawingGeometry = false; // Use each known drawing; preserve saved legacy choice.
     bool operator==(const ToolAssignment &) const = default;
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);

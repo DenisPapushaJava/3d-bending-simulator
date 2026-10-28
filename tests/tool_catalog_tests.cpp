@@ -31,6 +31,19 @@ int main() {
             selectTools({drawn.punch, drawn.die, wide.die}, {6, std::numbers::pi / 2, 8, 40});
         require(choice.candidates.size() == 1 && choice.candidates[0].die == 2,
                 "6 mm selection did not exclude V12/prefer available V50");
+        auto partial = drawn;
+        partial.die.drawing.reset();
+        auto mixed = drawingToolGeometry(partial);
+        require(mixed && mixed->hasPunch && !mixed->hasDie && toolParameters(partial),
+                "Known punch depends on missing die drawing");
+        partial = drawn;
+        partial.punch.drawing.reset();
+        mixed = drawingToolGeometry(partial);
+        require(mixed && !mixed->hasPunch && mixed->hasDie && toolParameters(partial),
+                "Known die depends on missing punch drawing");
+        partial.die.drawing.reset();
+        require(!drawingToolGeometry(partial) && !toolParameters(partial),
+                "DXF mode without any contour was accepted");
         auto wrong = drawn;
         wrong.die.drawing->millimeters = false;
         require(!drawingToolGeometry(wrong) && !toolParameters(wrong),

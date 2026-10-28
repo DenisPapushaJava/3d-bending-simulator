@@ -38,8 +38,11 @@ void ToolProfilesWidget::setTools(std::optional<core::PressTools> tools) {
 void ToolProfilesWidget::setDrawingAssignment(std::optional<core::ToolAssignment> a) {
     drawing_ = a && a->useDrawingGeometry ? a : std::nullopt;
     if (drawing_)
-        setAccessibleDescription(QStringLiteral("Полные сечения из DXF; та же форма участвует в "
-                                                "проверке. Держатели и станок не показаны."));
+        setAccessibleDescription(
+            QStringLiteral("Пуансон: %1. Матрица: %2. Эти формы участвуют в проверке. Держатели и "
+                           "станок не показаны.")
+                .arg(drawing_->punch.drawing ? QStringLiteral("DXF") : QStringLiteral("условный"),
+                     drawing_->die.drawing ? QStringLiteral("DXF") : QStringLiteral("условная")));
     update();
 }
 void ToolProfilesWidget::paintEvent(QPaintEvent *) {
@@ -88,8 +91,10 @@ void ToolProfilesWidget::paintEvent(QPaintEvent *) {
             p.closeSubpath();
             return p;
         };
-        punch = path(*drawing_->punch.drawing);
-        die = path(*drawing_->die.drawing);
+        if (drawing_->punch.drawing)
+            punch = path(*drawing_->punch.drawing);
+        if (drawing_->die.drawing)
+            die = path(*drawing_->die.drawing);
     }
     const auto punchBounds = punch.boundingRect(), dieBounds = die.boundingRect();
     const double half = width() / 2.;
@@ -119,8 +124,12 @@ void ToolProfilesWidget::paintEvent(QPaintEvent *) {
         painter.drawPath(transform.map(path));
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QColor("#1C2938"));
-        painter.drawText(QRectF(i * half, 7, half, 19), Qt::AlignCenter,
-                         i == 0 ? QStringLiteral("Пуансон") : QStringLiteral("Матрица"));
+        painter.drawText(
+            QRectF(i * half, 7, half, 19), Qt::AlignCenter,
+            i == 0 ? (drawing_ && drawing_->punch.drawing ? QStringLiteral("Пуансон · DXF")
+                                                          : QStringLiteral("Пуансон · условный"))
+                   : (drawing_ && drawing_->die.drawing ? QStringLiteral("Матрица · DXF")
+                                                        : QStringLiteral("Матрица · условная")));
         const auto dimensions =
             i == 0 ? QStringLiteral("α %1° · R %2 мм\nL %3 мм")
                          .arg(number(tools_->punchAngleRadians * degrees),
@@ -130,7 +139,7 @@ void ToolProfilesWidget::paintEvent(QPaintEvent *) {
                               number(tools_->lengthMm));
         painter.drawText(QRectF(i * half + 4, height() - 43, half - 8, 37), Qt::AlignCenter,
                          dimensions);
-        if (i == 1 && !drawing_) {
+        if (i == 1 && (!drawing_ || !drawing_->die.drawing)) {
             const auto left = transform.map(QPointF(profiles.die[1].x, profiles.die[1].y));
             const auto right = transform.map(QPointF(profiles.die[3].x, profiles.die[3].y));
             const double y = left.y() - 10;

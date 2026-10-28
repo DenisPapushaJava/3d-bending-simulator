@@ -47,10 +47,16 @@ using namespace application;
 class CadPreview final : public SingleBendPreview {
   public:
     bool filledCutouts = false;
-    bool realTools = false;
+    bool realPunch = false, realDie = false;
     std::optional<ToolCollisionPair> conflict;
     bool usesDrawingTools() const noexcept override {
-        return realTools;
+        return realPunch || realDie;
+    }
+    bool usesDrawingPunch() const noexcept override {
+        return realPunch;
+    }
+    bool usesDrawingDie() const noexcept override {
+        return realDie;
     }
     std::optional<ToolCollisionPair> collision() const noexcept override {
         return conflict;
@@ -545,13 +551,14 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
                 BendPreviewErrorCode::UnsupportedToolGeometry,
                 "Upright circular nose and symmetric rounded V groove required"};
         const auto shoulders =
-            toolGeometry
+            toolGeometry && toolGeometry->hasDie
                 ? std::optional<simulation::DieShoulders>{{toolGeometry->shoulderHalfSpanMm,
                                                            toolGeometry->shoulderRadiusMm,
                                                            toolGeometry->leftSupportWidthMm,
                                                            toolGeometry->rightSupportWidthMm}}
                 : std::nullopt;
-        preview->realTools = realTools.has_value();
+        preview->realPunch = toolGeometry && toolGeometry->hasPunch;
+        preview->realDie = toolGeometry && toolGeometry->hasDie;
         preview->filledCutouts = metadata.closedCutouts.status == ClosedCutoutStatus::Filled;
         const auto displaySource = preview->filledCutouts
                                        ? visibleSource(OcctDocumentAccess::shape(*native))
@@ -587,11 +594,11 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
             }
             // The section model uses flange envelopes. Certify actual material under every
             // possible shoulder position, rather than inferring support from a bounding box.
-            const double reach = preview->motion
-                                     ? preview->motion->maximumSupportDistanceMm
-                                     : (toolGeometry ? toolGeometry->shoulderHalfSpanMm
-                                                     : toolParameters->openingMm / 2.0) -
-                                           simulation::bendAllowanceMm(model) / 2.0;
+            const double reach = preview->motion ? preview->motion->maximumSupportDistanceMm
+                                                 : (toolGeometry && toolGeometry->hasDie
+                                                        ? toolGeometry->shoulderHalfSpanMm
+                                                        : toolParameters->openingMm / 2.0) -
+                                                       simulation::bendAllowanceMm(model) / 2.0;
             if (reach > analysis.lengthToleranceMm) {
                 auto supportSection = sourceSection;
                 const double length = reach + analysis.lengthToleranceMm / 2.0;
@@ -645,10 +652,14 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
         }
         std::array<TopoDS_Shape, 2> initialTools;
         if (preview->setup) {
-            initialTools = realTools
-                               ? makeDrawingTools(*realTools, *toolGeometry,
-                                                  model.thicknessMm + toolParameters->clearanceMm)
-                               : makeTools(*preview->setup, model.thicknessMm);
+            initialTools = makeTools(*preview->setup, model.thicknessMm);
+            if (realTools) {
+                const auto drawn = makeDrawingTools(
+                    *realTools, *toolGeometry, model.thicknessMm + toolParameters->clearanceMm);
+                for (std::size_t i = 0; i < 2; ++i)
+                    if (!drawn[i].IsNull())
+                        initialTools[i] = drawn[i];
+            }
         }
         Bnd_Box envelope;
         bool returnSweepClear = true;
@@ -708,7 +719,7 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
                     return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
                                             "Invalid vertical punch return distance", i};
                 }
-                preview->sweep = realTools
+                preview->sweep = preview->realPunch
                                      ? drawingPunchSweep(*realTools, *toolGeometry, tip, lift, stop)
                                      : makePunch(*toolParameters, tip, lift);
                 if (!BRepCheck_Analyzer(preview->sweep).IsValid() ||
@@ -772,7 +783,8 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
                         auto diagnostic = std::make_shared<CadPreview>();
                         diagnostic->geometry = model;
                         diagnostic->setup = preview->setup;
-                        diagnostic->realTools = preview->realTools;
+                        diagnostic->realPunch = preview->realPunch;
+                        diagnostic->realDie = preview->realDie;
                         diagnostic->filledCutouts = preview->filledCutouts;
                         diagnostic->conflict = static_cast<ToolCollisionPair>(pair);
                         if (withMotion) {

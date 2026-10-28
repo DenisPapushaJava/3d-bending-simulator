@@ -53,22 +53,39 @@ bool tangentNeighbours(const ToolDrawing &d, std::size_t i) {
 std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
     if (!validToolPreset(a.punch) || !validToolPreset(a.die) || !a.punch.parametersConfirmed ||
         !a.die.parametersConfirmed || a.punch.kind != ToolKind::Punch ||
-        a.die.kind != ToolKind::Die || a.groove >= a.die.openingsMm.size() || !a.punch.drawing ||
-        !a.die.drawing || !a.punch.drawing->millimeters || !a.die.drawing->millimeters)
+        a.die.kind != ToolKind::Die || a.groove >= a.die.openingsMm.size())
         return {};
-    const auto &p = *a.punch.drawing, &d = *a.die.drawing;
-    const auto pb = bounds(p), db = bounds(d);
-    std::vector<std::size_t> noses, lips;
-    for (std::size_t i = 0; i < p.edges.size(); ++i) {
-        const auto &e = p.edges[i];
-        if (e.center && e.sweepRadians * pb.area > 0 && contains(e, -pi / 2) &&
-            std::abs(radius(e) - *a.punch.noseRadiusMm) <= tolerance &&
-            std::abs(e.center->y - radius(e) - pb.minY) <= tolerance &&
-            std::abs(std::abs(e.sweepRadians) - (pi - a.punch.angleRadians)) < 1.e-6 &&
-            tangentNeighbours(p, i))
-            noses.push_back(i);
+    ToolGeometry geometry{};
+    if (a.punch.drawing) {
+        const auto &p = *a.punch.drawing;
+        if (!p.millimeters)
+            return {};
+        const auto pb = bounds(p);
+        std::vector<std::size_t> noses;
+        for (std::size_t i = 0; i < p.edges.size(); ++i) {
+            const auto &e = p.edges[i];
+            if (e.center && e.sweepRadians * pb.area > 0 && contains(e, -pi / 2) &&
+                std::abs(radius(e) - *a.punch.noseRadiusMm) <= tolerance &&
+                std::abs(e.center->y - radius(e) - pb.minY) <= tolerance &&
+                std::abs(std::abs(e.sweepRadians) - (pi - a.punch.angleRadians)) < 1.e-6 &&
+                tangentNeighbours(p, i))
+                noses.push_back(i);
+        }
+        if (noses.size() != 1)
+            return {};
+        const auto &nose = p.edges[noses[0]];
+        geometry.punchTip = {nose.center->x, nose.center->y - radius(nose)};
+        geometry.noseEdge = noses[0];
+        geometry.hasPunch = true;
     }
+    if (!a.die.drawing)
+        return geometry.hasPunch ? std::optional{geometry} : std::nullopt;
+    const auto &d = *a.die.drawing;
+    if (!d.millimeters)
+        return {};
+    const auto db = bounds(d);
     const double maxTilt = (pi - a.die.angleRadians) / 2;
+    std::vector<std::size_t> lips;
     for (std::size_t i = 0; i < d.edges.size(); ++i) {
         const auto &e = d.edges[i];
         if (e.center && e.sweepRadians * db.area > 0 && contains(e, pi / 2) &&
@@ -76,8 +93,6 @@ std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
             std::abs(std::abs(e.sweepRadians) - maxTilt) < 1.e-6 && tangentNeighbours(d, i))
             lips.push_back(i);
     }
-    if (noses.size() != 1)
-        return {};
     std::vector<ToolGeometry> candidates;
     for (auto l : lips)
         for (auto r : lips) {
@@ -90,32 +105,32 @@ std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
             if (std::abs(2 * (span - rad * std::tan(maxTilt / 2)) - a.die.openingsMm[a.groove]) >
                 tolerance)
                 continue;
-            const auto supportWidth = [&](std::size_t i, bool isLeft) {
-                double width = 0;
-                const auto centre = d.edges[i].center->x;
+            const auto width = [&](std::size_t i, bool isLeft) {
+                double result = 0;
+                const double centre = d.edges[i].center->x;
                 for (const auto j :
                      {(i + d.edges.size() - 1) % d.edges.size(), (i + 1) % d.edges.size()}) {
                     const auto &e = d.edges[j];
                     if (!e.center && std::abs(e.start.y - db.maxY) < tolerance &&
                         std::abs(e.end.y - db.maxY) < tolerance)
-                        width = std::max(width, isLeft ? centre - std::min(e.start.x, e.end.x)
-                                                       : std::max(e.start.x, e.end.x) - centre);
+                        result = std::max(result, isLeft ? centre - std::min(e.start.x, e.end.x)
+                                                         : std::max(e.start.x, e.end.x) - centre);
                 }
-                return width;
+                return result;
             };
-            const double lw = supportWidth(l, true), rw = supportWidth(r, false);
+            const double lw = width(l, true), rw = width(r, false);
             if (lw <= tolerance || rw <= tolerance)
                 continue;
-            const auto &nose = p.edges[noses[0]];
-            candidates.push_back({{nose.center->x, nose.center->y - radius(nose)},
-                                  {(left.center->x + right.center->x) / 2, db.maxY},
-                                  noses[0],
-                                  l,
-                                  r,
-                                  span,
-                                  rad,
-                                  lw,
-                                  rw});
+            auto candidate = geometry;
+            candidate.dieTopCentre = {(left.center->x + right.center->x) / 2, db.maxY};
+            candidate.leftShoulderEdge = l;
+            candidate.rightShoulderEdge = r;
+            candidate.shoulderHalfSpanMm = span;
+            candidate.shoulderRadiusMm = rad;
+            candidate.leftSupportWidthMm = lw;
+            candidate.rightSupportWidthMm = rw;
+            candidate.hasDie = true;
+            candidates.push_back(candidate);
         }
     return candidates.size() == 1 ? std::optional{candidates.front()} : std::nullopt;
 }

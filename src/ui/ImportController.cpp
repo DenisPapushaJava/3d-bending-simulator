@@ -420,7 +420,10 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
             QMetaObject::invokeMethod(
                 state->owner,
                 [state, revision, editRevision, id, mode,
-                 expectedDrawing = assignment && assignment->useDrawingGeometry,
+                 expectedPunch = assignment && assignment->useDrawingGeometry &&
+                                 assignment->punch.drawing.has_value(),
+                 expectedDie = assignment && assignment->useDrawingGeometry &&
+                               assignment->die.drawing.has_value(),
                  result = std::move(result)] {
                     state->running = false;
                     state->preparingPreview = false;
@@ -432,7 +435,8 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         !state->session.activeRequest()) {
                         if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
                             const bool matchingMode =
-                                *preview && (*preview)->usesDrawingTools() == expectedDrawing &&
+                                *preview && (*preview)->usesDrawingPunch() == expectedPunch &&
+                                (*preview)->usesDrawingDie() == expectedDie &&
                                 (mode == BendPreviewMode::ToolSetup
                                      ? (*preview)->toolSetup() && !(*preview)->pressMotion() &&
                                            (*preview)->frameCount() == 1
