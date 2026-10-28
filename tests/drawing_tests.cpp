@@ -1046,8 +1046,21 @@ void flatDrawing(const QString &folder) {
                 !missing->views[0].paths.empty(),
             "Missing material hid folded views or printed a blank");
     request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
-    const auto unsupported =
+    const auto zoneOpening =
         build(load(fixtures::bendWithZoneOpening(), folder + "/unfold-zone-hole.step"), request);
+    require(zoneOpening->flatPattern && zoneOpening->flatPattern->info.cutoutsIgnored &&
+                zoneOpening->flatPattern->view.paths.size() >= 2 &&
+                !zoneOpening->views[0].paths.empty(),
+            "Bend-zone hole blocked the blank or disappeared from its drawing");
+    const auto profiled =
+        build(load(fixtures::profiledBend(), folder + "/unfold-profiled.step"), request);
+    require(
+        profiled->flatPattern && profiled->flatPattern->info.cutoutsIgnored &&
+            profiled->flatPattern->view.paths.size() >= 4 &&
+            ui::DrawingSheet::writePdf(folder + "/unfold-profiled.pdf", *profiled, {}).isEmpty(),
+        "Countersink rims or hole are missing from the flat drawing/PDF");
+    const auto unsupported =
+        build(load(fixtures::cornerTrimmedBend(), folder + "/unfold-trimmed.step"), request);
     require(!unsupported->flatPattern && unsupported->flatPatternError &&
                 !unsupported->views[0].paths.empty(),
             "Unsupported blank replaced the valid drawing");

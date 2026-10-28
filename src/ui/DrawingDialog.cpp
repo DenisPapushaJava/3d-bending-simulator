@@ -399,8 +399,11 @@ class DrawingDialog::Impl {
                     status->text() +
                     QStringLiteral(" Размеры гибов не построены: распознавание не выполнено."));
             if (drawing->flatPattern)
-                status->setText(status->text() +
-                                QStringLiteral(" Теоретическая развёртка включена."));
+                status->setText(
+                    status->text() +
+                    (drawing->flatPattern->info.cutoutsIgnored
+                         ? QStringLiteral(" Развёртка включена; влияние отверстий не учитывается.")
+                         : QStringLiteral(" Теоретическая развёртка включена.")));
             else if (drawing->flatPatternError) {
                 status->setText(
                     status->text() +

@@ -7,6 +7,7 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
@@ -38,6 +39,25 @@ application::FlatPatternPtr build(application::DocumentPtr d,
     if (const auto *e = std::get_if<application::FlatPatternError>(&result))
         throw std::runtime_error(e->detail);
     return std::get<application::FlatPatternPtr>(result);
+}
+double displayVolume(const application::FlatPattern &flat) {
+    double volume = 0;
+    for (TopExp_Explorer e(cad::OcctFlatPatternAccess::shape(flat), TopAbs_FACE); e.More();
+         e.Next()) {
+        const auto face = TopoDS::Face(e.Current());
+        TopLoc_Location location;
+        const auto mesh = BRep_Tool::Triangulation(face, location);
+        check(!mesh.IsNull(), "Unmeshed flat display face");
+        for (int i = 1; i <= mesh->NbTriangles(); ++i) {
+            int a, b, c;
+            mesh->Triangle(i).Get(a, b, c);
+            const auto p = mesh->Node(a).Transformed(location.Transformation()).XYZ();
+            const auto q = mesh->Node(b).Transformed(location.Transformation()).XYZ();
+            const auto r = mesh->Node(c).Transformed(location.Transformation()).XYZ();
+            volume += p.Dot(q.Crossed(r)) / 6 * (face.Orientation() == TopAbs_REVERSED ? -1 : 1);
+        }
+    }
+    return std::abs(volume);
 }
 TopoDS_Shape reverseProfile(double axialLength = 80, double height = 40, double leftEnd = -30,
                             double rightEnd = 40) {
@@ -163,13 +183,18 @@ void treePatterns(const std::filesystem::path &folder) {
               "Branch length changed");
     }
     GProp_GProps properties;
-    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::shape(*flat), properties);
+    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*flat), properties);
     const double expectedArea = 300 * 28 + 2 * 296 * 30 + 2 * 296 * ba -
                                 12 * std::numbers::pi * 1.5 * 1.5 - 3 * std::numbers::pi * 9;
-    check(std::abs(std::abs(properties.Mass()) - expectedArea * 2) < 1e-3,
-          "Slots or holes were lost in the branched contour");
+    check(
+        info.cutoutsIgnored &&
+            std::abs(std::abs(properties.Mass()) -
+                     (expectedArea + 12 * std::numbers::pi * 1.5 * 1.5 + 3 * std::numbers::pi * 9) *
+                         2) < 1e-3 &&
+            std::abs(displayVolume(*flat) - expectedArea * 2) < 2,
+        "Slots or holes were lost in the branched contour");
     const auto solid =
-        TopExp_Explorer(cad::OcctFlatPatternAccess::shape(*flat), TopAbs_SOLID).Current();
+        TopExp_Explorer(cad::OcctFlatPatternAccess::geometry(*flat), TopAbs_SOLID).Current();
     for (double x : {99., 201.}) {
         check(BRepClass3d_SolidClassifier(solid, gp_Pnt(x, 5, 1), 1e-5).State() == TopAbs_OUT &&
                   BRepClass3d_SolidClassifier(solid, gp_Pnt(x, info.bounds.maximum.y - 5, 1), 1e-5)
@@ -192,11 +217,9 @@ void treePatterns(const std::filesystem::path &folder) {
     const auto mirrored =
         build(load(BRepBuilderAPI_Transform(segmentedWall(), mirror, true).Shape(),
                    folder / "segmented-mirrored.step"));
-    GProp_GProps mirroredProperties;
-    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::shape(*mirrored), mirroredProperties);
     check(std::abs(mirrored->info().bounds.maximum.x - info.bounds.maximum.x) < 1e-4 &&
               std::abs(mirrored->info().bounds.maximum.y - info.bounds.maximum.y) < 1e-4 &&
-              std::abs(std::abs(mirroredProperties.Mass()) - expectedArea * 2) < 1e-3 &&
+              std::abs(displayVolume(*mirrored) - expectedArea * 2) < 2 &&
               std::count_if(mirrored->info().bends.begin(), mirrored->info().bends.end(),
                             [](const auto &b) { return b.direction > 0; }) == 3,
           "Mirroring lost branch dimensions, holes or reverse bends");
@@ -216,6 +239,57 @@ void treePatterns(const std::filesystem::path &folder) {
               std::get<application::FlatPatternError>(result).detail ==
                   "Closed or disconnected sheet graph",
           "Closed sheet was split without a seam");
+}
+
+void ignoredCutouts(const std::filesystem::path &folder) {
+    const auto document = load(fixtures::profiledBend(), folder / "profiled.step");
+    const auto source = std::string(document->sourceStep());
+    const auto flat = build(document);
+    const auto baseline = build(load(fixtures::profiledBend(false), folder / "without-holes.step"));
+    check(flat->info().cutoutsIgnored && !baseline->info().cutoutsIgnored &&
+              std::abs(flat->info().bounds.maximum.x - baseline->info().bounds.maximum.x) < 1e-5 &&
+              std::abs(flat->info().bounds.maximum.y - baseline->info().bounds.maximum.y) < 1e-5 &&
+              std::abs(flat->info().bends[0].allowanceMm - baseline->info().bends[0].allowanceMm) <
+                  1e-7 &&
+              document->sourceStep() == source,
+          "Countersink influenced allowance/outer contour or modified the original");
+    check(cad::OcctFlatPatternAccess::openingContours(*flat).size() == 3,
+          "A hole or one of the two countersink rims was lost/duplicated");
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*flat), props);
+    const double cutVolume = 55.5 * std::numbers::pi;
+    check(std::abs(displayVolume(*flat) - (std::abs(props.Mass()) - cutVolume)) < 1.5,
+          "The visible countersink or hole was filled or its wall was distorted");
+    std::size_t faces = 0;
+    for (TopExp_Explorer e(cad::OcctFlatPatternAccess::shape(*flat), TopAbs_FACE); e.More();
+         e.Next())
+        ++faces;
+    check(faces == document->metadata().faceCount, "The display gained artificial hole caps");
+    for (bool through : {true, false}) {
+        const auto zone =
+            build(load(fixtures::bendWithZoneOpening(through), folder / "zone-opening.step"));
+        const auto whole = build(load(fixtures::bentStrip(8, 6), folder / "whole-bend.step"));
+        check(zone->info().cutoutsIgnored &&
+                  !cad::OcctFlatPatternAccess::openingContours(*zone).empty() &&
+                  std::abs(zone->info().bounds.maximum.y - whole->info().bounds.maximum.y) < 1e-5,
+              "A bend-zone opening blocked unfolding or changed the blank length");
+    }
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(2, 3, 4), gp_Dir(1, 2, 3)), .71);
+    const auto rotated =
+        build(load(BRepBuilderAPI_Transform(fixtures::profiledBend(), rotation, true).Shape(),
+                   folder / "profiled-rotated.step"));
+    check(cad::OcctFlatPatternAccess::openingContours(*rotated).size() == 3 &&
+              std::abs(displayVolume(*rotated) - displayVolume(*flat)) < .1,
+          "Cutout mapping depends on the STEP world orientation");
+    auto boss = BRepAlgoAPI_Fuse(fixtures::profiledBend(),
+                                 BRepPrimAPI_MakeBox(gp_Pnt(12, -20, 30), 5, 5, 5))
+                    .Shape();
+    const auto rejected =
+        cad::FlatPatternBuilder{}.build(load(boss, folder / "hole-and-boss.step"),
+                                        {{core::SheetMaterial::MildSteel, {}, 1}, {}}, {});
+    check(std::holds_alternative<application::FlatPatternError>(rejected),
+          "Ignoring internal cutouts also discarded unrecognized external material");
 }
 
 int main(int argc, char **argv) {
@@ -266,6 +340,7 @@ int main(int argc, char **argv) {
                   "K did not change the blank");
         }
         treePatterns(folder);
+        ignoredCutouts(folder);
         auto channel = load(fixtures::channel(), folder / "channel.step");
         auto p = build(channel);
         check(p->info().bends.size() == 2 &&
@@ -293,21 +368,14 @@ int main(int argc, char **argv) {
                                         gp_Ax2(gp_Pnt(0, -15, 40), gp_Dir(1, 0, 0)), 2, 12))
                         .Shape();
         auto holed = build(load(hole, folder / "hole.step"));
-        GProp_GProps props;
-        BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::shape(*holed), props);
-        check(std::abs(std::abs(props.Mass()) -
-                       (80 * holed->info().bounds.maximum.y * 2 - std::numbers::pi * 4 * 2)) < 1e-3,
+        check(std::abs(displayVolume(*holed) -
+                       (80 * holed->info().bounds.maximum.y * 2 - std::numbers::pi * 4 * 2)) < .3,
               "Flange hole was filled or distorted");
-        auto unsupported = load(fixtures::bendWithZoneOpening(), folder / "zone-hole.step");
-        auto r = cad::FlatPatternBuilder{}.build(unsupported,
-                                                 {{core::SheetMaterial::MildSteel, {}, 1}, {}}, {});
-        check(std::holds_alternative<application::FlatPatternError>(r),
-              "Zone opening silently filled");
         auto extra = BRepAlgoAPI_Fuse(fixtures::bentStrip(),
                                       BRepPrimAPI_MakeBox(gp_Pnt(4, -20, 30), 5, 5, 5))
                          .Shape();
-        r = cad::FlatPatternBuilder{}.build(load(extra, folder / "extra.step"),
-                                            {{core::SheetMaterial::MildSteel, {}, 1}, {}}, {});
+        auto r = cad::FlatPatternBuilder{}.build(load(extra, folder / "extra.step"),
+                                                 {{core::SheetMaterial::MildSteel, {}, 1}, {}}, {});
         check(std::holds_alternative<application::FlatPatternError>(r),
               "Unrecognized material silently discarded");
         r = cad::FlatPatternBuilder{}.build(channel, {{core::SheetMaterial::MildSteel, {}, 1}, 3},

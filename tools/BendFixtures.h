@@ -81,17 +81,20 @@ inline TopoDS_Shape cornerTrimmedBend() {
 }
 // Independently designed MIT fixture: two perforated flanges, a countersink and
 // a clipped free corner. The bend and its full-width support strips are intact.
-inline TopoDS_Shape profiledBend() {
+inline TopoDS_Shape profiledBend(bool openings = true) {
     auto shape = bentStrip(8, 6);
-    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
-                                       gp_Ax2(gp_Pnt(7, -26, 25), gp_Dir(1, 0, 0)), 1.5, 8))
-                .Shape();
-    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCone(
+    if (openings) {
+        shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(gp_Pnt(7, -26, 25), gp_Dir(1, 0, 0)), 1.5, 8))
+                    .Shape();
+        shape =
+            BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCone(
                                        gp_Ax2(gp_Pnt(14, -26, 25), gp_Dir(-1, 0, 0)), 3, 1.5, 1.5))
                 .Shape();
-    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
-                                       gp_Ax2(gp_Pnt(-26, 7, 50), gp_Dir(0, 1, 0)), 2.5, 8))
-                .Shape();
+        shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(gp_Pnt(-26, 7, 50), gp_Dir(0, 1, 0)), 2.5, 8))
+                    .Shape();
+    }
     BRepBuilderAPI_MakeWire corner;
     const std::array<gp_Pnt, 3> points{gp_Pnt(7, -30, 0), gp_Pnt(7, -27, 0), gp_Pnt(7, -30, 3)};
     for (std::size_t i = 0; i < points.size(); ++i) {

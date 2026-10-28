@@ -9,6 +9,10 @@ class OcctFlatPatternAccess final {
                                         const application::Document &);
     // Borrowed, independently built and meshed in the CAD worker.
     [[nodiscard]] static const TopoDS_Shape &shape(const application::FlatPattern &);
+    // Verified calculation solid; closed cutouts may be filled, unlike the display skin.
+    [[nodiscard]] static const TopoDS_Shape &geometry(const application::FlatPattern &);
+    [[nodiscard]] static const std::vector<std::vector<application::PointMm>> &
+    openingContours(const application::FlatPattern &);
     [[nodiscard]] static const std::vector<TopoDS_Shape> &
     bendLines(const application::FlatPattern &);
 };

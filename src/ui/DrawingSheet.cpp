@@ -1569,6 +1569,9 @@ void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitl
                             "стороны; без калибровки станка."),
              2.5, Qt::AlignLeft | Qt::AlignVCenter);
     QStringList notes;
+    if (d.flatPattern && d.flatPattern->info.cutoutsIgnored &&
+        (flatPage || (flatInline && page == 0)))
+        notes << QStringLiteral("Отверстия показаны условно; их влияние на гибку не учитывается");
     if (d.flatPatternError)
         notes << (d.flatPatternError->code == FlatPatternErrorCode::MissingMaterial
                       ? QStringLiteral("Развёртка не включена: материал не задан")

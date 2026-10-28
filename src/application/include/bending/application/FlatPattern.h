@@ -25,6 +25,7 @@ struct FlatPatternInfo {
     std::vector<FlatBend> bends;
     // Tangency boundaries in flat Y, for dimensions. Not CNC back-gauge positions.
     std::vector<double> wallBoundaries;
+    bool cutoutsIgnored = false;
 };
 class FlatPattern {
   public:

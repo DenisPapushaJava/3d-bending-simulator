@@ -818,7 +818,7 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
         unfolded.info = flat->info();
         const auto &info = unfolded.info;
         bool topFound = false;
-        for (TopExp_Explorer e(OcctFlatPatternAccess::shape(*flat), TopAbs_FACE); e.More();
+        for (TopExp_Explorer e(OcctFlatPatternAccess::geometry(*flat), TopAbs_FACE); e.More();
              e.Next()) {
             const auto face = TopoDS::Face(e.Current());
             BRepAdaptor_Surface surface(face);
@@ -896,6 +896,15 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
                     throw DrawingError{"Cannot attach a flat dimension to its contour"};
                 dimension.witnesses = std::array{*first, *second};
             }
+        for (const auto &contour : OcctFlatPatternAccess::openingContours(*flat)) {
+            budget += contour.size();
+            if (budget > 200000)
+                throw DrawingError{"Drawing projection exceeds 200000 points"};
+            DrawingPath path;
+            for (const auto &p : contour)
+                path.points.push_back({p.x, p.y});
+            v.paths.push_back(std::move(path));
+        }
         drawing.flatPattern = std::move(unfolded);
     }
 }

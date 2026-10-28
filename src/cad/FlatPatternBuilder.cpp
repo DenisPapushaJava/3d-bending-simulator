@@ -1,4 +1,5 @@
 #include "bending/cad/FlatPatternBuilder.h"
+#include "FlatPatternDisplay.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -10,6 +11,7 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -42,6 +44,8 @@ class CadFlatPattern final : public FlatPattern {
     DocumentPtr source;
     FlatPatternInfo data;
     TopoDS_Shape display;
+    TopoDS_Shape geometry;
+    std::vector<std::vector<PointMm>> contours;
     std::vector<TopoDS_Shape> lines;
     const FlatPatternInfo &info() const noexcept override {
         return data;
@@ -178,6 +182,12 @@ struct WallPlacement {
     double y;
     std::optional<std::size_t> incoming;
 };
+gp_Pnt flatPoint(gp_Pnt p, const WallPlacement &placement, gp_Dir axis, double zShift) {
+    const gp_Vec offset(placement.anchor, p);
+    return {gp_Vec(gp_Pnt(0, 0, 0), p).Dot(gp_Vec(axis)),
+            offset.Dot(gp_Vec(placement.along)) + placement.y,
+            offset.Dot(gp_Vec(axis).Crossed(gp_Vec(placement.along))) + zShift};
+}
 // A full outer tangency rail must belong to this wall. A local point on one
 // side alone cannot prove attachment along the complete axial span.
 int materialSide(const TopoDS_Face &wallFace, const gp_Pln &wallPlane, const RecognizedBend &bend,
@@ -227,6 +237,13 @@ bool OcctFlatPatternAccess::belongsTo(const FlatPattern &pattern, const Document
 const TopoDS_Shape &OcctFlatPatternAccess::shape(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).display;
 }
+const TopoDS_Shape &OcctFlatPatternAccess::geometry(const FlatPattern &p) {
+    return dynamic_cast<const CadFlatPattern &>(p).geometry;
+}
+const std::vector<std::vector<PointMm>> &
+OcctFlatPatternAccess::openingContours(const FlatPattern &p) {
+    return dynamic_cast<const CadFlatPattern &>(p).contours;
+}
 const std::vector<TopoDS_Shape> &OcctFlatPatternAccess::bendLines(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).lines;
 }
@@ -241,7 +258,9 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                     "Choose a material or set K"};
         const auto native = std::dynamic_pointer_cast<const CadDocument>(document);
         require(native != nullptr, "Unsupported document type");
-        const auto &analysis = native->metadata().bendAnalysis;
+        const bool cutoutsIgnored =
+            native->metadata().closedCutouts.status == ClosedCutoutStatus::Filled;
+        const auto &analysis = OcctDocumentAccess::simulationBends(*native);
         require(analysis.interiorContourDiagnostics.empty(),
                 "Openings in a bend zone are not yet supported for unfolding");
         require(analysis.status == BendRecognitionStatus::Completed && !analysis.bends.empty() &&
@@ -254,7 +273,8 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                           std::abs(*request.manualThicknessMm - t) > tolerance))
             return FlatPatternError{FlatPatternErrorCode::ThicknessConflict,
                                     "Thickness differs from CAD"};
-        auto source = BRepBuilderAPI_Copy(OcctDocumentAccess::shape(*native), true, false).Shape();
+        auto source =
+            BRepBuilderAPI_Copy(OcctDocumentAccess::simulationShape(*native), true, false).Shape();
         TopTools_IndexedMapOfShape faces;
         TopExp::MapShapes(source, TopAbs_FACE, faces);
         auto axis = gp_Dir(gp_Vec(point(bends.front().axisStart), point(bends.front().axisEnd)));
@@ -295,10 +315,12 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         result->source = document;
         result->data.settings = request.settings;
         result->data.thicknessMm = t;
+        result->data.cutoutsIgnored = cutoutsIgnored;
         TopoDS_Compound original;
         BRep_Builder builder;
         builder.MakeCompound(original);
         std::vector<TopoDS_Shape> patches;
+        std::vector<FlatDisplayRegion> regions;
         for (std::size_t wi = 0; wi < pending.size(); ++wi) {
             cancelled(stop);
             const auto w = pending[wi];
@@ -309,8 +331,18 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                         std::abs(pa.Distance(pb.Location()) - t) <= tolerance,
                     "Inconsistent wall thickness or axial direction");
             const gp_Vec n(pa.Axis().Direction());
-            builder.Add(original, extruded(face(faces, w[0]),
-                                           n * gp_Vec(pa.Location(), pb.Location()).Dot(n)));
+            const auto wallSolid =
+                extruded(face(faces, w[0]), n * gp_Vec(pa.Location(), pb.Location()).Dot(n));
+            builder.Add(original, wallSolid);
+            const double zShift =
+                gp_Vec(pa.Location(), pb.Location())
+                            .Dot(gp_Vec(axis).Crossed(gp_Vec(placement.along))) < 0
+                    ? t
+                    : 0;
+            const auto wallMap = [placement, axis, zShift](gp_Pnt p) {
+                return flatPoint(p, placement, axis, zShift);
+            };
+            regions.push_back({wallSolid, wallMap});
             patches.push_back(flatWall(face(faces, w[0]), placement, axis));
             const auto wallBox = bounds(patches.back());
             result->data.wallBoundaries.push_back(wallBox.minimum.y);
@@ -357,7 +389,29 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                               b.innerRadiusMm, k, *ba});
                 result->data.wallBoundaries.push_back(y0);
                 result->data.wallBoundaries.push_back(y1);
-                builder.Add(original, bendSolid(b, faces, tolerance));
+                const auto sector = bendSolid(b, faces, tolerance);
+                builder.Add(original, sector);
+                const auto center = point(b.axisStart);
+                const gp_Dir radial(gp_Vec(center, projected(center, pa)));
+                const gp_Dir otherRadial(gp_Vec(center, projected(center, childPlane)));
+                const double sign =
+                    gp_Vec(axis).Dot(gp_Vec(radial).Crossed(gp_Vec(otherRadial))) >= 0 ? 1 : -1;
+                const double zInner =
+                    wallMap(center.Translated(gp_Vec(radial) * b.innerRadiusMm)).Z();
+                const double zSign =
+                    gp_Vec(radial).Dot(gp_Vec(axis).Crossed(gp_Vec(placement.along)));
+                regions.push_back(
+                    {sector, [center, axis, radial, sign, y0, y1, zInner, zSign, b](gp_Pnt p) {
+                         auto r = gp_Vec(center, p);
+                         r -= gp_Vec(axis) * r.Dot(gp_Vec(axis));
+                         const double angle = std::clamp(
+                             std::atan2(sign * gp_Vec(axis).Dot(gp_Vec(radial).Crossed(r)),
+                                        gp_Vec(radial).Dot(r)),
+                             0., b.angleRadians);
+                         return gp_Pnt(gp_Vec(gp_Pnt(0, 0, 0), p).Dot(gp_Vec(axis)),
+                                       y0 + (y1 - y0) * angle / b.angleRadians,
+                                       zInner + zSign * (r.Magnitude() - b.innerRadiusMm));
+                     }});
             }
         }
         require(placements.size() == graph.size() &&
@@ -365,7 +419,7 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                 "Incomplete or disconnected sheet graph");
         std::sort(result->data.bends.begin(), result->data.bends.end(),
                   [](const auto &a, const auto &b) { return a.bendIndex < b.bendIndex; });
-        const double budget = std::max(1e-4, native->metadata().volumeMm3 * 1e-7);
+        const double budget = std::max(1e-4, volume(source) * 1e-7);
         require(std::abs(volume(original) - volume(source)) <= budget,
                 "The recognized walls and bends do not reconstruct the complete original solid");
         require(volume(boolean<BRepAlgoAPI_Cut>(source, original, tolerance, stop,
@@ -416,12 +470,38 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             result->data.wallBoundaries.end());
         result->display =
             extruded(TopoDS::Face(TopExp_Explorer(flat, TopAbs_FACE).Current()), gp_Vec(0, 0, t));
+        result->geometry = result->display;
         result->data.bounds = bounds(result->display);
-        BRepMesh_IncrementalMesh mesh(result->display, .08, false, .25, false);
-        require(mesh.IsDone(), "Flat preview meshing failed");
+        if (cutoutsIgnored) {
+            auto cutouts =
+                flatCutoutDisplay(OcctDocumentAccess::shape(*native), regions,
+                                  gp_Vec(-box.minimum.x, -box.minimum.y, 0), tolerance, stop);
+            result->display = std::move(cutouts.surface);
+            result->contours = std::move(cutouts.contours);
+        } else {
+            BRepMesh_IncrementalMesh mesh(result->display, .08, false, .25, false);
+            require(mesh.IsDone(), "Flat preview meshing failed");
+        }
         TopoDS_Compound display;
         builder.MakeCompound(display);
         builder.Add(display, result->display);
+        if (cutoutsIgnored) {
+            gp_Trsf top;
+            top.SetTranslation(gp_Vec(0, 0, t + .005));
+            builder.Add(display,
+                        BRepBuilderAPI_Transform(BRepTools::OuterWire(TopoDS::Face(
+                                                     TopExp_Explorer(flat, TopAbs_FACE).Current())),
+                                                 top, true)
+                            .Shape());
+            for (const auto &contour : result->contours) {
+                BRepBuilderAPI_MakePolygon wire;
+                for (std::size_t i = 0; i + 1 < contour.size(); ++i)
+                    wire.Add(gp_Pnt(contour[i].x, contour[i].y, t + .005));
+                wire.Close();
+                require(wire.IsDone(), "Cannot build cutout display outline");
+                builder.Add(display, wire.Wire());
+            }
+        }
         for (const auto &b : result->data.bends) {
             auto line =
                 BRepBuilderAPI_MakeEdge(gp_Pnt(b.minimumX, (b.firstY + b.secondY) / 2, t + .005),

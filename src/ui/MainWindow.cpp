@@ -521,6 +521,12 @@ class MainWindow::Impl {
             QString details =
                 QStringLiteral("Теоретический расчёт без калибровки станка. Координаты линий гибов "
                                "— от края заготовки, не X упора.");
+            if (info.cutoutsIgnored) {
+                status +=
+                    QStringLiteral("\nОтверстия показаны; их влияние на гибку не учитывается.");
+                details += QStringLiteral(" Проверена отдельная копия без замкнутых вырезов. "
+                                          "Форма вырезов в зоне гиба показана условно.");
+            }
             for (const auto &b : info.bends)
                 details += QStringLiteral("\nB%1: Ri %2 · K %3 · BA %4 мм · L %5 мм")
                                .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
