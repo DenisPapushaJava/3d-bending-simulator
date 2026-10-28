@@ -1,3 +1,4 @@
+#include "ToolFixtures.h"
 #include "bending/core/ToolCatalog.h"
 #include "bending/core/ToolSelection.h"
 #include <cmath>
@@ -15,6 +16,34 @@ void require(bool value, const char *message) {
 int main() {
     using namespace bending::core;
     try {
+        const auto drawn = tool_fixture::pair();
+        const auto geometry = drawingToolGeometry(drawn);
+        require(geometry && toolParameters(drawn) &&
+                    std::abs(geometry->shoulderHalfSpanMm - (6 + .8 / std::sqrt(3.))) < 1.e-8 &&
+                    std::abs(geometry->punchTip.y) < 1.e-8,
+                "Round shoulder references not recognized");
+        require(!standardAirBendOpening(6, 12) && standardAirBendOpening(6, 50) &&
+                    referenceDieOpeningMm(6) == 48,
+                "Opening guard or 8t reference changed");
+        auto wide = tool_fixture::pair(50);
+        wide.die.id = "wide";
+        const auto choice =
+            selectTools({drawn.punch, drawn.die, wide.die}, {6, std::numbers::pi / 2, 8, 40});
+        require(choice.candidates.size() == 1 && choice.candidates[0].die == 2,
+                "6 mm selection did not exclude V12/prefer available V50");
+        auto wrong = drawn;
+        wrong.die.drawing->millimeters = false;
+        require(!drawingToolGeometry(wrong) && !toolParameters(wrong),
+                "Unknown units admitted real geometry");
+        wrong = drawn;
+        wrong.die.openingsMm[0] = 13;
+        require(!drawingToolGeometry(wrong), "V mismatch was silently normalized");
+        wrong = drawn;
+        wrong.punch.noseRadiusMm = 1;
+        require(!drawingToolGeometry(wrong), "Nose mismatch accepted");
+        wrong = drawn;
+        wrong.punch.drawing->edges[0].center->x += 1;
+        require(!drawingToolGeometry(wrong), "Broken arc accepted");
         const ToolPreset punch{"p",
                                "test",
                                "P26",

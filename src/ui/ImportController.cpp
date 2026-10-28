@@ -1,4 +1,5 @@
 #include "bending/ui/ImportController.h"
+#include "bending/core/ToolSelection.h"
 
 #include <QThread>
 
@@ -369,6 +370,15 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
              metadata.bendAnalysis.lengthToleranceMm)) {
         return false;
     }
+    if (mode != BendPreviewMode::Kinematic && entry->tools &&
+        !core::standardAirBendOpening(metadata.bendAnalysis.bends[recognizedIndex].thicknessMm,
+                                      entry->tools->openingMm)) {
+        impl_->invalidatePreview();
+        impl_->previewError = BendPreviewError{BendPreviewErrorCode::NarrowDieOpening,
+                                               "V is below the current standard air-bending scope"};
+        emit stateChanged();
+        return false;
+    }
     auto *state = impl_.get();
     state->invalidatePreview();
     const auto id = state->previewId;
@@ -377,6 +387,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     const auto editRevision = state->session.editRevision();
     const auto target = *state->session.bendTarget(recognizedIndex);
     const auto tools = mode == BendPreviewMode::Kinematic ? std::nullopt : entry->tools;
+    const auto assignment = mode == BendPreviewMode::Kinematic ? std::nullopt : entry->catalogTools;
     state->stop = std::stop_source{};
     const auto stop = state->stop.get_token();
     state->running = true;
@@ -384,16 +395,23 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     QMetaObject::invokeMethod(
         state->worker,
         [state, document, revision, editRevision, id, target, recognizedIndex, fixedSecond, stop,
-         tools, mode, builder = std::move(builder)] {
+         tools, assignment, mode, builder = std::move(builder)] {
             BendPreviewResult result =
                 BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
             try {
-                result =
-                    mode == BendPreviewMode::ToolMotion
-                        ? builder->buildToolMotion(document, recognizedIndex, target, *tools, stop)
-                    : tools
-                        ? builder->buildToolSetup(document, recognizedIndex, target, *tools, stop)
-                        : builder->build(document, recognizedIndex, target, fixedSecond, stop);
+                result = mode == BendPreviewMode::ToolMotion
+                             ? (assignment && assignment->useDrawingGeometry
+                                    ? builder->buildAssignedToolMotion(document, recognizedIndex,
+                                                                       target, *assignment, stop)
+                                    : builder->buildToolMotion(document, recognizedIndex, target,
+                                                               *tools, stop))
+                         : tools
+                             ? (assignment && assignment->useDrawingGeometry
+                                    ? builder->buildAssignedToolSetup(document, recognizedIndex,
+                                                                      target, *assignment, stop)
+                                    : builder->buildToolSetup(document, recognizedIndex, target,
+                                                              *tools, stop))
+                             : builder->build(document, recognizedIndex, target, fixedSecond, stop);
             } catch (const std::exception &error) {
                 result = BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
             } catch (...) {
@@ -401,7 +419,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
             }
             QMetaObject::invokeMethod(
                 state->owner,
-                [state, revision, editRevision, id, mode, result = std::move(result)] {
+                [state, revision, editRevision, id, mode,
+                 expectedDrawing = assignment && assignment->useDrawingGeometry,
+                 result = std::move(result)] {
                     state->running = false;
                     state->preparingPreview = false;
                     if (state->stopping) {
@@ -412,7 +432,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         !state->session.activeRequest()) {
                         if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
                             const bool matchingMode =
-                                *preview &&
+                                *preview && (*preview)->usesDrawingTools() == expectedDrawing &&
                                 (mode == BendPreviewMode::ToolSetup
                                      ? (*preview)->toolSetup() && !(*preview)->pressMotion() &&
                                            (*preview)->frameCount() == 1
@@ -443,6 +463,11 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         } else if (const auto &error = std::get<BendPreviewError>(result);
                                    error.code != BendPreviewErrorCode::Cancelled) {
                             state->previewError = error;
+                            if (error.diagnostic &&
+                                (error.code != BendPreviewErrorCode::ToolIntersection ||
+                                 error.diagnostic->frameCount() != 1 ||
+                                 !error.diagnostic->collision() || !error.diagnostic->toolSetup()))
+                                state->previewError->diagnostic.reset();
                         }
                     }
                     state->dispatch();

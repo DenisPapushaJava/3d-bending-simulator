@@ -3,7 +3,7 @@
 #include <optional>
 
 namespace bending::core {
-// Idealized extruded tools for the initial flat setup, not a manufacturer's catalogue.
+// Standard V-tool working dimensions. Full body geometry belongs to ToolAssignment.
 struct PressTools {
     double openingMm;
     double dieAngleRadians;

@@ -35,6 +35,13 @@ void ToolProfilesWidget::setTools(std::optional<core::PressTools> tools) {
             : QStringLiteral("Выберите пару и ручей или проверьте ручные параметры."));
     update();
 }
+void ToolProfilesWidget::setDrawingAssignment(std::optional<core::ToolAssignment> a) {
+    drawing_ = a && a->useDrawingGeometry ? a : std::nullopt;
+    if (drawing_)
+        setAccessibleDescription(QStringLiteral("Полные сечения из DXF; та же форма участвует в "
+                                                "проверке. Держатели и станок не показаны."));
+    update();
+}
 void ToolProfilesWidget::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
@@ -63,6 +70,27 @@ void ToolProfilesWidget::paintEvent(QPaintEvent *) {
     for (std::size_t i = 1; i < profiles.die.size(); ++i)
         die.lineTo(profiles.die[i].x, profiles.die[i].y);
     die.closeSubpath();
+    if (drawing_) {
+        const auto path = [](const core::ToolDrawing &d) {
+            QPainterPath p;
+            p.moveTo(d.edges.front().start.x, d.edges.front().start.y);
+            for (const auto &e : d.edges) {
+                if (!e.center)
+                    p.lineTo(e.end.x, e.end.y);
+                else {
+                    const double r = std::hypot(e.start.x - e.center->x, e.start.y - e.center->y);
+                    const double start =
+                        std::atan2(e.start.y - e.center->y, e.start.x - e.center->x);
+                    p.arcTo(QRectF(e.center->x - r, e.center->y - r, 2 * r, 2 * r),
+                            -start * degrees, -e.sweepRadians * degrees);
+                }
+            }
+            p.closeSubpath();
+            return p;
+        };
+        punch = path(*drawing_->punch.drawing);
+        die = path(*drawing_->die.drawing);
+    }
     const auto punchBounds = punch.boundingRect(), dieBounds = die.boundingRect();
     const double half = width() / 2.;
     const double drawingTop = 42, drawingBottom = height() - 49.;
@@ -102,7 +130,7 @@ void ToolProfilesWidget::paintEvent(QPaintEvent *) {
                               number(tools_->lengthMm));
         painter.drawText(QRectF(i * half + 4, height() - 43, half - 8, 37), Qt::AlignCenter,
                          dimensions);
-        if (i == 1) {
+        if (i == 1 && !drawing_) {
             const auto left = transform.map(QPointF(profiles.die[1].x, profiles.die[1].y));
             const auto right = transform.map(QPointF(profiles.die[3].x, profiles.die[3].y));
             const double y = left.y() - 10;

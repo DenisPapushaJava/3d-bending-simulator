@@ -1,4 +1,5 @@
 #include "bending/core/ToolCatalog.h"
+#include "bending/core/ToolGeometry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -94,6 +95,8 @@ std::optional<PressTools> toolParameters(const ToolAssignment &a) {
         !text(a.machineName, 256, true)) {
         return {};
     }
+    if (a.useDrawingGeometry && !drawingToolGeometry(a))
+        return {};
     PressTools result{a.die.openingsMm[a.groove],
                       a.die.angleRadians,
                       a.punch.angleRadians,

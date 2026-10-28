@@ -14,9 +14,9 @@ double cosc(double a) noexcept {
                                 : 2.0 * std::pow(std::sin(a / 2.0), 2) / a;
 }
 } // namespace
-PressMotionResult preparePressMotion(const SingleBend &m, core::PressTools tools,
-                                     double tolerance) noexcept {
-    const auto initial = flatToolSetup(m, tools, tolerance);
+PressMotionResult preparePressMotion(const SingleBend &m, core::PressTools tools, double tolerance,
+                                     std::optional<DieShoulders> shoulders) noexcept {
+    const auto initial = flatToolSetup(m, tools, tolerance, shoulders);
     if (!std::holds_alternative<FlatToolSetup>(initial)) {
         return PressMotionIssue::InvalidParameters;
     }
@@ -30,22 +30,29 @@ PressMotionResult preparePressMotion(const SingleBend &m, core::PressTools tools
     }
     const double half = m.angleRadians / 2.0;
     const double halfLength = bendAllowanceMm(m) / 2.0;
-    const double a = tools.openingMm / 2.0;
+    const double a = shoulders ? shoulders->halfSpanMm : tools.openingMm / 2.0;
+    const double shoulderRadius = shoulders ? shoulders->radiusMm : 0.;
     // For h in [0,half], sinc(h) decreases, sin(h) increases, cos(h) decreases.
     // Bound outer tangency X and q=(a-X)/cos(h) without a discrete-only support test.
     const double maximumTangencyX = halfLength + m.thicknessMm / 2.0 * std::sin(half);
     const double maximumQ = (a - halfLength * sinc(half)) / std::cos(half);
-    if (a - maximumTangencyX <= tolerance ||
+    if (a - shoulderRadius * std::sin(half) - maximumTangencyX <= tolerance ||
         maximumQ >= std::min(m.fixedFlangeMm, m.movingFlangeMm) - tolerance) {
         return PressMotionIssue::SupportNotProven;
     }
-    return PressMotion{std::get<FlatToolSetup>(initial), maximumQ, tolerance};
+    return PressMotion{std::get<FlatToolSetup>(initial), maximumQ, tolerance, shoulders};
+}
+Point2Mm dieSupportPoint(const PressMotion &motion, double angle) noexcept {
+    const double a =
+        motion.shoulders ? motion.shoulders->halfSpanMm : motion.initial.tools.openingMm / 2;
+    const double r = motion.shoulders ? motion.shoulders->radiusMm : 0.;
+    return {a - r * std::sin(angle / 2), r * (std::cos(angle / 2) - 1)};
 }
 std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotion &motion,
                                            double progress) noexcept {
     if (!std::isfinite(progress) || progress < 0.0 || progress > 1.0 ||
-        !std::holds_alternative<PressMotion>(
-            preparePressMotion(m, motion.initial.tools, motion.lengthToleranceMm))) {
+        !std::holds_alternative<PressMotion>(preparePressMotion(
+            m, motion.initial.tools, motion.lengthToleranceMm, motion.shoulders))) {
         return {};
     }
     constexpr double approach = 0.2;
@@ -55,14 +62,16 @@ std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotio
     const double h = angle / 2.0;
     const double c = std::cos(h), s = std::sin(h);
     const double halfLength = bendAllowanceMm(m) / 2.0;
-    const double a = motion.initial.tools.openingMm / 2.0;
+    const double a =
+        motion.shoulders ? motion.shoulders->halfSpanMm : motion.initial.tools.openingMm / 2.0;
+    const double shoulderRadius = motion.shoulders ? motion.shoulders->radiusMm : 0.;
     const double oneMinusCos = 2.0 * std::pow(std::sin(h / 2.0), 2);
     const double outerX = halfLength * sinc(h) + m.thicknessMm / 2.0 * s;
     const double innerX = halfLength * sinc(h) - m.thicknessMm / 2.0 * s;
     const double outerRise = halfLength * cosc(h) + m.thicknessMm / 2.0 * oneMinusCos;
     const double innerRise = halfLength * cosc(h) - m.thicknessMm / 2.0 * oneMinusCos;
-    const double bottom = (outerRise - a * s) / c;
-    const double q = (a - outerX) / c;
+    const double bottom = (outerRise - a * s + shoulderRadius * oneMinusCos) / c;
+    const double q = (a - shoulderRadius * s - outerX) / c;
     BendSection section{};
     section.innerArc = {{{-innerX, bottom + m.thicknessMm + innerRise},
                          {0, bottom + m.thicknessMm},

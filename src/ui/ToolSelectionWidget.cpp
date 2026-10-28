@@ -1,6 +1,8 @@
 #include "ToolSelectionWidget.h"
 #include "ToolDrawingWidget.h"
 #include "ToolProfilesWidget.h"
+#include "bending/core/ToolGeometry.h"
+#include <QCheckBox>
 
 #include "bending/ui/Preferences.h"
 #include <QComboBox>
@@ -149,6 +151,16 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     auto *clearanceForm = new QFormLayout;
     clearanceForm->addRow(labels[5], fields_[5]);
     layout->addWidget(manualPanel_);
+    realGeometry_ = new QCheckBox(QStringLiteral("Использовать форму из DXF"), this);
+    realGeometry_->setObjectName(QStringLiteral("useDrawingToolGeometry"));
+    realGeometry_->setToolTip(
+        QStringLiteral("Полные корпуса, круглый носик и скруглённые плечи из сечений. Пуансон и "
+                       "матрица выбираются независимо. Держатели и станок не моделируются."));
+    layout->addWidget(realGeometry_);
+    geometryScope_ = wrapped(this);
+    geometryScope_->setObjectName(QStringLiteral("toolGeometryScope"));
+    layout->addWidget(geometryScope_);
+    connect(realGeometry_, &QCheckBox::toggled, this, [this] { changed(); });
     profiles_ = new ToolProfilesWidget(this);
     profiles_->setObjectName(QStringLiteral("toolProfilesPreview"));
     layout->addWidget(profiles_);
@@ -160,7 +172,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     layout->addWidget(drawings_);
     connect(drawings_, &QPushButton::clicked, this, [this] { showDrawings(); });
     auto *profileScope = wrapped(this);
-    profileScope->setText(QStringLiteral("Упрощённые рабочие сечения · общий масштаб"));
+    profileScope->setText(QStringLiteral("Сечения выбранного инструмента · общий масштаб"));
     profileScope->setMinimumHeight(profileScope->heightForWidth(240));
     layout->insertWidget(layout->indexOf(profiles_), profileScope);
     detailsToggle_ = new QToolButton(this);
@@ -172,7 +184,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     layout->addWidget(catalogDetails_);
     connect(detailsToggle_, &QToolButton::toggled, this, [this] { updateDetails(); });
     connect(enlargeProfiles_, &QPushButton::clicked, this, [this] {
-        const auto tools = parameters();
+        const auto tools = rawParameters();
         if (!tools)
             return;
         QDialog dialog(this);
@@ -184,12 +196,15 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         auto *view = new ToolProfilesWidget(&dialog, true);
         view->setObjectName(QStringLiteral("enlargedToolProfiles"));
         view->setTools(tools);
+        view->setDrawingAssignment(assignment());
         dialogLayout->addWidget(view, 1);
         auto *note = wrapped(&dialog);
-        note->setText(QStringLiteral(
-            "Сечения идеализированных тел, используемых в 3D-проверке. Масштаб одинаковый, размеры "
-            "в мм. Высота клина условная и зависит от V. Корпуса, поднутрения и крепления не "
-            "показаны. Это просмотр геометрии, не результат проверки совместимости."));
+        note->setText(
+            assignment() && assignment()->useDrawingGeometry
+                ? QStringLiteral("Полные сечения из DXF используются и в 3D-проверке. Масштаб "
+                                 "одинаковый. Держатели, станок и нагрузка не моделируются.")
+                : QStringLiteral("Условные рабочие сечения. Высота клина зависит от V; полные "
+                                 "корпуса не показаны."));
         note->setMinimumHeight(note->heightForWidth(400));
         dialogLayout->addWidget(note);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
@@ -274,6 +289,8 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     selectPair({settings->value(QStringLiteral("tools/lastPunch")).toString(),
                 settings->value(QStringLiteral("tools/lastDie")).toString(),
                 settings->value(QStringLiteral("tools/lastGroove")).toInt()});
+    realGeometry_->setChecked(
+        settings->value(QStringLiteral("tools/lastDrawingGeometry"), false).toBool());
     if (catalog_.empty())
         mode_->setCurrentIndex(1);
     updateDetails();
@@ -301,11 +318,22 @@ std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
     const auto *d = preset(die_);
     if (!usesCatalog() || !p || !d || groove_->currentIndex() < 0)
         return {};
-    core::ToolAssignment a{*p, *d, static_cast<std::size_t>(groove_->currentIndex()),
-                           fields_[5]->value(), machine_->text().toStdString()};
+    core::ToolAssignment a{*p,
+                           *d,
+                           static_cast<std::size_t>(groove_->currentIndex()),
+                           fields_[5]->value(),
+                           machine_->text().toStdString(),
+                           realGeometry_->isChecked()};
     return core::toolParameters(a) ? std::optional{a} : std::nullopt;
 }
 std::optional<core::PressTools> ToolSelectionWidget::parameters() const {
+    const auto t = rawParameters();
+    return t && (!selectionRequest_ ||
+                 core::standardAirBendOpening(selectionRequest_->thicknessMm, t->openingMm))
+               ? t
+               : std::nullopt;
+}
+std::optional<core::PressTools> ToolSelectionWidget::rawParameters() const {
     if (usesCatalog()) {
         const auto a = assignment();
         return a ? core::toolParameters(*a) : std::nullopt;
@@ -320,6 +348,25 @@ std::optional<core::PressTools> ToolSelectionWidget::parameters() const {
     if (f[6]->value() != t.lengthMm)
         t.punchLengthMm = f[6]->value();
     return core::validPressTools(t) ? std::optional{t} : std::nullopt;
+}
+QString ToolSelectionWidget::openingIssue() const {
+    if (!selectionRequest_)
+        return {};
+    double v = fields_[0]->value();
+    if (usesCatalog()) {
+        const auto *d = preset(die_);
+        const int g = groove_->currentIndex();
+        if (!d || g < 0 || static_cast<std::size_t>(g) >= d->openingsMm.size())
+            return {};
+        v = d->openingsMm[static_cast<std::size_t>(g)];
+    }
+    return core::standardAirBendOpening(selectionRequest_->thicknessMm, v)
+               ? QString{}
+               : QStringLiteral("V %1 мм слишком мало для t %2 мм. Проверка заблокирована. "
+                                "Ориентир 8t: %3 мм.")
+                     .arg(v)
+                     .arg(selectionRequest_->thicknessMm)
+                     .arg(core::referenceDieOpeningMm(selectionRequest_->thicknessMm));
 }
 void ToolSelectionWidget::selectPreset(QComboBox *combo, const core::ToolPreset &p) {
     const auto it = std::find(catalog_.begin(), catalog_.end(), p);
@@ -341,6 +388,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         populateGrooves(a->groove);
         fields_[5]->setValue(a->clearanceMm);
         machine_->setText(text(a->machineName));
+        realGeometry_->setChecked(a->useDrawingGeometry);
         mode_->setCurrentIndex(0);
     } else if (tools) {
         const auto &t = *tools;
@@ -353,6 +401,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
                                            core::punchLengthMm(t)};
         for (std::size_t i = 0; i < fields_.size(); ++i)
             fields_[i]->setValue(values[i]);
+        realGeometry_->setChecked(false);
         mode_->setCurrentIndex(1);
     }
     updating_ = false;
@@ -403,12 +452,36 @@ void ToolSelectionWidget::updateDetails() {
     const auto *selectedDie = preset(die_);
     drawings_->setVisible(usesCatalog() && ((selectedPunch && selectedPunch->drawing) ||
                                             (selectedDie && selectedDie->drawing)));
+    std::optional<core::ToolAssignment> proposed;
+    if (selectedPunch && selectedDie && groove_->currentIndex() >= 0)
+        proposed = core::ToolAssignment{*selectedPunch, *selectedDie,
+                                        static_cast<std::size_t>(groove_->currentIndex()),
+                                        fields_[5]->value(), machine_->text().toStdString()};
+    const bool ready = proposed && core::drawingToolGeometry(*proposed).has_value();
+    realGeometry_->setVisible(usesCatalog());
+    realGeometry_->setEnabled(usesCatalog() && (ready || realGeometry_->isChecked()));
+    geometryScope_->setText(
+        realGeometry_->isChecked() && !ready
+            ? QStringLiteral("Рабочие участки DXF этой пары не распознаны. Выберите другую пару "
+                             "или явно отключите форму DXF.")
+        : realGeometry_->isChecked()
+            ? QStringLiteral(
+                  "По контуру DXF · рабочие точки распознаны. Пределы нагрузки ещё не проверяются.")
+        : ready ? QStringLiteral("Доступна форма из DXF. Пока выбран условный профиль.")
+                : QStringLiteral("Условный профиль. Для формы DXF нужны оба контура в мм и "
+                                 "поддержанные рабочие участки."));
+    geometryScope_->setVisible(usesCatalog());
     catalogPanel_->setVisible(usesCatalog());
     manualPanel_->setVisible(!usesCatalog());
     detailsToggle_->setVisible(usesCatalog());
     catalogDetails_->setVisible(usesCatalog() && detailsToggle_->isChecked());
-    const auto tools = parameters();
+    if (const auto issue = openingIssue(); !issue.isEmpty()) {
+        geometryScope_->setText(issue);
+        geometryScope_->setVisible(true);
+    }
+    const auto tools = rawParameters();
     profiles_->setTools(tools);
+    profiles_->setDrawingAssignment(assignment());
     enlargeProfiles_->setEnabled(tools.has_value());
     const auto a = assignment();
     favorite_->setEnabled(a.has_value());
@@ -435,18 +508,16 @@ void ToolSelectionWidget::updateDetails() {
     }
     const auto &p = a->punch;
     const auto &d = a->die;
-    details_->setText(
-        QStringLiteral(
-            "%1\n%2° · R %3 мм · L %4 мм\n\n%5\nV %6 мм · %7° · L %8 "
-            "мм\n\nРасчёт по упрощённой рабочей зоне; исходные контуры доступны отдельно.")
-            .arg(title(p))
-            .arg(p.angleRadians * 180 / std::numbers::pi)
-            .arg(*p.noseRadiusMm)
-            .arg(p.lengthMm)
-            .arg(title(d))
-            .arg(d.openingsMm[a->groove])
-            .arg(d.angleRadians * 180 / std::numbers::pi)
-            .arg(d.lengthMm));
+    details_->setText(QStringLiteral("%1\n%2° · R %3 мм · L %4 мм\n\n%5\nV %6 мм · %7° · L %8 "
+                                     "мм")
+                          .arg(title(p))
+                          .arg(p.angleRadians * 180 / std::numbers::pi)
+                          .arg(*p.noseRadiusMm)
+                          .arg(p.lengthMm)
+                          .arg(title(d))
+                          .arg(d.openingsMm[a->groove])
+                          .arg(d.angleRadians * 180 / std::numbers::pi)
+                          .arg(d.lengthMm));
     details_->setMinimumHeight(details_->heightForWidth(240));
     sources_->setText(text(p.source + "\n" + p.notes + "\n\n" + d.source + "\n" + d.notes));
     sources_->setMinimumHeight(sources_->heightForWidth(240));
@@ -494,6 +565,7 @@ void ToolSelectionWidget::rememberChoice() {
     settings->setValue(QStringLiteral("tools/lastPunch"), pair.punchId);
     settings->setValue(QStringLiteral("tools/lastDie"), pair.dieId);
     settings->setValue(QStringLiteral("tools/lastGroove"), pair.groove);
+    settings->setValue(QStringLiteral("tools/lastDrawingGeometry"), realGeometry_->isChecked());
     settings->setValue(QStringLiteral("tools/machine"), machine_->text());
 }
 void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionRequest> request) {
@@ -501,6 +573,7 @@ void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionR
         selectionRequest_ = request;
         recommendation_->clear();
         recommendation_->hide();
+        updateDetails();
     }
     recommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
 }
@@ -508,13 +581,22 @@ void ToolSelectionWidget::recommend() {
     if (!selectionRequest_)
         return;
     const core::ToolCatalog workshop(catalog_.begin(), catalog_.begin() + workshopSize_);
-    const auto result = core::selectTools(workshop, *selectionRequest_);
+    auto result = core::selectTools(workshop, *selectionRequest_);
+    if (realGeometry_->isChecked())
+        std::erase_if(result.candidates, [&](const auto &c) {
+            return !core::drawingToolGeometry({workshop[c.punch], workshop[c.die], c.groove,
+                                               fields_[5]->value(),
+                                               machine_->text().toStdString()});
+        });
     QString message;
     if (!result.validRequest) {
         message =
             QStringLiteral("Для подбора нужны толщина, угол, радиус и длина выбранного гиба.");
     } else if (result.candidates.empty()) {
-        message = QStringLiteral(
+        message = (realGeometry_->isChecked()
+                       ? QStringLiteral("Нет подходящей пары с поддержанной формой DXF. ")
+                       : QString{}) +
+                  QStringLiteral(
                       "В текущей библиотеке нет пары в рамках предварительного подбора (V/t ≥ 5). "
                       "Это не доказывает невозможность гибки. Записей с недостающими данными: %1.")
                       .arg(result.missingData);

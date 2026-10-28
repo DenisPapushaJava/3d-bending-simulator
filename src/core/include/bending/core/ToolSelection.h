@@ -3,6 +3,10 @@
 #include "bending/core/ToolCatalog.h"
 
 namespace bending::core {
+// Product guard for the current standard air-bending scope, not a material norm.
+inline constexpr double minimumAirBendOpeningRatio = 5.;
+[[nodiscard]] bool standardAirBendOpening(double thicknessMm, double openingMm) noexcept;
+[[nodiscard]] double referenceDieOpeningMm(double thicknessMm) noexcept;
 struct ToolSelectionRequest {
     double thicknessMm;
     double bendAngleRadians; // Turn from flat, unlike internal tool angles.

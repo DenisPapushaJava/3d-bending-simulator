@@ -20,7 +20,7 @@ struct DrawingEdge {
     double sweepRadians = 0;            // Signed mathematical XY sweep.
     bool operator==(const DrawingEdge &) const = default;
 };
-// Source drawing for inspection only; never silently substituted for the simulation body.
+// Source contour; simulation use requires an explicit, validated assignment mode.
 struct ToolDrawing {
     std::string sourceFile;
     std::string sha256;
@@ -29,7 +29,7 @@ struct ToolDrawing {
     bool operator==(const ToolDrawing &) const = default;
 };
 [[nodiscard]] bool validToolDrawing(const ToolDrawing &drawing);
-// Catalogue facts only. Simulation bodies remain idealized working profiles.
+// Catalogue facts; the assignment selects idealized or supported drawing geometry.
 struct ToolPreset {
     std::string id;
     std::string manufacturer;
@@ -54,6 +54,7 @@ struct ToolAssignment {
     std::size_t groove = 0;
     double clearanceMm = 10;
     std::string machineName;
+    bool useDrawingGeometry = false; // Explicit opt-in; legacy assignments remain idealized.
     bool operator==(const ToolAssignment &) const = default;
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);

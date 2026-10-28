@@ -185,7 +185,8 @@ QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
                        {"die", presetJson(a->die)},
                        {"groove", static_cast<int>(a->groove)},
                        {"clearanceMm", a->clearanceMm},
-                       {"machineName", QString::fromStdString(a->machineName)}};
+                       {"machineName", QString::fromStdString(a->machineName)},
+                       {"useDrawingGeometry", a->useDrawingGeometry}};
 }
 bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment> &assignment) {
     if (value.isNull()) {
@@ -205,6 +206,9 @@ bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment>
         !o.value("machineName").isString()) {
         return false;
     }
+    if (o.contains("useDrawingGeometry") && !o.value("useDrawingGeometry").isBool())
+        return false;
+    a.useDrawingGeometry = o.value("useDrawingGeometry").toBool(false);
     a.groove = static_cast<std::size_t>(groove);
     a.clearanceMm = o.value("clearanceMm").toDouble();
     a.machineName = o.value("machineName").toString().toStdString();

@@ -213,6 +213,8 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
                 : object.contains(QStringLiteral("catalogTools"))) {
             return false;
         }
+        if (version < 7 && bend.catalogTools && bend.catalogTools->useDrawingGeometry)
+            return false;
         bends.push_back(std::move(bend));
     }
     return validBendPreparations(bends);
@@ -255,9 +257,10 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     const auto version = root.value(QStringLiteral("version"));
     if (!version.isDouble() ||
         (version.toDouble() != 1.0 && version.toDouble() != 2.0 && version.toDouble() != 3.0 &&
-         version.toDouble() != 4.0 && version.toDouble() != 5.0 && version.toDouble() != 6.0)) {
+         version.toDouble() != 4.0 && version.toDouble() != 5.0 && version.toDouble() != 6.0 &&
+         version.toDouble() != 7.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 6",
+                           "Supported project format versions are 1 through 7",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -382,7 +385,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 6},
+        {QStringLiteral("version"), 7},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},

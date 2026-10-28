@@ -2,6 +2,7 @@
 
 #include "bending/application/Document.h"
 #include "bending/core/BendTarget.h"
+#include "bending/core/ToolCatalog.h"
 #include "bending/simulation/FlatToolSetup.h"
 #include "bending/simulation/PressMotion.h"
 #include "bending/simulation/SingleBend.h"
@@ -19,9 +20,16 @@ struct PunchRetractionCheck {
     double liftMm;
     double finalClearanceMm;
 };
+enum class ToolCollisionPair { SheetDie, SheetPunch, DiePunch };
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual bool usesDrawingTools() const noexcept {
+        return false;
+    }
+    [[nodiscard]] virtual std::optional<ToolCollisionPair> collision() const noexcept {
+        return {};
+    }
     [[nodiscard]] virtual bool ignoresClosedCutouts() const noexcept {
         return false;
     }
@@ -47,6 +55,8 @@ enum class BendPreviewErrorCode {
     UnsupportedGeometry,
     BendZoneInteriorContours,
     UnsupportedParameters,
+    UnsupportedToolGeometry,
+    NarrowDieOpening,
     TargetMismatch,
     ToolTooShort,
     MissingLeftSupport,
@@ -64,11 +74,35 @@ struct BendPreviewError {
     BendPreviewErrorCode code;
     std::string detail;
     std::optional<std::size_t> frameIndex = std::nullopt;
+    BendPreviewPtr diagnostic = {}; // Failed state only, never a successful ToolMotion.
 };
 using BendPreviewResult = std::variant<BendPreviewPtr, BendPreviewError>;
 class SingleBendPreviewBuilder {
   public:
+    [[nodiscard]] virtual BendPreviewResult
+    buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
+                           core::ToolAssignment assignment, std::stop_token stop) const {
+        if (assignment.useDrawingGeometry)
+            return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
+                                    "DXF setup unavailable"};
+        const auto tools = core::toolParameters(assignment);
+        return tools ? buildToolSetup(document, index, target, *tools, stop)
+                     : BendPreviewResult(BendPreviewError{
+                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
+    }
+
     virtual ~SingleBendPreviewBuilder() = default;
+    [[nodiscard]] virtual BendPreviewResult
+    buildAssignedToolMotion(DocumentPtr document, std::size_t index, core::BendTarget target,
+                            core::ToolAssignment assignment, std::stop_token stop) const {
+        if (assignment.useDrawingGeometry)
+            return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
+                                    "DXF tool contact unavailable"};
+        const auto tools = core::toolParameters(assignment);
+        return tools ? buildToolMotion(document, index, target, *tools, stop)
+                     : BendPreviewResult(BendPreviewError{
+                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
+    }
     [[nodiscard]] virtual BendPreviewResult buildToolMotion(DocumentPtr, std::size_t,
                                                             core::BendTarget, core::PressTools,
                                                             std::stop_token) const {

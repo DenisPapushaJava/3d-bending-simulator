@@ -28,13 +28,20 @@ ToolRejection screenValidTools(const ToolSelectionRequest &r, const ToolPreset &
         return ToolRejection::Angle;
     if (*p.noseRadiusMm > r.innerRadiusMm - tolerance)
         return ToolRejection::Radius;
-    if (d.openingsMm[groove] / r.thicknessMm < 5 - 1e-12)
+    if (!standardAirBendOpening(r.thicknessMm, d.openingsMm[groove]))
         return ToolRejection::NarrowOpening;
     if (*p.noseRadiusMm > d.openingsMm[groove] / 4)
         return ToolRejection::MissingData;
     return ToolRejection::None;
 }
 } // namespace
+bool standardAirBendOpening(double t, double v) noexcept {
+    return std::isfinite(t) && std::isfinite(v) && t > 0 && v > 0 &&
+           v / t >= minimumAirBendOpeningRatio - 1.e-12;
+}
+double referenceDieOpeningMm(double t) noexcept {
+    return t * 8.;
+}
 ToolRejection screenTools(const ToolSelectionRequest &r, const ToolPreset &p, const ToolPreset &d,
                           std::size_t groove) {
     if (!validRequest(r) || !validToolPreset(p) || !validToolPreset(d))

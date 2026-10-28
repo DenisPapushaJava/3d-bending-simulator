@@ -1,5 +1,6 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/DrawingTools.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include "bending/simulation/ToolProfiles.h"
 
@@ -46,6 +47,14 @@ using namespace application;
 class CadPreview final : public SingleBendPreview {
   public:
     bool filledCutouts = false;
+    bool realTools = false;
+    std::optional<ToolCollisionPair> conflict;
+    bool usesDrawingTools() const noexcept override {
+        return realTools;
+    }
+    std::optional<ToolCollisionPair> collision() const noexcept override {
+        return conflict;
+    }
     bool ignoresClosedCutouts() const noexcept override {
         return filledCutouts;
     }
@@ -367,8 +376,8 @@ std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, do
     }
     return {die, punch};
 }
-bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
-                     double budget) {
+bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
+                     bool *completed = nullptr) {
     BRepAlgoAPI_Common common;
     TopTools_ListOfShape arguments, tools;
     arguments.Append(a);
@@ -378,8 +387,12 @@ bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolera
     common.SetNonDestructive(true);
     common.SetFuzzyValue(tolerance);
     common.Build();
-    return common.IsDone() && !common.HasErrors() && BRepCheck_Analyzer(common.Shape()).IsValid() &&
-           std::isfinite(volume(common.Shape())) && volume(common.Shape()) <= budget;
+    const bool valid = common.IsDone() && !common.HasErrors() &&
+                       BRepCheck_Analyzer(common.Shape()).IsValid() &&
+                       std::isfinite(volume(common.Shape()));
+    if (completed)
+        *completed = valid;
+    return valid && volume(common.Shape()) <= budget;
 }
 bool sameVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
                 std::stop_token stop) {
@@ -415,11 +428,10 @@ const TopoDS_Shape &
 OcctPreviewAccess::retractionSweep(const application::SingleBendPreview &preview) {
     return dynamic_cast<const CadPreview &>(preview).sweep;
 }
-static application::BendPreviewResult buildPreview(DocumentPtr document, std::size_t bendIndex,
-                                                   core::BendTarget target, bool fixedSecond,
-                                                   std::stop_token stop,
-                                                   std::optional<core::PressTools> toolParameters,
-                                                   bool withMotion = false) {
+static application::BendPreviewResult
+buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
+             std::stop_token stop, std::optional<core::PressTools> toolParameters,
+             bool withMotion = false, std::optional<core::ToolAssignment> realTools = {}) {
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -527,13 +539,26 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
         }
         auto preview = std::make_shared<CadPreview>();
         preview->geometry = model;
+        const auto toolGeometry = realTools ? core::drawingToolGeometry(*realTools) : std::nullopt;
+        if (realTools && !toolGeometry)
+            return BendPreviewError{
+                BendPreviewErrorCode::UnsupportedToolGeometry,
+                "Upright circular nose and symmetric rounded V groove required"};
+        const auto shoulders =
+            toolGeometry
+                ? std::optional<simulation::DieShoulders>{{toolGeometry->shoulderHalfSpanMm,
+                                                           toolGeometry->shoulderRadiusMm,
+                                                           toolGeometry->leftSupportWidthMm,
+                                                           toolGeometry->rightSupportWidthMm}}
+                : std::nullopt;
+        preview->realTools = realTools.has_value();
         preview->filledCutouts = metadata.closedCutouts.status == ClosedCutoutStatus::Filled;
         const auto displaySource = preview->filledCutouts
                                        ? visibleSource(OcctDocumentAccess::shape(*native))
                                        : TopoDS_Shape{};
         if (toolParameters) {
-            const auto placement =
-                simulation::flatToolSetup(model, *toolParameters, analysis.lengthToleranceMm);
+            const auto placement = simulation::flatToolSetup(model, *toolParameters,
+                                                             analysis.lengthToleranceMm, shoulders);
             if (const auto *issue = std::get_if<simulation::ToolSetupIssue>(&placement)) {
                 const auto code = *issue == simulation::ToolSetupIssue::ToolTooShort
                                       ? BendPreviewErrorCode::ToolTooShort
@@ -546,8 +571,8 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
             }
             preview->setup = std::get<simulation::FlatToolSetup>(placement);
             if (withMotion) {
-                const auto prepared = simulation::preparePressMotion(model, *toolParameters,
-                                                                     analysis.lengthToleranceMm);
+                const auto prepared = simulation::preparePressMotion(
+                    model, *toolParameters, analysis.lengthToleranceMm, shoulders);
                 if (const auto *issue = std::get_if<simulation::PressMotionIssue>(&prepared)) {
                     const auto code = *issue == simulation::PressMotionIssue::ToolAngleConflict
                                           ? BendPreviewErrorCode::ToolAngleConflict
@@ -562,10 +587,11 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
             }
             // The section model uses flange envelopes. Certify actual material under every
             // possible shoulder position, rather than inferring support from a bounding box.
-            const double reach =
-                preview->motion
-                    ? preview->motion->maximumSupportDistanceMm
-                    : (toolParameters->openingMm - simulation::bendAllowanceMm(model)) / 2.0;
+            const double reach = preview->motion
+                                     ? preview->motion->maximumSupportDistanceMm
+                                     : (toolGeometry ? toolGeometry->shoulderHalfSpanMm
+                                                     : toolParameters->openingMm / 2.0) -
+                                           simulation::bendAllowanceMm(model) / 2.0;
             if (reach > analysis.lengthToleranceMm) {
                 auto supportSection = sourceSection;
                 const double length = reach + analysis.lengthToleranceMm / 2.0;
@@ -619,9 +645,13 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
         }
         std::array<TopoDS_Shape, 2> initialTools;
         if (preview->setup) {
-            initialTools = makeTools(*preview->setup, model.thicknessMm);
+            initialTools = realTools
+                               ? makeDrawingTools(*realTools, *toolGeometry,
+                                                  model.thicknessMm + toolParameters->clearanceMm)
+                               : makeTools(*preview->setup, model.thicknessMm);
         }
         Bnd_Box envelope;
+        bool returnSweepClear = true;
         constexpr std::size_t formingIntervals = 40;
         const std::size_t intervals = withMotion ? formingIntervals + 20 : toolParameters ? 0 : 20;
         for (std::size_t i = 0; i <= intervals; ++i) {
@@ -678,7 +708,9 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                     return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
                                             "Invalid vertical punch return distance", i};
                 }
-                preview->sweep = makePunch(*toolParameters, tip, lift);
+                preview->sweep = realTools
+                                     ? drawingPunchSweep(*realTools, *toolGeometry, tip, lift, stop)
+                                     : makePunch(*toolParameters, tip, lift);
                 if (!BRepCheck_Analyzer(preview->sweep).IsValid() ||
                     !std::isfinite(volume(preview->sweep)) || volume(preview->sweep) <= 0.0) {
                     return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
@@ -688,12 +720,14 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                     if (stop.stop_requested()) {
                         return cancelled();
                     }
+                    bool completed = false;
                     if (!disjointVolumes(preview->sweep, obstacle, analysis.lengthToleranceMm,
-                                         budget)) {
-                        return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
-                                                "Punch return swept volume intersects sheet/die "
-                                                "or its Boolean check failed",
-                                                i};
+                                         budget, &completed)) {
+                        if (!realTools || !completed)
+                            return BendPreviewError{
+                                BendPreviewErrorCode::RetractionNotProven,
+                                "Punch return occupied volume is not clear or Boolean failed", i};
+                        returnSweepClear = false;
                     }
                 }
             }
@@ -708,16 +742,52 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                                                       0));
                     frame.tools[1] = initialTools[1].Moved(TopLoc_Location(translation));
                 }
-                for (const auto &[a, b] : {std::pair{frame.shape, frame.tools[0]},
-                                           std::pair{frame.shape, frame.tools[1]},
-                                           std::pair{frame.tools[0], frame.tools[1]}}) {
-                    if (stop.stop_requested()) {
+                const std::array<std::pair<TopoDS_Shape, TopoDS_Shape>, 3> pairs{
+                    {{frame.shape, frame.tools[0]},
+                     {frame.shape, frame.tools[1]},
+                     {frame.tools[0], frame.tools[1]}}};
+                for (std::size_t pair = 0; pair < pairs.size(); ++pair) {
+                    if (stop.stop_requested())
                         return cancelled();
-                    }
-                    if (!disjointVolumes(a, b, analysis.lengthToleranceMm, budget)) {
-                        return BendPreviewError{
-                            BendPreviewErrorCode::ToolIntersection,
-                            "Tool/material intersection or failed Boolean check", i};
+                    bool completed = false;
+                    if (!disjointVolumes(pairs[pair].first, pairs[pair].second,
+                                         analysis.lengthToleranceMm, budget, &completed)) {
+                        if (!completed)
+                            return BendPreviewError{BendPreviewErrorCode::Failed,
+                                                    "Tool collision Boolean failed", i};
+                        BRep_Builder builder;
+                        TopoDS_Compound assembly;
+                        builder.MakeCompound(assembly);
+                        builder.Add(assembly, frame.shape);
+                        for (const auto &t : frame.tools)
+                            builder.Add(assembly, t);
+                        frame.shape = assembly;
+                        BRepMesh_IncrementalMesh mesh(frame.shape, .05, false, .35, false);
+                        if (!mesh.IsDone())
+                            return BendPreviewError{BendPreviewErrorCode::Failed,
+                                                    "Collision snapshot mesh failed", i};
+                        if (!displaySource.IsNull())
+                            makeDisplay(frame, displaySource, model, sourceBasis, basis, section,
+                                        stop);
+                        auto diagnostic = std::make_shared<CadPreview>();
+                        diagnostic->geometry = model;
+                        diagnostic->setup = preview->setup;
+                        diagnostic->realTools = preview->realTools;
+                        diagnostic->filledCutouts = preview->filledCutouts;
+                        diagnostic->conflict = static_cast<ToolCollisionPair>(pair);
+                        if (withMotion) {
+                            diagnostic->motion = preview->motion;
+                            diagnostic->states.push_back(preview->states.back());
+                        }
+                        Bnd_Box box;
+                        BRepBndLib::Add(frame.shape, box);
+                        box.Get(diagnostic->envelope.minimum.x, diagnostic->envelope.minimum.y,
+                                diagnostic->envelope.minimum.z, diagnostic->envelope.maximum.x,
+                                diagnostic->envelope.maximum.y, diagnostic->envelope.maximum.z);
+                        diagnostic->frames.push_back(std::move(frame));
+                        return BendPreviewError{BendPreviewErrorCode::ToolIntersection,
+                                                "Tool and material volumes intersect", i,
+                                                BendPreviewPtr(diagnostic)};
                     }
                 }
                 if (withMotion) {
@@ -726,13 +796,18 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
                         if (stop.stop_requested()) {
                             return cancelled();
                         }
-                        const double x = (flange == 0 ? -0.5 : 0.5) * toolParameters->openingMm;
+                        const auto contactPoint = simulation::dieSupportPoint(
+                            *preview->motion, state.section.angleRadians);
+                        const double x = (flange == 0 ? -1. : 1.) * contactPoint.x;
                         const auto shoulder =
-                            BRepBuilderAPI_MakeEdge(gp_Pnt(x, 0, 0),
-                                                    gp_Pnt(x, 0, toolParameters->lengthMm))
+                            BRepBuilderAPI_MakeEdge(
+                                gp_Pnt(x, contactPoint.y, 0),
+                                gp_Pnt(x, contactPoint.y, toolParameters->lengthMm))
                                 .Edge();
                         BRepExtrema_DistShapeShape contact(frame.regions[flange * 2], shoulder);
-                        if (!contact.IsDone() || contact.Value() > analysis.lengthToleranceMm) {
+                        BRepExtrema_DistShapeShape onDie(shoulder, frame.tools[0]);
+                        if (!contact.IsDone() || contact.Value() > analysis.lengthToleranceMm ||
+                            !onDie.IsDone() || onDie.Value() > analysis.lengthToleranceMm) {
                             return BendPreviewError{BendPreviewErrorCode::ContactLost,
                                                     "Die shoulder contact missing", i};
                         }
@@ -784,6 +859,10 @@ static application::BendPreviewResult buildPreview(DocumentPtr document, std::si
         if (stop.stop_requested()) {
             return cancelled();
         }
+        if (!returnSweepClear)
+            return BendPreviewError{BendPreviewErrorCode::RetractionNotProven,
+                                    "DXF punch return occupied volume intersects; discrete "
+                                    "positions are not a complete proof"};
         envelope.Get(preview->envelope.minimum.x, preview->envelope.minimum.y,
                      preview->envelope.minimum.z, preview->envelope.maximum.x,
                      preview->envelope.maximum.y, preview->envelope.maximum.z);
@@ -814,5 +893,27 @@ SingleBendPreviewBuilder::buildToolMotion(DocumentPtr document, std::size_t bend
                                           core::BendTarget target, core::PressTools tools,
                                           std::stop_token stop) const {
     return buildPreview(std::move(document), bendIndex, target, false, stop, tools, true);
+}
+application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion(
+    DocumentPtr document, std::size_t index, core::BendTarget target,
+    core::ToolAssignment assignment, std::stop_token stop) const {
+    const auto tools = core::toolParameters(assignment);
+    if (!tools)
+        return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
+                                "Invalid DXF tool geometry/parameters"};
+    return buildPreview(std::move(document), index, target, false, stop, *tools, true,
+                        assignment.useDrawingGeometry ? std::optional{std::move(assignment)}
+                                                      : std::nullopt);
+}
+application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
+    DocumentPtr document, std::size_t index, core::BendTarget target,
+    core::ToolAssignment assignment, std::stop_token stop) const {
+    const auto tools = core::toolParameters(assignment);
+    if (!tools)
+        return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
+                                "Invalid DXF tool geometry/parameters"};
+    return buildPreview(std::move(document), index, target, false, stop, *tools, false,
+                        assignment.useDrawingGeometry ? std::optional{std::move(assignment)}
+                                                      : std::nullopt);
 }
 } // namespace bending::cad

@@ -307,6 +307,20 @@ class OcctCanvas final : public QWidget {
                         candidate->SetCustomColor(frame.tools[tool], toolColors[tool]);
                     }
                 }
+                if (const auto conflict = preview->collision()) {
+                    const Quantity_Color red(.95, .06, .04, Quantity_TOC_RGB);
+                    if (*conflict != application::ToolCollisionPair::DiePunch)
+                        for (const auto &r : regions) {
+                            TopTools_IndexedMapOfShape faces;
+                            TopExp::MapShapes(r, TopAbs_FACE, faces);
+                            for (int i = 1; i <= faces.Extent(); ++i)
+                                candidate->SetCustomColor(faces(i), red);
+                        }
+                    if (*conflict != application::ToolCollisionPair::SheetPunch)
+                        candidate->SetCustomColor(frame.tools[0], red);
+                    if (*conflict != application::ToolCollisionPair::SheetDie)
+                        candidate->SetCustomColor(frame.tools[1], red);
+                }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
                                                                            : AIS_Shaded,

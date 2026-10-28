@@ -10,6 +10,7 @@
 #include <variant>
 
 class QComboBox;
+class QCheckBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
@@ -28,6 +29,7 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] std::optional<core::ToolAssignment> assignment() const;
     [[nodiscard]] bool usesCatalog() const;
     [[nodiscard]] QString summary() const;
+    [[nodiscard]] QString openingIssue() const;
     [[nodiscard]] QString shortSummary() const;
     void rememberChoice();
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request);
@@ -42,6 +44,7 @@ class ToolSelectionWidget final : public QWidget {
         int groove = 0;
         bool operator==(const Pair &) const = default;
     };
+    [[nodiscard]] std::optional<core::PressTools> rawParameters() const;
     void changed();
     void updateDetails();
     void populateGrooves(std::size_t selected = 0);
@@ -55,6 +58,8 @@ class ToolSelectionWidget final : public QWidget {
     void importCatalog();
     core::ToolCatalog catalog_;
     std::size_t workshopSize_ = 0;
+    QCheckBox *realGeometry_;
+    QLabel *geometryScope_;
     QComboBox *mode_;
     QComboBox *punch_;
     QComboBox *die_;

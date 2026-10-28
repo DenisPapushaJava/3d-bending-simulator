@@ -586,7 +586,7 @@ class MainWindow::Impl {
         const auto &document = session.document();
         const auto row = bendList->currentIndex().row();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
-        const auto preview = controller->bendPreview();
+        const auto preview = scenePreview();
         const auto tools = toolSelection->parameters();
         const bool chosen =
             tools && (toolSelection->usesCatalog() || toolDraftChanged || (entry && entry->tools));
@@ -607,12 +607,13 @@ class MainWindow::Impl {
         changePartTools->setVisible(document && chosen);
         changePartTools->setEnabled(!controller->hasWork());
         partPrimary->setEnabled(!controller->hasWork());
-        partPrimary->setText(!document ? QStringLiteral("Открыть деталь…")
-                             : preview ? QStringLiteral("Показать результат")
-                             : !singleBendSupported || !matchingBendThickness
-                                 ? QStringLiteral("Условия проверки")
-                             : chosen ? QStringLiteral("Проверить гибку")
-                                      : QStringLiteral("Выбрать инструмент →"));
+        partPrimary->setText(
+            !document ? QStringLiteral("Открыть деталь…")
+            : preview ? (preview->collision() ? QStringLiteral("Показать столкновение")
+                                              : QStringLiteral("Показать результат"))
+            : !singleBendSupported || !matchingBendThickness ? QStringLiteral("Условия проверки")
+            : chosen ? QStringLiteral("Проверить гибку")
+                     : QStringLiteral("Выбрать инструмент →"));
         const auto bendCount = document ? document->metadata().bendAnalysis.bends.size() : 0;
         processSteps[0]->setStatus(document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
                                             : QStringLiteral("Открыть STEP"));
@@ -645,8 +646,14 @@ class MainWindow::Impl {
         playback->stop();
         playBend->setText(QStringLiteral("Воспроизвести"));
     }
+    application::BendPreviewPtr scenePreview() const {
+        if (const auto p = controller->bendPreview())
+            return p;
+        const auto &e = controller->bendPreviewError();
+        return e ? e->diagnostic : nullptr;
+    }
     void showPreviewFrame() {
-        const auto preview = controller->bendPreview();
+        const auto preview = scenePreview();
         if (!preview || viewingSource) {
             return;
         }
@@ -670,6 +677,11 @@ class MainWindow::Impl {
                 : 0.0;
         const auto approximation =
             preview->ignoresClosedCutouts() ? QStringLiteral("Проверка без вырезов · ") : QString{};
+        if (preview->collision()) {
+            frameLabel->setText(
+                QStringLiteral("Обнаружено столкновение · диагностическое положение"));
+            return;
+        }
         if (const auto *state = preview->pressState(index)) {
             frameLabel->setText(
                 approximation +
@@ -742,7 +754,7 @@ class MainWindow::Impl {
             toolDraftChanged = false;
             toolSelection->setChoice(savedTools, savedAssignment);
         }
-        const auto preview = controller->bendPreview();
+        const auto preview = scenePreview();
         if (!preview) {
             previewDisplayError.clear();
             positionedPreview.reset();
@@ -764,11 +776,13 @@ class MainWindow::Impl {
             }
             showPreviewFrame();
         }
-        const bool staticSetup = preview && preview->toolSetup() && !preview->pressMotion();
+        const bool diagnostic = preview && preview->collision().has_value();
+        const bool staticSetup =
+            preview && (diagnostic || (preview->toolSetup() && !preview->pressMotion()));
         previewControls->setCurrentIndex(staticSetup ? 1 : 0);
         playBend->setVisible(!staticSetup);
         playbackSpeedControls->setVisible(!staticSetup);
-        showKinematics->setVisible(staticSetup);
+        showKinematics->setVisible(staticSetup && !diagnostic);
         showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
         bendFrame->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
                               previewDisplayError.isEmpty());
@@ -808,8 +822,8 @@ class MainWindow::Impl {
                           "отверстия/контур около сгиба и раскрытие V. Для движения участок "
                           "опоры проверяется на всём ходе.")
                 : failure->code == BendPreviewErrorCode::ToolIntersection
-                    ? QStringLiteral("Не удалось подтвердить отсутствие пересечения с инструментом "
-                                     "в положении %1. Проверьте параметры.")
+                    ? QStringLiteral("Обнаружено столкновение с инструментом в положении %1. "
+                                     "Конфликтующие тела выделены красным.")
                           .arg(failure->frameIndex.value_or(0) + 1)
                 : failure->code == BendPreviewErrorCode::ContactLost
                     ? QStringLiteral("Не удалось подтвердить рабочий контакт в положении %1. "
@@ -819,6 +833,14 @@ class MainWindow::Impl {
                     ? QStringLiteral(
                           "Не удалось подтвердить свободный отвод пуансона. "
                           "Полный цикл не подготовлен; проверьте инструмент и геометрию.")
+                : failure->code == BendPreviewErrorCode::NarrowDieOpening
+                    ? QStringLiteral(
+                          "Раскрытие V слишком мало для толщины детали. Выберите подходящую "
+                          "матрицу; ориентир обычной свободной гибки — около 8t.")
+                : failure->code == BendPreviewErrorCode::UnsupportedToolGeometry
+                    ? QStringLiteral(
+                          "Для выбранной формы DXF не удалось подтвердить рабочие участки. Нужны "
+                          "круглый носик и симметричный V-ручей со скруглёнными плечами.")
                 : failure->code == BendPreviewErrorCode::UnsupportedParameters
                     ? QStringLiteral("Параметры вне диапазона первого сценария: поворот 5–175°, "
                                      "толщина/радиус 0,1–100000 мм, ширина/полки 1–100000 мм.")
@@ -910,9 +932,8 @@ class MainWindow::Impl {
         if (entry && entry->catalogTools) {
             previewStatus->setText(
                 previewStatus->text() +
-                QStringLiteral(
-                    "\n\nИнструмент из каталога: проверена идеализированная рабочая зона. Полные "
-                    "корпуса, поднутрения, держатели, станок и допустимая нагрузка не проверены."));
+                QStringLiteral("\n\nИнструмент из каталога. Охват формы указан в условиях "
+                               "проверки; держатели, станок и допустимая нагрузка не проверены."));
         }
         singleBendSupported = supported;
         matchingBendThickness = matchingThickness;
@@ -933,7 +954,9 @@ class MainWindow::Impl {
                                                   "В параметрах детали можно вернуть толщину CAD.")
             : !previewBuilder ? QStringLiteral("Проверка недоступна в этой сборке.")
             : !toolSelection->parameters()
-                ? QStringLiteral("Выберите пуансон, матрицу и рабочий ручей.")
+                ? (toolSelection->openingIssue().isEmpty()
+                       ? QStringLiteral("Выберите пуансон, матрицу и рабочий ручей.")
+                       : toolSelection->openingIssue())
                 : QString{};
         const bool busy = controller->isPreparingPreview();
         const bool failed =
@@ -954,8 +977,12 @@ class MainWindow::Impl {
                 ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                 : QStringLiteral("Деталь и пара инструмента выбраны. Можно проверить гибку."));
         checkScope->setText(
-            QStringLiteral("Упрощённые рабочие профили. Станок, держатели, усилие и пружинение "
-                           "не проверяются.") +
+            (preview && preview->usesDrawingTools()
+                 ? QStringLiteral("Полные корпуса по DXF. Скруглённые плечи и носик учтены. ")
+             : entry && entry->catalogTools && entry->catalogTools->useDrawingGeometry
+                 ? QStringLiteral("Выбрана форма DXF; результат её проверки ещё не подготовлен. ")
+                 : QStringLiteral("Упрощённые рабочие профили. ")) +
+            QStringLiteral("Станок, держатели, усилие и пружинение не проверяются.") +
             (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled
                  ? QStringLiteral(
                        "\nВырезы видимы; опоры и зазоры проверяются по заполненной копии. "
@@ -1841,7 +1868,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->pairs, &QComboBox::currentIndexChanged, this,
             [this](int) { impl_->showThicknessEvidence(true); });
     connect(impl_->bendList->selectionModel(), &QItemSelectionModel::currentChanged, this, [this] {
-        if (impl_->controller->bendPreview() || impl_->controller->isPreparingPreview()) {
+        if (impl_->scenePreview() || impl_->controller->isPreparingPreview()) {
             impl_->controller->discardBendPreview();
         }
         impl_->showSelectedBend(true);
@@ -1902,7 +1929,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             open->trigger();
         } else if (!impl_->singleBendSupported || !impl_->matchingBendThickness) {
             impl_->propertyTabs->setCurrentIndex(2);
-        } else if (impl_->controller->bendPreview()) {
+        } else if (impl_->scenePreview()) {
             impl_->viewingSource = false;
             impl_->propertyTabs->setCurrentIndex(2);
             impl_->refreshPreview();
