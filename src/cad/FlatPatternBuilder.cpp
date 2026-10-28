@@ -39,6 +39,7 @@ using namespace application;
 using Wall = std::array<std::size_t, 2>;
 class CadFlatPattern final : public FlatPattern {
   public:
+    DocumentPtr source;
     FlatPatternInfo data;
     TopoDS_Shape display;
     std::vector<TopoDS_Shape> lines;
@@ -219,6 +220,10 @@ TopoDS_Shape flatWall(const TopoDS_Face &f, const WallPlacement &placement, gp_D
     return BRepBuilderAPI_Transform(patch, shift, true).Shape();
 }
 } // namespace
+bool OcctFlatPatternAccess::belongsTo(const FlatPattern &pattern, const Document &document) {
+    const auto *native = dynamic_cast<const CadFlatPattern *>(&pattern);
+    return native && native->source.get() == &document;
+}
 const TopoDS_Shape &OcctFlatPatternAccess::shape(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).display;
 }
@@ -287,6 +292,7 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         std::vector<Wall> pending{root};
         std::vector<bool> used(bends.size());
         auto result = std::make_shared<CadFlatPattern>();
+        result->source = document;
         result->data.settings = request.settings;
         result->data.thicknessMm = t;
         TopoDS_Compound original;

@@ -1,7 +1,9 @@
 #include "BendFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
+#include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/FlatPatternAccess.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -972,6 +974,91 @@ void classicalDrawing(const QString &folder) {
     require(ui::DrawingSheet::writePdf(folder + "/classical-shallow-top.pdf", *tall, {}).isEmpty(),
             "A shallow projection has no room for its outside dimension number");
 }
+void flatDrawing(const QString &folder) {
+    const auto doc = load(fixtures::channel(), folder + "/unfold-channel.step");
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+    const auto result = build(doc, request);
+    require(result->flatPattern && !result->flatPatternError, "Flat drawing snapshot missing");
+    const auto &flat = *result->flatPattern;
+    require(flat.info.bends.size() == 2 && !flat.view.paths.empty() &&
+                flat.view.dimensions.size() == 2 && flat.view.sectionDimensions.size() == 2,
+            "Blank contour, overall sizes or bend coordinates missing");
+    const auto cachedResult =
+        cad::FlatPatternBuilder{}.build(doc, {*request.unfoldSettings, {}}, {});
+    const auto cached = std::get<application::FlatPatternPtr>(cachedResult);
+    require(cad::OcctFlatPatternAccess::belongsTo(*cached, *doc), "Flat provenance lost");
+    const auto uncachedRequest = request;
+    request.preparedFlatPattern = cached;
+    require(request == uncachedRequest, "A cache handle became a drawing geometry input");
+    require(build(doc, request)->flatPattern->info.bounds.maximum.y == flat.info.bounds.maximum.y,
+            "Prepared flat differs from drawing");
+    const auto other = load(fixtures::bentStrip(), folder + "/different-unfold.step");
+    require(!cad::OcctFlatPatternAccess::belongsTo(*cached, *other),
+            "Foreign flat provenance accepted");
+    const auto different = build(other, request);
+    require(different->flatPattern && different->flatPattern->info.bends.size() == 1,
+            "Foreign cached blank was used on another document");
+    request.unfoldSettings->manualK = .5;
+    const auto changed = build(doc, request);
+    require(changed->flatPattern &&
+                changed->flatPattern->info.bounds.maximum.y > flat.info.bounds.maximum.y,
+            "Stale cached K was used for PDF");
+    request.manualThicknessMm = 3;
+    const auto conflict = build(doc, request);
+    require(!conflict->flatPattern && conflict->flatPatternError &&
+                conflict->flatPatternError->code ==
+                    application::FlatPatternErrorCode::ThicknessConflict,
+            "Cached blank ignored a conflicting manual thickness");
+    request.manualThicknessMm.reset();
+    request.unfoldSettings = core::UnfoldSettings{};
+    const auto missing = build(doc, request);
+    require(!missing->flatPattern && missing->flatPatternError &&
+                missing->flatPatternError->code ==
+                    application::FlatPatternErrorCode::MissingMaterial &&
+                !missing->views[0].paths.empty(),
+            "Missing material hid folded views or printed a blank");
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+    const auto unsupported =
+        build(load(fixtures::bendWithZoneOpening(), folder + "/unfold-zone-hole.step"), request);
+    require(!unsupported->flatPattern && unsupported->flatPatternError &&
+                !unsupported->views[0].paths.empty(),
+            "Unsupported blank replaced the valid drawing");
+    const auto branched = build(load(segmentedWall(), folder + "/unfold-branches.step"), request);
+    require(
+        branched->flatPattern && branched->flatPattern->info.bends.size() == 6 &&
+            branched->flatPattern->view.sectionDimensions.size() == 2 &&
+            branched->flatPattern->view.axialDimensions.size() == 5 &&
+            ui::DrawingSheet::pageCount(*branched) == 1 &&
+            ui::DrawingSheet::writePdf(folder + "/unfold-branches.pdf", *branched, {}).isEmpty(),
+        "Branched blank lost grouped coordinates, axial gaps or one-sheet layout");
+    ui::DrawingTitle profileTitle;
+    profileTitle.layout = ui::DrawingLayout::Profiles;
+    auto withoutFlat = *result;
+    withoutFlat.flatPattern.reset();
+    require(ui::DrawingSheet::pageCount(*result, profileTitle) ==
+                    ui::DrawingSheet::pageCount(withoutFlat, profileTitle) + 1 &&
+                ui::DrawingSheet::writePdf(folder + "/unfold-separate.pdf", *result, profileTitle)
+                    .isEmpty(),
+            "Fallback flat page was lost or could not be exported");
+    auto invalid = *result;
+    invalid.flatPattern->info.bends.clear();
+    const auto failurePath = folder + "/failed-flat.pdf";
+    QFile previous(failurePath);
+    require(previous.open(QIODevice::WriteOnly), "Cannot prepare previous PDF");
+    previous.write("previous-pdf");
+    previous.close();
+    require(!ui::DrawingSheet::writePdf(failurePath, invalid, {}).isEmpty() &&
+                previous.open(QIODevice::ReadOnly) && previous.readAll() == "previous-pdf",
+            "A failed additional flat page overwrote the previous PDF");
+    const auto output = qEnvironmentVariable("BENDING_FLAT_DRAWING_OUTPUT");
+    require(ui::DrawingSheet::writePdf(output.isEmpty() ? folder + "/unfolded.pdf" : output,
+                                       *result, {})
+                .isEmpty(),
+            "Combined blank and folded PDF failed");
+    require(ui::DrawingSheet::pageCount(*result) == 1,
+            "Simple blank was unnecessarily split from the folded shape");
+}
 void workflow(const QString &folder) {
     auto importer = std::make_shared<cad::StepImporter>();
     ui::MainWindow window({"test", "test"}, importer);
@@ -982,6 +1069,8 @@ void workflow(const QString &folder) {
     window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step");
     wait([&] { return !c.hasWork(); });
     require(c.session().document() != nullptr, "Workflow import failed");
+    require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, {}, 1}),
+            "Cannot select drawing material");
     const auto revision = c.session().editRevision();
     auto *action = window.findChild<QAction *>("bendingDrawingAction");
     require(action && action->isEnabled(), "Drawing action missing");
@@ -998,6 +1087,8 @@ void workflow(const QString &folder) {
         auto *qty = dialog->findChild<QSpinBox *>("drawingQuantity");
         qty->setValue(37);
         const auto oldDrawing = c.drawing();
+        require(oldDrawing && oldDrawing->flatPattern,
+                "Dialog did not automatically prepare the blank");
         auto *layout = dialog->findChild<QComboBox *>("drawingLayout");
         require(layout && layout->currentIndex() == 0, "Classical layout is not the default");
         layout->setCurrentIndex(1);
@@ -1053,6 +1144,8 @@ void workflow(const QString &folder) {
     const auto old = c.drawing();
     require(c.prepareDrawing(builder, {}) && !c.hasWork() && c.drawing() == old,
             "Reopening recomputed current drawing");
+    require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .5, 1}) && !c.drawing(),
+            "Material rule change retained an obsolete PDF snapshot");
     application::DrawingRequest another;
     another.reverseView = true;
     require(c.prepareDrawing(builder, another), "Second drawing did not start");
@@ -1068,6 +1161,20 @@ int main(int argc, char **argv) {
     app.setQuitOnLastWindowClosed(false);
     QTemporaryDir temp;
     try {
+        if (app.arguments().size() == 4 && app.arguments().at(1) == "--flat-sample") {
+            const auto doc = application::resultDocument(
+                cad::StepImporter{}.load(native(app.arguments().at(2)), {}, {}));
+            require(doc != nullptr, "Sample import failed");
+            application::DrawingRequest request;
+            request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+            const auto d = build(doc, request);
+            require(ui::DrawingSheet::writePdf(app.arguments().at(3), *d, {}).isEmpty(),
+                    "Sample PDF failed");
+            std::cout << "PAGES " << ui::DrawingSheet::pageCount(*d) << " FLAT "
+                      << bool(d->flatPattern) << '\n';
+            return 0;
+        }
+        flatDrawing(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());
         holePositions(temp.path());

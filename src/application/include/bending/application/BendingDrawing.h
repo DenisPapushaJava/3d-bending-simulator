@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/Document.h"
+#include "bending/application/FlatPattern.h"
 #include <array>
 #include <optional>
 #include <stop_token>
@@ -152,7 +153,18 @@ struct DrawingRequest {
     int quarterTurns = -1; // -1: choose the better in-plane orientation.
     bool allowBreaks = true;
     std::optional<double> manualThicknessMm;
-    bool operator==(const DrawingRequest &) const = default;
+    std::optional<core::UnfoldSettings> unfoldSettings = {};
+    FlatPatternPtr preparedFlatPattern = {}; // Optional cache; not an input affecting equality.
+    bool operator==(const DrawingRequest &other) const {
+        return baseFace == other.baseFace && reverseView == other.reverseView &&
+               quarterTurns == other.quarterTurns && allowBreaks == other.allowBreaks &&
+               manualThicknessMm == other.manualThicknessMm &&
+               unfoldSettings == other.unfoldSettings;
+    }
+};
+struct DrawingFlatPattern {
+    DrawingView view; // True flat contour, without HLR of the folded source.
+    FlatPatternInfo info;
 };
 struct BendingDrawing {
     std::array<DrawingView, 4> views; // Front, top, left: first-angle projection; isometric.
@@ -174,6 +186,8 @@ struct BendingDrawing {
     std::optional<std::array<DrawingView, 3>> classicalViews;
     std::vector<DrawingSection> sections;
     std::vector<DrawingAuxiliaryView> auxiliaryViews;
+    std::optional<DrawingFlatPattern> flatPattern = {};
+    std::optional<FlatPatternError> flatPatternError = {};
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
 struct DrawingError {

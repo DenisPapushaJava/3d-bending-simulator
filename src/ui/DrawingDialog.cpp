@@ -119,6 +119,18 @@ class DrawingDialog::Impl {
                 status->setText(
                     status->text() +
                     QStringLiteral(" Размеры гибов не построены: распознавание не выполнено."));
+            if (drawing->flatPattern)
+                status->setText(status->text() +
+                                QStringLiteral(" Теоретическая развёртка включена."));
+            else if (drawing->flatPatternError) {
+                status->setText(
+                    status->text() +
+                    (drawing->flatPatternError->code ==
+                             application::FlatPatternErrorCode::MissingMaterial
+                         ? QStringLiteral(" Для развёртки выберите материал на этапе «Деталь».")
+                         : QStringLiteral(" Развёртка этой формы не подтверждена и не включена.")));
+                status->setToolTip(QString::fromStdString(drawing->flatPatternError->detail));
+            }
             render();
         }
     }
@@ -206,7 +218,8 @@ DrawingDialog::DrawingDialog(ImportController &c,
     auto *scope = new QLabel(
         QStringLiteral("База и виды выбираются по форме детали. Для другой базы можно выбрать "
                        "плоскую грань в 3D перед открытием листа.\n\nЭто справочный лист готовой "
-                       "формы. Развёртка, припуски, усилие и задний упор не рассчитываются."),
+                       "формы. При выбранном материале добавляется теоретическая развёртка. Её "
+                       "размеры не являются X упора; калибровка станка не выполнена."),
         panel);
     scope->setWordWrap(true);
     left->addWidget(scope);

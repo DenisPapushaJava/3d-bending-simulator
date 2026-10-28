@@ -4,7 +4,9 @@
 #include "DrawingProfiles.h"
 #include "DrawingSections.h"
 #include "bending/cad/CadDocument.h"
+#include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/FlatPatternAccess.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -789,6 +791,114 @@ std::optional<VariableSections> variableSections(const TopoDS_Shape &shape,
     }
     return result;
 }
+void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
+                        const DrawingRequest &request, std::size_t &budget, std::stop_token stop) {
+    if (!request.unfoldSettings)
+        return;
+    const auto &metadata = document->metadata();
+    const auto &settings = *request.unfoldSettings;
+    auto flat = request.preparedFlatPattern;
+    if (!flat || !OcctFlatPatternAccess::belongsTo(*flat, *document) ||
+        flat->info().settings != settings ||
+        (request.manualThicknessMm &&
+         std::abs(flat->info().thicknessMm - *request.manualThicknessMm) >
+             std::max(1e-6, metadata.bendAnalysis.lengthToleranceMm))) {
+        auto flatResult =
+            FlatPatternBuilder{}.build(document, {settings, request.manualThicknessMm}, stop);
+        if (const auto *error = std::get_if<FlatPatternError>(&flatResult)) {
+            if (error->code == FlatPatternErrorCode::Cancelled)
+                throw DrawingError{"Cancelled", true};
+            drawing.flatPatternError = *error;
+            flat.reset();
+        } else
+            flat = std::get<FlatPatternPtr>(std::move(flatResult));
+    }
+    if (flat) {
+        DrawingFlatPattern unfolded;
+        unfolded.info = flat->info();
+        const auto &info = unfolded.info;
+        bool topFound = false;
+        for (TopExp_Explorer e(OcctFlatPatternAccess::shape(*flat), TopAbs_FACE); e.More();
+             e.Next()) {
+            const auto face = TopoDS::Face(e.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane ||
+                std::abs(std::abs(surface.Plane().Axis().Direction().Z()) - 1) > 1e-7 ||
+                std::abs(surface.Plane().Location().Z() - info.thicknessMm) > 1e-5)
+                continue;
+            if (topFound)
+                throw DrawingError{"Multiple top contours in the flat pattern"};
+            contours(face, false, unfolded.view, budget, stop);
+            topFound = true;
+        }
+        if (!topFound || unfolded.view.paths.empty())
+            throw DrawingError{"Missing verified flat contour"};
+        auto &v = unfolded.view;
+        const auto &hi = info.bounds.maximum;
+        v.minimum = {0, 0};
+        v.maximum = {hi.x, hi.y};
+        v.dimensions.push_back({{0, 0}, {hi.x, 0}, hi.x, ""});
+        v.dimensions.push_back({{0, 0}, {0, hi.y}, hi.y, ""});
+        std::vector<double> ys, xs{0, hi.x};
+        for (const auto &b : info.bends) {
+            ys.push_back((b.firstY + b.secondY) / 2);
+            xs.push_back(b.minimumX);
+            xs.push_back(b.maximumX);
+        }
+        const auto unique = [](auto &values) {
+            std::sort(values.begin(), values.end());
+            values.erase(std::unique(values.begin(), values.end(),
+                                     [](double a, double b) { return std::abs(a - b) < 1e-5; }),
+                         values.end());
+        };
+        unique(ys);
+        unique(xs);
+        for (auto y : ys)
+            v.sectionDimensions.push_back({{hi.x, 0}, {hi.x, y}, y, ""});
+        if (xs.size() > 2)
+            for (std::size_t i = 1; i < xs.size(); ++i)
+                v.axialDimensions.push_back(
+                    {{xs[i - 1], hi.y}, {xs[i], hi.y}, xs[i] - xs[i - 1], ""});
+        // Witnesses attach to the actual flat contour at the measured coordinate.
+        // This changes presentation anchors only, never the measured value.
+        const auto witness = [&](DrawingPoint target, bool horizontal) {
+            std::optional<DrawingPoint> best;
+            for (const auto &path : v.paths)
+                for (std::size_t i = 1; i < path.points.size(); ++i) {
+                    const auto a = path.points[i - 1], b = path.points[i];
+                    const double from = horizontal ? a.x : a.y, to = horizontal ? b.x : b.y;
+                    const double coordinate = horizontal ? target.x : target.y;
+                    if (coordinate < std::min(from, to) - 1e-5 ||
+                        coordinate > std::max(from, to) + 1e-5)
+                        continue;
+                    const auto consider = [&](DrawingPoint point) {
+                        if (!best || std::hypot(point.x - target.x, point.y - target.y) <
+                                         std::hypot(best->x - target.x, best->y - target.y))
+                            best = point;
+                    };
+                    if (std::abs(to - from) < 1e-10) {
+                        consider(a);
+                        consider(b);
+                    } else {
+                        const double f = std::clamp((coordinate - from) / (to - from), 0., 1.);
+                        consider({a.x + f * (b.x - a.x), a.y + f * (b.y - a.y)});
+                    }
+                }
+            return best;
+        };
+        for (auto *dimensions : {&v.dimensions, &v.sectionDimensions, &v.axialDimensions})
+            for (auto &dimension : *dimensions) {
+                const bool horizontal = std::abs(dimension.end.x - dimension.start.x) >
+                                        std::abs(dimension.end.y - dimension.start.y);
+                const auto first = witness(dimension.start, horizontal),
+                           second = witness(dimension.end, horizontal);
+                if (!first || !second)
+                    throw DrawingError{"Cannot attach a flat dimension to its contour"};
+                dimension.witnesses = std::array{*first, *second};
+            }
+        drawing.flatPattern = std::move(unfolded);
+    }
+}
 } // namespace
 DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest request,
                                            std::stop_token stop) const {
@@ -1388,6 +1498,22 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         if (drawing->variableProfile != DrawingVariableProfile::Measured)
             prepareClassicalDrawing(shape, faces, bendAnalysis.bends, classicalFrames, *drawing,
                                     bendAnalysis.lengthToleranceMm, budget, stop);
+        try {
+            prepareFlatDrawing(*drawing, document, request, budget, stop);
+        } catch (const DrawingError &error) {
+            if (error.cancelled)
+                throw;
+            drawing->flatPatternError =
+                FlatPatternError{FlatPatternErrorCode::Failed, error.detail};
+        } catch (const Standard_Failure &error) {
+            drawing->flatPatternError =
+                FlatPatternError{FlatPatternErrorCode::Failed,
+                                 error.GetMessageString() ? error.GetMessageString()
+                                                          : "Flat contour preparation failed"};
+        } catch (const std::runtime_error &error) {
+            drawing->flatPatternError =
+                FlatPatternError{FlatPatternErrorCode::Failed, error.what()};
+        }
         if (!drawingScale(*drawing))
             return DrawingError{"The part does not fit the supported A3 / standard scale range"};
         return BendingDrawingPtr(std::move(drawing));

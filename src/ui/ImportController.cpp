@@ -477,6 +477,8 @@ bool ImportController::prepareDrawing(
         return false;
     auto *state = impl_.get();
     request.manualThicknessMm = state->session.manualThicknessMm();
+    request.unfoldSettings = state->session.unfoldSettings();
+    request.preparedFlatPattern = state->flat;
     if (state->drawing && state->drawingRequest == request) {
         emit stateChanged();
         return true;
@@ -555,8 +557,10 @@ bool ImportController::setUnfoldSettings(core::UnfoldSettings settings) {
         return false;
     const auto before = impl_->session.editRevision();
     const bool changed = impl_->session.setUnfoldSettings(settings);
-    if (before != impl_->session.editRevision())
+    if (before != impl_->session.editRevision()) {
         impl_->invalidateFlat();
+        impl_->invalidateDrawing();
+    }
     emit stateChanged();
     return changed;
 }
