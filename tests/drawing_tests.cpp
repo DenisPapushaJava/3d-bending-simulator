@@ -1297,6 +1297,8 @@ void workflow(const QString &folder) {
         require(page->value() == 1 && !previous->isEnabled(),
                 "Typed page number was not committed");
         const auto clearOfPaper = [&] {
+            if (!navigation->isVisible())
+                return;
             const auto nav = navigation->geometry();
             require(scroll->rect().contains(nav) && !nav.intersects(scroll->viewport()->geometry()),
                     "Navigation overlaps the paper viewport or escapes its preview frame");
@@ -1307,17 +1309,59 @@ void workflow(const QString &folder) {
         };
         clearOfPaper();
         const auto normal = dialog->size();
+        const auto snapshot = qEnvironmentVariable("BENDING_DRAWING_DIALOG_SNAPSHOT");
+        const auto fittedPaper = [&] {
+            QApplication::processEvents();
+            wait([&] {
+                return !preview->pixmap().isNull() &&
+                       preview->pixmap().width() ==
+                           qRound(preview->width() * preview->devicePixelRatioF());
+            });
+            require(scroll->viewport()->rect().contains(preview->geometry()),
+                    "Resized paper does not fit inside the preview viewport");
+            require(std::abs(preview->width() * ui::DrawingSheet::heightMm -
+                             preview->height() * ui::DrawingSheet::widthMm) <=
+                        ui::DrawingSheet::widthMm,
+                    "Resizing distorted the A3 sheet proportions");
+            require(!scroll->horizontalScrollBar()->isVisible() &&
+                        !scroll->verticalScrollBar()->isVisible(),
+                    "Fitted paper still requires scrolling");
+            clearOfPaper();
+            return preview->size();
+        };
+        const auto originalPaper = fittedPaper();
+        const auto selectedPage = page->value();
+        const auto totalPages = page->maximum();
+        dialog->resize(1500, 950);
+        const auto expandedPaper = fittedPaper();
+        require(expandedPaper.width() > originalPaper.width() &&
+                    expandedPaper.height() > originalPaper.height(),
+                "Expanding the window did not enlarge the paper and its sharp raster");
+        if (!snapshot.isEmpty())
+            require(dialog->grab().save(snapshot + ".expanded.png"),
+                    "Cannot save the expanded preview snapshot");
         dialog->resize(900, 560);
-        scroll->widget()->resize(1400, 1000);
-        QApplication::processEvents();
-        clearOfPaper();
-        scroll->verticalScrollBar()->setValue(70);
+        const auto compactPaper = fittedPaper();
+        require(compactPaper.width() < originalPaper.width() &&
+                    compactPaper.height() < originalPaper.height(),
+                "Shrinking the window did not reduce the paper and its sharp raster");
+        require(page->value() == selectedPage && page->maximum() == totalPages,
+                "Window resizing changed the selected page or page count");
+        auto *name = dialog->findChild<QLineEdit *>("drawingName");
+        auto *options = dialog->findChild<QScrollArea *>("drawingOptionsScroll");
+        require(options && options->verticalScrollBar()->isVisible() &&
+                    name->height() >= name->minimumSizeHint().height() &&
+                    dialog->rect().contains(
+                        QRect(exportButton->mapTo(dialog, QPoint{}), exportButton->size())),
+                "Compact window crushed the input fields or hid the PDF action");
+        if (!snapshot.isEmpty())
+            require(dialog->grab().save(snapshot + ".compact.png"),
+                    "Cannot save the compact preview snapshot");
         next->click();
-        require(scroll->verticalScrollBar()->value() == 0,
-                "New page retained the previous vertical scroll position");
+        fittedPaper();
         dialog->resize(normal);
         layout->setCurrentIndex(0);
-        QApplication::processEvents();
+        fittedPaper();
         require(page->maximum() == basePages && page->value() <= basePages &&
                     navigation->isVisible() == (basePages > 1),
                 "Page count reduction left a stale selector");
@@ -1329,7 +1373,6 @@ void workflow(const QString &folder) {
         dialog->findChild<QLineEdit *>("drawingExecution")->setText(QStringLiteral("Исполнение Л"));
         inspected = !dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().isNull() &&
                     c.session().editRevision() == revision;
-        const auto snapshot = qEnvironmentVariable("BENDING_DRAWING_DIALOG_SNAPSHOT");
         if (!snapshot.isEmpty()) {
             if (page->maximum() > 1)
                 page->setValue(page->maximum());

@@ -29,7 +29,7 @@ class DrawingPreviewArea final : public QScrollArea {
   public:
     explicit DrawingPreviewArea(QWidget *parent) : QScrollArea(parent) {
         setObjectName(QStringLiteral("drawingPreviewScroll"));
-        setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+        setAlignment(Qt::AlignCenter);
         navigation_ = new QFrame(this);
         navigation_->setObjectName(QStringLiteral("drawingPageNavigation"));
         navigation_->setStyleSheet(QStringLiteral(
@@ -97,6 +97,19 @@ class DrawingPreviewArea final : public QScrollArea {
     QSpinBox *pageControl() const {
         return page_;
     }
+    QSize paperSize() const {
+        const auto available = viewport()->size() - QSize(24, 24);
+        if (available.width() < 2 || available.height() < 2)
+            return {};
+        const auto width = std::min(
+            available.width(),
+            static_cast<int>(available.height() * DrawingSheet::widthMm / DrawingSheet::heightMm));
+        return {width, static_cast<int>(width * DrawingSheet::heightMm / DrawingSheet::widthMm)};
+    }
+    void fitPaper() {
+        if (widget())
+            widget()->resize(paperSize());
+    }
     void setPageCount(int count) {
         const QSignalBlocker blocker(page_);
         page_->setRange(1, std::max(1, count));
@@ -112,16 +125,20 @@ class DrawingPreviewArea final : public QScrollArea {
         // Reserve a footer inside the preview frame, outside the paper viewport.
         setViewportMargins(0, 0, 0, count > 1 ? navigation_->height() + 16 : 0);
         positionNavigation();
+        fitPaper();
     }
 
   protected:
     void resizeEvent(QResizeEvent *event) override {
         QScrollArea::resizeEvent(event);
         positionNavigation();
+        fitPaper();
     }
     bool eventFilter(QObject *object, QEvent *event) override {
-        if (object == viewport() && event->type() == QEvent::Resize)
+        if (object == viewport() && event->type() == QEvent::Resize) {
             positionNavigation();
+            fitPaper();
+        }
         return QScrollArea::eventFilter(object, event);
     }
 
@@ -142,7 +159,6 @@ class DrawingPreviewArea final : public QScrollArea {
 } // namespace
 class DrawingDialog::Impl {
   public:
-    DrawingDialog *dialog;
     ImportController &controller;
     std::shared_ptr<const application::BendingDrawingBuilder> builder;
     std::uint64_t revision;
@@ -158,6 +174,7 @@ class DrawingDialog::Impl {
     QSpinBox *quantity;
     QSpinBox *page;
     DrawingPreviewArea *preview;
+    QTimer *refit;
     QLabel *image;
     QLabel *status;
     QPushButton *prepare;
@@ -165,11 +182,9 @@ class DrawingDialog::Impl {
     std::optional<std::size_t> selected;
     bool settingsChanged = false;
     bool started = false;
-    Impl(DrawingDialog *d, ImportController &c,
-         std::shared_ptr<const application::BendingDrawingBuilder> b,
+    Impl(ImportController &c, std::shared_ptr<const application::BendingDrawingBuilder> b,
          std::optional<std::size_t> face)
-        : dialog(d), controller(c), builder(std::move(b)), revision(c.session().revision()),
-          selected(face) {}
+        : controller(c), builder(std::move(b)), revision(c.session().revision()), selected(face) {}
     DrawingTitle title() const {
         return {name->text(),
                 designation->text(),
@@ -186,18 +201,30 @@ class DrawingDialog::Impl {
         image->clear();
         preview->setPageCount(0);
     }
-    void render() {
+    void render(bool contentChanged = true) {
         const auto drawing = controller.drawing();
         if (!drawing || settingsChanged || controller.session().revision() != revision)
             return;
         try {
-            const auto previousPage = page->value();
-            preview->setPageCount(DrawingSheet::pageCount(*drawing, title()));
-            if (page->value() != previousPage)
-                preview->verticalScrollBar()->setValue(0);
-            image->setPixmap(QPixmap::fromImage(DrawingSheet::preview(
-                *drawing, title(), page->value() - 1, std::max(600, dialog->width() - 370))));
-            image->adjustSize();
+            if (contentChanged) {
+                const auto previousPage = page->value();
+                preview->setPageCount(DrawingSheet::pageCount(*drawing, title()));
+                if (page->value() != previousPage)
+                    preview->verticalScrollBar()->setValue(0);
+            }
+            const auto fit = preview->paperSize();
+            if (fit.isEmpty())
+                return;
+            const auto ratio = preview->devicePixelRatioF();
+            const int pixels = std::max(2, qRound(fit.width() * ratio));
+            const auto current = image->pixmap();
+            if (!contentChanged && !current.isNull() && current.width() == pixels &&
+                qFuzzyCompare(current.devicePixelRatioF(), ratio))
+                return;
+            auto raster = DrawingSheet::preview(*drawing, title(), page->value() - 1, pixels);
+            raster.setDevicePixelRatio(ratio);
+            image->setPixmap(QPixmap::fromImage(raster));
+            image->resize(fit);
             exportPdf->setEnabled(!controller.hasWork());
         } catch (const std::exception &e) {
             image->clear();
@@ -284,7 +311,7 @@ class DrawingDialog::Impl {
 DrawingDialog::DrawingDialog(ImportController &c,
                              std::shared_ptr<const application::BendingDrawingBuilder> builder,
                              std::optional<std::size_t> selected, QWidget *parent)
-    : QDialog(parent), impl_(std::make_unique<Impl>(this, c, std::move(builder), selected)) {
+    : QDialog(parent), impl_(std::make_unique<Impl>(c, std::move(builder), selected)) {
     setObjectName(QStringLiteral("bendingDrawingDialog"));
     setWindowTitle(QStringLiteral("Лист гибки из STEP"));
     resize(1200, 720);
@@ -292,6 +319,17 @@ DrawingDialog::DrawingDialog(ImportController &c,
     auto *panel = new QWidget(this);
     panel->setMaximumWidth(310);
     auto *left = new QVBoxLayout(panel);
+    auto *options = new QWidget(panel);
+    auto *optionLayout = new QVBoxLayout(options);
+    optionLayout->setContentsMargins(0, 0, 0, 0);
+    optionLayout->setSizeConstraint(QLayout::SetMinimumSize);
+    auto *optionScroll = new QScrollArea(panel);
+    optionScroll->setObjectName(QStringLiteral("drawingOptionsScroll"));
+    optionScroll->setFrameShape(QFrame::NoFrame);
+    optionScroll->setWidgetResizable(true);
+    optionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    optionScroll->setWidget(options);
+    left->addWidget(optionScroll, 1);
     auto *form = new QFormLayout;
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     const auto field = [&](const QString &label, const char *name, int length) {
@@ -337,14 +375,14 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->breaks->setObjectName(QStringLiteral("drawingAllowBreaks"));
     impl_->breaks->setChecked(true);
     form->addRow(impl_->breaks);
-    left->addLayout(form);
+    optionLayout->addLayout(form);
     impl_->prepare = new QPushButton(QStringLiteral("Сформировать виды"), panel);
     impl_->prepare->setObjectName(QStringLiteral("prepareDrawing"));
-    left->addWidget(impl_->prepare);
+    optionLayout->addWidget(impl_->prepare);
     impl_->status = new QLabel(panel);
     impl_->status->setWordWrap(true);
     impl_->status->setObjectName(QStringLiteral("drawingStatus"));
-    left->addWidget(impl_->status);
+    optionLayout->addWidget(impl_->status);
     auto *scope = new QLabel(
         QStringLiteral("База и виды выбираются по форме детали. Для другой базы можно выбрать "
                        "плоскую грань в 3D перед открытием листа.\n\nЭто справочный лист готовой "
@@ -352,8 +390,8 @@ DrawingDialog::DrawingDialog(ImportController &c,
                        "размеры не являются X упора; калибровка станка не выполнена."),
         panel);
     scope->setWordWrap(true);
-    left->addWidget(scope);
-    left->addStretch();
+    optionLayout->addWidget(scope);
+    optionLayout->addStretch();
     impl_->exportPdf = new QPushButton(QStringLiteral("Сохранить PDF…"), panel);
     impl_->exportPdf->setObjectName(QStringLiteral("exportDrawingPdf"));
     impl_->exportPdf->setMinimumHeight(40);
@@ -367,7 +405,14 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->image = new QLabel(scroll);
     impl_->image->setObjectName(QStringLiteral("drawingPreviewImage"));
     impl_->image->setAlignment(Qt::AlignCenter);
+    impl_->image->setScaledContents(true);
+    impl_->image->setToolTip(QStringLiteral("Лист автоматически вписывается в размер окна"));
     scroll->setWidget(impl_->image);
+    impl_->refit = new QTimer(this);
+    impl_->refit->setSingleShot(true);
+    impl_->refit->setInterval(80);
+    connect(impl_->refit, &QTimer::timeout, this, [this] { impl_->render(false); });
+    scroll->viewport()->installEventFilter(this);
     layout->addWidget(panel);
     layout->addWidget(scroll, 1);
     // No edit signal runs before all controls and the preview exist.
@@ -408,6 +453,11 @@ DrawingDialog::DrawingDialog(ImportController &c,
             impl_->status->setText(QStringLiteral("PDF сохранён: %1").arg(destination));
     });
     QTimer::singleShot(0, this, [this] { impl_->build(); });
+}
+bool DrawingDialog::eventFilter(QObject *object, QEvent *event) {
+    if (object == impl_->preview->viewport() && event->type() == QEvent::Resize)
+        impl_->refit->start();
+    return QDialog::eventFilter(object, event);
 }
 DrawingDialog::~DrawingDialog() {
     if (impl_->controller.isPreparingDrawing())
