@@ -314,6 +314,11 @@ int main(int argc, char **argv) {
                         frame->setValue(frame->maximum() / 2);
                         break;
                     }
+            QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+            QApplication::processEvents();
+            const auto *status = window.findChild<QLabel *>("bendRouteStatus");
+            require(status->height() >= status->heightForWidth(status->width()),
+                    "The real-model warning was captured before its layout settled");
             const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
             if (!output.isEmpty()) {
                 auto shot = window.grab().toImage();
