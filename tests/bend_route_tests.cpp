@@ -49,6 +49,9 @@ int main(int argc, char **argv) {
         const auto &bends = document->metadata().bendAnalysis.bends;
         for (std::size_t i = 0; i < bends.size(); ++i) {
             const auto &b = bends[i];
+            if (sample)
+                std::cout << "B" << i + 1 << ": t=" << b.thicknessMm << " R=" << b.innerRadiusMm
+                          << " L=" << b.lengthMm << std::endl;
             request.operations.push_back(
                 {"B" + std::to_string(i + 1),
                  i,
@@ -111,11 +114,16 @@ int main(int argc, char **argv) {
                     op.tools->lengthMm = 1;
                 const auto tooShort =
                     cad::SingleBendPreviewBuilder{}.buildRoute(document, request, {});
-                require(std::get<application::BendRouteError>(tooShort).code ==
-                                application::BendRouteErrorCode::NoRoute &&
-                            std::get<application::BendRouteError>(tooShort).operationError ==
-                                application::BendPreviewErrorCode::ToolTooShort,
-                        "An impossible fixed setup was reported as a valid route");
+                require(
+                    std::get<application::BendRouteError>(tooShort).code ==
+                            application::BendRouteErrorCode::InvalidInput &&
+                        std::get<application::BendRouteError>(tooShort).operationError ==
+                            application::BendPreviewErrorCode::ToolTooShort &&
+                        std::get<application::BendRouteError>(tooShort).evaluatedOperations == 0 &&
+                        std::get<application::BendRouteError>(tooShort).toolLengths &&
+                        std::get<application::BendRouteError>(tooShort).toolLengths->dieLengthMm ==
+                            1,
+                    "Short tools were not rejected with their lengths before CAD search");
             }
         }
         std::filesystem::remove_all(folder);

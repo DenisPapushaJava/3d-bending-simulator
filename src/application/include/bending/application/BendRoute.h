@@ -48,12 +48,18 @@ enum class BendRouteErrorCode {
     Cancelled,
     Failed
 };
+struct BendRouteToolLengthIssue {
+    double bendLengthMm;
+    double punchLengthMm;
+    double dieLengthMm;
+};
 struct BendRouteError {
     BendRouteErrorCode code;
     std::string detail;
     std::optional<std::size_t> bendIndex = {};
     std::size_t evaluatedOperations = 0;
     std::optional<BendPreviewErrorCode> operationError = {};
+    std::optional<BendRouteToolLengthIssue> toolLengths = {};
 };
 using BendRouteResult = std::variant<BendRoutePtr, BendRouteError>;
 } // namespace bending::application

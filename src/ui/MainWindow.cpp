@@ -681,7 +681,8 @@ class MainWindow::Impl {
             : !singleBendSupported ? QStringLiteral("Пока не поддерживается")
             : !matchingBendThickness || !entry || !included(entry->review)
                 ? QStringLiteral("Нужно уточнение")
-            : controller->bendPreviewError() || !previewDisplayError.isEmpty()
+            : controller->bendPreviewError() || controller->bendRouteError() ||
+                    !previewDisplayError.isEmpty()
                 ? QStringLiteral("Есть проблема")
             : preview && preview->pressMotion() ? QStringLiteral("Проверено в модели")
             : preview ? QStringLiteral("Просмотр подготовлен")
@@ -801,6 +802,8 @@ class MainWindow::Impl {
         fixedSide->setEnabled(document && !controller->hasWork());
         toolMode->setEnabled(document && !controller->hasWork());
         const bool toolEditable = entry && included(entry->review) && !controller->hasWork();
+        const bool allBends = document && document->metadata().bendAnalysis.bends.size() > 1 &&
+                              toolMode->currentIndex() == 0;
         std::optional<core::ToolSelectionRequest> selectionRequest;
         if (document && entry && included(entry->review) && matchingThickness && row >= 0 &&
             static_cast<std::size_t>(row) < document->metadata().bendAnalysis.bends.size()) {
@@ -809,8 +812,20 @@ class MainWindow::Impl {
             if (const auto target = session.bendTarget(static_cast<std::size_t>(row)))
                 selectionRequest = core::ToolSelectionRequest{
                     bend.thicknessMm, target->angleRadians, target->innerRadiusMm, bend.lengthMm};
+            if (allBends && selectionRequest) {
+                const auto &bends = document->metadata().bendAnalysis.bends;
+                for (std::size_t i = 0; i < bends.size(); ++i)
+                    if (const auto target = session.bendTarget(i)) {
+                        selectionRequest->bendLengthMm =
+                            std::max(selectionRequest->bendLengthMm, bends[i].lengthMm);
+                        selectionRequest->bendAngleRadians =
+                            std::max(selectionRequest->bendAngleRadians, target->angleRadians);
+                        selectionRequest->innerRadiusMm =
+                            std::min(selectionRequest->innerRadiusMm, target->innerRadiusMm);
+                    }
+            }
         }
-        toolSelection->setSelectionRequest(selectionRequest);
+        toolSelection->setSelectionRequest(selectionRequest, allBends);
         toolSelection->setEnabled(toolEditable);
         applyTools->setEnabled(toolEditable && previewBuilder && supported && matchingThickness &&
                                session.bendTarget(static_cast<std::size_t>(row)).has_value());
@@ -1035,11 +1050,15 @@ class MainWindow::Impl {
                        ? QStringLiteral("Выберите пуансон, матрицу и рабочий ручей.")
                        : toolSelection->openingIssue())
                 : QString{};
-        const bool busy = controller->isPreparingPreview();
-        const bool failed =
-            controller->bendPreviewError().has_value() || !previewDisplayError.isEmpty();
+        const bool busy = controller->isPreparingPreview() || controller->isPreparingRoute();
+        const auto routeFailure = controller->bendRouteError();
+        const bool failed = controller->bendPreviewError().has_value() || routeFailure ||
+                            !previewDisplayError.isEmpty();
         checkSummary->setText(
             busy ? QStringLiteral("Проверяем деталь и готовим движение…")
+            : routeFailure
+                ? QStringLiteral("Порядок не подготовлен. Причина указана над 3D-видом; "
+                                 "отказ этой проверки не доказывает невозможность изготовления.")
             : failed ? outcome
             : preview && preview->pressMotion()
                 ? QStringLiteral("Геометрическая проверка пройдена.\nПодвод и гибка — по кадрам, "
@@ -1117,6 +1136,8 @@ class MainWindow::Impl {
                      failure->code == BendPreviewErrorCode::UnsupportedParameters)
                 checkAction = CheckAction::Part;
         }
+        if (routeFailure && routeFailure->code == BendRouteErrorCode::Unsupported)
+            checkAction = CheckAction::Part;
         resolveCheck->setText(
             checkAction == CheckAction::Tools ? QStringLiteral("Изменить инструмент…")
             : checkAction == CheckAction::Thickness ? QStringLiteral("Уточнить толщину…")
@@ -1125,7 +1146,8 @@ class MainWindow::Impl {
         resolveCheck->setVisible(document && !busy && !preview &&
                                  (failed || !checkBlocker.isEmpty()));
         resolveCheck->setEnabled(!controller->hasWork());
-        checkSummary->setToolTip(previewStatus->toolTip());
+        checkSummary->setToolTip(routeFailure ? text(routeFailure->detail)
+                                              : previewStatus->toolTip());
         refreshWorkflow();
     }
 

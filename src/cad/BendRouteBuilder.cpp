@@ -298,6 +298,17 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                  (op.assignment && core::toolParameters(*op.assignment) != op.tools)))
                 return BendRouteError{BendRouteErrorCode::InvalidInput,
                                       "Missing or inconsistent route tool", op.bendIndex};
+            if (request.withTools && std::min(op.tools->lengthMm, core::punchLengthMm(*op.tools)) +
+                                             analysis.lengthToleranceMm <
+                                         b.lengthMm)
+                return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                      "The selected tool assembly is shorter than the bend line",
+                                      op.bendIndex,
+                                      0,
+                                      BendPreviewErrorCode::ToolTooShort,
+                                      BendRouteToolLengthIssue{b.lengthMm,
+                                                               core::punchLengthMm(*op.tools),
+                                                               op.tools->lengthMm}};
         }
         FlatPatternRequest flatRequest{{core::SheetMaterial::Unknown, .5, 1},
                                        request.manualThicknessMm};

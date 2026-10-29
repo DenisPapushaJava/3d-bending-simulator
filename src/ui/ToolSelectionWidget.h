@@ -34,7 +34,8 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] QString openingIssue() const;
     [[nodiscard]] QString shortSummary() const;
     void rememberChoice();
-    void setSelectionRequest(std::optional<core::ToolSelectionRequest> request);
+    void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
+                             bool allBends = false);
     void setToolProfileImport(ImportController &,
                               std::shared_ptr<const application::ToolProfileImporter>,
                               application::ToolLibraryWriter);
@@ -92,6 +93,7 @@ class ToolSelectionWidget final : public QWidget {
     QPushButton *importDxf_;
     QLabel *recommendation_;
     std::optional<core::ToolSelectionRequest> selectionRequest_;
+    bool allBends_ = false;
     std::array<QDoubleSpinBox *, 7> fields_{};
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;

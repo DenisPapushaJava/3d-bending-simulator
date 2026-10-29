@@ -2,10 +2,13 @@
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
+#include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <QApplication>
 #include <QComboBox>
 #include <QElapsedTimer>
@@ -19,8 +22,10 @@
 #include <QThread>
 #include <QToolButton>
 #include <STEPControl_Writer.hxx>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 using namespace bending;
 void require(bool ok, const char *message) {
     if (!ok)
@@ -51,11 +56,30 @@ int main(int argc, char **argv) {
         require(folder.isValid(), "No folder");
         ui::setPreferencesFile(folder.path() + "/settings.ini");
         auto files = std::make_shared<project::ProjectFiles>();
-        const bool withTools = app.arguments().contains("--tools");
-        const auto pair = tool_fixture::pair(16);
-        ui::MainWindow window(
-            {"test", "test"}, files, files, std::make_shared<cad::SingleBendPreviewBuilder>(),
-            withTools ? core::ToolCatalog{pair.punch, pair.die} : core::ToolCatalog{});
+        const int libraryArgument = app.arguments().indexOf("--library");
+        const bool shortTools = app.arguments().contains("--short-tools");
+        const bool withTools =
+            app.arguments().contains("--tools") || shortTools || libraryArgument > 0;
+        auto pair = tool_fixture::pair(16);
+        if (shortTools) {
+            pair.punch.lengthMm = 40;
+            pair.die.lengthMm = 40;
+        } else if (withTools && libraryArgument < 0) {
+            pair.punch.segments = std::vector<core::ToolSegment>{{40, 2}};
+            pair.die.segments = std::vector<core::ToolSegment>{{40, 2}};
+        }
+        core::ToolCatalog catalog =
+            withTools ? core::ToolCatalog{pair.punch, pair.die} : core::ToolCatalog{};
+        if (libraryArgument > 0) {
+            require(libraryArgument + 1 < app.arguments().size(), "Missing library path");
+            auto loaded = project::readToolCatalog(native(app.arguments()[libraryArgument + 1]));
+            if (const auto *error = std::get_if<std::string>(&loaded))
+                throw std::runtime_error(*error);
+            catalog = std::get<core::ToolCatalog>(std::move(loaded));
+        }
+        ui::MainWindow window({"test", "test"}, files, files,
+                              std::make_shared<cad::SingleBendPreviewBuilder>(),
+                              std::move(catalog));
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
         window.show();
@@ -63,7 +87,11 @@ int main(int argc, char **argv) {
         auto path = sample ? app.arguments()[1] : folder.path() + "/channel.step";
         if (!sample) {
             STEPControl_Writer writer;
-            require(writer.Transfer(fixtures::channel(), STEPControl_AsIs) == IFSelect_RetDone &&
+            auto shape = fixtures::channel();
+            if (withTools && !shortTools)
+                shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(80, -1, 40), 20, 50, 50))
+                            .Shape();
+            require(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone &&
                         writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
                     "Fixture write");
         }
@@ -80,15 +108,50 @@ int main(int argc, char **argv) {
         const int count =
             static_cast<int>(controller.session().document()->metadata().bendAnalysis.bends.size());
         require(count > 1, "The route fixture must have several bends");
-        auto *draft = window.findChild<QPushButton *>("routeStep2");
+        const auto &bends = controller.session().document()->metadata().bendAnalysis.bends;
+        const auto shorter = static_cast<std::size_t>(
+            std::min_element(bends.begin(), bends.end(),
+                             [](const auto &a, const auto &b) { return a.lengthMm < b.lengthMm; }) -
+            bends.begin());
+        const auto draftIndex = withTools && !sample && !shortTools ? shorter : std::size_t{1};
+        auto *draft =
+            window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(draftIndex + 1));
         require(draft && draft->toolTip().contains(QStringLiteral("Черновик")),
                 "Unprepared route looks like a ready animation");
         draft->click();
         require(!controller.hasWork() && !controller.bendRoute() &&
-                    window.findChild<QListView *>("bendList")->currentIndex().row() == 1,
+                    window.findChild<QListView *>("bendList")->currentIndex().row() ==
+                        static_cast<int>(draftIndex),
                 "A draft step neither selected its source bend nor avoided calculation");
         if (withTools) {
-            window.findChild<QPushButton *>("recommendTools")->click();
+            if (shortTools) {
+                window.findChild<QComboBox *>("punchPreset")->setCurrentIndex(1);
+                window.findChild<QComboBox *>("diePreset")->setCurrentIndex(1);
+            } else {
+                window.findChild<QPushButton *>("recommendTools")->click();
+                if (sample)
+                    std::cout
+                        << window.findChild<QLabel *>("toolAssemblySummary")->text().toStdString()
+                        << '\n'
+                        << window.findChild<QLabel *>("toolRecommendation")->text().toStdString()
+                        << '\n';
+                if (!sample) {
+                    require(bends[draftIndex].lengthMm < std::max_element(
+                                                             bends.begin(), bends.end(),
+                                                             [](const auto &a, const auto &b) {
+                                                                 return a.lengthMm < b.lengthMm;
+                                                             })
+                                                             ->lengthMm,
+                            "The tool sizing fixture must select the shorter bend");
+                    require(
+                        window.findChild<QLabel *>("toolAssemblySummary")->text().contains("80.00"),
+                        "The common tool request ignored the longer bend");
+                }
+            }
+            if (sample && app.arguments().contains("--selection-only")) {
+                controller.shutdown();
+                return 0;
+            }
             // Reproduce the normal user path, including a previously changed route mode.
             mode->setCurrentIndex(0);
             auto *check = window.findChild<QPushButton *>("checkBend");
@@ -101,8 +164,29 @@ int main(int argc, char **argv) {
             prepare->click();
         }
         wait([&] { return !controller.hasWork(); });
-        if (const auto error = controller.bendRouteError())
+        if (shortTools) {
+            const auto error = controller.bendRouteError();
+            const auto status = window.findChild<QLabel *>("bendRouteStatus")->text();
+            require(error && error->toolLengths && error->evaluatedOperations == 0 &&
+                        !controller.bendRoute() && !controller.bendPreview() &&
+                        status.contains("80.00") && status.contains("40.00") &&
+                        !status.contains(QStringLiteral("порядок не найден")) &&
+                        window.findChild<QLabel *>("bendCheckSummary")
+                            ->text()
+                            .contains(QStringLiteral("Порядок не подготовлен")) &&
+                        window.findChild<QPushButton *>("resolveCheckProblem")->isVisible(),
+                    "The short-tool diagnostic lacks lengths or pretends a geometry search failed");
+            controller.shutdown();
+            return 0;
+        }
+        if (const auto error = controller.bendRouteError()) {
+            if (sample) {
+                const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+                if (!output.isEmpty())
+                    require(window.grab().save(output), "Error snapshot failed");
+            }
             throw std::runtime_error(error->detail);
+        }
         const auto route = controller.bendRoute();
         require(route && route->steps.size() == static_cast<std::size_t>(count) &&
                     !controller.bendPreview(),
@@ -112,6 +196,14 @@ int main(int argc, char **argv) {
                     route->steps[0].preview->usesDrawingPunch() == withTools &&
                     route->steps[0].preview->usesDrawingDie() == withTools,
                 "UI route lost its actual tool profile mode");
+        if (withTools && !sample)
+            for (int i = 0; i < count; ++i) {
+                const auto *entry = controller.session().bend(static_cast<std::size_t>(i));
+                require(entry->tools && entry->tools->lengthMm == 80 &&
+                            entry->catalogTools->punchAssembly->pieces.size() == 2 &&
+                            entry->catalogTools->dieAssembly->pieces.size() == 2,
+                        "A bend retained an assembly sized only for the shorter line");
+            }
         auto *viewerWidget = window.findChild<viewer::ViewerWidget *>("viewer");
         auto *strip = window.findChild<QWidget *>("routeStepStrip");
         require(viewerWidget && strip && viewerWidget->isAncestorOf(strip),

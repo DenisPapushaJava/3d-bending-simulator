@@ -178,7 +178,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         message = QStringLiteral("Строим 3D-состояния и проверяем порядок… Можно отменить расчёт.");
     else if (error) {
         message =
-            error->code == application::BendRouteErrorCode::SearchLimit
+            error->toolLengths ? QStringLiteral("Недостаточная длина выбранной сборки инструмента.")
+            : error->code == application::BendRouteErrorCode::SearchLimit
                 ? QStringLiteral("Лимит поиска достигнут. Полный порядок пока не найден.")
             : error->code == application::BendRouteErrorCode::NoRoute
                 ? QStringLiteral(
@@ -186,13 +187,23 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                 : QStringLiteral(
                       "Не удалось подготовить полный порядок для этой геометрии/настройки.");
         if (error->bendIndex)
-            message += QStringLiteral(" Последняя попытка: B%1.")
+            message += (error->toolLengths ? QStringLiteral(" Гиб B%1.")
+                                           : QStringLiteral(" Последняя попытка: B%1."))
                            .arg(*error->bendIndex + 1, 2, 10, QLatin1Char('0'));
+        if (error->toolLengths) {
+            const auto &lengths = *error->toolLengths;
+            message += QStringLiteral(" Нужно %1 мм; пуансон %2 мм, матрица %3 мм. "
+                                      "Подберите секции на этапе «Инструмент».")
+                           .arg(lengths.bendLengthMm, 0, 'f', 2)
+                           .arg(lengths.punchLengthMm, 0, 'f', 2)
+                           .arg(lengths.dieLengthMm, 0, 'f', 2);
+        }
         if (error->operationError) {
             using Code = application::BendPreviewErrorCode;
             switch (*error->operationError) {
             case Code::ToolTooShort:
-                message += QStringLiteral(" Инструмент короче линии гиба.");
+                if (!error->toolLengths)
+                    message += QStringLiteral(" Инструмент короче линии гиба.");
                 break;
             case Code::MissingLeftSupport:
             case Code::MissingRightSupport:

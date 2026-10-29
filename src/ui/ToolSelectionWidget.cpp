@@ -551,6 +551,9 @@ void ToolSelectionWidget::refreshFavorites() {
 }
 void ToolSelectionWidget::updateDetails() {
     QStringList assemblyLines;
+    if (allBends_ && selectionRequest_)
+        assemblyLines << QStringLiteral("Для всех гибов: длина инструмента не менее %1 мм.")
+                             .arg(selectionRequest_->bendLengthMm, 0, 'f', 2);
     const auto describe = [&](const core::ToolPreset *tool,
                               const std::optional<core::ToolAssembly> &a, const QString &name) {
         if (!tool)
@@ -581,7 +584,7 @@ void ToolSelectionWidget::updateDetails() {
     const auto *stockPunch = preset(punch_), *stockDie = preset(die_);
     const bool stockConfigured =
         (stockPunch && stockPunch->segments) || (stockDie && stockDie->segments);
-    assemblySummary_->setVisible(usesCatalog() && stockConfigured);
+    assemblySummary_->setVisible(usesCatalog() && (stockConfigured || allBends_));
     segmentGap_->setVisible(usesCatalog() && stockConfigured);
     recommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
     const auto *selectedPunch = preset(punch_);
@@ -717,12 +720,13 @@ void ToolSelectionWidget::rememberChoice() {
     settings->setValue(QStringLiteral("tools/lastDrawingGeometry"), realGeometry_->isChecked());
     settings->setValue(QStringLiteral("tools/machine"), machine_->text());
 }
-void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionRequest> request) {
-    const bool different = selectionRequest_ != request;
-    if (selectionRequest_ != request) {
+void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
+                                              bool allBends) {
+    const bool different = selectionRequest_ != request || allBends_ != allBends;
+    if (different) {
+        allBends_ = allBends;
         selectionRequest_ = request;
-        if (different)
-            fitAssemblies();
+        fitAssemblies();
         recommendation_->clear();
         recommendation_->hide();
         updateDetails();
@@ -746,8 +750,7 @@ void ToolSelectionWidget::recommend() {
     });
     QString message;
     if (!result.validRequest) {
-        message =
-            QStringLiteral("Для подбора нужны толщина, угол, радиус и длина выбранного гиба.");
+        message = QStringLiteral("Для подбора нужны толщина, угол, радиус и длина гиба.");
     } else if (result.candidates.empty()) {
         message =
             QStringLiteral("В библиотеке нет пары в рамках предварительного подбора (V/t ≥ 5, "
@@ -765,11 +768,14 @@ void ToolSelectionWidget::recommend() {
         chooseDrawingGeometry();
         changed();
         message = QStringLiteral("Предварительно: %1 / %2 · V %3 мм (%4 толщин). Вариантов: %5. "
-                                 "Далее — «Проверить гибку»: опоры и пересечения.")
+                                 "Далее — проверка опор и пересечений.")
                       .arg(text(p.code), text(d.code))
                       .arg(d.openingsMm[c.groove])
                       .arg(c.openingThicknessRatio, 0, 'f', 1)
                       .arg(result.candidates.size());
+        if (allBends_)
+            message += QStringLiteral(" Общая пара для всех гибов; длина не менее %1 мм.")
+                           .arg(request.bendLengthMm, 0, 'f', 2);
     }
     recommendation_->setText(message);
     if (result.segmentSearchLimited)
