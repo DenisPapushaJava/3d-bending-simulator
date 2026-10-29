@@ -14,15 +14,16 @@ class ProcessStepButton final : public QToolButton {
   public:
     ProcessStepButton(int stage, const QString &name, QWidget *parent)
         : QToolButton(parent), stage_(stage), name_(name) {
-        setCheckable(true);
-        setMinimumHeight(84);
+        setCheckable(stage < 3);
+        setMinimumHeight(68);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         auto *row = new QHBoxLayout(this);
-        row->setContentsMargins(18, 10, 18, 10);
-        row->addSpacing(42);
+        row->setContentsMargins(12, 8, 12, 8);
+        row->addSpacing(36);
         auto *copy = new QVBoxLayout;
         copy->setSpacing(3);
-        auto *title = new QLabel(QStringLiteral("0%1  %2").arg(stage + 1).arg(name), this);
+        auto *title =
+            new QLabel(stage < 3 ? QStringLiteral("%1. %2").arg(stage + 1).arg(name) : name, this);
         title->setStyleSheet(
             QStringLiteral("font-size:14px;color:#1C2938;background:transparent;"));
         title->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -40,7 +41,8 @@ class ProcessStepButton final : public QToolButton {
         status_->setText(status);
         setAccessibleName(name_ + QStringLiteral(" · ") + status);
         setToolTip(name_ + QStringLiteral(" · ") + status +
-                   QStringLiteral(" · Alt+%1").arg(stage_ + 1));
+                   (stage_ < 3 ? QStringLiteral(" · Alt+%1").arg(stage_ + 1)
+                               : QStringLiteral(" · Ctrl+Shift+E")));
     }
 
   protected:
@@ -48,7 +50,7 @@ class ProcessStepButton final : public QToolButton {
         QToolButton::paintEvent(event);
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.translate(18, (height() - 32) / 2.0);
+        painter.translate(12, (height() - 32) / 2.0);
         painter.setPen(QPen(isChecked() ? QColor(QStringLiteral("#087F83"))
                                         : QColor(QStringLiteral("#526171")),
                             1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -61,9 +63,14 @@ class ProcessStepButton final : public QToolButton {
             painter.drawPolygon(QPolygonF{{7, 2}, {25, 2}, {16, 16}});
             painter.drawPolygon(
                 QPolygonF{{2, 21}, {9, 21}, {16, 28}, {23, 21}, {30, 21}, {30, 32}, {2, 32}});
-        } else {
+        } else if (stage_ == 2) {
             painter.drawEllipse(QRectF(2, 2, 28, 28));
             painter.drawPolygon(QPolygonF{{13, 9}, {23, 16}, {13, 23}});
+        } else {
+            painter.drawPolygon(QPolygonF{{5, 2}, {22, 2}, {29, 9}, {29, 31}, {5, 31}});
+            painter.drawPolyline(QPolygonF{{22, 2}, {22, 9}, {29, 9}});
+            painter.drawLine(QPointF(10, 16), QPointF(24, 16));
+            painter.drawLine(QPointF(10, 22), QPointF(24, 22));
         }
     }
 

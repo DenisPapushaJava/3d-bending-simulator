@@ -13,12 +13,11 @@
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
-#include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
-#include <QStyle>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <numbers>
@@ -159,16 +158,20 @@ class StepStrip final : public QWidget {
     using QWidget::QWidget;
     int count = 1;
     QSize sizeHint() const override {
-        return {count * 44 + 12, 60};
+        return {count * 44 + 12, 44};
     }
 };
 } // namespace
 RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     setObjectName("bendRoutePanel");
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(12, 8, 12, 8);
-    auto *actions = new QHBoxLayout;
-    automatic_ = new QPushButton(QStringLiteral("Подобрать порядок"), this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto *advanced = new QWidget(this);
+    advanced->setObjectName("routeAdvancedActions");
+    auto *advancedLayout = new QVBoxLayout(advanced);
+    advancedLayout->setContentsMargins(0, 0, 0, 0);
+    auto *actions = new QVBoxLayout;
+    automatic_ = new QPushButton(QStringLiteral("Автопорядок"), this);
     automatic_->setObjectName("prepareBendRoute");
     manual_ = new QPushButton(QStringLiteral("Проверить мой порядок"), this);
     manual_->setObjectName("checkBendRoute");
@@ -180,7 +183,6 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     mode_->addItems({QStringLiteral("Без инструмента"), QStringLiteral("Одна пара для всех гибов"),
                      QStringLiteral("По назначениям гибов")});
     mode_->setCurrentIndex(1);
-    actions->addWidget(automatic_);
     actions->addWidget(manual_);
     actions->addWidget(mode_);
     expandSearch_ = new QPushButton(QStringLiteral("Расширить поиск"), this);
@@ -188,18 +190,18 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     expandSearch_->setToolTip(QStringLiteral("Повторить расчёт с начала: до 120 секунд поиска "
                                              "и 512 попыток. Это не обещание найти маршрут."));
     expandSearch_->hide();
-    actions->addWidget(expandSearch_);
-    actions->addStretch();
-    layout->addLayout(actions);
+    layout->addWidget(automatic_);
+    layout->addWidget(expandSearch_);
+    advancedLayout->addLayout(actions);
     stepStrip_ = new StepStrip(this);
     stepStrip_->setObjectName("routeStepStrip");
     auto *stripLayout = new QHBoxLayout(stepStrip_);
-    stripLayout->setContentsMargins(4, 4, 4, 4);
+    stripLayout->setContentsMargins(2, 2, 2, 2);
     auto *scroll = new QScrollArea(stepStrip_);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setFixedHeight(52);
+    scroll->setFixedHeight(40);
     auto *strip = new StepCanvas(scroll);
     strip->moved = [this](int from, int to) { moveTo(from, to); };
     strip_ = new QHBoxLayout(strip);
@@ -214,17 +216,16 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     earlier_->setToolTip(QStringLiteral("Изменить порядок; потребуется новая проверка"));
     later_->setToolTip(earlier_->toolTip());
     auto *details = new QHBoxLayout;
-    details_ = details;
     status_ = new QLabel(this);
     status_->setObjectName("bendRouteStatus");
     status_->setWordWrap(true);
     status_->setTextFormat(Qt::PlainText);
-    details->addWidget(status_, 1);
-    editTool_ = new QPushButton(QStringLiteral("Инструмент…"), this);
+    advancedLayout->addWidget(status_);
+    editTool_ = new QPushButton(QStringLiteral("Инструмент выбранного гиба…"), this);
     editTool_->setObjectName("routeEditTool");
     editTool_->setToolTip(QStringLiteral("Открыть инструмент выбранного гиба"));
     editTool_->setAccessibleName(QStringLiteral("Изменить инструмент выбранного гиба"));
-    details->addWidget(editTool_);
+    layout->addWidget(editTool_);
     details->addWidget(earlier_);
     details->addWidget(later_);
     undoButton_ = new QPushButton(QStringLiteral("↶"), this);
@@ -253,9 +254,18 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
                 undo();
         });
     }
-    layout->addLayout(details);
+    advancedLayout->addLayout(details);
+    auto *more = new QToolButton(this);
+    more->setObjectName("routeActionsToggle");
+    more->setText(QStringLiteral("Действия шага и параметры ▸"));
+    more->setCheckable(true);
+    more->setMinimumHeight(32);
+    layout->addWidget(more);
+    layout->addWidget(advanced);
+    advanced->hide();
+    connect(more, &QToolButton::toggled, advanced, &QWidget::setVisible);
     stepStrip_->setStyleSheet(QStringLiteral(
-        "QWidget#routeStepStrip{background:#F4F7F9;border:1px solid #526171;border-radius:7px;}"
+        "QWidget#routeStepStrip{background:transparent;border:0;}"
         "QScrollArea{background:transparent;border:0;}"
         "QPushButton{background:#FFFFFF;color:#1C2938;border:1px solid #DCE3E9;border-radius:4px;}"
         "QPushButton:hover{background:#E5F3F3;}"
@@ -301,31 +311,11 @@ bool RoutePanel::perBendTools() const {
 bool RoutePanel::withTools() const {
     return mode_->currentIndex() != 0;
 }
-void RoutePanel::resizeEvent(QResizeEvent *event) {
-    QWidget::resizeEvent(event);
-    updateStatusHeight();
+QString RoutePanel::statusText() const {
+    return status_->text();
 }
-void RoutePanel::updateStatusHeight() {
-    const auto margins = layout()->contentsMargins();
-    const int horizontalSpacing = details_->spacing() >= 0
-                                      ? details_->spacing()
-                                      : style()->pixelMetric(QStyle::PM_LayoutHorizontalSpacing);
-    const int available =
-        width() - margins.left() - margins.right() - earlier_->sizeHint().width() -
-        later_->sizeHint().width() -
-        (editTool_->isHidden() ? 0 : editTool_->sizeHint().width() + horizontalSpacing) -
-        undoButton_->width() - redoButton_->width() - 2 * horizontalSpacing - 2 * horizontalSpacing;
-    status_->setMinimumHeight(0);
-    status_->setMaximumHeight(QWIDGETSIZE_MAX);
-    const int statusHeight = std::max(0, status_->heightForWidth(std::max(1, available)));
-    status_->setFixedHeight(statusHeight);
-    const int verticalSpacing = layout()->spacing() >= 0
-                                    ? layout()->spacing()
-                                    : style()->pixelMetric(QStyle::PM_LayoutVerticalSpacing);
-    setFixedHeight(
-        margins.top() + margins.bottom() + layout()->itemAt(0)->sizeHint().height() +
-        std::max({statusHeight, earlier_->sizeHint().height(), later_->sizeHint().height()}) +
-        verticalSpacing);
+QWidget *RoutePanel::reportWidget() const {
+    return status_;
 }
 void RoutePanel::move(int delta) {
     moveTo(selected_ - 1, selected_ - 1 + delta);
@@ -624,7 +614,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         message = QStringLiteral("Выберите 0 или номер для ручного 3D-просмотра. Перетаскивайте "
                                  "шаги; затем «Проверить мой порядок».");
     status_->setText(message);
-    updateStatusHeight();
+    updateGeometry();
     status_->setToolTip(
         error ? QString::fromStdString(error->detail)
               : QStringLiteral("Геометрическая заготовка сохраняет среднюю поверхность. "

@@ -102,7 +102,26 @@ int main(int argc, char **argv) {
         for (auto i : controller.session().orderedBends())
             require(controller.setBendToolAssignment(i, pair), "Assignment failed");
         window.findChild<QToolButton *>("processStage2")->click();
+        auto *task = window.findChild<QWidget *>("propertiesDock");
+        auto *routeActions = window.findChild<QWidget *>("bendRoutePanel");
+        auto *overlay = window.findChild<QWidget *>("operationOverlay");
+        require(task && routeActions && task->isAncestorOf(routeActions) && overlay &&
+                    overlay->isAncestorOf(window.findChild<QWidget *>("routeStepStrip")) &&
+                    overlay->isAncestorOf(window.findChild<QWidget *>("playbackControls")),
+                "Route commands or transport escaped the task panel and viewport");
         auto *mode = window.findChild<QComboBox *>("bendRouteMode");
+        auto *more = window.findChild<QToolButton *>("routeActionsToggle");
+        require(more && !more->isChecked() && !mode->isVisible(),
+                "Advanced route controls are permanently exposed");
+        const auto inputEdit = controller.session().editRevision();
+        more->click();
+        require(mode->isVisible() &&
+                    window.findChild<QPushButton *>("routeMoveEarlier")->isVisible() &&
+                    window.findChild<QPushButton *>("routeUndo")->isVisible(),
+                "Expanded route actions lost reorder, history or scope controls");
+        more->click();
+        require(controller.session().editRevision() == inputEdit && !controller.hasWork(),
+                "Opening route details edited inputs or launched CAD");
         mode->setCurrentIndex(2);
         auto step = [&](int n) {
             return window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(n));
@@ -113,6 +132,12 @@ int main(int argc, char **argv) {
         require(controller.routeDraft() && controller.routeDraft()->request.step == 0 &&
                     controller.routeDraft()->checkedToolPositions == 1 && builder->searches == 0,
                 "Zero launched a search or skipped tool checks");
+        auto *report = window.findChild<QToolButton *>("checkReportToggle");
+        report->click();
+        require(window.findChild<QLabel *>("bendPreviewStatus")->isVisible() &&
+                    window.findChild<QLabel *>("bendRouteStatus")->isVisible(),
+                "The shared report lost manual coverage or route details");
+        report->click();
         auto *slider = window.findChild<QSlider *>("bendFrame");
         step(4)->click();
         wait([&] { return !controller.hasWork(); });
@@ -125,6 +150,19 @@ int main(int argc, char **argv) {
         expected.pop_back();
         expected.insert(expected.begin() + 1, id);
         if (qEnvironmentVariableIsSet("BENDING_NATIVE_DRAG")) {
+            window.raise();
+            window.activateWindow();
+            QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+            QApplication::processEvents();
+            if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+                !output.isEmpty()) {
+                auto shot = window.grab().toImage();
+                auto *viewer = window.findChild<viewer::ViewerWidget *>();
+                QPainter p(&shot);
+                p.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
+                p.end();
+                require(shot.save(output + "-before-drag.png"), "Cannot capture drag layout");
+            }
             const auto start = step(4)->mapToGlobal(step(4)->rect().center());
             const auto end = step(2)->mapToGlobal(QPoint(2, step(2)->height() / 2));
             QProcess mouse;
@@ -155,6 +193,10 @@ x.XCloseDisplay(d)
             window.findChild<QPushButton *>("routeMoveEarlier")->click();
         }
         wait([&] { return !controller.hasWork(); });
+        if (order(controller) != expected)
+            std::cerr << "Native reorder unchanged: step "
+                      << (controller.routeDraft() ? controller.routeDraft()->request.step : 99)
+                      << ", searches " << builder->searches << '\n';
         require(order(controller) == expected && step(2)->isChecked() && step(2)->text() == "2" &&
                     step(2)->property("routeId").toString().toStdString() == id &&
                     controller.routeDraft() && controller.routeDraft()->request.step == 2 &&

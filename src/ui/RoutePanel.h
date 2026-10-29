@@ -37,6 +37,8 @@ class RoutePanel final : public QWidget {
     [[nodiscard]] QWidget *stepStrip() const {
         return stepStrip_;
     }
+    [[nodiscard]] QString statusText() const;
+    [[nodiscard]] QWidget *reportWidget() const;
     std::function<void(bool automatic, bool withTools)> onPrepare;
     std::function<void(int)> onSelect;
     std::function<void(std::optional<std::size_t>)> onHover;
@@ -46,8 +48,6 @@ class RoutePanel final : public QWidget {
     std::function<void()> onExpandSearch;
 
   private:
-    void resizeEvent(QResizeEvent *) override;
-    void updateStatusHeight();
     void move(int delta);
     void moveTo(int from, int to);
     void undo();
@@ -69,7 +69,6 @@ class RoutePanel final : public QWidget {
     bool expandedSearch_ = false;
     QLabel *status_;
     QHBoxLayout *strip_;
-    QHBoxLayout *details_;
     QWidget *stepStrip_;
 };
 } // namespace bending::ui

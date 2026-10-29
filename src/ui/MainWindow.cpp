@@ -381,12 +381,10 @@ class MainWindow::Impl {
             window->statusBar()->showMessage(
                 QStringLiteral("3D-просмотр недоступен: %1").arg(viewer->errorString()));
         } else if (controller->bendPreview()) {
-            window->statusBar()->showMessage(QStringLiteral(
-                "Просмотр операции · ПКМ: вращение · СКМ: перенос · Колесо: масштаб"));
+            window->statusBar()->showMessage(QStringLiteral("Просмотр операции"));
         } else {
             window->statusBar()->showMessage(
-                document ? QStringLiteral("Деталь загружена · ПКМ: вращение · СКМ: перенос · "
-                                          "Колесо: масштаб · ЛКМ: грань")
+                document ? QStringLiteral("Деталь загружена")
                          : QStringLiteral("Откройте STEP для начала работы · Ctrl+O"));
         }
         const bool hasFailure = session.error().has_value() || !controller->saveError().isEmpty();
@@ -672,11 +670,16 @@ class MainWindow::Impl {
                     status = QStringLiteral("Развёртка рассчитана; ошибка показа: %1").arg(error);
             }
         } else
-            status = QStringLiteral("Развёртка: теоретический расчёт по материалу. Столкновения и "
-                                    "пружинение не рассчитываются.");
+            status.clear();
         flatStatus->setText(status);
+        flatStatus->setVisible(!status.isEmpty());
+        if (checkFlatStatus)
+            checkFlatStatus->setVisible(displayedFlat || controller->isPreparingFlatPattern() ||
+                                        controller->flatPatternError().has_value());
         if (checkFlatStatus)
             checkFlatStatus->setText(status);
+        if (checkFlatButton)
+            checkFlatButton->setVisible(displayedFlat != nullptr);
         flatSource->setVisible(displayedFlat != nullptr);
         if (checkFlatSource)
             checkFlatSource->setVisible(displayedFlat != nullptr);
@@ -751,20 +754,151 @@ class MainWindow::Impl {
             : preview ? QStringLiteral("Просмотр подготовлен")
             : !chosen ? QStringLiteral("Нужен инструмент")
                       : QStringLiteral("Нужна проверка"));
-        if (auto *dock = window->findChild<QDockWidget *>(QStringLiteral("sequenceDock")))
-            dock->setVisible(propertyTabs->currentIndex() == 2 && !viewingSource &&
-                             (preview || controller->isPreparingPreview()));
+        const bool checking = propertyTabs->currentIndex() == 2 && !viewingSource;
+        const bool transport = checking && (preview || controller->isPreparingPreview() ||
+                                            controller->isPreparingDraft());
+        playbackControls->setVisible(transport);
+        operationOverlay->setVisible(checking && (transport || (document && bendCount > 1)));
     }
 
     void showPlaybackPanel() {
-        if (auto *dock = window->findChild<QDockWidget *>(QStringLiteral("sequenceDock"))) {
-            dock->show();
-            dock->raise();
-        }
+        playbackControls->show();
+        operationOverlay->show();
     }
     void stopPlayback() {
         playback->stop();
         playBend->setText(QStringLiteral("Воспроизвести"));
+    }
+    void setFrameText(const QString &text) {
+        frameLabel->setText(text);
+        bendFrame->setToolTip(text);
+        playBend->setToolTip(text);
+    }
+    std::optional<std::size_t> selectedOperationIndex() const {
+        if (viewingRoute && controller->bendRoute() && routePanel->selected() > 0)
+            return controller->bendRoute()->steps[routePanel->operation()].bendIndex;
+        if (controller->session().document() &&
+            controller->session().document()->metadata().bendAnalysis.bends.size() > 1)
+            return routePanel->selectedBend();
+        const auto row = bendList->currentIndex().row();
+        return row >= 0 ? std::optional{static_cast<std::size_t>(row)} : std::nullopt;
+    }
+    void refreshCheckResult() {
+        const auto &session = controller->session();
+        const auto preview = scenePreview();
+        const auto route = controller->bendRoute();
+        const auto frame = static_cast<std::size_t>(bendFrame->value());
+        const bool collision =
+            preview && (preview->collision() || preview->collisionAtFrame(frame));
+        const bool partial = viewingRoute && route && route->partialEndSupport;
+        const bool preparing = controller->isPreparingDraft() || controller->isPreparingRoute() ||
+                               controller->isPreparingPreview();
+        QString result;
+        if (controller->isPreparingDraft())
+            result = QStringLiteral("Проверяем столкновения выбранного шага…");
+        else if (controller->isPreparingRoute())
+            result = lastRouteAutomatic ? QStringLiteral("Подбираем порядок гибов…")
+                                        : QStringLiteral("Проверяем ваш порядок…");
+        else if (controller->isPreparingPreview())
+            result = QStringLiteral("Проверяем гибку…");
+        else if (!previewDisplayError.isEmpty())
+            result = QStringLiteral("Не удалось показать положение.\n%1").arg(previewDisplayError);
+        else if (viewingDraft && controller->routeDraftError())
+            result = QStringLiteral("Положение не проверено.\n%1")
+                         .arg(text(controller->routeDraftError()->detail));
+        else if (preview && preview->unverifiedDraft()) {
+            result = collision
+                         ? QStringLiteral("Столкновение с инструментом.\nИзмените порядок или "
+                                          "установку.")
+                     : controller->routeDraft() && controller->routeDraft()->checkedToolPositions
+                         ? QStringLiteral("В этом кадре пересечений с инструментом не найдено.\n"
+                                          "Полный порядок, опора и отвод не проверены.")
+                         : QStringLiteral("Инструмент не задан.\nСтолкновения не проверены.");
+            if (controller->routeDraft() && !controller->routeDraft()->toolNotice.empty())
+                result += QLatin1Char('\n') + text(controller->routeDraft()->toolNotice);
+        } else if (controller->bendRouteError())
+            result = routePanel->statusText();
+        else if (collision)
+            result = QStringLiteral("Обнаружено столкновение с инструментом.\n"
+                                    "Положение выделено красным.");
+        else if (partial)
+            result = QStringLiteral("Просмотр с неполной опорой у торца.\n"
+                                    "Пригодность к изготовлению не подтверждена.");
+        else if (controller->bendPreviewError())
+            result = operationFailureSummary;
+        else if (preview && preview->pressMotion())
+            result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.\n")
+                                   : QStringLiteral("Геометрическая проверка пройдена.\n")) +
+                     QStringLiteral("Гибка — по кадрам, отвод — непрерывно.\n"
+                                    "Станок, держатели и перенос не проверены.");
+        else if (preview && preview->toolSetup())
+            result = QStringLiteral("Начальная установка проверена.\n"
+                                    "Одно положение; движение не проверено.");
+        else if (preview)
+            result =
+                QStringLiteral("Просмотр без инструмента.\nКонтакт и ход пресса не проверены.");
+        else if (!checkBlocker.isEmpty())
+            result = checkBlocker;
+        else
+            result = toolDraftChanged
+                         ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
+                         : QStringLiteral("Деталь и инструмент выбраны. Можно проверить.");
+        if (preview && !preparing) {
+            if (preview->ignoresClosedCutouts())
+                result += QStringLiteral("\nПроверка по копии без вырезов.");
+            if (preview->toolSetup() &&
+                (!preview->usesDrawingPunch() || !preview->usesDrawingDie()))
+                result += QStringLiteral("\nЕсть условные профили инструмента.");
+            if (preview->toolSegmentGaps()[0] > 0 || preview->toolSegmentGaps()[1] > 0)
+                result += QStringLiteral("\nВлияние зазоров секций не проверено.");
+            if (viewingRoute && route && routePanel->operation() > 0) {
+                const auto *current = session.bend(route->steps[routePanel->operation()].bendIndex);
+                const auto *previous =
+                    session.bend(route->steps[routePanel->operation() - 1].bendIndex);
+                if (current && previous &&
+                    (current->tools != previous->tools ||
+                     current->catalogTools != previous->catalogTools))
+                    result += QStringLiteral("\nПереналадка не проверена.");
+            }
+        }
+        checkSummary->setText(result);
+        checkSummary->setStyleSheet(
+            collision && !preparing
+                ? QStringLiteral("background:#FBE9E7;color:#8F2318;border-radius:4px;padding:10px;")
+            : partial || controller->bendRouteError() || controller->routeDraftError()
+                ? QStringLiteral("background:#FFF2CC;color:#704500;border-radius:4px;padding:10px;")
+                : QStringLiteral(
+                      "background:#F0F3F6;color:#1C2938;border-radius:4px;padding:10px;"));
+        checkSummary->setMinimumHeight(0);
+        const auto index = selectedOperationIndex();
+        operationSummary->clear();
+        if (const auto &document = session.document(); document) {
+            if (index && *index < document->metadata().bendAnalysis.bends.size()) {
+                const auto &bend = document->metadata().bendAnalysis.bends[*index];
+                const auto target = session.bendTarget(*index);
+                operationSummary->setText(
+                    QStringLiteral("Гиб %1 из %2\n%3° · L %4 мм")
+                        .arg(document->metadata().bendAnalysis.bends.size() > 1
+                                 ? routePanel->selected()
+                                 : 1)
+                        .arg(session.orderedBends().size())
+                        .arg(number((std::numbers::pi -
+                                     (target ? target->angleRadians : bend.angleRadians)) *
+                                    180 / std::numbers::pi),
+                             number(bend.lengthMm)));
+                if (const auto *entry = session.bend(*index); entry && entry->tools) {
+                    const auto name = entry->catalogTools
+                                          ? text(entry->catalogTools->punch.code) + " / " +
+                                                text(entry->catalogTools->die.code)
+                                          : QStringLiteral("Инструмент");
+                    operationSummary->setText(operationSummary->text() +
+                                              QStringLiteral("\n%1 · V %2 мм")
+                                                  .arg(name, number(entry->tools->openingMm)));
+                }
+            } else
+                operationSummary->setText(
+                    QStringLiteral("Заготовка · гибов %1").arg(session.orderedBends().size()));
+        }
     }
     application::BendPreviewPtr scenePreview() const {
         if (viewingDraft) {
@@ -832,6 +966,7 @@ class MainWindow::Impl {
         }
         displayedPreview = preview;
         previewDisplayError.clear();
+        refreshCheckResult();
         const double progressValue =
             preview->frameCount() > 1
                 ? static_cast<double>(index) / static_cast<double>(preview->frameCount() - 1)
@@ -851,29 +986,17 @@ class MainWindow::Impl {
                 : draft && draft->checkedToolPositions
                     ? QStringLiteral("В этом положении пересечений с инструментом не найдено")
                     : QStringLiteral("Инструмент не задан — столкновения не проверены");
-            frameLabel->setText(QStringLiteral("Ручной просмотр · %1% · %2")
-                                    .arg(qRound(progressValue * 100))
-                                    .arg(message));
-            checkSummary->setText(message +
-                                  QStringLiteral(".\nПолный порядок, опора и отвод не проверены."));
-            if (draft && !draft->toolNotice.empty())
-                checkSummary->setText(checkSummary->text() + QLatin1Char('\n') +
-                                      QString::fromStdString(draft->toolNotice));
-            checkSummary->setStyleSheet(
-                collision
-                    ? QStringLiteral(
-                          "background:#FBE9E7;color:#8F2318;border-radius:4px;padding:12px;")
-                    : QStringLiteral(
-                          "background:#F0F3F6;color:#1C2938;border-radius:4px;padding:12px;"));
+            setFrameText(QStringLiteral("Ручной просмотр · %1% · %2")
+                             .arg(qRound(progressValue * 100))
+                             .arg(message));
             return;
         }
         if (preview->collision()) {
-            frameLabel->setText(
-                QStringLiteral("Обнаружено столкновение · диагностическое положение"));
+            setFrameText(QStringLiteral("Обнаружено столкновение · диагностическое положение"));
             return;
         }
         if (const auto *state = preview->pressState(index)) {
-            frameLabel->setText(
+            setFrameText(
                 approximation + segmented +
                 QStringLiteral("%1 · %2% · поворот %3° · ход пуансона %4 мм")
                     .arg(state->phase == simulation::PressPhase::Approach ? QStringLiteral("Подвод")
@@ -886,13 +1009,13 @@ class MainWindow::Impl {
                          QLocale::system().toString(state->punchTravelMm, 'f', 1)));
             return;
         }
-        frameLabel->setText(approximation +
-                            (preview->toolSetup()
-                                 ? QStringLiteral("Начальное положение · статичный просмотр")
-                                 : QStringLiteral("%1% · поворот %2°")
-                                       .arg(number(progressValue * 100.0),
-                                            number(progressValue * preview->model().angleRadians *
-                                                   180.0 / std::numbers::pi))));
+        setFrameText(approximation +
+                     (preview->toolSetup()
+                          ? QStringLiteral("Начальное положение · статичный просмотр")
+                          : QStringLiteral("%1% · поворот %2°")
+                                .arg(number(progressValue * 100.0),
+                                     number(progressValue * preview->model().angleRadians * 180.0 /
+                                            std::numbers::pi))));
     }
     void refreshPreview() {
         const auto &session = controller->session();
@@ -1072,7 +1195,7 @@ class MainWindow::Impl {
             stopPlayback();
         }
         if (controller->isPreparingDraft()) {
-            frameLabel->setText(QStringLiteral("Готовим выбранный шаг и проверяем столкновения…"));
+            setFrameText(QStringLiteral("Готовим выбранный шаг и проверяем столкновения…"));
             previewStatus->setText(QStringLiteral(
                 "Ручной порядок: проверяется выбранный переход без поиска последовательности."));
         } else if (preview && preview->unverifiedDraft()) {
@@ -1083,7 +1206,7 @@ class MainWindow::Impl {
                                "не подтверждены. "
                                "Для полной проверки нажмите «Проверить мой порядок»."));
         } else if (controller->isPreparingPreview()) {
-            frameLabel->setText(QStringLiteral("Подготовка просмотра…"));
+            setFrameText(QStringLiteral("Подготовка просмотра…"));
             previewStatus->setText(
                 QStringLiteral("Проверяем восстановление всей детали и готовим геометрию…"));
         } else if (const auto &failure = controller->bendPreviewError()) {
@@ -1150,6 +1273,7 @@ class MainWindow::Impl {
                     : QStringLiteral("Не удалось подготовить кинематический просмотр. Исходная "
                                      "деталь сохранена."));
             previewStatus->setToolTip(text(failure->detail));
+            operationFailureSummary = previewStatus->text();
         } else if (!previewDisplayError.isEmpty()) {
             previewStatus->setText(
                 QStringLiteral("Не удалось показать состояние: %1").arg(previewDisplayError));
@@ -1209,9 +1333,8 @@ class MainWindow::Impl {
                                      "используйте толщину из STEP.")
                     : QStringLiteral("Параметры сгиба взяты из CAD. Выберите инструмент и нажмите "
                                      "«Проверить и показать гибку»."));
-            frameLabel->setText(QStringLiteral("Исходная CAD-форма"));
+            setFrameText(QStringLiteral("Исходная CAD-форма"));
         }
-        const auto outcome = previewStatus->text();
         if (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
             previewStatus->setText(
                 QStringLiteral(
@@ -1251,59 +1374,10 @@ class MainWindow::Impl {
                 : QString{};
         const bool busy = controller->isPreparingPreview() || controller->isPreparingRoute();
         const auto routeFailure = controller->bendRouteError();
-        const bool partialEndSupport =
-            viewingRoute && controller->bendRoute() && controller->bendRoute()->partialEndSupport;
         const bool failed = controller->bendPreviewError().has_value() || routeFailure ||
                             !previewDisplayError.isEmpty();
-        checkSummary->setText(
-            controller->isPreparingDraft()
-                ? QStringLiteral("Готовим ручной шаг и проверяем столкновения…")
-            : controller->routeDraftError() && viewingDraft
-                ? QStringLiteral("Положение не проверено: не удалось завершить ручной просмотр.")
-            : preview && preview->unverifiedDraft()
-                ? (preview->collisionAtFrame(static_cast<std::size_t>(bendFrame->value()))
-                       ? QStringLiteral("Обнаружено столкновение с инструментом. Измените порядок "
-                                        "или установку.")
-                   : controller->routeDraft() && controller->routeDraft()->checkedToolPositions
-                       ? QStringLiteral("В показанном положении пересечений с инструментом не "
-                                        "найдено.\nПолный порядок, опора и отвод не проверены.")
-                       : QStringLiteral(
-                             "Ручной просмотр без инструмента. Столкновения не проверены."))
-            : busy ? QStringLiteral("Проверяем деталь и готовим движение…")
-            : routeFailure
-                ? QStringLiteral("Порядок не подготовлен. Причина указана над 3D-видом; "
-                                 "отказ этой проверки не доказывает невозможность изготовления.")
-            : partialEndSupport
-                ? QStringLiteral("Геометрический просмотр с неполной опорой у торца. "
-                                 "Пригодность к изготовлению и устойчивость не подтверждены. "
-                                 "Столкновения и отвод пуансона проверяются.")
-            : failed ? outcome
-            : preview && preview->pressMotion()
-                ? QStringLiteral("Геометрическая проверка пройдена.\nПодвод и гибка — по кадрам, "
-                                 "вертикальный отвод — непрерывно.")
-            : preview && preview->toolSetup()
-                ? QStringLiteral("Начальная установка проверена.\nОдно неподвижное положение; "
-                                 "движение не проверено.")
-            : preview
-                ? QStringLiteral("Просмотр без инструмента. Контакт и ход пресса не проверены.")
-            : !checkBlocker.isEmpty() ? checkBlocker
-            : toolDraftChanged
-                ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
-                : QStringLiteral("Деталь и пара инструмента выбраны. Можно проверить гибку."));
-        if (preview && preview->unverifiedDraft() && controller->routeDraft() &&
-            !controller->routeDraft()->toolNotice.empty())
-            checkSummary->setText(checkSummary->text() + QLatin1Char('\n') +
-                                  QString::fromStdString(controller->routeDraft()->toolNotice));
-        checkSummary->setStyleSheet(
-            preview && preview->unverifiedDraft() &&
-                    preview->collisionAtFrame(static_cast<std::size_t>(bendFrame->value()))
-                ? QStringLiteral("background:#FBE9E7;color:#8F2318;border-radius:4px;padding:12px;")
-            : partialEndSupport
-                ? QStringLiteral("background:#FFF2CC;color:#704500;border:1px solid #D0AA52;"
-                                 "border-radius:4px;padding:12px;")
-                : QStringLiteral(
-                      "background:#F0F3F6;color:#1C2938;border-radius:4px;padding:12px;"));
-        checkSummary->setMinimumHeight(std::max(0, checkSummary->heightForWidth(240)));
+        refreshCheckResult();
+        routePanel->reportWidget()->setVisible(multiple);
         checkScope->setText(
             (viewingRoute && controller->bendRoute()
                  ? QStringLiteral("Промежуточная 3D-форма по выбранному порядку. Извлечение и "
@@ -1859,6 +1933,7 @@ class MainWindow::Impl {
     std::uint64_t drawingBaseRevision = 0;
     application::BendPreviewPtr displayedPreview;
     QString previewDisplayError;
+    QString operationFailureSummary;
     QComboBox *fixedSide = nullptr;
     QPushButton *preparePreview = nullptr;
     QLabel *previewStatus = nullptr;
@@ -1905,6 +1980,9 @@ class MainWindow::Impl {
     QPushButton *returnToCad = nullptr;
     QLabel *frameLabel = nullptr;
     QTimer *playback = nullptr;
+    QWidget *playbackControls = nullptr;
+    QWidget *operationOverlay = nullptr;
+    QLabel *operationSummary = nullptr;
     std::optional<std::uint64_t> shownBendEditRevision;
     int shownTargetRow = -1;
     QTabWidget *propertyTabs = nullptr;
@@ -1963,9 +2041,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     workspaceLayout->setContentsMargins(0, 0, 0, 0);
     workspaceLayout->setSpacing(0);
     impl_->routePanel = new RoutePanel(workspace);
-    impl_->viewer->setBottomOverlay(impl_->routePanel->stepStrip());
     impl_->routePanel->hide();
-    workspaceLayout->addWidget(impl_->routePanel);
     workspaceLayout->addWidget(impl_->viewer, 1);
     setCentralWidget(workspace);
     impl_->controller = new ImportController(
@@ -2076,7 +2152,6 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     quickClose->setAccessibleName(QStringLiteral("Закрыть текущую деталь"));
     toolbar->addWidget(quickClose);
     toolbar->addAction(impl_->saveAction);
-    toolbar->addAction(impl_->drawingAction);
     toolbar->addAction(impl_->cancelAction);
     auto *toolSetupAction = viewMenu->addAction(QStringLiteral("Инструмент"));
     toolSetupAction->setObjectName(QStringLiteral("toolSetupAction"));
@@ -2446,9 +2521,15 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *operationPanel = new QWidget(this);
     auto *operationLayout = new QVBoxLayout(operationPanel);
     operationLayout->setContentsMargins(18, 18, 18, 8);
-    auto *operationTitle = new QLabel(QStringLiteral("Проверка и симуляция гибки"), operationPanel);
+    auto *operationTitle = new QLabel(QStringLiteral("Гибка"), operationPanel);
+    operationTitle->setStyleSheet(QStringLiteral("font-size:18px;font-weight:500;"));
     operationTitle->setWordWrap(true);
     operationLayout->addWidget(operationTitle);
+    impl_->operationSummary = new QLabel(operationPanel);
+    impl_->operationSummary->setObjectName("selectedOperationSummary");
+    impl_->operationSummary->setWordWrap(true);
+    impl_->operationSummary->setTextFormat(Qt::PlainText);
+    operationLayout->addWidget(impl_->operationSummary);
     impl_->checkFlatButton = new QPushButton(operationPanel);
     impl_->checkFlatButton->setObjectName(QStringLiteral("checkFlatPattern"));
     connect(impl_->checkFlatButton, &QPushButton::clicked, impl_->flatAction, &QAction::trigger);
@@ -2519,9 +2600,18 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     reportToggle->setCheckable(true);
     reportToggle->setMinimumHeight(32);
     operationLayout->addWidget(reportToggle);
-    operationLayout->addWidget(impl_->previewStatus);
-    impl_->previewStatus->hide();
-    connect(reportToggle, &QToolButton::toggled, impl_->previewStatus, &QWidget::setVisible);
+    auto *report = new QWidget(operationPanel);
+    report->setObjectName("checkReportDetails");
+    auto *reportLayout = new QVBoxLayout(report);
+    reportLayout->setContentsMargins(0, 0, 0, 0);
+    operationLayout->removeWidget(impl_->checkScope);
+    reportLayout->addWidget(impl_->checkScope);
+    reportLayout->addWidget(impl_->previewStatus);
+    reportLayout->addWidget(impl_->routePanel->reportWidget());
+    operationLayout->addWidget(report);
+    report->hide();
+    connect(reportToggle, &QToolButton::toggled, report, &QWidget::setVisible);
+    operationLayout->addWidget(impl_->routePanel);
     auto *kinematicHint = new QLabel(
         QStringLiteral("Модель сохраняет толщину и длину средней поверхности. Это геометрическая "
                        "кинематика.\n\n"
@@ -2544,8 +2634,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     advancedLayout->addWidget(impl_->fixedSide);
     advancedLayout->addWidget(impl_->preparePreview);
     advancedLayout->addWidget(kinematicHint);
-    operationLayout->addWidget(advancedToggle);
-    operationLayout->addWidget(advanced);
+    reportLayout->addWidget(advancedToggle);
+    reportLayout->addWidget(advanced);
     advanced->hide();
     connect(advancedToggle, &QToolButton::toggled, advanced, &QWidget::setVisible);
     operationLayout->addStretch();
@@ -2657,11 +2747,22 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         "QTabWidget::pane{border:0;background:white;}QScrollArea{border:0;background:white;}"));
     resizeDocks({findChild<QDockWidget *>(QStringLiteral("propertiesDock"))}, {350},
                 Qt::Horizontal);
-    auto *sequence = new QWidget(this);
+    impl_->operationOverlay = new QWidget(this);
+    impl_->operationOverlay->setObjectName("operationOverlay");
+    auto *overlayLayout = new QVBoxLayout(impl_->operationOverlay);
+    overlayLayout->setContentsMargins(6, 6, 6, 6);
+    overlayLayout->setSpacing(2);
+    overlayLayout->addWidget(impl_->routePanel->stepStrip(), 0, Qt::AlignHCenter);
+    auto *sequence = new QWidget(impl_->operationOverlay);
+    sequence->setObjectName("playbackControls");
+    impl_->playbackControls = sequence;
+    overlayLayout->addWidget(sequence);
     auto *sequenceLayout = new QVBoxLayout(sequence);
+    sequenceLayout->setContentsMargins(0, 0, 0, 0);
+    sequenceLayout->setSpacing(0);
     impl_->frameLabel = new QLabel(sequence);
     impl_->frameLabel->setObjectName(QStringLiteral("bendFrameLabel"));
-    sequenceLayout->addWidget(impl_->frameLabel);
+    impl_->frameLabel->hide(); // Full frame detail is available as a transport tooltip.
     impl_->setupPlaybackHint =
         new QLabel(QStringLiteral("Здесь показано одно начальное "
                                   "положение. Для движения выберите «Гибка с инструментом» на "
@@ -2684,7 +2785,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *playLayout = new QHBoxLayout;
     impl_->playBend = new QPushButton(QStringLiteral("Воспроизвести"), sequence);
     impl_->playBend->setObjectName(QStringLiteral("playBend"));
-    impl_->returnToCad = new QPushButton(QStringLiteral("Вернуться к STEP"), sequence);
+    impl_->returnToCad = new QPushButton(QStringLiteral("Деталь"), sequence);
     impl_->returnToCad->setObjectName(QStringLiteral("returnToCad"));
     playLayout->addWidget(impl_->playBend);
     playLayout->addWidget(impl_->previewControls, 1);
@@ -2706,7 +2807,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->playbackSpeed->setTickPosition(QSlider::NoTicks);
     impl_->playbackSpeed->setTickInterval(1);
     impl_->playbackSpeed->setMinimumWidth(80);
-    impl_->playbackSpeed->setMaximumWidth(160);
+    impl_->playbackSpeed->setMaximumWidth(95);
     speedTitle->setBuddy(impl_->playbackSpeed);
     impl_->playbackSpeedValue = new QLabel(QStringLiteral("1×"), impl_->playbackSpeedControls);
     impl_->playbackSpeedValue->setObjectName(QStringLiteral("bendPlaybackSpeedValue"));
@@ -2797,10 +2898,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             }
         }
     });
-    addDock(QStringLiteral("sequenceDock"), QStringLiteral("Просмотр операции"), sequence,
-            Qt::BottomDockWidgetArea);
-
-    findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->hide();
+    impl_->operationOverlay->setStyleSheet(QStringLiteral(
+        "QWidget#operationOverlay{background:#F4F7F9;border:1px solid #526171;border-radius:6px;}"
+        "QWidget#routeStepStrip{border:0;}QWidget#playbackControls{background:transparent;}"));
+    impl_->viewer->setBottomOverlay(impl_->operationOverlay);
+    impl_->operationOverlay->hide();
     impl_->routePanel->onSelect = [this](int) {
         impl_->stopPlayback();
         impl_->draftAutoPlay = false;
@@ -2869,7 +2971,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *processGroup = new QButtonGroup(processPanel);
     processGroup->setExclusive(true);
     const std::array<QString, 3> stageNames{QStringLiteral("Деталь"), QStringLiteral("Инструмент"),
-                                            QStringLiteral("Проверка")};
+                                            QStringLiteral("Гибка")};
     const std::array<int, 3> stageTabs{0, 3, 2};
     for (int i = 0; i < 3; ++i) {
         auto *button =
@@ -2892,6 +2994,16 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         });
     }
     processGroup->button(0)->setChecked(true);
+    auto *drawingButton = new ProcessStepButton(3, QStringLiteral("Чертёж / PDF"), processPanel);
+    drawingButton->setObjectName("drawingStageButton");
+    drawingButton->setStatus(QStringLiteral("Виды и развёртка"));
+    drawingButton->setEnabled(impl_->drawingAction->isEnabled());
+    processLayout->addWidget(drawingButton, 1);
+    connect(drawingButton, &QToolButton::clicked, impl_->drawingAction, &QAction::trigger);
+    connect(impl_->drawingAction, &QAction::changed, drawingButton,
+            [drawingButton, action = impl_->drawingAction] {
+                drawingButton->setEnabled(action->isEnabled());
+            });
     connect(impl_->propertyTabs, &QTabWidget::currentChanged, this, [this, processGroup](int page) {
         const int stage = page == 3 ? 1 : page == 2 ? 2 : 0;
         processGroup->button(stage)->setChecked(true);
@@ -2937,6 +3049,17 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             });
 
     auto *help = menuBar()->addMenu(QStringLiteral("Справка"));
+    auto *navigationHelp = help->addAction(QStringLiteral("Управление сценой"));
+    navigationHelp->setShortcut(QKeySequence::HelpContents);
+    connect(navigationHelp, &QAction::triggered, this, [this] {
+        QMessageBox::information(
+            this, QStringLiteral("Управление сценой"),
+            QStringLiteral("ПКМ — вращение, СКМ — перенос, колесо — масштаб.\n"
+                           "ЛКМ — выбор грани; F — вписать, Ctrl+D — размеры.\n"
+                           "Куб переключает виды. Якорь Y фиксирует горизонтальный обход пресса.\n"
+                           "В ленте 0 — заготовка, номера — результаты гибов. "
+                           "Перетаскивание меняет порядок; Ctrl+Z в ленте отменяет перестановку."));
+    });
     impl_->updatesAction = help->addAction(QStringLiteral("Проверить обновления…"));
     impl_->updatesAction->setObjectName(QStringLiteral("checkUpdatesAction"));
     impl_->updatesAction->setEnabled(false);

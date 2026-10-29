@@ -1122,7 +1122,7 @@ void testSingleBendWorkflow(bool graphics) {
             "Restored setup not reproducible");
     auto *mode = window.findChild<QComboBox *>(QStringLiteral("toolPreviewMode"));
     mode->setCurrentIndex(0);
-    auto *sequenceDock = window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"));
+    auto *sequenceDock = window.findChild<QWidget *>(QStringLiteral("playbackControls"));
     sequenceDock->hide();
     applyTools->click();
     require(sequenceDock->isVisible(), "Press preparation did not reveal playback controls");
@@ -1904,11 +1904,11 @@ void testGuidedWorkflow(bool graphics) {
     require(toggle->isChecked() && toggle->isVisible() && stage(0)->isChecked(),
             "Import did not retain detail stage/automatic cutouts");
     require(!stage(3) && !window.findChild<QDockWidget *>(QStringLiteral("projectDock")) &&
-                !window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->isVisible() &&
+                !window.findChild<QWidget *>(QStringLiteral("playbackControls"))->isVisible() &&
                 !window.findChild<QListView *>(QStringLiteral("bendList"))->isVisible(),
             "Single-bend task retained unnecessary panels/stages");
     for (int i = 0; i < 3; ++i) {
-        require(stage(i) && stage(i)->height() >= 80 && stage(i)->width() >= 180 &&
+        require(stage(i) && stage(i)->height() >= 64 && stage(i)->width() >= 180 &&
                     stage(i)->shortcut() == QKeySequence(QStringLiteral("Alt+%1").arg(i + 1)),
                 "Process navigation is too small or lacks shortcuts");
     }
@@ -2158,7 +2158,7 @@ void testGuidedWorkflow(bool graphics) {
     const auto checkedFrame = slider->value();
     stage(0)->click();
     require(controller.bendPreview() == checkedPreview && !play->isEnabled() &&
-                !window.findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->isVisible(),
+                !window.findChild<QWidget *>(QStringLiteral("playbackControls"))->isVisible(),
             "Part navigation recalculated the result or kept transport controls");
     window.findChild<QPushButton *>(QStringLiteral("partPrimaryAction"))->click();
     require(controller.bendPreview() == checkedPreview && slider->value() == checkedFrame &&

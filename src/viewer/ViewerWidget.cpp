@@ -265,6 +265,9 @@ class OcctCanvas final : public QWidget {
     QMenu *navigationMenu() const {
         return navigationMenu_;
     }
+    void setBottomOverlay(QWidget *widget) {
+        bottomOverlay_ = widget;
+    }
 
     bool ready() const {
         return ready_;
@@ -1047,6 +1050,15 @@ class OcctCanvas final : public QWidget {
         box.Add(gp_Pnt(bounds.minimum.x, bounds.minimum.y, bounds.minimum.z));
         box.Add(gp_Pnt(bounds.maximum.x, bounds.maximum.y, bounds.maximum.z));
         view_->FitAll(box, dimensionsVisible_ ? 0.3 : 0.1, false);
+        if (bottomOverlay_ && bottomOverlay_->isVisible()) {
+            const auto size = physicalSize();
+            const int inset = qRound((bottomOverlay_->height() + 24) * devicePixelRatioF());
+            // Symmetric padding keeps the original orbit target while leaving
+            // the lower part of the fitted geometry clear of the transport.
+            const int available = std::max(size.height() / 3, size.height() - 2 * inset);
+            const auto camera = view_->Camera();
+            camera->SetScale(camera->Scale() * size.height() / available);
+        }
         view_->ZFitAll();
     }
 
@@ -1184,6 +1196,7 @@ class OcctCanvas final : public QWidget {
     QAction *dimensionsAction_ = nullptr;
     QMenu *navigationMenu_ = nullptr;
     QAction *orbitLockAction_ = nullptr;
+    QPointer<QWidget> bottomOverlay_;
     QToolButton *orbitLockButton_ = nullptr;
     bool pressOrbitLocked() const {
         return orbitLockAction_ && orbitLockAction_->isChecked() && preview_ &&
@@ -1318,6 +1331,8 @@ QImage ViewerWidget::captureImage(bool includeControls) {
     return result;
 }
 void ViewerWidget::setBottomOverlay(QWidget *widget) {
+    if (impl_->canvas)
+        impl_->canvas->setBottomOverlay(widget);
     if (impl_->bottomOverlay && impl_->bottomOverlay != widget) {
         impl_->bottomOverlay->removeEventFilter(this);
         impl_->bottomOverlay->hide();

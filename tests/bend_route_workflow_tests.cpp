@@ -194,7 +194,7 @@ int main(int argc, char **argv) {
                         !status.contains(QStringLiteral("порядок не найден")) &&
                         window.findChild<QLabel *>("bendCheckSummary")
                             ->text()
-                            .contains(QStringLiteral("Порядок не подготовлен")) &&
+                            .contains(QStringLiteral("80.00")) &&
                         window.findChild<QPushButton *>("resolveCheckProblem")->isVisible(),
                     "The short-tool diagnostic lacks lengths or pretends a geometry search failed");
             QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
@@ -320,8 +320,9 @@ int main(int argc, char **argv) {
                     }
             QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
             QApplication::processEvents();
-            const auto *status = window.findChild<QLabel *>("bendRouteStatus");
-            require(status->height() >= status->heightForWidth(status->width()),
+            const auto *status = window.findChild<QLabel *>("bendCheckSummary");
+            require(status->isVisible() && !status->text().isEmpty() &&
+                        status->height() >= status->heightForWidth(status->width()),
                     "The real-model warning was captured before its layout settled");
             const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
             if (!output.isEmpty()) {
@@ -356,8 +357,9 @@ int main(int argc, char **argv) {
         QApplication::processEvents();
         require(strip->parentWidget()->rect().contains(strip->geometry()) && !controller.hasWork(),
                 "Viewport strip clipped on resize");
-        const auto *routeStatus = window.findChild<QLabel *>("bendRouteStatus");
-        require(routeStatus->height() >= routeStatus->heightForWidth(routeStatus->width()),
+        const auto *routeStatus = window.findChild<QLabel *>("bendCheckSummary");
+        require(routeStatus->isVisible() && !routeStatus->text().isEmpty() &&
+                    routeStatus->height() >= routeStatus->heightForWidth(routeStatus->width()),
                 "The route warning is clipped instead of wrapping at the current width");
         window.resize(1280, 850);
         QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);

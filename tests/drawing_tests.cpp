@@ -1301,9 +1301,13 @@ void workflow(const QString &folder) {
     const auto revision = c.session().editRevision();
     auto *action = window.findChild<QAction *>("bendingDrawingAction");
     require(action && action->isEnabled(), "Drawing action missing");
+    auto *drawingEntry = window.findChild<QToolButton *>("drawingStageButton");
+    require(drawingEntry && drawingEntry->isVisible() && drawingEntry->isEnabled() &&
+                !drawingEntry->isCheckable() && !c.bendPreview() && !c.bendRoute(),
+            "Drawing entry is missing or requires a bending result");
     bool inspected = false, pdf = false;
     int exportedPages = 0;
-    action->trigger();
+    drawingEntry->click();
     auto *dialog = window.findChild<QDialog *>("bendingDrawingDialog");
     require(dialog && dialog->isVisible() && !dialog->isModal() &&
                 QApplication::activeModalWidget() == nullptr && window.isEnabled() &&
