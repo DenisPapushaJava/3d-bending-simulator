@@ -306,72 +306,114 @@ std::optional<std::array<TopoDS_Shape, 2>> splitAtBend(const TopoDS_Shape &sourc
     }
     return result[0].IsNull() || result[1].IsNull() ? std::nullopt : std::optional{result};
 }
-void makeWholePartDisplay(PreviewFrame &frame, const TopoDS_Shape &source,
-                          const std::array<TopoDS_Shape, 2> &flanges, const TopoDS_Shape &sector,
+struct SkinNode {
+    gp_Pnt point;
+    unsigned regions = 0;
+};
+struct SkinFace {
+    Handle(Poly_Triangulation) original;
+    TopAbs_Orientation orientation;
+    std::vector<SkinNode> nodes;
+    std::size_t region = 0;
+};
+using WholePartSkin = std::vector<SkinFace>;
+WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
+                                   const std::array<TopoDS_Shape, 2> &flanges,
+                                   const TopoDS_Shape &sector, double tolerance,
+                                   std::stop_token stop) {
+    // Membership is in immutable SOURCE components and does not depend on the
+    // displayed angle. Preserve all rail memberships; never cache across operations.
+    WholePartSkin result;
+    std::array<BRepClass3d_SolidClassifier, 3> classifiers{BRepClass3d_SolidClassifier(flanges[0]),
+                                                           BRepClass3d_SolidClassifier(sector),
+                                                           BRepClass3d_SolidClassifier(flanges[1])};
+    for (TopExp_Explorer f(source, TopAbs_FACE); f.More(); f.Next()) {
+        if (stop.stop_requested())
+            return {};
+        const auto face = TopoDS::Face(f.Current());
+        TopLoc_Location location;
+        const auto original = BRep_Tool::Triangulation(face, location);
+        if (original.IsNull())
+            throw std::runtime_error("Missing original surface mesh");
+        SkinFace skin{original, face.Orientation(), {}, 0};
+        skin.nodes.reserve(static_cast<std::size_t>(original->NbNodes()));
+        std::array<unsigned, 3> votes{};
+        for (int n = 1; n <= original->NbNodes(); ++n) {
+            if ((n & 255) == 0 && stop.stop_requested())
+                return {};
+            const auto point = original->Node(n).Transformed(location.Transformation());
+            unsigned regions = 0;
+            for (std::size_t r = 0; r < 3; ++r) {
+                classifiers[r].Perform(point, tolerance * 10);
+                if (classifiers[r].State() != TopAbs_IN && classifiers[r].State() != TopAbs_ON)
+                    continue;
+                regions |= 1u << r;
+                ++votes[r];
+            }
+            if (!regions)
+                throw std::runtime_error(
+                    "Source skin is outside the two checked components and bend");
+            skin.nodes.push_back({point, regions});
+        }
+        skin.region =
+            static_cast<std::size_t>(std::max_element(votes.begin(), votes.end()) - votes.begin());
+        result.push_back(std::move(skin));
+    }
+    return result;
+}
+void makeWholePartDisplay(PreviewFrame &frame, const WholePartSkin &source,
                           const simulation::SingleBend &model, const FrameBasis &from,
                           const FrameBasis &to, const simulation::BendSection &section,
-                          double tolerance, std::stop_token stop) {
+                          std::stop_token stop) {
     const auto final = *simulation::singleBendSection(model, 1);
     std::array<gp_Trsf, 2> maps;
     for (std::size_t s = 0; s < 2; ++s)
         maps[s].SetDisplacement(flangeAxes(from, final, s == 1), flangeAxes(to, section, s == 1));
-    std::array<BRepClass3d_SolidClassifier, 3> classifiers{BRepClass3d_SolidClassifier(flanges[0]),
-                                                           BRepClass3d_SolidClassifier(sector),
-                                                           BRepClass3d_SolidClassifier(flanges[1])};
     BRep_Builder builder;
     for (auto &region : frame.displayRegions) {
         TopoDS_Compound c;
         builder.MakeCompound(c);
         region = c;
     }
-    for (TopExp_Explorer f(source, TopAbs_FACE); f.More(); f.Next()) {
+    for (const auto &face : source) {
         if (stop.stop_requested())
             return;
-        const auto face = TopoDS::Face(f.Current());
-        TopLoc_Location location;
-        const auto original = BRep_Tool::Triangulation(face, location);
-        if (original.IsNull())
-            throw std::runtime_error("Missing original surface mesh");
+        const auto &original = face.original;
         Handle(Poly_Triangulation) mesh =
             new Poly_Triangulation(original->NbNodes(), original->NbTriangles(), false);
-        std::array<unsigned, 3> votes{};
-        for (int n = 1; n <= original->NbNodes(); ++n) {
-            const auto p = original->Node(n).Transformed(location.Transformation());
+        for (std::size_t n = 0; n < face.nodes.size(); ++n) {
+            const auto &[point, regions] = face.nodes[n];
             std::optional<gp_Pnt> mapped;
             for (std::size_t r = 0; r < 3; ++r) {
-                classifiers[r].Perform(p, tolerance * 10);
-                if (classifiers[r].State() != TopAbs_IN && classifiers[r].State() != TopAbs_ON)
+                if (!(regions & (1u << r)))
                     continue;
                 gp_Pnt next;
                 if (r == 1) {
-                    const gp_Vec v(from.origin, p);
+                    const gp_Vec v(from.origin, point);
                     const auto local =
                         simulation::mapBendPoint(model, {v.Dot(from.x), v.Dot(from.y)}, section);
                     if (!local)
                         throw std::runtime_error("Cannot map active zone surface");
                     next = sectionPoint(to, *local).Translated(to.z * v.Dot(from.z));
                 } else
-                    next = p.Transformed(maps[r / 2]);
+                    next = point.Transformed(maps[r / 2]);
                 if (mapped && mapped->Distance(next) > .02)
                     throw std::runtime_error(
                         "Inconsistent surface mapping at the active bend rail");
                 mapped = next;
-                ++votes[r];
             }
             if (!mapped)
                 throw std::runtime_error(
                     "Source skin is outside the two checked components and bend");
-            mesh->SetNode(n, *mapped);
+            mesh->SetNode(static_cast<int>(n + 1), *mapped);
         }
         for (int t = 1; t <= original->NbTriangles(); ++t)
             mesh->SetTriangle(t, original->Triangle(t));
         mesh->Deflection(original->Deflection());
         TopoDS_Face skin;
         builder.MakeFace(skin, mesh);
-        skin.Orientation(face.Orientation());
-        builder.Add(frame.displayRegions[static_cast<std::size_t>(
-                        std::max_element(votes.begin(), votes.end()) - votes.begin())],
-                    skin);
+        skin.Orientation(face.orientation);
+        builder.Add(frame.displayRegions[face.region], skin);
     }
     TopoDS_Compound assembly;
     builder.MakeCompound(assembly);
@@ -895,6 +937,12 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                     {initialTools[1], core::punchLengthMm(*toolParameters)});
             }
         }
+        const auto skin = multi && !displaySource.IsNull()
+                              ? prepareWholePartSkin(displaySource, flanges, sourceSector,
+                                                     analysis.lengthToleranceMm, stop)
+                              : WholePartSkin{};
+        if (stop.stop_requested())
+            return cancelled();
         Bnd_Box envelope;
         bool returnSweepClear = true;
         constexpr std::size_t formingIntervals = 40;
@@ -1036,9 +1084,8 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                                     "Collision snapshot mesh failed", i};
                         if (!displaySource.IsNull()) {
                             if (multi)
-                                makeWholePartDisplay(frame, displaySource, flanges, sourceSector,
-                                                     model, sourceBasis, basis, section,
-                                                     analysis.lengthToleranceMm, stop);
+                                makeWholePartDisplay(frame, skin, model, sourceBasis, basis,
+                                                     section, stop);
                             else
                                 makeDisplay(frame, displaySource, model, sourceBasis, basis,
                                             section, stop);
@@ -1129,9 +1176,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             }
             if (!displaySource.IsNull()) {
                 if (multi)
-                    makeWholePartDisplay(frame, displaySource, flanges, sourceSector, model,
-                                         sourceBasis, basis, section, analysis.lengthToleranceMm,
-                                         stop);
+                    makeWholePartDisplay(frame, skin, model, sourceBasis, basis, section, stop);
                 else
                     makeDisplay(frame, displaySource, model, sourceBasis, basis, section, stop);
             }

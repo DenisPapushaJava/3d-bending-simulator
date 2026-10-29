@@ -4,9 +4,14 @@
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
+#include <Poly_Triangulation.hxx>
 #include <STEPControl_Writer.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -20,6 +25,31 @@ double volume(const TopoDS_Shape &s) {
     GProp_GProps p;
     BRepGProp::VolumeProperties(s, p);
     return std::abs(p.Mass());
+}
+void checkSkin(const cad::PreviewFrame &frame) {
+    std::array<BRepClass3d_SolidClassifier, 3> solid{BRepClass3d_SolidClassifier(frame.regions[0]),
+                                                     BRepClass3d_SolidClassifier(frame.regions[1]),
+                                                     BRepClass3d_SolidClassifier(frame.regions[2])};
+    unsigned count = 0;
+    // Independent classification in each MOVED frame checks cached source membership,
+    // including bend-rail nodes and faces with visible holes on the filled calculation body.
+    for (const auto &region : frame.displayRegions)
+        for (TopExp_Explorer f(region, TopAbs_FACE); f.More(); f.Next()) {
+            TopLoc_Location location;
+            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(f.Current()), location);
+            require(!mesh.IsNull(), "Visible surface lost its mesh");
+            for (int n = 1; n <= mesh->NbNodes(); ++n) {
+                const auto point = mesh->Node(n).Transformed(location.Transformation());
+                bool contained = false;
+                for (auto &classifier : solid) {
+                    classifier.Perform(point, .02);
+                    contained |= classifier.State() == TopAbs_ON || classifier.State() == TopAbs_IN;
+                }
+                require(contained, "Visible skin left the checked material during motion");
+                ++count;
+            }
+        }
+    require(count > 0, "Empty visible skin");
 }
 application::DocumentPtr load(const std::filesystem::path &path) {
     const auto d = application::resultDocument(cad::StepImporter{}.load(path, {}, {}));
@@ -69,6 +99,8 @@ int main(int argc, char **argv) {
                                 std::max(.01, expected * 1.e-7),
                         "Whole-part frame lost material");
                 require(!frame.displayShape.IsNull(), "Original holes not displayed");
+                if (!sample && (f == 0 || f == 10 || f == 20))
+                    checkSkin(frame);
             }
             if (!sample && i > 0)
                 continue; // One press cycle plus every kinematic component split.
@@ -86,6 +118,9 @@ int main(int argc, char **argv) {
                 require(p->frameCount() == 61 && p->punchRetraction() &&
                             p->otherFormedBends() == bends.size() - 1,
                         "Incomplete press motion");
+                if (!sample)
+                    for (auto f : {0u, 20u, 40u, 60u})
+                        checkSkin(cad::OcctPreviewAccess::frame(*p, f));
                 std::cout << "B" << i + 1 << " conditional tool L=" << b.lengthMm << " motion OK\n";
             }
         }
