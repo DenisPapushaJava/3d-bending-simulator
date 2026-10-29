@@ -412,9 +412,54 @@ class MainWindow::Impl {
         refreshFlat();
     }
 
+    void prepareRoute(bool automatic, bool withTools) {
+        const auto &session = controller->session();
+        if (!session.document() || controller->hasWork())
+            return;
+        application::BendRouteRequest request;
+        request.automatic = automatic;
+        request.withTools = withTools;
+        const auto tools = toolSelection->parameters();
+        const auto assignment = toolSelection->assignment();
+        routePanel->setWithTools(withTools);
+        propertyTabs->setCurrentIndex(2);
+        if (withTools && !tools) {
+            refreshPreview();
+            return;
+        }
+        for (auto index : session.orderedBends()) {
+            const auto *entry = session.bend(index);
+            const auto target = session.bendTarget(index);
+            if (!entry || !application::included(entry->review) || !target) {
+                refreshPreview();
+                return;
+            }
+            request.operations.push_back({entry->id, index, *target,
+                                          withTools ? tools : std::nullopt,
+                                          withTools ? assignment : std::nullopt});
+        }
+        stopPlayback();
+        viewingRoute = true;
+        viewingSource = false;
+        wantFlat = false;
+        if (controller->prepareBendRoute(std::move(request), previewBuilder)) {
+            if (withTools) {
+                toolDraftChanged = false;
+                toolSelection->rememberChoice();
+            }
+            showPlaybackPanel();
+        }
+    }
+
     void checkTools() {
         if (controller->hasWork())
             return;
+        const auto &document = controller->session().document();
+        if (toolMode->currentIndex() == 0 && document &&
+            document->metadata().bendAnalysis.bends.size() > 1) {
+            prepareRoute(true, true);
+            return;
+        }
         viewingRoute = false;
         const auto row = bendList->currentIndex().row();
         const auto tools = toolSelection->parameters();
@@ -618,7 +663,9 @@ class MainWindow::Impl {
             : preview ? (preview->collision() ? QStringLiteral("Показать столкновение")
                                               : QStringLiteral("Показать результат"))
             : !singleBendSupported || !matchingBendThickness ? QStringLiteral("Условия проверки")
-            : chosen ? QStringLiteral("Проверить гибку")
+            : chosen ? (document->metadata().bendAnalysis.bends.size() > 1
+                            ? QStringLiteral("Проверить все гибы")
+                            : QStringLiteral("Проверить гибку"))
                      : QStringLiteral("Выбрать инструмент →"));
         const auto bendCount = document ? document->metadata().bendAnalysis.bends.size() : 0;
         processSteps[0]->setStatus(document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
@@ -1012,8 +1059,14 @@ class MainWindow::Impl {
                  ? QStringLiteral("Промежуточная 3D-форма по выбранному порядку. Извлечение и "
                                   "перенос между установками не проверены.\n")
                  : (document && document->metadata().bendAnalysis.bends.size() > 1
-                        ? QStringLiteral("Выбранный гиб — как последняя операция; остальные гибы "
-                                         "сохраняют форму STEP. Полный порядок не проверен.\n")
+                        ? (preview
+                               ? QStringLiteral("Выбранный гиб — как последняя операция; остальные "
+                                                "гибы сохраняют форму STEP. Полный порядок не "
+                                                "проверен.\n")
+                               : QStringLiteral(
+                                     "Проверка построит порядок всех гибов из заготовки. "
+                                     "Лента станет пошаговым 3D-просмотром после "
+                                     "успешного расчёта.\n"))
                         : QString{})) +
             (preview && preview->usesDrawingTools()
                  ? QStringLiteral("Пуансон: %1. Матрица: %2. ")
@@ -1038,7 +1091,13 @@ class MainWindow::Impl {
         checkScope->setMinimumHeight(std::max(0, checkScope->heightForWidth(240)));
         checkBend->setEnabled(applyTools->isEnabled() && toolSelection->parameters().has_value());
         checkBend->setVisible(!preview);
-        checkBend->setText(busy ? QStringLiteral("Проверяем…") : QStringLiteral("Проверить гибку"));
+        const auto checkTitle = document && document->metadata().bendAnalysis.bends.size() > 1
+                                    ? QStringLiteral("Проверить все гибы")
+                                    : QStringLiteral("Проверить гибку");
+        checkBend->setText(busy ? QStringLiteral("Проверяем…") : checkTitle);
+        applyTools->setText(toolMode->currentIndex() == 0
+                                ? checkTitle
+                                : QStringLiteral("Проверить начальную установку"));
         applyTools->setEnabled(applyTools->isEnabled() && toolSelection->parameters().has_value());
         toolStatus->setText(busy ? QStringLiteral("Выполняется проверка…")
                             : !checkBlocker.isEmpty() ? checkBlocker
@@ -2248,11 +2307,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     extraToolsLayout->addWidget(impl_->toolMode);
     extraTools->hide();
     connect(extraToolsToggle, &QToolButton::toggled, extraTools, &QWidget::setVisible);
-    connect(impl_->toolMode, &QComboBox::currentIndexChanged, this, [this](int index) {
-        impl_->applyTools->setText(index == 0 ? QStringLiteral("Проверить гибку")
-                                              : QStringLiteral("Проверить начальную установку"));
-        impl_->controller->discardBendPreview();
-    });
+    connect(impl_->toolMode, &QComboBox::currentIndexChanged, this,
+            [this](int) { impl_->controller->discardBendPreview(); });
     impl_->clearTools = new QPushButton(QStringLiteral("Удалить настройку инструмента"), toolPanel);
     impl_->clearTools->setObjectName(QStringLiteral("clearToolSetup"));
     extraToolsLayout->addWidget(impl_->clearTools);
@@ -2429,6 +2485,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->wantFlat = false;
             impl_->positionedPreview.reset();
             impl_->displayedPreview.reset();
+        } else if (const auto index = impl_->routePanel->selectedBend()) {
+            impl_->viewingRoute = false;
+            impl_->showSource();
+            impl_->bendList->setCurrentIndex(impl_->bendModel->index(static_cast<int>(*index), 0));
         }
         impl_->refreshPreview();
         if (impl_->controller->bendRoute())
@@ -2440,31 +2500,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->controller->setBendOrder(ids);
     };
     impl_->routePanel->onPrepare = [this](bool automatic, bool withTools) {
-        const auto &session = impl_->controller->session();
-        if (!session.document() || impl_->controller->hasWork())
-            return;
-        application::BendRouteRequest request;
-        request.automatic = automatic;
-        request.withTools = withTools;
-        const auto tools = impl_->toolSelection->parameters();
-        const auto assignment = impl_->toolSelection->assignment();
-        if (withTools && !tools)
-            return;
-        for (auto index : session.orderedBends()) {
-            const auto *entry = session.bend(index);
-            const auto target = session.bendTarget(index);
-            if (!entry || !application::included(entry->review) || !target)
-                return;
-            request.operations.push_back({entry->id, index, *target,
-                                          withTools ? tools : std::nullopt,
-                                          withTools ? assignment : std::nullopt});
-        }
-        impl_->stopPlayback();
-        impl_->viewingRoute = true;
-        impl_->viewingSource = false;
-        impl_->wantFlat = false;
-        if (impl_->controller->prepareBendRoute(std::move(request), impl_->previewBuilder))
-            impl_->showPlaybackPanel();
+        impl_->prepareRoute(automatic, withTools);
     };
     auto *processBar = new QToolBar(QStringLiteral("Этапы работы"), this);
     processBar->setObjectName(QStringLiteral("processNavigation"));

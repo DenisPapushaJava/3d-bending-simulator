@@ -5,6 +5,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <numbers>
@@ -98,6 +99,10 @@ void RoutePanel::select(int step) {
     if (onSelect)
         onSelect(selected_);
 }
+void RoutePanel::setWithTools(bool withTools) {
+    const QSignalBlocker block(mode_);
+    mode_->setCurrentIndex(withTools ? 1 : 0);
+}
 void RoutePanel::move(int delta) {
     const int from = selected_ - 1, to = from + delta;
     if (from < 0 || to < 0 || to >= static_cast<int>(ids_.size()) || !onReorder)
@@ -134,12 +139,16 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             button->setObjectName(QStringLiteral("routeStep%1").arg(i));
             button->setCheckable(true);
             button->setFixedSize(40, 36);
-            button->setToolTip(i == 0 ? QStringLiteral("0 — заготовка до первого гиба")
-                                      : QStringLiteral("Шаг %1 · B%2 · показать начало операции")
-                                            .arg(i)
-                                            .arg(indices_[i - 1] + 1, 2, 10, QLatin1Char('0')));
+            button->setToolTip(
+                i == 0 ? QStringLiteral("0 — заготовка до первого гиба")
+                       : (route_ ? QStringLiteral("Шаг %1 · B%2 · показать начало операции")
+                                 : QStringLiteral("Черновик: шаг %1 · B%2 · выделить гиб детали"))
+                             .arg(i)
+                             .arg(indices_[i - 1] + 1, 2, 10, QLatin1Char('0')));
             button->setAccessibleName(i == 0 ? QStringLiteral("Показать заготовку")
-                                             : QStringLiteral("Показать операцию %1").arg(i));
+                                             : (route_ ? QStringLiteral("Показать операцию %1")
+                                                       : QStringLiteral("Выделить гиб для шага %1"))
+                                                   .arg(i));
             strip_->addWidget(button);
             steps_.push_back(button);
             connect(button, &QPushButton::clicked, this,
@@ -253,8 +262,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     else if (mode_->currentIndex() == 1 && !toolsAvailable)
         message = QStringLiteral("Выберите инструмент либо режим «Без инструмента».");
     else
-        message = QStringLiteral("Подберите порядок из плоской заготовки. После перестановки шагов "
-                                 "нажмите «Проверить мой порядок».");
+        message = QStringLiteral("Черновик порядка. «Проверить все гибы» или «Подобрать порядок» "
+                                 "подготовит 3D-шаги из заготовки. После перестановки нажмите "
+                                 "«Проверить мой порядок».");
     status_->setText(message);
     status_->setToolTip(
         error ? QString::fromStdString(error->detail)

@@ -16,6 +16,11 @@ class RoutePanel final : public QWidget {
                  std::optional<application::BendRouteError>, bool busy, bool preparing,
                  bool toolsAvailable);
     void select(int step);
+    void setWithTools(bool);
+    [[nodiscard]] std::optional<std::size_t> selectedBend() const {
+        return selected_ > 0 && operation() < indices_.size() ? std::optional{indices_[operation()]}
+                                                              : std::nullopt;
+    }
     [[nodiscard]] int selected() const {
         return selected_;
     }

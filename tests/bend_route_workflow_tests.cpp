@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QLabel>
+#include <QListView>
 #include <QPainter>
 #include <QPushButton>
 #include <QSlider>
@@ -58,11 +59,14 @@ int main(int argc, char **argv) {
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
         window.show();
-        auto path = folder.path() + "/channel.step";
-        STEPControl_Writer writer;
-        require(writer.Transfer(fixtures::channel(), STEPControl_AsIs) == IFSelect_RetDone &&
-                    writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
-                "Fixture write");
+        const bool sample = app.arguments().size() > 1 && !app.arguments()[1].startsWith("--");
+        auto path = sample ? app.arguments()[1] : folder.path() + "/channel.step";
+        if (!sample) {
+            STEPControl_Writer writer;
+            require(writer.Transfer(fixtures::channel(), STEPControl_AsIs) == IFSelect_RetDone &&
+                        writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
+                    "Fixture write");
+        }
         auto &controller = window.importController();
         window.openStep(path);
         wait([&] { return !controller.hasWork(); });
@@ -73,16 +77,37 @@ int main(int argc, char **argv) {
         auto *mode = window.findChild<QComboBox *>("bendRouteMode");
         auto *prepare = window.findChild<QPushButton *>("prepareBendRoute");
         require(mode && prepare, "No route controls");
-        if (withTools)
+        const int count =
+            static_cast<int>(controller.session().document()->metadata().bendAnalysis.bends.size());
+        require(count > 1, "The route fixture must have several bends");
+        auto *draft = window.findChild<QPushButton *>("routeStep2");
+        require(draft && draft->toolTip().contains(QStringLiteral("Черновик")),
+                "Unprepared route looks like a ready animation");
+        draft->click();
+        require(!controller.hasWork() && !controller.bendRoute() &&
+                    window.findChild<QListView *>("bendList")->currentIndex().row() == 1,
+                "A draft step neither selected its source bend nor avoided calculation");
+        if (withTools) {
             window.findChild<QPushButton *>("recommendTools")->click();
-        mode->setCurrentIndex(withTools ? 1 : 0);
-        require(prepare->isEnabled(), "Cannot prepare geometry route");
-        prepare->click();
+            // Reproduce the normal user path, including a previously changed route mode.
+            mode->setCurrentIndex(0);
+            auto *check = window.findChild<QPushButton *>("checkBend");
+            require(check->isEnabled() && check->text().contains(QStringLiteral("все гибы")),
+                    "The main check does not explain its multi-bend scope");
+            check->click();
+        } else {
+            mode->setCurrentIndex(0);
+            require(prepare->isEnabled(), "Cannot prepare geometry route");
+            prepare->click();
+        }
         wait([&] { return !controller.hasWork(); });
         if (const auto error = controller.bendRouteError())
             throw std::runtime_error(error->detail);
         const auto route = controller.bendRoute();
-        require(route && route->steps.size() == 2, "No complete channel route");
+        require(route && route->steps.size() == static_cast<std::size_t>(count) &&
+                    !controller.bendPreview(),
+                "The main check prepared only one bend instead of the complete route");
+        require(mode->currentIndex() == (withTools ? 1 : 0), "Route mode differs from its result");
         require(route->withTools == withTools &&
                     route->steps[0].preview->usesDrawingPunch() == withTools &&
                     route->steps[0].preview->usesDrawingDie() == withTools,
@@ -91,7 +116,7 @@ int main(int argc, char **argv) {
         auto *strip = window.findChild<QWidget *>("routeStepStrip");
         require(viewerWidget && strip && viewerWidget->isAncestorOf(strip),
                 "The route strip is outside the viewport");
-        for (int i = 0; i <= 2; ++i)
+        for (int i = 0; i <= count; ++i)
             require(window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(i))->text() ==
                         QString::number(i),
                     "Route numbers contain feature IDs");
@@ -100,7 +125,8 @@ int main(int argc, char **argv) {
                     .contains(QStringLiteral("заготовка")),
                 "Blank stage is ambiguous");
         auto *frame = window.findChild<QSlider *>("bendFrame");
-        for (int index : {2, 0, 1, 2}) {
+        std::vector<QImage> images;
+        for (int index = 0; index <= count; ++index) {
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(index))->click();
             require(controller.bendRoute() == route && !controller.hasWork() && frame->value() == 0,
                     "Stage navigation recalculated or retained a different frame");
@@ -108,8 +134,35 @@ int main(int argc, char **argv) {
                 require(!frame->isEnabled(), "The blank stage exposes a bending slider");
             else if (QApplication::platformName() != "offscreen")
                 require(frame->isEnabled(), "Native operation playback is unavailable");
-            if (index > 0)
+            if (index > 0) {
                 frame->setValue(10);
+                if (viewerWidget->isReady()) {
+                    const auto image = viewerWidget->captureImage();
+                    for (const auto &previous : images)
+                        require(image != previous, "Different steps display the same 3D state");
+                    images.push_back(image);
+                }
+            }
+        }
+        for (int index : {0, count, 1, count}) {
+            window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(index))->click();
+            require(controller.bendRoute() == route && !controller.hasWork() && frame->value() == 0,
+                    "Arbitrary navigation recalculated or showed the end of another step");
+        }
+        if (sample) {
+            const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+            if (!output.isEmpty()) {
+                auto shot = window.grab().toImage();
+                if (viewerWidget->isReady()) {
+                    QPainter painter(&shot);
+                    painter.drawImage(viewerWidget->mapTo(&window, QPoint()),
+                                      viewerWidget->captureImage(true));
+                }
+                require(shot.save(output), "Sample snapshot failed");
+            }
+            controller.shutdown();
+            std::cout << count << " route steps navigated successfully\n";
+            return 0;
         }
         window.findChild<QPushButton *>("routeMoveEarlier")->click();
         require(!controller.bendRoute() && controller.session().modified() && !controller.hasWork(),
