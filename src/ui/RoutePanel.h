@@ -16,7 +16,12 @@ class RoutePanel final : public QWidget {
                  std::optional<application::BendRouteError>, bool busy, bool preparing,
                  bool toolsAvailable);
     void select(int step);
-    void setWithTools(bool);
+    void setWithTools(bool, bool perBend = false);
+    [[nodiscard]] bool perBendTools() const;
+    [[nodiscard]] bool withTools() const;
+    void setExpandedSearch(bool expanded) {
+        expandedSearch_ = expanded;
+    }
     [[nodiscard]] std::optional<std::size_t> selectedBend() const {
         return selected_ > 0 && operation() < indices_.size() ? std::optional{indices_[operation()]}
                                                               : std::nullopt;
@@ -34,6 +39,8 @@ class RoutePanel final : public QWidget {
     std::function<void(int)> onSelect;
     std::function<void(std::vector<std::string>)> onReorder;
     std::function<void()> onModeChanged;
+    std::function<void(std::size_t)> onEditTool;
+    std::function<void()> onExpandSearch;
 
   private:
     void resizeEvent(QResizeEvent *) override;
@@ -45,7 +52,8 @@ class RoutePanel final : public QWidget {
     std::vector<QPushButton *> steps_;
     int selected_ = 0;
     QComboBox *mode_;
-    QPushButton *automatic_, *manual_, *earlier_, *later_;
+    QPushButton *automatic_, *manual_, *earlier_, *later_, *editTool_, *expandSearch_;
+    bool expandedSearch_ = false;
     QLabel *status_;
     QHBoxLayout *strip_;
     QHBoxLayout *details_;

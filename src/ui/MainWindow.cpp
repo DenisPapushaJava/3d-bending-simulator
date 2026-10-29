@@ -413,7 +413,32 @@ class MainWindow::Impl {
         refreshFlat();
     }
 
-    void prepareRoute(bool automatic, bool withTools) {
+    bool assignSelectedTool() {
+        const auto row = bendList->currentIndex().row();
+        const auto tools = toolSelection->parameters();
+        const auto assignment = toolSelection->assignment();
+        if (controller->hasWork() || row < 0 || !tools)
+            return false;
+        const bool applied =
+            assignment
+                ? controller->setBendToolAssignment(static_cast<std::size_t>(row), *assignment)
+                : controller->setBendTools(static_cast<std::size_t>(row), *tools);
+        if (applied) {
+            toolDraftChanged = false;
+            toolSelection->rememberChoice();
+        }
+        return applied;
+    }
+
+    void editRouteTool(std::size_t index) {
+        toolAssignmentScope->setCurrentIndex(1);
+        bendList->setCurrentIndex(bendModel->index(static_cast<int>(index), 0));
+        showSource();
+        propertyTabs->setCurrentIndex(3);
+        refreshPreview();
+    }
+
+    void prepareRoute(bool automatic, bool withTools, bool expanded = false) {
         const auto &session = controller->session();
         if (!session.document() || controller->hasWork())
             return;
@@ -421,11 +446,20 @@ class MainWindow::Impl {
         request.automatic = automatic;
         request.withTools = withTools;
         request.allowPartialEndSupport = withTools;
+        if (expanded) {
+            request.maximumChecks = 512;
+            request.maximumTimeMs = 120000;
+        }
+        const bool perBend = withTools && toolAssignmentScope->currentIndex() == 1;
+        if (perBend && toolDraftChanged && !assignSelectedTool()) {
+            propertyTabs->setCurrentIndex(3);
+            return;
+        }
         const auto tools = toolSelection->parameters();
         const auto assignment = toolSelection->assignment();
-        routePanel->setWithTools(withTools);
+        routePanel->setWithTools(withTools, perBend);
         propertyTabs->setCurrentIndex(2);
-        if (withTools && !tools) {
+        if (withTools && !perBend && !tools) {
             refreshPreview();
             return;
         }
@@ -436,14 +470,24 @@ class MainWindow::Impl {
                 refreshPreview();
                 return;
             }
+            if (perBend && !entry->tools) {
+                editRouteTool(index);
+                return;
+            }
             request.operations.push_back({entry->id, index, *target,
-                                          withTools ? tools : std::nullopt,
-                                          withTools ? assignment : std::nullopt});
+                                          !withTools ? std::nullopt
+                                          : perBend  ? entry->tools
+                                                     : tools,
+                                          !withTools ? std::nullopt
+                                          : perBend  ? entry->catalogTools
+                                                     : assignment});
         }
         stopPlayback();
         viewingRoute = true;
         viewingSource = false;
         wantFlat = false;
+        lastRouteAutomatic = automatic;
+        routePanel->setExpandedSearch(expanded);
         if (controller->prepareBendRoute(std::move(request), previewBuilder)) {
             if (withTools) {
                 toolDraftChanged = false;
@@ -776,6 +820,55 @@ class MainWindow::Impl {
     void refreshPreview() {
         const auto &session = controller->session();
         const auto &document = session.document();
+        const bool multiple = document && document->metadata().bendAnalysis.bends.size() > 1;
+        if (document && toolScopeRevision != session.revision()) {
+            toolScopeRevision = session.revision();
+            const auto indices = session.orderedBends();
+            const auto *first = indices.empty() ? nullptr : session.bend(indices.front());
+            const bool anyAssigned = std::any_of(indices.begin(), indices.end(), [&](auto i) {
+                return session.bend(i)->tools.has_value();
+            });
+            const bool same = first && std::all_of(indices.begin(), indices.end(), [&](auto i) {
+                                  const auto *entry = session.bend(i);
+                                  return entry->tools == first->tools &&
+                                         entry->catalogTools == first->catalogTools;
+                              });
+            const bool perBend = multiple && anyAssigned && !same;
+            const QSignalBlocker block(toolAssignmentScope);
+            toolAssignmentScope->setCurrentIndex(perBend ? 1 : 0);
+            routePanel->setWithTools(true, perBend);
+        }
+        const bool perBend = toolAssignmentScope->currentIndex() == 1;
+        toolAssignmentScope->setVisible(multiple);
+        toolAssignmentScope->setEnabled(!controller->hasWork());
+        toolBendSelection->setVisible(multiple && perBend);
+        toolBendSelection->setEnabled(!controller->hasWork());
+        assignBendTool->setVisible(multiple && perBend);
+        toolAssignmentStatus->setVisible(multiple && perBend);
+        {
+            const QSignalBlocker block(toolBendSelection);
+            toolBendSelection->clear();
+            std::size_t assigned = 0;
+            for (const auto index : session.orderedBends()) {
+                const auto *entry = session.bend(index);
+                assigned += entry && entry->tools ? 1 : 0;
+                toolBendSelection->addItem(
+                    QStringLiteral("B%1 · L %2 мм · %3")
+                        .arg(index + 1, 2, 10, QLatin1Char('0'))
+                        .arg(document->metadata().bendAnalysis.bends[index].lengthMm, 0, 'f', 1)
+                        .arg(entry && entry->tools ? QStringLiteral("назначен")
+                                                   : QStringLiteral("нет инструмента")),
+                    static_cast<int>(index));
+            }
+            toolBendSelection->setCurrentIndex(
+                toolBendSelection->findData(bendList->currentIndex().row()));
+            toolAssignmentStatus->setText(
+                QStringLiteral("Назначено %1 из %2. Сохраните выбор для каждого гиба; "
+                               "затем проверьте весь порядок. Переналадка между гибами "
+                               "не проверяется.")
+                    .arg(assigned)
+                    .arg(session.orderedBends().size()));
+        }
         routePanel->setVisible(propertyTabs->currentIndex() == 2 && document &&
                                document->metadata().bendAnalysis.bends.size() > 1);
         routePanel->stepStrip()->setVisible(propertyTabs->currentIndex() == 2 && document &&
@@ -806,8 +899,7 @@ class MainWindow::Impl {
         fixedSide->setEnabled(document && !controller->hasWork());
         toolMode->setEnabled(document && !controller->hasWork());
         const bool toolEditable = entry && included(entry->review) && !controller->hasWork();
-        const bool allBends = document && document->metadata().bendAnalysis.bends.size() > 1 &&
-                              toolMode->currentIndex() == 0;
+        const bool allBends = multiple && !perBend && toolMode->currentIndex() == 0;
         std::optional<core::ToolSelectionRequest> selectionRequest;
         if (document && entry && included(entry->review) && matchingThickness && row >= 0 &&
             static_cast<std::size_t>(row) < document->metadata().bendAnalysis.bends.size()) {
@@ -834,6 +926,8 @@ class MainWindow::Impl {
         applyTools->setEnabled(toolEditable && previewBuilder && supported && matchingThickness &&
                                session.bendTarget(static_cast<std::size_t>(row)).has_value());
         checkBend->setEnabled(applyTools->isEnabled());
+        assignBendTool->setText(
+            QStringLiteral("Назначить гибу B%1").arg(row + 1, 2, 10, QLatin1Char('0')));
         clearTools->setEnabled(toolEditable && entry->tools.has_value());
         const auto entryId = entry ? entry->id : std::string{};
         const auto savedTools = entry ? entry->tools : std::nullopt;
@@ -847,6 +941,8 @@ class MainWindow::Impl {
             toolDraftChanged = false;
             toolSelection->setChoice(savedTools, savedAssignment);
         }
+        assignBendTool->setEnabled(toolEditable && supported && matchingThickness &&
+                                   toolSelection->parameters().has_value());
         const auto preview = scenePreview();
         if (!preview) {
             previewDisplayError.clear();
@@ -1588,7 +1684,13 @@ class MainWindow::Impl {
     }
     MainWindow *window;
     RoutePanel *routePanel = nullptr;
+    QComboBox *toolAssignmentScope = nullptr;
+    QComboBox *toolBendSelection = nullptr;
+    QPushButton *assignBendTool = nullptr;
+    QLabel *toolAssignmentStatus = nullptr;
+    std::uint64_t toolScopeRevision = 0;
     bool viewingRoute = false;
+    bool lastRouteAutomatic = true;
     viewer::ViewerWidget *viewer = nullptr;
     ImportController *controller = nullptr;
     QListWidget *project = nullptr;
@@ -2322,6 +2424,19 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     toolLayout->setContentsMargins(18, 18, 18, 8);
     auto *toolHeading = new QLabel(QStringLiteral("Гибочный инструмент"), toolPanel);
     toolLayout->addWidget(toolHeading);
+    impl_->toolAssignmentScope = new QComboBox(toolPanel);
+    impl_->toolAssignmentScope->setObjectName("toolAssignmentScope");
+    impl_->toolAssignmentScope->setAccessibleName(QStringLiteral("Назначение инструмента"));
+    impl_->toolAssignmentScope->setToolTip(
+        QStringLiteral("Одна пара назначается всем гибам после успешной проверки. "
+                       "В индивидуальном режиме сохраняйте инструмент каждого гиба отдельно."));
+    impl_->toolAssignmentScope->addItems(
+        {QStringLiteral("Одна пара для всех гибов"), QStringLiteral("Отдельно для каждого гиба")});
+    toolLayout->addWidget(impl_->toolAssignmentScope);
+    impl_->toolBendSelection = new QComboBox(toolPanel);
+    impl_->toolBendSelection->setObjectName("toolBendSelection");
+    impl_->toolBendSelection->setAccessibleName(QStringLiteral("Гиб для назначения инструмента"));
+    toolLayout->addWidget(impl_->toolBendSelection);
     impl_->applyTools = new QPushButton(QStringLiteral("Проверить гибку"), toolPanel);
     impl_->applyTools->setObjectName(QStringLiteral("applyToolSetup"));
     impl_->applyTools->setMinimumHeight(40);
@@ -2331,6 +2446,15 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->viewer->setToolSegmentColors(toolSegmentColors());
     };
     toolLayout->addWidget(impl_->toolSelection);
+    impl_->assignBendTool = new QPushButton(toolPanel);
+    impl_->assignBendTool->setObjectName("assignBendTool");
+    impl_->assignBendTool->setToolTip(
+        QStringLiteral("Сохранить только выбранному гибу без расчёта"));
+    toolLayout->addWidget(impl_->assignBendTool);
+    impl_->toolAssignmentStatus = new QLabel(toolPanel);
+    impl_->toolAssignmentStatus->setObjectName("toolAssignmentStatus");
+    impl_->toolAssignmentStatus->setWordWrap(true);
+    toolLayout->addWidget(impl_->toolAssignmentStatus);
     impl_->toolMode = new QComboBox(toolPanel);
     impl_->toolMode->setObjectName(QStringLiteral("toolPreviewMode"));
     impl_->toolMode->setAccessibleName(QStringLiteral("Режим просмотра инструмента"));
@@ -2366,6 +2490,18 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *toolPage = taskPage(toolPanel, impl_->applyTools, this);
     impl_->propertyTabs->addTab(toolPage, QStringLiteral("Инструмент"));
     connect(impl_->applyTools, &QPushButton::clicked, this, [this] { impl_->checkTools(); });
+    connect(impl_->assignBendTool, &QPushButton::clicked, this,
+            [this] { impl_->assignSelectedTool(); });
+    connect(impl_->toolBendSelection, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (index >= 0)
+            impl_->bendList->setCurrentIndex(
+                impl_->bendModel->index(impl_->toolBendSelection->itemData(index).toInt(), 0));
+    });
+    connect(impl_->toolAssignmentScope, &QComboBox::currentIndexChanged, this, [this](int index) {
+        impl_->routePanel->setWithTools(true, index == 1);
+        impl_->controller->discardBendRoute();
+        impl_->refreshPreview();
+    });
     connect(impl_->checkBend, &QPushButton::clicked, this, [this] {
         impl_->toolMode->setCurrentIndex(0);
         impl_->checkTools();
@@ -2536,7 +2672,18 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         if (impl_->controller->bendRoute())
             impl_->showPlaybackPanel();
     };
-    impl_->routePanel->onModeChanged = [this] { impl_->controller->discardBendRoute(); };
+    impl_->routePanel->onModeChanged = [this] {
+        if (impl_->routePanel->withTools()) {
+            const QSignalBlocker block(impl_->toolAssignmentScope);
+            impl_->toolAssignmentScope->setCurrentIndex(impl_->routePanel->perBendTools() ? 1 : 0);
+        }
+        impl_->controller->discardBendRoute();
+        impl_->refreshPreview();
+    };
+    impl_->routePanel->onEditTool = [this](std::size_t index) { impl_->editRouteTool(index); };
+    impl_->routePanel->onExpandSearch = [this] {
+        impl_->prepareRoute(impl_->lastRouteAutomatic, impl_->routePanel->withTools(), true);
+    };
     impl_->routePanel->onReorder = [this](std::vector<std::string> ids) {
         impl_->stopPlayback();
         impl_->controller->setBendOrder(ids);
