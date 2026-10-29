@@ -1079,9 +1079,18 @@ class OcctCanvas final : public QWidget {
             driver_ = new OpenGl_GraphicDriver(display_);
             scene_ = new V3d_Viewer(driver_);
             Handle(V3d_AmbientLight) ambient = new V3d_AmbientLight();
-            ambient->SetIntensity(0.3f);
             scene_->AddLight(ambient);
-            scene_->AddLight(new V3d_DirectionalLight(gp_Dir(-0.2, 0.5, -1.0)));
+            // Broad fill from all sides: retain enough shading to read bends,
+            // without a single dominant light or a dark back/underside.
+            for (const auto &[direction, intensity] : std::array{
+                     std::pair{gp_Dir(-1, -1, -1), 0.32f}, std::pair{gp_Dir(1, -1, 1), 0.24f},
+                     std::pair{gp_Dir(1, 1, -1), 0.40f}, std::pair{gp_Dir(-1, 1, 1), 0.12f}}) {
+                // Classic shading weights light by linear RGB, rather than the
+                // ray/path-tracing Intensity() property.
+                Handle(V3d_DirectionalLight) fill = new V3d_DirectionalLight(
+                    direction, Quantity_Color(intensity, intensity, intensity, Quantity_TOC_RGB));
+                scene_->AddLight(fill);
+            }
             scene_->SetLightOn();
             context_ = new AIS_InteractiveContext(scene_);
             view_ = scene_->CreateView();
