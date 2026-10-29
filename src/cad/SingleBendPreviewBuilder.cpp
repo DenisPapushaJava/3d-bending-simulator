@@ -869,6 +869,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             basis.origin = gp_Pnt(0, 0, (toolParameters->lengthMm - model.widthMm) / 2.0);
         }
         std::array<TopoDS_Shape, 2> initialTools;
+        std::array<std::vector<ToolDisplaySegment>, 2> initialSegments;
         if (preview->setup) {
             initialTools = makeTools(*preview->setup, model.thicknessMm);
             if (realTools && realTools->useDrawingGeometry) {
@@ -879,13 +880,19 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         initialTools[i] = drawn[i];
             }
             if (realTools) {
-                initialTools[0] = segmentToolBody(initialTools[0], realTools->die,
-                                                  realTools->dieAssembly, 0, stop);
+                initialTools[0] =
+                    segmentToolBody(initialTools[0], realTools->die, realTools->dieAssembly, 0,
+                                    stop, &initialSegments[0]);
                 initialTools[1] = segmentToolBody(
                     initialTools[1], realTools->punch, realTools->punchAssembly,
-                    (toolParameters->lengthMm - core::punchLengthMm(*toolParameters)) / 2, stop);
+                    (toolParameters->lengthMm - core::punchLengthMm(*toolParameters)) / 2, stop,
+                    &initialSegments[1]);
                 if (stop.stop_requested())
                     return cancelled();
+            } else {
+                initialSegments[0].push_back({initialTools[0], toolParameters->lengthMm});
+                initialSegments[1].push_back(
+                    {initialTools[1], core::punchLengthMm(*toolParameters)});
             }
         }
         Bnd_Box envelope;
@@ -990,6 +997,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             }
             if (preview->setup) {
                 frame.tools = initialTools;
+                frame.toolSegments = initialSegments;
                 if (withMotion) {
                     gp_Trsf translation;
                     translation.SetTranslation(gp_Vec(0,
@@ -997,7 +1005,10 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                                           model.thicknessMm -
                                                           toolParameters->clearanceMm,
                                                       0));
-                    frame.tools[1] = initialTools[1].Moved(TopLoc_Location(translation));
+                    const TopLoc_Location location(translation);
+                    frame.tools[1] = initialTools[1].Moved(location);
+                    for (auto &segment : frame.toolSegments[1])
+                        segment.shape = segment.shape.Moved(location);
                 }
                 const std::array<std::pair<TopoDS_Shape, TopoDS_Shape>, 3> pairs{
                     {{frame.shape, frame.tools[0]},

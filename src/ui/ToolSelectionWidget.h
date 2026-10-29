@@ -42,6 +42,7 @@ class ToolSelectionWidget final : public QWidget {
     std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
         loadCatalog;
     std::function<void()> onChanged;
+    std::function<void()> onAppearanceChanged;
 
   private:
     struct Pair {

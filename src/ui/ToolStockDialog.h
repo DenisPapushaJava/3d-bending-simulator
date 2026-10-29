@@ -13,12 +13,17 @@ class ToolStockDialog final : public QDialog {
     Q_OBJECT
   public:
     ToolStockDialog(core::ToolCatalog, std::function<QString(core::ToolPreset)>, QWidget *);
+    std::function<void()> onColorsChanged;
 
   private:
     void load();
     void add(core::ToolSegment);
     void addSet(bool available);
     void updateSet();
+    void updateColors();
+    void updateEditing();
+    void chooseColor(double);
+    void resetColor(double);
     core::ToolKind toolKind() const;
     void save();
     core::ToolCatalog catalog_;
@@ -31,5 +36,7 @@ class ToolStockDialog final : public QDialog {
     QCheckBox *enabled_;
     QTableWidget *rows_;
     QLabel *status_;
+    bool loading_ = false;
+    bool inventoryEdited_ = false;
 };
 } // namespace bending::ui

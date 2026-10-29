@@ -1,5 +1,6 @@
 #include "bending/cad/occt/DrawingTools.h"
 #include "bending/cad/ToolProfileValidation.h"
+#include "bending/cad/occt/PreviewAccess.h"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
@@ -115,9 +116,14 @@ std::array<TopoDS_Shape, 2> makeDrawingTools(const core::ToolAssignment &a,
 }
 TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &tool,
                              const std::optional<core::ToolAssembly> &assembly, double startZ,
-                             std::stop_token stop) {
-    if (!assembly)
+                             std::stop_token stop, std::vector<ToolDisplaySegment> *display) {
+    if (display)
+        display->clear();
+    if (!assembly) {
+        if (display)
+            display->push_back({whole, tool.lengthMm});
         return whole;
+    }
     if (!tool.segments || !core::assemblyLength(*tool.segments, *assembly))
         throw std::runtime_error("Invalid tool assembly");
     Bnd_Box box;
@@ -149,6 +155,8 @@ TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &
         if (!std::isfinite(properties.Mass()) || std::abs(properties.Mass()) <= 1.e-10)
             throw std::runtime_error("Tool segment has no valid positive volume");
         builder.Add(parts, cut.Shape());
+        if (display)
+            display->push_back({cut.Shape(), length});
         startZ += length + assembly->gapMm;
     }
     return parts;

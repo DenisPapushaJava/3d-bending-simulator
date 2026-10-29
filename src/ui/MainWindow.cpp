@@ -11,6 +11,7 @@
 #include "bending/viewer/ViewerWidget.h"
 
 #include "RoutePanel.h"
+#include "ToolSegmentColorPreferences.h"
 #include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
@@ -1724,6 +1725,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         QStringLiteral("3D Bending Simulator · %1").arg(text(runtime.applicationVersion));
     resize(1440, 900);
     impl_->viewer = new viewer::ViewerWidget(this);
+    impl_->viewer->setToolSegmentColors(toolSegmentColors());
     auto *workspace = new QWidget(this);
     auto *workspaceLayout = new QVBoxLayout(workspace);
     workspaceLayout->setContentsMargins(0, 0, 0, 0);
@@ -2325,6 +2327,9 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->applyTools->setMinimumHeight(40);
 
     impl_->toolSelection = new ToolSelectionWidget(std::move(catalog), toolPanel);
+    impl_->toolSelection->onAppearanceChanged = [this] {
+        impl_->viewer->setToolSegmentColors(toolSegmentColors());
+    };
     toolLayout->addWidget(impl_->toolSelection);
     impl_->toolMode = new QComboBox(toolPanel);
     impl_->toolMode->setObjectName(QStringLiteral("toolPreviewMode"));

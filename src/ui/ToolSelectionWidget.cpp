@@ -86,12 +86,19 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         }
     });
     connect(stock_, &QPushButton::clicked, this, [this] {
+        const auto originalCatalog = catalog_;
         const auto previous = currentPair();
         const auto previousMode = mode_->currentIndex();
         ToolStockDialog dialog(
             core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_),
             [this](core::ToolPreset tool) { return saveImportedTool(std::move(tool)); }, this);
+        dialog.onColorsChanged = [this] {
+            if (onAppearanceChanged)
+                onAppearanceChanged();
+        };
         dialog.exec();
+        if (catalog_ == originalCatalog)
+            return;
         updating_ = true;
         selectPair(previous);
         mode_->setCurrentIndex(previousMode);

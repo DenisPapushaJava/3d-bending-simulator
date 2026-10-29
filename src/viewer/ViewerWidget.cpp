@@ -273,6 +273,15 @@ class OcctCanvas final : public QWidget {
         return {};
     }
 
+    void setToolSegmentColors(ToolSegmentColors colors) {
+        if (segmentColors_ == colors)
+            return;
+        segmentColors_ = std::move(colors);
+        if (preview_) {
+            const auto preview = preview_;
+            presentPreview(preview, previewFrame_, revision_);
+        }
+    }
     QString presentPreview(application::BendPreviewPtr preview, std::size_t index,
                            quint64 revision) {
         if (revision != revision_ || !document_ || !preview || index >= preview->frameCount()) {
@@ -307,6 +316,15 @@ class OcctCanvas final : public QWidget {
                     if (!frame.tools[tool].IsNull()) {
                         candidate->SetCustomColor(frame.tools[tool], toolColors[tool]);
                     }
+                    for (const auto &segment : frame.toolSegments[tool]) {
+                        const auto color = toolSegmentColor(segment.lengthMm, segmentColors_);
+                        const Quantity_Color native(color.redF(), color.greenF(), color.blueF(),
+                                                    Quantity_TOC_sRGB);
+                        TopTools_IndexedMapOfShape faces;
+                        TopExp::MapShapes(segment.shape, TopAbs_FACE, faces);
+                        for (int face = 1; face <= faces.Extent(); ++face)
+                            candidate->SetCustomColor(faces(face), native);
+                    }
                 }
                 if (const auto conflict = preview->collision()) {
                     const Quantity_Color red(.95, .06, .04, Quantity_TOC_RGB);
@@ -317,10 +335,16 @@ class OcctCanvas final : public QWidget {
                             for (int i = 1; i <= faces.Extent(); ++i)
                                 candidate->SetCustomColor(faces(i), red);
                         }
-                    if (*conflict != application::ToolCollisionPair::SheetPunch)
-                        candidate->SetCustomColor(frame.tools[0], red);
-                    if (*conflict != application::ToolCollisionPair::SheetDie)
-                        candidate->SetCustomColor(frame.tools[1], red);
+                    for (std::size_t tool = 0; tool < frame.tools.size(); ++tool)
+                        if (*conflict == application::ToolCollisionPair::DiePunch ||
+                            (tool == 0 && *conflict == application::ToolCollisionPair::SheetDie) ||
+                            (tool == 1 &&
+                             *conflict == application::ToolCollisionPair::SheetPunch)) {
+                            TopTools_IndexedMapOfShape faces;
+                            TopExp::MapShapes(frame.tools[tool], TopAbs_FACE, faces);
+                            for (int face = 1; face <= faces.Extent(); ++face)
+                                candidate->SetCustomColor(faces(face), red);
+                        }
                 }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
@@ -1075,6 +1099,7 @@ class OcctCanvas final : public QWidget {
     DimensionAnnotations dimensions_;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
+    ToolSegmentColors segmentColors_;
     application::FlatPatternPtr flat_;
     std::size_t previewFrame_ = 0;
     quint64 revision_ = 0;
@@ -1201,6 +1226,10 @@ void ViewerWidget::fitAll() {
     if (impl_->canvas) {
         impl_->canvas->fitAll();
     }
+}
+void ViewerWidget::setToolSegmentColors(ToolSegmentColors colors) {
+    if (impl_->canvas)
+        impl_->canvas->setToolSegmentColors(std::move(colors));
 }
 
 void ViewerWidget::setOrientation(Orientation orientation) {

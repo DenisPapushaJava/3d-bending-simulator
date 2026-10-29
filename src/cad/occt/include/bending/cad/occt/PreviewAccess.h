@@ -8,6 +8,7 @@
 
 #include <array>
 #include <optional>
+#include <vector>
 
 namespace bending::cad {
 struct BendDimensionAnchors {
@@ -18,9 +19,14 @@ struct BendDimensionAnchors {
     double angleRadians;
     std::optional<double> innerRadiusMm;
 };
+struct ToolDisplaySegment {
+    TopoDS_Shape shape; // A subshape of the complete checked tool, at this frame's placement.
+    double lengthMm;
+};
 struct PreviewFrame {
     TopoDS_Shape shape;
-    std::array<TopoDS_Shape, 2> tools;   // Die, punch; null in the kinematic preview.
+    std::array<TopoDS_Shape, 2> tools; // Die, punch; null in the kinematic preview.
+    std::array<std::vector<ToolDisplaySegment>, 2> toolSegments;
     std::array<TopoDS_Shape, 3> regions; // Flange A, bend, flange B; A is fixed only without tools.
     std::array<gp_Trsf, 2> materialTransforms; // Source components -> this frame.
     // Optional triangulated source surface with geometrically moved cutouts.

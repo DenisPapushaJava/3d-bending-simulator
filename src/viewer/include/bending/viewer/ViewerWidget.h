@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/viewer/ToolSegmentColors.h"
 #include <QImage>
 #include <QWidget>
 
@@ -35,6 +36,7 @@ class ViewerWidget final : public QWidget {
     [[nodiscard]] QImage captureImage(bool includeControls = false);
     // Qt-only HUD attachment. The viewer owns positioning above its native canvas.
     void setBottomOverlay(QWidget *);
+    void setToolSegmentColors(ToolSegmentColors);
     void fitAll();
     void setCutoutsVisible(bool visible);
     void setDimensionsVisible(bool visible);

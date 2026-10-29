@@ -1,10 +1,14 @@
 #include "ToolStockDialog.h"
+#include "ToolSegmentColorPreferences.h"
+#include <QAction>
 #include <QCheckBox>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QHeaderView>
 #include <QLabel>
+#include <QMenu>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -110,13 +114,22 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     enabled_ = new QCheckBox(QStringLiteral("Подбирать из указанного наличия секций"), this);
     enabled_->setObjectName("stockEnabled");
     layout->addWidget(enabled_);
-    rows_ = new QTableWidget(0, 3, this);
+    rows_ = new QTableWidget(0, 4, this);
     rows_->setObjectName("stockRows");
-    rows_->setHorizontalHeaderLabels(
-        {QStringLiteral("Длина, мм"), QStringLiteral("Количество, шт."), QStringLiteral("Форма")});
+    rows_->setHorizontalHeaderLabels({QStringLiteral("Длина, мм"),
+                                      QStringLiteral("Количество, шт."), QStringLiteral("Форма"),
+                                      QStringLiteral("Цвет")});
     rows_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    rows_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
+    rows_->setColumnWidth(3, 64);
     rows_->setSelectionBehavior(QAbstractItemView::SelectRows);
     layout->addWidget(rows_);
+    auto *colorHelp = new QLabel(
+        QStringLiteral("Цвета общие для одной длины у всех инструментов и сохраняются сразу. "
+                       "Нажмите цвет для выбора; правой кнопкой — возврат к стандартному."),
+        this);
+    colorHelp->setWordWrap(true);
+    layout->addWidget(colorHelp);
     auto *actions = new QHBoxLayout;
     auto *addRow = new QPushButton(QStringLiteral("Добавить"), this);
     addRow->setObjectName("stockAdd");
@@ -140,14 +153,20 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
             [this] { save(); });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(tool_, &QComboBox::currentIndexChanged, this, [this] { load(); });
-    connect(enabled_, &QCheckBox::toggled, rows_, &QWidget::setEnabled);
+    connect(enabled_, &QCheckBox::toggled, this, [this] {
+        if (!loading_)
+            inventoryEdited_ = true;
+        updateEditing();
+    });
     connect(addRow, &QPushButton::clicked, this, [this] {
         enabled_->setChecked(true);
         add({100, 0});
     });
     connect(remove, &QPushButton::clicked, this, [this] {
-        if (rows_->currentRow() >= 0)
+        if (rows_->currentRow() >= 0) {
             rows_->removeRow(rows_->currentRow());
+            inventoryEdited_ = true;
+        }
     });
     connect(standard, &QPushButton::clicked, this, [this] { addSet(false); });
     connect(set_, &QComboBox::currentIndexChanged, this, [this] { updateSet(); });
@@ -179,11 +198,42 @@ void ToolStockDialog::add(core::ToolSegment s) {
     rows_->setCellWidget(row, 0, length);
     rows_->setCellWidget(row, 1, quantity);
     rows_->setCellWidget(row, 2, shape);
+    auto *color = new QPushButton(rows_);
+    color->setObjectName("stockColor");
+    color->setContextMenuPolicy(Qt::CustomContextMenu);
+    rows_->setCellWidget(row, 3, color);
+    connect(color, &QPushButton::clicked, this, [this, length] { chooseColor(length->value()); });
+    connect(color, &QWidget::customContextMenuRequested, this, [this, color, length](QPoint p) {
+        QMenu menu(color);
+        auto *reset = menu.addAction(QStringLiteral("Стандартный цвет для этой длины"));
+        reset->setObjectName("resetSegmentColor");
+        connect(reset, &QAction::triggered, this, [this, length] { resetColor(length->value()); });
+        menu.exec(color->mapToGlobal(p));
+    });
+    connect(length, &QDoubleSpinBox::valueChanged, this, [this] {
+        if (!loading_)
+            inventoryEdited_ = true;
+        updateColors();
+    });
+    connect(quantity, &QSpinBox::valueChanged, this, [this] {
+        if (!loading_)
+            inventoryEdited_ = true;
+    });
+    connect(shape, &QComboBox::currentIndexChanged, this, [this] {
+        if (!loading_)
+            inventoryEdited_ = true;
+    });
+    if (!loading_) {
+        inventoryEdited_ = true;
+        updateEditing();
+        updateColors();
+    }
 }
 void ToolStockDialog::load() {
     const auto index = static_cast<std::size_t>(tool_->currentIndex());
     if (index >= catalog_.size())
         return;
+    loading_ = true;
     const auto &s = catalog_[index].segments;
     {
         const QSignalBlocker blocked(set_);
@@ -198,11 +248,17 @@ void ToolStockDialog::load() {
     updateSet();
     rows_->setRowCount(0);
     enabled_->setChecked(s.has_value());
-    rows_->setEnabled(s.has_value());
     if (s)
         for (const auto &r : *s)
             add(r);
-    for (const auto &r : referenceSections(toolKind(), 0)) {
+    auto references = referenceSections(toolKind(), 0);
+    const double nominalLength = catalog_[index].lengthMm;
+    if (nominalLength > 0 &&
+        std::none_of(references.begin(), references.end(), [nominalLength](const auto &r) {
+            return r.lengthMm == nominalLength && r.shape == core::SegmentShape::Straight;
+        }))
+        references.insert(references.begin(), {nominalLength, 0});
+    for (const auto &r : references) {
         bool exists = false;
         for (int i = 0; i < rows_->rowCount(); ++i)
             exists |=
@@ -215,6 +271,58 @@ void ToolStockDialog::load() {
     status_->setText(s ? QStringLiteral("Изменения применяются к библиотеке после сохранения.")
                        : QStringLiteral("Типовые размеры уже заполнены. Наличие ещё не указано; "
                                         "сохраняется прежний выбор цельного инструмента."));
+    loading_ = false;
+    inventoryEdited_ = false;
+    updateEditing();
+    updateColors();
+}
+void ToolStockDialog::updateEditing() {
+    for (int row = 0; row < rows_->rowCount(); ++row)
+        for (int column = 0; column < 3; ++column)
+            rows_->cellWidget(row, column)->setEnabled(enabled_->isChecked());
+}
+void ToolStockDialog::updateColors() {
+    const auto colors = toolSegmentColors();
+    for (int row = 0; row < rows_->rowCount(); ++row) {
+        const double length = static_cast<QDoubleSpinBox *>(rows_->cellWidget(row, 0))->value();
+        const auto color = viewer::toolSegmentColor(length, colors);
+        auto *button = static_cast<QPushButton *>(rows_->cellWidget(row, 3));
+        button->setStyleSheet(
+            QStringLiteral("background:%1;border:1px solid #596878;border-radius:3px;")
+                .arg(color.name()));
+        button->setProperty("segmentColor", color.name());
+        button->setAccessibleName(
+            QStringLiteral("Цвет секций длиной %1 мм: %2").arg(length).arg(color.name()));
+        button->setToolTip(button->accessibleName() +
+                           QStringLiteral(". Нажмите для выбора; ПКМ — стандартный цвет."));
+    }
+}
+void ToolStockDialog::chooseColor(double length) {
+    QColorDialog dialog(viewer::toolSegmentColor(length, toolSegmentColors()), this);
+    dialog.setObjectName("toolSegmentColorDialog");
+    dialog.setWindowTitle(QStringLiteral("Цвет секций длиной %1 мм").arg(length));
+    dialog.setOption(QColorDialog::DontUseNativeDialog);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    if (!setToolSegmentColor(length, dialog.currentColor())) {
+        status_->setText(QStringLiteral("Не удалось сохранить цвет в настройках."));
+        return;
+    }
+    updateColors();
+    status_->setText(
+        QStringLiteral("Цвет сохранён для этой длины у всех инструментов. Наличие не изменено."));
+    if (onColorsChanged)
+        onColorsChanged();
+}
+void ToolStockDialog::resetColor(double length) {
+    if (!resetToolSegmentColor(length)) {
+        status_->setText(QStringLiteral("Не удалось сбросить цвет в настройках."));
+        return;
+    }
+    updateColors();
+    status_->setText(QStringLiteral("Восстановлен стандартный цвет для этой длины."));
+    if (onColorsChanged)
+        onColorsChanged();
 }
 void ToolStockDialog::updateSet() {
     const bool specific = set_->currentIndex() > 0;
@@ -291,6 +399,11 @@ void ToolStockDialog::addSet(bool available) {
                   "Размеры добавлены с нулевым новым наличием; введённые количества сохранены."));
 }
 void ToolStockDialog::save() {
+    if (!inventoryEdited_) {
+        status_->setText(
+            QStringLiteral("Наличие сохранено без изменений. Цвета сохраняются сразу."));
+        return;
+    }
     const auto index = static_cast<std::size_t>(tool_->currentIndex());
     if (index >= catalog_.size())
         return;
@@ -314,6 +427,7 @@ void ToolStockDialog::save() {
         return;
     }
     catalog_[index] = std::move(tool);
+    inventoryEdited_ = false;
     status_->setText(
         QStringLiteral("Наличие сохранено. Существующие проекты сохраняют свои снимки сборок."));
 }
