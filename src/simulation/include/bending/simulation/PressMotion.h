@@ -40,4 +40,9 @@ preparePressMotion(const SingleBend &model, core::PressTools tools, double lengt
 // the punch returns to its initial Y; the formed sheet stays fixed, without springback.
 [[nodiscard]] std::optional<PressState>
 pressMotionState(const SingleBend &model, const PressMotion &motion, double progress) noexcept;
+// Same contact geometry, without asserting support or compatibility. For a manual
+// draft only; each displayed CAD position must separately check tool intersections.
+[[nodiscard]] std::optional<PressState>
+draftPressState(const SingleBend &, core::PressTools, double bendProgress,
+                std::optional<DieShoulders> shoulders = {}) noexcept;
 } // namespace bending::simulation

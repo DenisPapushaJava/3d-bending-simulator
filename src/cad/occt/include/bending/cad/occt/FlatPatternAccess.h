@@ -2,6 +2,7 @@
 #include "bending/application/FlatPattern.h"
 #include <TopoDS_Shape.hxx>
 #include <functional>
+#include <gp_Ax3.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
@@ -17,6 +18,11 @@ struct SheetBendRegion {
     std::size_t bendIndex, parent, child;
     TopoDS_Shape solid, flatSolid;
     std::function<gp_Pnt(gp_Pnt)> toFlat;
+    // Original coordinates -> partial bend, parent wall fixed. Same K=0.5 model as routes.
+    std::function<gp_Pnt(gp_Pnt, double)> atProgress;
+    std::function<gp_Trsf(double)> childAtProgress;
+    std::function<TopoDS_Shape(double)> solidAtProgress;
+    gp_Ax3 sectionAxes;
 };
 struct SheetLayout {
     std::vector<SheetWallRegion> walls;

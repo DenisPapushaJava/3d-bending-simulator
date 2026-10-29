@@ -124,12 +124,33 @@ class ImportController::Impl {
     std::optional<BendRouteError> routeError;
     std::uint64_t routeId = 0, routeRevision = 0, routeEditRevision = 0;
     bool preparingRoute = false;
+    RouteDraftPtr draft;
+    std::optional<BendRouteError> draftError;
+    std::uint64_t draftId = 0;
+    bool runningDraft = false;
+    struct DraftJob {
+        DocumentPtr document;
+        RouteDraftRequest request;
+        std::shared_ptr<const SingleBendPreviewBuilder> builder;
+        std::uint64_t id, revision, edit;
+    };
+    std::optional<DraftJob> pendingDraft;
+    void dispatchDraft();
+    void invalidateDraft() {
+        ++draftId;
+        draft.reset();
+        draftError.reset();
+        pendingDraft.reset();
+        if (runningDraft)
+            stop.request_stop();
+    }
     std::weak_ptr<const SingleBendPreviewBuilder> routeBuilder;
     void discardRouteCache() {
         if (const auto builder = routeBuilder.lock())
             builder->discardRouteCache();
     }
     void invalidateRoute() {
+        invalidateDraft();
         ++routeId;
         route.reset();
         routeError.reset();
@@ -178,6 +199,82 @@ class ImportController::Impl {
         }
     }
 };
+
+void ImportController::Impl::dispatchDraft() {
+    if (stopping || running || !pendingDraft)
+        return;
+    auto job = std::move(*pendingDraft);
+    pendingDraft.reset();
+    stop = std::stop_source{};
+    const auto token = stop.get_token();
+    running = runningDraft = true;
+    QMetaObject::invokeMethod(
+        worker,
+        [this, job = std::move(job), token]() mutable {
+            RouteDraftResult result = BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
+            try {
+                if (!token.stop_requested())
+                    result = job.builder->buildRouteDraft(job.document, job.request, token);
+            } catch (const std::exception &e) {
+                result = BendRouteError{BendRouteErrorCode::Failed, e.what()};
+            } catch (...) {
+                result = BendRouteError{BendRouteErrorCode::Failed, "Unexpected draft failure"};
+            }
+            QMetaObject::invokeMethod(
+                owner,
+                [this, job = std::move(job), token, result = std::move(result)] {
+                    running = runningDraft = false;
+                    if (stopping)
+                        return;
+                    if (job.id == draftId && job.revision == session.revision() &&
+                        job.edit == session.editRevision() && job.document == session.document() &&
+                        !session.activeRequest() && !token.stop_requested()) {
+                        if (const auto *value = std::get_if<RouteDraftPtr>(&result)) {
+                            const auto p = *value ? (*value)->visual : nullptr;
+                            bool valid = *value && (*value)->source == job.document &&
+                                         (*value)->request == job.request && p &&
+                                         p->unverifiedDraft() && !p->punchRetraction() &&
+                                         !p->pressMotion() &&
+                                         p->frameCount() == (job.request.step ? 21u : 1u) &&
+                                         (!p->toolSetup() ||
+                                          (*value)->checkedToolPositions == p->frameCount());
+                            if (valid && !job.request.operations.empty()) {
+                                const auto &op =
+                                    job.request
+                                        .operations[job.request.step ? job.request.step - 1 : 0];
+                                const bool tools = job.request.withTools && op.tools &&
+                                                   core::validPressTools(*op.tools);
+                                valid = bool(p->toolSetup()) == tools;
+                                if (tools)
+                                    valid = valid && p->toolSetup() &&
+                                            p->toolSetup()->tools == *op.tools &&
+                                            p->usesDrawingPunch() ==
+                                                bool(op.assignment &&
+                                                     op.assignment->useDrawingGeometry &&
+                                                     op.assignment->punch.drawing) &&
+                                            p->usesDrawingDie() ==
+                                                bool(op.assignment &&
+                                                     op.assignment->useDrawingGeometry &&
+                                                     op.assignment->die.drawing);
+                            } else
+                                valid = false;
+                            if (valid)
+                                draft = *value;
+                            else
+                                draftError = BendRouteError{BendRouteErrorCode::Failed,
+                                                            "Invalid draft result"};
+                        } else if (const auto &e = std::get<BendRouteError>(result);
+                                   e.code != BendRouteErrorCode::Cancelled)
+                            draftError = e;
+                    }
+                    dispatch();
+                    dispatchDraft();
+                    emit owner->stateChanged();
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
+}
 
 ImportController::ImportController(std::shared_ptr<const DocumentImporter> importer,
                                    Presenter presenter, QObject *parent)
@@ -246,7 +343,7 @@ const DocumentSession &ImportController::session() const {
 }
 
 bool ImportController::hasWork() const {
-    return impl_->running || impl_->pending.has_value();
+    return impl_->running || impl_->pending.has_value() || impl_->pendingDraft.has_value();
 }
 
 bool ImportController::prepareToolProfile(ToolProfileInput input,
@@ -515,7 +612,8 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         !state->session.activeRequest()) {
                         if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
                             const bool matchingMode =
-                                *preview && (*preview)->usesDrawingPunch() == expectedPunch &&
+                                *preview && !(*preview)->unverifiedDraft() &&
+                                (*preview)->usesDrawingPunch() == expectedPunch &&
                                 (*preview)->usesDrawingDie() == expectedDie &&
                                 (mode == BendPreviewMode::ToolSetup
                                      ? (*preview)->toolSetup() && !(*preview)->pressMotion() &&
@@ -572,7 +670,7 @@ void ImportController::discardBendRoute() {
     emit stateChanged();
 }
 bool ImportController::setBendOrder(const std::vector<std::string> &ids) {
-    if (impl_->stopping || hasWork())
+    if (impl_->stopping || impl_->session.activeRequest() || (hasWork() && !impl_->runningDraft))
         return false;
     const auto before = impl_->session.editRevision();
     const bool changed = impl_->session.setBendOrder(ids);
@@ -592,6 +690,50 @@ std::optional<BendRouteError> ImportController::bendRouteError() const {
 }
 bool ImportController::isPreparingRoute() const {
     return impl_->preparingRoute;
+}
+bool ImportController::isPreparingDraft() const {
+    return impl_->runningDraft || impl_->pendingDraft.has_value();
+}
+RouteDraftPtr ImportController::routeDraft() const {
+    return impl_->draft;
+}
+std::optional<BendRouteError> ImportController::routeDraftError() const {
+    return impl_->draftError;
+}
+void ImportController::discardRouteDraft() {
+    impl_->invalidateDraft();
+    emit stateChanged();
+}
+bool ImportController::prepareRouteDraft(RouteDraftRequest request,
+                                         std::shared_ptr<const SingleBendPreviewBuilder> builder) {
+    auto *s = impl_.get();
+    if (s->stopping || s->session.activeRequest() || (hasWork() && !s->runningDraft) || !builder ||
+        !s->session.document())
+        return false;
+    const auto &session = s->session;
+    const auto indices = session.orderedBends();
+    if (request.operations.size() != indices.size() || request.step > indices.size() ||
+        indices.size() != session.document()->metadata().bendAnalysis.bends.size())
+        return false;
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        const auto *entry = session.bend(indices[i]);
+        const auto &op = request.operations[i];
+        if (!entry || !included(entry->review) || op.bendIndex != indices[i] ||
+            op.id != entry->id || session.bendTarget(indices[i]) != std::optional{op.target})
+            return false;
+    }
+    request.manualThicknessMm = session.manualThicknessMm();
+    if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
+        previous->discardRouteCache();
+    s->routeBuilder = builder;
+    s->invalidateDraft();
+    s->routeError.reset();
+    s->pendingDraft =
+        Impl::DraftJob{session.document(), std::move(request), std::move(builder),
+                       s->draftId,         session.revision(), session.editRevision()};
+    s->dispatchDraft();
+    emit stateChanged();
+    return true;
 }
 bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         std::shared_ptr<const SingleBendPreviewBuilder> builder) {
@@ -662,7 +804,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                                      });
                                     const auto &p = step.preview;
                                     valid &= found != request.operations.end() &&
-                                             ids.insert(step.id).second && p && !p->collision() &&
+                                             ids.insert(step.id).second && p &&
+                                             !p->unverifiedDraft() && !p->collision() &&
                                              p->frameCount() >= 2 &&
                                              (request.withTools
                                                   ? p->pressMotion() && p->punchRetraction()

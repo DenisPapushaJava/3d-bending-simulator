@@ -83,4 +83,22 @@ struct BendRouteError {
     BendRouteStatistics statistics = {};
 };
 using BendRouteResult = std::variant<BendRoutePtr, BendRouteError>;
+// Display-only prefix. Its visual has unverifiedDraft()==true and cannot certify a route.
+struct RouteDraftRequest {
+    std::vector<RouteOperation> operations;
+    std::size_t step = 0;
+    bool withTools = false;
+    std::optional<double> manualThicknessMm;
+    bool operator==(const RouteDraftRequest &) const = default;
+};
+struct RouteDraft {
+    DocumentPtr source;
+    RouteDraftRequest request;
+    std::shared_ptr<const SingleBendPreview> visual;
+    bool reusedBasis = false;
+    std::size_t checkedToolPositions = 0;
+    std::string toolNotice;
+};
+using RouteDraftPtr = std::shared_ptr<const RouteDraft>;
+using RouteDraftResult = std::variant<RouteDraftPtr, BendRouteError>;
 } // namespace bending::application

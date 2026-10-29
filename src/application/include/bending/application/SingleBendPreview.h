@@ -25,6 +25,9 @@ enum class ToolCollisionPair { SheetDie, SheetPunch, DiePunch };
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual bool unverifiedDraft() const noexcept {
+        return false;
+    }
     // One operation: every other bend remains in its imported formed state.
     [[nodiscard]] virtual std::size_t otherFormedBends() const noexcept {
         return 0;
@@ -46,6 +49,10 @@ class SingleBendPreview {
     }
     [[nodiscard]] virtual std::optional<ToolCollisionPair> collision() const noexcept {
         return {};
+    }
+    [[nodiscard]] virtual std::optional<ToolCollisionPair>
+    collisionAtFrame(std::size_t) const noexcept {
+        return collision();
     }
     [[nodiscard]] virtual bool ignoresClosedCutouts() const noexcept {
         return false;
@@ -99,6 +106,10 @@ class SingleBendPreviewBuilder {
   public:
     // Drop retained route work on close/new import. Must not wait for an active CAD call.
     virtual void discardRouteCache() const {}
+    [[nodiscard]] virtual RouteDraftResult buildRouteDraft(DocumentPtr, RouteDraftRequest,
+                                                           std::stop_token) const {
+        return BendRouteError{BendRouteErrorCode::Unsupported, "Draft preview unavailable"};
+    }
     [[nodiscard]] virtual BendRouteResult buildRoute(DocumentPtr, BendRouteRequest,
                                                      std::stop_token) const {
         return BendRouteError{BendRouteErrorCode::Unsupported, "Route builder unavailable"};

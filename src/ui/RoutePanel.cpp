@@ -1,11 +1,22 @@
 #include "RoutePanel.h"
 #include "bending/application/SingleBendPreview.h"
+#include "bending/core/BendSequence.h"
+#include <QApplication>
 #include <QComboBox>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMimeData>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QScrollBar>
+#include <QShortcut>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QVBoxLayout>
@@ -13,6 +24,136 @@
 #include <numbers>
 namespace bending::ui {
 namespace {
+const char *stepMime = "application/x-bending-route-step";
+class StepButton final : public QPushButton {
+  public:
+    using QPushButton::QPushButton;
+    std::function<void(bool)> hovered;
+
+  protected:
+    void enterEvent(QEnterEvent *e) override {
+        QPushButton::enterEvent(e);
+        if (hovered)
+            hovered(true);
+    }
+    void leaveEvent(QEvent *e) override {
+        QPushButton::leaveEvent(e);
+        if (hovered)
+            hovered(false);
+    }
+    void mousePressEvent(QMouseEvent *e) override {
+        start_ = e->position().toPoint();
+        QPushButton::mousePressEvent(e);
+    }
+    void mouseMoveEvent(QMouseEvent *e) override {
+        if ((e->buttons() & Qt::LeftButton) && property("routePosition").toInt() > 0 &&
+            (e->position().toPoint() - start_).manhattanLength() >=
+                QApplication::startDragDistance()) {
+            QPointer<QDrag> drag = new QDrag(this);
+            auto *mime = new QMimeData;
+            mime->setData(stepMime, property("routeId").toString().toUtf8());
+            drag->setMimeData(mime);
+            drag->setPixmap(grab());
+            setDown(false);
+            drag->exec(Qt::MoveAction);
+            if (drag)
+                drag->deleteLater();
+            return;
+        }
+        QPushButton::mouseMoveEvent(e);
+    }
+
+  private:
+    QPoint start_;
+};
+class StepCanvas final : public QWidget {
+  public:
+    explicit StepCanvas(QWidget *parent) : QWidget(parent) {
+        setAcceptDrops(true);
+    }
+    std::function<void(int, int)> moved;
+    std::vector<QPushButton *> buttons;
+    void clearMarker() {
+        marker_ = -1;
+        update();
+    }
+
+  protected:
+    bool accepts(const QDropEvent *e) const {
+        const auto *source = qobject_cast<QPushButton *>(e->source());
+        return source && source->parentWidget() == this && source->isEnabled() &&
+               source->property("routePosition").toInt() > 0 &&
+               e->mimeData()->hasFormat(stepMime) &&
+               e->mimeData()->data(stepMime) == source->property("routeId").toString().toUtf8();
+    }
+    void dragEnterEvent(QDragEnterEvent *e) override {
+        if (accepts(e)) {
+            e->setDropAction(Qt::MoveAction);
+            e->accept();
+        } else
+            e->ignore();
+    }
+    int slot(QPoint p) const {
+        int i = 1;
+        for (; i < static_cast<int>(buttons.size()); ++i)
+            if (p.x() < buttons[static_cast<std::size_t>(i)]->geometry().center().x())
+                break;
+        return i;
+    }
+    void dragMoveEvent(QDragMoveEvent *e) override {
+        if (!accepts(e)) {
+            e->ignore();
+            return;
+        }
+        const auto at = slot(e->position().toPoint());
+        marker_ = at < static_cast<int>(buttons.size())
+                      ? buttons[static_cast<std::size_t>(at)]->x() - 2
+                      : buttons.back()->geometry().right() + 2;
+        if (auto *scroll = qobject_cast<QScrollArea *>(parentWidget()->parentWidget())) {
+            const auto x = mapTo(scroll->viewport(), e->position().toPoint()).x();
+            if (x < 28)
+                scroll->horizontalScrollBar()->setValue(scroll->horizontalScrollBar()->value() -
+                                                        20);
+            else if (x > scroll->viewport()->width() - 28)
+                scroll->horizontalScrollBar()->setValue(scroll->horizontalScrollBar()->value() +
+                                                        20);
+        }
+        update();
+        e->setDropAction(Qt::MoveAction);
+        e->accept();
+    }
+    void dragLeaveEvent(QDragLeaveEvent *e) override {
+        clearMarker();
+        e->accept();
+    }
+    void dropEvent(QDropEvent *e) override {
+        if (!accepts(e)) {
+            clearMarker();
+            e->ignore();
+            return;
+        }
+        const int from = e->source()->property("routePosition").toInt();
+        int to = slot(e->position().toPoint());
+        if (to > from)
+            --to;
+        clearMarker();
+        e->setDropAction(Qt::MoveAction);
+        e->accept();
+        if (moved)
+            moved(from - 1, to - 1);
+    }
+    void paintEvent(QPaintEvent *e) override {
+        QWidget::paintEvent(e);
+        if (marker_ >= 0) {
+            QPainter p(this);
+            p.setPen(QPen(QColor("#087F83"), 3));
+            p.drawLine(marker_, 3, marker_, 39);
+        }
+    }
+
+  private:
+    int marker_ = -1;
+};
 class StepStrip final : public QWidget {
   public:
     using QWidget::QWidget;
@@ -34,6 +175,8 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     mode_ = new QComboBox(this);
     mode_->setObjectName("bendRouteMode");
     mode_->setAccessibleName(QStringLiteral("Охват проверки порядка гибов"));
+    mode_->setToolTip(QStringLiteral("Охват полной проверки порядка. Ручной просмотр всегда "
+                                     "проверяет столкновения с назначенным инструментом."));
     mode_->addItems({QStringLiteral("Без инструмента"), QStringLiteral("Одна пара для всех гибов"),
                      QStringLiteral("По назначениям гибов")});
     mode_->setCurrentIndex(1);
@@ -57,7 +200,8 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFixedHeight(52);
-    auto *strip = new QWidget(scroll);
+    auto *strip = new StepCanvas(scroll);
+    strip->moved = [this](int from, int to) { moveTo(from, to); };
     strip_ = new QHBoxLayout(strip);
     strip_->setContentsMargins(0, 0, 0, 0);
     strip_->setSpacing(4);
@@ -83,6 +227,32 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     details->addWidget(editTool_);
     details->addWidget(earlier_);
     details->addWidget(later_);
+    undoButton_ = new QPushButton(QStringLiteral("↶"), this);
+    redoButton_ = new QPushButton(QStringLiteral("↷"), this);
+    undoButton_->setObjectName("routeUndo");
+    redoButton_->setObjectName("routeRedo");
+    undoButton_->setToolTip(QStringLiteral("Отменить перестановку (Ctrl+Z)"));
+    redoButton_->setToolTip(QStringLiteral("Повторить перестановку (Ctrl+Shift+Z)"));
+    undoButton_->setAccessibleName(QStringLiteral("Отменить перестановку гибов"));
+    redoButton_->setAccessibleName(QStringLiteral("Повторить перестановку гибов"));
+    for (auto *button : {undoButton_, redoButton_}) {
+        button->setFixedWidth(32);
+        details->addWidget(button);
+    }
+    connect(undoButton_, &QPushButton::clicked, this, [this] { undo(); });
+    connect(redoButton_, &QPushButton::clicked, this, [this] { redo(); });
+    for (const auto &[key, redo] :
+         {std::pair{QKeySequence(Qt::CTRL | Qt::Key_Z), false},
+          std::pair{QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), true}}) {
+        auto *shortcut = new QShortcut(key, stepStrip_);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(shortcut, &QShortcut::activated, this, [this, redo] {
+            if (redo)
+                this->redo();
+            else
+                undo();
+        });
+    }
     layout->addLayout(details);
     stepStrip_->setStyleSheet(QStringLiteral(
         "QWidget#routeStepStrip{background:#F4F7F9;border:1px solid #526171;border-radius:7px;}"
@@ -144,7 +314,7 @@ void RoutePanel::updateStatusHeight() {
         width() - margins.left() - margins.right() - earlier_->sizeHint().width() -
         later_->sizeHint().width() -
         (editTool_->isHidden() ? 0 : editTool_->sizeHint().width() + horizontalSpacing) -
-        2 * horizontalSpacing;
+        undoButton_->width() - redoButton_->width() - 2 * horizontalSpacing - 2 * horizontalSpacing;
     status_->setMinimumHeight(0);
     status_->setMaximumHeight(QWIDGETSIZE_MAX);
     const int statusHeight = std::max(0, status_->heightForWidth(std::max(1, available)));
@@ -158,18 +328,66 @@ void RoutePanel::updateStatusHeight() {
         verticalSpacing);
 }
 void RoutePanel::move(int delta) {
-    const int from = selected_ - 1, to = from + delta;
+    moveTo(selected_ - 1, selected_ - 1 + delta);
+}
+void RoutePanel::moveTo(int from, int to) {
     if (from < 0 || to < 0 || to >= static_cast<int>(ids_.size()) || !onReorder)
         return;
-    auto ids = ids_;
-    std::swap(ids[static_cast<std::size_t>(from)], ids[static_cast<std::size_t>(to)]);
-    selected_ += delta;
-    onReorder(std::move(ids));
+    core::BendSequence sequence(ids_);
+    if (!sequence.move(static_cast<std::size_t>(from), static_cast<std::size_t>(to)))
+        return;
+    const auto before = ids_;
+    const auto selected = ids_[static_cast<std::size_t>(from)];
+    selected_ = to + 1;
+    if (onReorder(sequence.bendIds())) {
+        undo_.push_back({before, sequence.bendIds(), selected});
+        redo_.clear();
+        if (undo_.size() > 50)
+            undo_.erase(undo_.begin());
+    }
+    undoButton_->setEnabled(!undo_.empty());
+    redoButton_->setEnabled(!redo_.empty());
+}
+void RoutePanel::undo() {
+    if (undo_.empty() || !onReorder || ids_ != undo_.back().after)
+        return;
+    const auto edit = undo_.back();
+    selected_ = static_cast<int>(std::find(edit.before.begin(), edit.before.end(), edit.selected) -
+                                 edit.before.begin()) +
+                1;
+    if (onReorder(edit.before)) {
+        undo_.pop_back();
+        redo_.push_back(edit);
+    }
+    undoButton_->setEnabled(!undo_.empty());
+    redoButton_->setEnabled(!redo_.empty());
+}
+void RoutePanel::redo() {
+    if (redo_.empty() || !onReorder || ids_ != redo_.back().before)
+        return;
+    const auto edit = redo_.back();
+    selected_ = static_cast<int>(std::find(edit.after.begin(), edit.after.end(), edit.selected) -
+                                 edit.after.begin()) +
+                1;
+    if (onReorder(edit.after)) {
+        redo_.pop_back();
+        undo_.push_back(edit);
+    }
+    undoButton_->setEnabled(!undo_.empty());
+    redoButton_->setEnabled(!redo_.empty());
 }
 void RoutePanel::refresh(const application::DocumentSession &session,
                          application::BendRoutePtr route,
                          std::optional<application::BendRouteError> error, bool busy,
-                         bool preparing, bool toolsAvailable) {
+                         bool preparing, bool toolsAvailable, application::RouteDraftPtr draft,
+                         std::optional<application::BendRouteError> draftError,
+                         bool preparingDraft) {
+    if (documentRevision_ != session.revision()) {
+        documentRevision_ = session.revision();
+        selected_ = 0;
+        undo_.clear();
+        redo_.clear();
+    }
     const auto indices = session.orderedBends();
     std::vector<std::string> ids;
     for (auto i : indices)
@@ -181,7 +399,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     indices_ = indices;
     route_ = std::move(route);
     selected_ = newRoute ? 0 : std::clamp(selected_, 0, static_cast<int>(ids_.size()));
-    if (changed) {
+    if (changed && steps_.size() != ids_.size() + 1) {
         while (auto *item = strip_->takeAt(0)) {
             delete item->widget();
             delete item;
@@ -189,7 +407,12 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         steps_.clear();
         for (std::size_t i = 0; i <= ids_.size(); ++i) {
             const auto title = QString::number(i);
-            auto *button = new QPushButton(title, this);
+            auto *button = new StepButton(title, strip_->parentWidget());
+            button->hovered = [this, i](bool entered) {
+                if (onHover)
+                    onHover(entered && i && i <= indices_.size() ? std::optional{indices_[i - 1]}
+                                                                 : std::nullopt);
+            };
             button->setObjectName(QStringLiteral("routeStep%1").arg(i));
             button->setCheckable(true);
             button->setFixedSize(40, 36);
@@ -212,6 +435,20 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         static_cast<StepStrip *>(stepStrip_)->count = static_cast<int>(ids_.size() + 1);
         stepStrip_->adjustSize();
     }
+    auto *canvas = static_cast<StepCanvas *>(strip_->parentWidget());
+    canvas->buttons = steps_;
+    for (std::size_t i = 0; i < steps_.size(); ++i) {
+        steps_[i]->setProperty("routePosition", static_cast<int>(i));
+        steps_[i]->setProperty("routeId", i ? QString::fromStdString(ids_[i - 1]) : QString{});
+        steps_[i]->setToolTip(
+            i ? (route_ ? QString{} : QStringLiteral("Черновик · ")) +
+                    QStringLiteral("Шаг %1 · B%2 · форма после гиба. Перетащите между шагами.")
+                        .arg(i)
+                        .arg(indices_[i - 1] + 1, 2, 10, QLatin1Char('0'))
+              : QStringLiteral("0 — заготовка: все гибы разогнуты"));
+        steps_[i]->setAccessibleName(i ? QStringLiteral("Показать результат шага %1").arg(i)
+                                       : QStringLiteral("Показать заготовку"));
+    }
     bool included = !ids_.empty() && session.document() &&
                     ids_.size() == session.document()->metadata().bendAnalysis.bends.size();
     bool assigned = included;
@@ -225,7 +462,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     missingTool = index;
             }
         }
-    const bool ready = included && ids_.size() <= 12 && !busy &&
+    const bool ready = included && ids_.size() <= 12 && !busy && !preparingDraft &&
                        (mode_->currentIndex() == 0 || (perBendTools() ? assigned : toolsAvailable));
     automatic_->setEnabled(ready);
     manual_->setEnabled(ready);
@@ -239,12 +476,21 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     editTool_->setVisible(selected_ > 0);
     editTool_->setEnabled(!busy && selected_ > 0);
     for (std::size_t i = 0; i < steps_.size(); ++i) {
-        steps_[i]->setEnabled(!busy && (i > 0 || bool(route_)));
-        steps_[i]->setChecked(static_cast<int>(i) == selected_ && (route_ || selected_ > 0));
+        steps_[i]->setEnabled(!busy && included);
+        steps_[i]->setChecked(static_cast<int>(i) == selected_);
     }
+    undoButton_->setEnabled(!busy && !undo_.empty() && ids_ == undo_.back().after);
+    redoButton_->setEnabled(!busy && !redo_.empty() && ids_ == redo_.back().before);
     QString message;
     if (preparing)
         message = QStringLiteral("Строим 3D-состояния и проверяем порядок… Можно отменить расчёт.");
+    else if (preparingDraft)
+        message = QStringLiteral("Ручной просмотр: готовим выбранный гиб и проверяем столкновения… "
+                                 "Порядок можно менять.");
+    else if (draftError)
+        message =
+            QStringLiteral("Не удалось подготовить ручной просмотр; столкновения не проверены. %1")
+                .arg(QString::fromStdString(draftError->detail));
     else if (error) {
         message =
             error->toolLengths ? QStringLiteral("Недостаточная длина выбранной сборки инструмента.")
@@ -354,6 +600,16 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             }
         }
         message += QStringLiteral("Извлечение, перенос и станок не проверены.");
+    } else if (draft) {
+        message = selected_ ? QStringLiteral("Ручной порядок · шаг %1/%2 · B%3. ")
+                                  .arg(selected_)
+                                  .arg(ids_.size())
+                                  .arg(indices_[operation()] + 1, 2, 10, QLatin1Char('0'))
+                            : QStringLiteral("0 · Плоская заготовка. ");
+        message +=
+            draft->checkedToolPositions
+                ? QStringLiteral("Столкновения проверены по кадрам. Полный порядок не проверен.")
+                : QStringLiteral("Выберите инструмент для проверки столкновений.");
     } else if (ids_.size() > 12)
         message = QStringLiteral("Первый режим порядка поддерживает до 12 полных прямых гибов.");
     else if (!included)
@@ -365,9 +621,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     else if (mode_->currentIndex() == 1 && !toolsAvailable)
         message = QStringLiteral("Выберите инструмент либо режим «Без инструмента».");
     else
-        message = QStringLiteral("Черновик порядка. «Проверить все гибы» или «Подобрать порядок» "
-                                 "подготовит 3D-шаги из заготовки. После перестановки нажмите "
-                                 "«Проверить мой порядок».");
+        message = QStringLiteral("Выберите 0 или номер для ручного 3D-просмотра. Перетаскивайте "
+                                 "шаги; затем «Проверить мой порядок».");
     status_->setText(message);
     updateStatusHeight();
     status_->setToolTip(

@@ -137,10 +137,11 @@ int main(int argc, char **argv) {
         require(draft && draft->toolTip().contains(QStringLiteral("Черновик")),
                 "Unprepared route looks like a ready animation");
         draft->click();
-        require(!controller.hasWork() && !controller.bendRoute() &&
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && !controller.bendRoute() &&
                     window.findChild<QListView *>("bendList")->currentIndex().row() ==
                         static_cast<int>(draftIndex),
-                "A draft step neither selected its source bend nor avoided calculation");
+                "A draft step lost the selected bend or was promoted to a checked route");
         if (withTools) {
             if (shortTools) {
                 window.findChild<QComboBox *>("punchPreset")->setCurrentIndex(1);
@@ -172,12 +173,14 @@ int main(int argc, char **argv) {
             }
             // Reproduce the normal user path, including a previously changed route mode.
             mode->setCurrentIndex(0);
+            wait([&] { return !controller.hasWork(); });
             auto *check = window.findChild<QPushButton *>("checkBend");
-            require(check->isEnabled() && check->text().contains(QStringLiteral("все гибы")),
-                    "The main check does not explain its multi-bend scope");
+            require(check->isEnabled() && check->text().contains(QStringLiteral("мой порядок")),
+                    "The main check does not preserve the manually edited order");
             check->click();
         } else {
             mode->setCurrentIndex(0);
+            wait([&] { return !controller.hasWork(); });
             require(prepare->isEnabled(), "Cannot prepare geometry route");
             prepare->click();
         }
@@ -280,7 +283,8 @@ int main(int argc, char **argv) {
         std::vector<QImage> images;
         for (int index = 0; index <= count; ++index) {
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(index))->click();
-            require(controller.bendRoute() == route && !controller.hasWork() && frame->value() == 0,
+            require(controller.bendRoute() == route && !controller.hasWork() &&
+                        frame->value() == (index ? frame->maximum() : 0),
                     "Stage navigation recalculated or retained a different frame");
             if (index == 0)
                 require(!frame->isEnabled(), "The blank stage exposes a bending slider");
@@ -298,7 +302,8 @@ int main(int argc, char **argv) {
         }
         for (int index : {0, count, 1, count}) {
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(index))->click();
-            require(controller.bendRoute() == route && !controller.hasWork() && frame->value() == 0,
+            require(controller.bendRoute() == route && !controller.hasWork() &&
+                        frame->value() == (index ? frame->maximum() : 0),
                     "Arbitrary navigation recalculated or showed the end of another step");
         }
         if (sample) {
@@ -333,8 +338,9 @@ int main(int argc, char **argv) {
             return 0;
         }
         window.findChild<QPushButton *>("routeMoveEarlier")->click();
-        require(!controller.bendRoute() && controller.session().modified() && !controller.hasWork(),
+        require(!controller.bendRoute() && controller.session().modified(),
                 "Reorder not invalidated");
+        wait([&] { return !controller.hasWork(); });
         auto expected = controller.session().orderedBends();
         require(expected == std::vector<std::size_t>({1, 0}), "Order not moved");
         window.findChild<QPushButton *>("checkBendRoute")->click();

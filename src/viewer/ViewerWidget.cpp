@@ -309,6 +309,13 @@ class OcctCanvas final : public QWidget {
                         candidate->SetCustomColor(regionFaces(face), colors[region]);
                     }
                 }
+                if (hoverPreviewBend_ && *hoverPreviewBend_ < frame.bendZones.size()) {
+                    TopTools_IndexedMapOfShape faces;
+                    TopExp::MapShapes(frame.bendZones[*hoverPreviewBend_], TopAbs_FACE, faces);
+                    for (int f = 1; f <= faces.Extent(); ++f)
+                        candidate->SetCustomColor(faces(f),
+                                                  Quantity_Color(.92, .65, .22, Quantity_TOC_RGB));
+                }
                 const std::array<Quantity_Color, 2> toolColors{
                     Quantity_Color(0.30, 0.36, 0.44, Quantity_TOC_RGB),
                     Quantity_Color(0.64, 0.70, 0.77, Quantity_TOC_RGB)};
@@ -326,7 +333,7 @@ class OcctCanvas final : public QWidget {
                             candidate->SetCustomColor(faces(face), native);
                     }
                 }
-                if (const auto conflict = preview->collision()) {
+                if (const auto conflict = preview->collisionAtFrame(index)) {
                     const Quantity_Color red(.95, .06, .04, Quantity_TOC_RGB);
                     if (*conflict != application::ToolCollisionPair::DiePunch)
                         for (const auto &r : regions) {
@@ -359,7 +366,9 @@ class OcctCanvas final : public QWidget {
                     }
                 }
                 context_->ClearSelected(false);
-                if (entering) {
+                if (entering &&
+                    !(preview_ && preview_->unverifiedDraft() && preview->unverifiedDraft() &&
+                      bool(preview_->toolSetup()) == bool(preview->toolSetup()))) {
                     if (preview->toolSetup()) {
                         view_->SetProj(1.0, 0.5, 3.0);
                         view_->SetUp(0.0, 1.0, 0.0);
@@ -1099,6 +1108,16 @@ class OcctCanvas final : public QWidget {
     DimensionAnnotations dimensions_;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
+
+  public:
+    void highlightPreviewBend(std::optional<std::size_t> i) {
+        hoverPreviewBend_ = i;
+        if (preview_)
+            presentPreview(preview_, previewFrame_, revision_);
+    }
+
+  private:
+    std::optional<std::size_t> hoverPreviewBend_;
     ToolSegmentColors segmentColors_;
     application::FlatPatternPtr flat_;
     std::size_t previewFrame_ = 0;
@@ -1304,6 +1323,10 @@ QString ViewerWidget::presentBendPreview(application::BendPreviewPtr preview,
     } catch (const std::exception &error) {
         return QString::fromUtf8(error.what());
     }
+}
+void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i) {
+    if (impl_->canvas)
+        impl_->canvas->highlightPreviewBend(i);
 }
 QString ViewerWidget::endBendPreview() {
     return impl_->canvas ? impl_->canvas->endPreview() : QString{};

@@ -114,6 +114,7 @@ int main(int argc, char **argv) {
                 "Missing assignments started a search");
         window.findChild<QPushButton *>("routeStep1")->click();
         window.findChild<QPushButton *>("routeEditTool")->click();
+        wait([&] { return !controller.hasWork(); });
         auto *scope = window.findChild<QComboBox *>("toolAssignmentScope");
         auto *selection = window.findChild<QComboBox *>("toolBendSelection");
         auto *assign = window.findChild<QPushButton *>("assignBendTool");

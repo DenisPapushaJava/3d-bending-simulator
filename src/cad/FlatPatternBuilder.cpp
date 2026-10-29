@@ -1,8 +1,10 @@
 #include "bending/cad/FlatPatternBuilder.h"
 #include "FlatPatternDisplay.h"
+#include "RouteGeometry.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
+#include "bending/simulation/SingleBend.h"
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -451,9 +453,40 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                          mapped.SetZ(zInner + zSign * (r.Magnitude() - b.innerRadiusMm));
                          return mapped;
                      }});
+                const auto tangent = center.Translated(gp_Vec(radial) * b.innerRadiusMm);
+                const gp_Vec bx = gp_Vec(bendAxis).Crossed(gp_Vec(radial)) * sign;
+                const gp_Vec by = -gp_Vec(radial), bz(bendAxis);
+                const simulation::SingleBend model{
+                    t, b.innerRadiusMm, b.angleRadians, b.lengthMm, 1, 1};
+                const auto atProgress = [tangent, bx, by, bz, model](gp_Pnt p, double progress) {
+                    const gp_Vec v(tangent, p);
+                    const auto section = simulation::singleBendSection(model, progress);
+                    if (!section)
+                        throw std::runtime_error("Invalid draft bend progress");
+                    const auto mapped =
+                        simulation::mapBendPoint(model, {v.Dot(bx), v.Dot(by)}, *section);
+                    if (!mapped)
+                        throw std::runtime_error("Cannot map draft bend surface");
+                    return tangent.Translated(bx * mapped->x + by * mapped->y + bz * v.Dot(bz));
+                };
+                const auto childTangent = center.Translated(gp_Vec(otherRadial) * b.innerRadiusMm);
+                const auto childAtProgress = [atProgress, childTangent, center, bendAxis, sign,
+                                              angle = b.angleRadians](double progress) {
+                    gp_Trsf rotation, translation;
+                    rotation.SetRotation(gp_Ax1(center, bendAxis), sign * (progress - 1) * angle);
+                    translation.SetTranslation(gp_Vec(childTangent.Transformed(rotation),
+                                                      atProgress(childTangent, progress)));
+                    return translation * rotation;
+                };
+                const gp_Ax3 sectionAxes(sign > 0 ? tangent : tangent.Translated(bz * b.lengthMm),
+                                         gp_Dir(bx.Crossed(by)), gp_Dir(bx));
+                const auto solidAtProgress = [model, sectionAxes](double progress) {
+                    return makeRouteSector(model, sectionAxes, progress);
+                };
                 result->layout.bends.push_back(
                     {index, wallIndices.at(w), wallIndices.at(child), sector,
-                     extruded(TopoDS::Face(patches.back()), gp_Vec(0, 0, t)), regions.back().map});
+                     extruded(TopoDS::Face(patches.back()), gp_Vec(0, 0, t)), regions.back().map,
+                     atProgress, childAtProgress, solidAtProgress, sectionAxes});
             }
         }
         require(placements.size() == graph.size() &&

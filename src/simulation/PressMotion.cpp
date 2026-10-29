@@ -48,13 +48,8 @@ Point2Mm dieSupportPoint(const PressMotion &motion, double angle) noexcept {
     const double r = motion.shoulders ? motion.shoulders->radiusMm : 0.;
     return {a - r * std::sin(angle / 2), r * (std::cos(angle / 2) - 1)};
 }
-std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotion &motion,
-                                           double progress) noexcept {
-    if (!std::isfinite(progress) || progress < 0.0 || progress > 1.0 ||
-        !std::holds_alternative<PressMotion>(preparePressMotion(
-            m, motion.initial.tools, motion.lengthToleranceMm, motion.shoulders))) {
-        return {};
-    }
+static std::optional<PressState> calculateState(const SingleBend &m, const PressMotion &motion,
+                                                double progress) noexcept {
     constexpr double approach = 0.2;
     const double forming = std::min(progress / pressBendingEndProgress, 1.0);
     const double fraction = forming <= approach ? 0.0 : (forming - approach) / (1.0 - approach);
@@ -106,5 +101,22 @@ std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotio
                                                           : PressPhase::Bending;
     return PressState{section, phase, tip, m.thicknessMm + motion.initial.tools.clearanceMm - tip,
                       q};
+}
+std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotion &motion,
+                                           double progress) noexcept {
+    if (!std::isfinite(progress) || progress < 0 || progress > 1 ||
+        !std::holds_alternative<PressMotion>(preparePressMotion(
+            m, motion.initial.tools, motion.lengthToleranceMm, motion.shoulders)))
+        return {};
+    return calculateState(m, motion, progress);
+}
+std::optional<PressState> draftPressState(const SingleBend &m, core::PressTools tools,
+                                          double progress,
+                                          std::optional<DieShoulders> shoulders) noexcept {
+    if (!validSingleBend(m) || !core::validPressTools(tools) || !std::isfinite(progress) ||
+        progress < 0 || progress > 1)
+        return {};
+    PressMotion geometry{{tools, 0, 0, 0, 0, 0}, 0, 0, shoulders};
+    return calculateState(m, geometry, (0.2 + 0.8 * progress) * pressBendingEndProgress);
 }
 } // namespace bending::simulation

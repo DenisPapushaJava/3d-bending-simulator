@@ -9,6 +9,9 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
     SingleBendPreviewBuilder() = default;
     ~SingleBendPreviewBuilder() override;
     void discardRouteCache() const override;
+    [[nodiscard]] application::RouteDraftResult buildRouteDraft(application::DocumentPtr,
+                                                                application::RouteDraftRequest,
+                                                                std::stop_token) const override;
     [[nodiscard]] application::BendRouteResult buildRoute(application::DocumentPtr,
                                                           application::BendRouteRequest,
                                                           std::stop_token) const override;

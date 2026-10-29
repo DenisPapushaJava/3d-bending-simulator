@@ -33,6 +33,7 @@ struct PreviewFrame {
     // Display only: all checks use shape/regions above. Includes the same tools.
     TopoDS_Shape displayShape;
     std::array<TopoDS_Shape, 3> displayRegions;
+    std::vector<TopoDS_Shape> bendZones; // Optional draft highlights by original bend index.
     // World-space attachments prepared from the same section/basis as the solid.
     std::optional<BendDimensionAnchors> dimensions;
 };

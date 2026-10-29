@@ -1,5 +1,8 @@
 #include "BendOperation.h"
+#include "CadPreview.h"
 #include "FlatPatternDisplay.h"
+#include "RouteDraftGeometry.h"
+#include "RouteGeometry.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -91,6 +94,8 @@ struct CacheData {
     DocumentPtr source;
     std::optional<double> thickness;
     FlatPatternPtr flat;
+    std::shared_ptr<const RouteDraftBasis> draftBasis;
+    std::list<RouteDraftPtr> drafts;
     std::map<Mask, std::shared_ptr<const State>> states;
     std::list<Mask> stateOrder;
     std::list<Transition> transitions;
@@ -151,7 +156,11 @@ class RouteSearch {
                                  "Intermediate state cache limit reached",
                                  {},
                                  attempts};
-        std::vector<gp_Trsf> maps(layout->walls.size());
+        std::vector<double> progress(request.operations.size());
+        for (std::size_t i = 0; i < progress.size(); ++i)
+            progress[i] = (mask & (Mask{1} << i)) ? 1. : 0.;
+        const auto placements = routePlacement(*layout, progress);
+        const auto &maps = placements.walls;
         std::vector<TopoDS_Shape> solids;
         std::vector<FlatDisplayRegion> display;
         std::vector<gp_Trsf> bendMaps(request.operations.size());
@@ -160,16 +169,9 @@ class RouteSearch {
             const auto flatMap = maps[b.parent] * parentInverse;
             bendMaps[b.bendIndex] = maps[b.parent];
             const bool formed = (mask & (Mask{1} << b.bendIndex)) != 0;
-            maps[b.child] = formed ? maps[b.parent] : flatMap * layout->walls[b.child].toFlat;
             solids.push_back(
                 moved(formed ? b.solid : b.flatSolid, formed ? maps[b.parent] : flatMap));
-            display.push_back(
-                {b.solid, formed
-                              ? std::function<gp_Pnt(gp_Pnt)>(
-                                    [map = maps[b.parent]](gp_Pnt p) { return p.Transformed(map); })
-                              : std::function<gp_Pnt(gp_Pnt)>([map = b.toFlat, flatMap](gp_Pnt p) {
-                                    return map(p).Transformed(flatMap);
-                                })});
+            display.push_back({b.solid, placements.bends[b.bendIndex]});
         }
         for (std::size_t i = 0; i < layout->walls.size(); ++i) {
             solids.push_back(moved(layout->walls[i].solid, maps[i]));
@@ -397,6 +399,86 @@ void SingleBendPreviewBuilder::discardRouteCache() const {
     {
         std::lock_guard lock(routeCacheMutex_);
         old = std::move(routeCache_);
+    }
+}
+RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
+                                                           RouteDraftRequest request,
+                                                           std::stop_token stop) const {
+    try {
+        cancelled(stop);
+        const auto native = std::dynamic_pointer_cast<const CadDocument>(document);
+        check(bool(native), "Unsupported draft document");
+        const auto &analysis = native->metadata().bendAnalysis;
+        const auto n = analysis.bends.size();
+        if (!n || n > 12 || request.operations.size() != n || request.step > n)
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "Requires every bend, up to 12 zones"};
+        std::set<std::size_t> indices;
+        std::set<std::string> ids;
+        for (const auto &op : request.operations) {
+            if (op.bendIndex >= n || !indices.insert(op.bendIndex).second || op.id.empty() ||
+                !ids.insert(op.id).second || !core::validBendTarget(op.target))
+                return BendRouteError{BendRouteErrorCode::InvalidInput, "Invalid draft operations"};
+            const auto &b = analysis.bends[op.bendIndex];
+            if (std::abs(op.target.angleRadians - b.angleRadians) >
+                    analysis.angleToleranceRadians ||
+                std::abs(op.target.innerRadiusMm - b.innerRadiusMm) > analysis.lengthToleranceMm ||
+                (request.manualThicknessMm &&
+                 (!std::isfinite(*request.manualThicknessMm) ||
+                  std::abs(*request.manualThicknessMm - b.thicknessMm) >
+                      analysis.lengthToleranceMm)))
+                return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                      "Draft target must match CAD", op.bendIndex};
+        }
+        std::shared_ptr<RouteCache> work;
+        {
+            std::lock_guard lock(routeCacheMutex_);
+            cancelled(stop);
+            if (!routeCache_ || routeCache_->source != document ||
+                routeCache_->thickness != request.manualThicknessMm) {
+                routeCache_ = std::make_shared<RouteCache>();
+                routeCache_->source = document;
+                routeCache_->thickness = request.manualThicknessMm;
+            }
+            work = routeCache_;
+        }
+        std::lock_guard lock(work->mutex);
+        cancelled(stop);
+        for (auto it = work->drafts.begin(); it != work->drafts.end(); ++it)
+            if ((*it)->request == request) {
+                auto result = std::make_shared<RouteDraft>(**it);
+                result->reusedBasis = true;
+                work->drafts.splice(work->drafts.begin(), work->drafts, it);
+                cancelled(stop);
+                return RouteDraftPtr(result);
+            }
+        if (!work->flat) {
+            const auto result = FlatPatternBuilder().build(
+                document, {{core::SheetMaterial::Unknown, .5, 1}, request.manualThicknessMm}, stop);
+            if (const auto *e = std::get_if<FlatPatternError>(&result))
+                return BendRouteError{e->code == FlatPatternErrorCode::Cancelled
+                                          ? BendRouteErrorCode::Cancelled
+                                          : BendRouteErrorCode::Unsupported,
+                                      e->detail};
+            cancelled(stop);
+            work->flat = std::get<FlatPatternPtr>(result);
+        }
+        const bool reused = bool(work->draftBasis);
+        if (!work->draftBasis)
+            work->draftBasis = std::make_shared<RouteDraftBasis>(document, work->flat, stop);
+        const auto result = work->draftBasis->build(std::move(request), reused, stop);
+        cancelled(stop);
+        work->drafts.push_front(result);
+        while (work->drafts.size() > 3)
+            work->drafts.pop_back();
+        return result;
+    } catch (const BendRouteError &e) {
+        return e;
+    } catch (const Standard_Failure &e) {
+        return BendRouteError{BendRouteErrorCode::Failed,
+                              e.GetMessageString() ? e.GetMessageString() : "Draft CAD failure"};
+    } catch (const std::exception &e) {
+        return BendRouteError{BendRouteErrorCode::Failed, e.what()};
     }
 }
 BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendRouteRequest request,

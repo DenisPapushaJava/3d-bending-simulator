@@ -183,6 +183,19 @@ int main() {
                   ->section.angleRadians,
               std::numbers::pi / 4, "Wrong middle angle");
         const auto end = *pressMotionState(pressModel, motion, pressBendingEndProgress);
+        for (double progress : {0., .25, .5, 1.}) {
+            const auto draft = draftPressState(pressModel, tools, progress);
+            const auto checked = pressMotionState(pressModel, motion,
+                                                  (.2 + .8 * progress) * pressBendingEndProgress);
+            require(draft && checked, "Missing manual placement");
+            close(draft->punchTipYmm, checked->punchTipYmm,
+                  "Manual placement diverged from checked contact geometry");
+            close(draft->section.fixed[0].x, checked->section.fixed[0].x,
+                  "Manual fixed wall drifted");
+        }
+        require(!draftPressState(pressModel, tools, -.1) &&
+                    !draftPressState(pressModel, tools, 1.1),
+                "Invalid draft angle fraction accepted");
         close(*end.section.innerRadiusMm, 8, "Press end radius differs from CAD");
         close(end.punchTravelMm, 10 + 24 - 14 * (std::sqrt(2.0) - 1), "Wrong final punch travel");
         double lastTravel = -1;
