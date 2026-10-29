@@ -40,6 +40,7 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
+#include <QWheelEvent>
 
 #include <cmath>
 #include <functional>
@@ -47,6 +48,7 @@
 #include <numbers>
 #include <source_location>
 #include <stdexcept>
+#include <tuple>
 
 namespace {
 void require(bool value, const char *message) {
@@ -1590,6 +1592,123 @@ void testTrimmedBendWorkflow(bool graphics) {
     }
     controller.closeDocument();
 }
+void testPressOrbit() {
+    using namespace bending;
+    using Viewer = viewer::ViewerWidget;
+    auto files = std::make_shared<project::ProjectFiles>();
+    auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
+    ui::MainWindow window({"test", cad::kernelVersion()}, files, files, builder);
+    window.setAutomaticPartInputPrompt(false);
+    window.resize(1280, 850);
+    window.show();
+    auto &controller = window.importController();
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step");
+    waitUntil([&] { return !controller.hasWork(); });
+    auto *viewer = window.findChild<Viewer *>();
+    waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
+    require(viewer->isReady(), "Press orbit needs a native graphics context");
+    auto *canvas = viewer->findChild<QWidget *>("cadCanvas");
+    auto *lock = viewer->findChild<QAction *>("lockPressVertical");
+    auto *button = viewer->findChild<QToolButton *>("pressOrbitLock");
+    require(lock && button && !lock->isChecked() && !lock->isEnabled() && !button->isVisible(),
+            "Press-only orbit lock is active in the source CAD scene");
+    require(controller.setBendTools(
+                0, core::PressTools{48, std::numbers::pi / 2, std::numbers::pi / 6, 1, 100, 10}),
+            "Cannot configure orbit test tooling");
+    window.findChild<QToolButton *>("processStage1")->click();
+    window.findChild<QPushButton *>("applyToolSetup")->click();
+    waitUntil([&] { return !controller.hasWork(); });
+    const auto preview = controller.bendPreview();
+    if (controller.bendPreviewError())
+        throw std::runtime_error(controller.bendPreviewError()->detail);
+    require(preview && preview->pressMotion() && button->isVisible() && lock->isEnabled(),
+            "Tool scene has no orbit control");
+    require(button->defaultAction() == lock && canvas->rect().contains(button->geometry()) &&
+                button->y() > 150,
+            "Orbit control is not below the cube inside the viewport");
+    const auto edit = controller.session().editRevision();
+    const auto image = [&] {
+        const auto frame = viewer->captureImage();
+        // Exclude the cube and Qt controls: only the actual part/tools prove motion.
+        return frame.copy(0, 0, frame.width() - 200, frame.height());
+    };
+    const auto drag = [&](Qt::MouseButton which, QPoint delta) {
+        const auto from = canvas->rect().center(), to = from + delta;
+        for (const auto &[type, p, b, bs] :
+             {std::tuple{QEvent::MouseButtonPress, from, which, Qt::MouseButtons(which)},
+              std::tuple{QEvent::MouseMove, to, Qt::NoButton, Qt::MouseButtons(which)},
+              std::tuple{QEvent::MouseButtonRelease, to, which, Qt::MouseButtons(Qt::NoButton)}}) {
+            QMouseEvent event(type, QPointF(p), QPointF(canvas->mapToGlobal(p)), b, bs,
+                              Qt::NoModifier);
+            QApplication::sendEvent(canvas, &event);
+        }
+    };
+    const auto home = [&] { viewer->setOrientation(Viewer::Orientation::Isometric); };
+    home();
+    button->click();
+    require(lock->isChecked() && button->isChecked(), "Anchor did not enable fixed-Y orbit");
+    const auto locked = image();
+    drag(Qt::RightButton, {0, 80});
+    require(differences(locked, image()) == 0, "Vertical drag tilted the anchored scene");
+    drag(Qt::RightButton, {85, 0});
+    const auto horizontal = image();
+    require(differences(locked, horizontal) > 100,
+            "Anchored horizontal orbit did not move the scene");
+    home();
+    drag(Qt::RightButton, {85, 80});
+    require(differences(horizontal, image()) <= 2,
+            "Diagonal input added pitch/roll while Y was anchored");
+    home();
+    button->click();
+    require(!lock->isChecked(), "Anchor did not restore free rotation");
+    drag(Qt::RightButton, {85, 0});
+    const auto freeHorizontal = image();
+    home();
+    drag(Qt::RightButton, {85, 80});
+    require(differences(freeHorizontal, image()) > 100, "Released anchor still suppresses pitch");
+    button->click();
+    const auto beforePan = image();
+    drag(Qt::MiddleButton, {30, 15});
+    require(differences(beforePan, image()) > 50 && lock->isChecked(), "Anchor disabled pan");
+    const auto beforeZoom = image();
+    const auto pos = canvas->rect().center();
+    QWheelEvent wheel(QPointF(pos), QPointF(canvas->mapToGlobal(pos)), {}, {0, 120}, Qt::NoButton,
+                      Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(canvas, &wheel);
+    require(differences(beforeZoom, image()) > 50 && lock->isChecked(), "Anchor disabled zoom");
+    auto *frame = window.findChild<QSlider *>("bendFrame");
+    frame->setValue(24);
+    require(button->isChecked() && button->isVisible(), "Changing frames lost the anchor");
+    viewer->setOrientation(Viewer::Orientation::Top);
+    const auto top = image();
+    drag(Qt::RightButton, {85, 70});
+    require(differences(top, image()) == 0, "Anchored top view turned mouse input into roll");
+    home();
+    window.resize(1120, 760);
+    QApplication::processEvents();
+    require(canvas->rect().contains(button->geometry()), "Orbit control clipped after resize");
+    window.resize(1280, 850);
+    QApplication::processEvents();
+    if (const auto output = qEnvironmentVariable("BENDING_PRESS_ORBIT_SNAPSHOT");
+        !output.isEmpty()) {
+        auto shot = window.grab().toImage();
+        QPainter p(&shot);
+        p.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
+        p.end();
+        require(shot.save(output), "Cannot save press orbit snapshot");
+    }
+    window.findChild<QPushButton *>("returnToCad")->click();
+    require(!button->isVisible() && !lock->isEnabled() && lock->isChecked(),
+            "Source CAD inherited press orbit mode");
+    home();
+    const auto source = image();
+    drag(Qt::RightButton, {0, 80});
+    require(differences(source, image()) > 100, "Source CAD lost free orbit");
+    window.findChild<QPushButton *>("partPrimaryAction")->click();
+    require(button->isVisible() && lock->isChecked() && !controller.hasWork() &&
+                controller.bendPreview() == preview && controller.session().editRevision() == edit,
+            "Camera toggle edited the project, recalculated frames or lost its preference");
+}
 void testViewportControls(bool graphics) {
     using namespace bending;
     auto files = std::make_shared<project::ProjectFiles>();
@@ -2089,13 +2208,19 @@ int main(int argc, char *argv[]) {
     app.setQuitOnLastWindowClosed(false);
     try {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
+        if (app.arguments().contains(QStringLiteral("--press-orbit-only"))) {
+            testPressOrbit();
+            std::cout << "Fixed Y orbit, free rotation and press-scene lifecycle passed\n";
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--viewport-controls-only"))) {
             testViewportControls(graphics);
             std::cout << "Viewport controls and quick close passed\n";
             return 0;
         }
-        if (graphics)
+        if (graphics) {
             testViewportControls(true);
+        }
         if (app.arguments().contains(QStringLiteral("--file-drop-only"))) {
             testFileDrop(graphics);
             std::cout << "File drop workflow passed\n";

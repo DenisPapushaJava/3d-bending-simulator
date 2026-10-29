@@ -237,7 +237,9 @@ if(BENDING_BUILD_APP)
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics)
             add_test(NAME viewer.render
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:viewer_tests>)
-            set_tests_properties(app.step-render viewer.render PROPERTIES
+            add_test(NAME viewer.press-orbit
+                COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics --press-orbit-only)
+            set_tests_properties(app.step-render viewer.render viewer.press-orbit PROPERTIES
                 ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1;QT_SCALE_FACTOR=1" TIMEOUT 60 LABELS "graphics")
         endif()
     endif()

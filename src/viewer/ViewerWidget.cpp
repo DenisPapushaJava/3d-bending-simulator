@@ -49,6 +49,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <numbers>
 #include <stdexcept>
 #include <utility>
 
@@ -204,6 +205,51 @@ class OcctCanvas final : public QWidget {
         connect(dimensionsAction_, &QAction::toggled, this,
                 [this](bool visible) { setDimensionsVisible(visible); });
         updateDimensionButton();
+        orbitLockAction_ = navigationMenu_->addAction(QStringLiteral("Обход вокруг Y"));
+        orbitLockAction_->setObjectName(QStringLiteral("lockPressVertical"));
+        orbitLockAction_->setCheckable(true);
+        orbitLockAction_->setIconText(QStringLiteral("Y"));
+        orbitLockAction_->setToolTip(QStringLiteral(
+            "ПКМ: поворот вокруг вертикали Y без наклона. "
+            "СКМ: перенос, колесо: масштаб. Повторное нажатие возвращает свободное вращение."));
+        orbitLockButton_ = new QToolButton(this);
+        orbitLockButton_->setObjectName(QStringLiteral("pressOrbitLock"));
+        orbitLockButton_->setAttribute(Qt::WA_NativeWindow);
+        orbitLockButton_->setDefaultAction(orbitLockAction_);
+        orbitLockButton_->setText(QStringLiteral("Y"));
+        orbitLockButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        orbitLockButton_->setAccessibleName(QStringLiteral("Обход вокруг вертикальной оси Y"));
+        orbitLockButton_->setFixedSize(62, 30);
+        orbitLockButton_->setStyleSheet(controls_->styleSheet());
+        QIcon anchor;
+        for (int ratio : {1, 2})
+            for (const auto state : {QIcon::Off, QIcon::On}) {
+                QPixmap pixels(24 * ratio, 24 * ratio);
+                pixels.setDevicePixelRatio(ratio);
+                pixels.fill(Qt::transparent);
+                QPainter painter(&pixels);
+                painter.setRenderHint(QPainter::Antialiasing);
+                painter.setPen(QPen(state == QIcon::On ? QColor(Qt::white) : QColor("#526171"), 1.7,
+                                    Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                painter.drawEllipse(QPointF(12, 4), 2, 2);
+                painter.drawLine(QPointF(12, 6), QPointF(12, 21));
+                painter.drawLine(QPointF(8, 10), QPointF(16, 10));
+                painter.drawArc(QRectF(4, 5, 16, 16), 180 * 16, 180 * 16);
+                painter.drawPolyline(QPolygonF{{3, 16}, {4, 13}, {7, 15}});
+                painter.drawPolyline(QPolygonF{{17, 15}, {20, 13}, {21, 16}});
+                painter.end();
+                anchor.addPixmap(pixels, QIcon::Normal, state);
+            }
+        orbitLockAction_->setIcon(anchor);
+        orbitLockButton_->hide();
+        orbitLockAction_->setEnabled(false);
+        connect(orbitLockAction_, &QAction::toggled, this, [this](bool locked) {
+            if (locked)
+                guarded([&] {
+                    levelPressCamera();
+                    view_->Redraw();
+                });
+        });
     }
 
     ~OcctCanvas() override {
@@ -703,6 +749,8 @@ class OcctCanvas final : public QWidget {
             result.setDevicePixelRatio(devicePixelRatioF());
             QPainter painter(&result);
             painter.drawPixmap(controls_->pos(), controls_->grab());
+            if (orbitLockButton_->isVisible())
+                painter.drawPixmap(orbitLockButton_->pos(), orbitLockButton_->grab());
         }
         return result;
     }
@@ -732,6 +780,7 @@ class OcctCanvas final : public QWidget {
     void resizeEvent(QResizeEvent *) override {
         controls_->adjustSize();
         controls_->move(qMax(12, width() - controls_->width() - 12), 12);
+        positionOrbitLock();
         updateNavigationCube();
         refreshDimensions();
         guarded([&] { view_->Redraw(); });
@@ -749,7 +798,8 @@ class OcctCanvas final : public QWidget {
         lastPosition_ = physicalPoint(event->position());
         guarded([&] {
             if (event->button() == Qt::RightButton) {
-                view_->StartRotation(lastPosition_.x(), lastPosition_.y());
+                if (!pressOrbitLocked())
+                    view_->StartRotation(lastPosition_.x(), lastPosition_.y());
             } else if (event->button() == Qt::LeftButton) {
                 context_->MoveTo(lastPosition_.x(), lastPosition_.y(), view_, false);
                 const auto cubeOwner =
@@ -778,7 +828,21 @@ class OcctCanvas final : public QWidget {
         const auto position = physicalPoint(event->position());
         guarded([&] {
             if (event->buttons().testFlag(Qt::RightButton)) {
-                view_->Rotation(position.x(), position.y());
+                if (pressOrbitLocked()) {
+                    const auto camera = view_->Camera();
+                    // Looking exactly along Y has no azimuth. Keep explicit top/bottom
+                    // views stationary rather than turning a horizontal drag into roll.
+                    if (std::abs(camera->Direction().Y()) < 1. - 1.e-10) {
+                        gp_Trsf orbit;
+                        orbit.SetRotation(gp_Ax1(camera->Center(), gp_Dir(0, 1, 0)),
+                                          -2 * std::numbers::pi *
+                                              (position.x() - lastPosition_.x()) /
+                                              physicalSize().width());
+                        camera->Transform(orbit);
+                        levelPressCamera();
+                    }
+                } else
+                    view_->Rotation(position.x(), position.y());
             } else if (event->buttons().testFlag(Qt::MiddleButton)) {
                 view_->Pan(position.x() - lastPosition_.x(), lastPosition_.y() - position.y());
             } else if (event->buttons() == Qt::NoButton) {
@@ -902,6 +966,13 @@ class OcctCanvas final : public QWidget {
         navigationMenu_->setEnabled(hasGeometry);
         for (auto *action : navigationMenu_->findChildren<QAction *>())
             action->setEnabled(hasGeometry);
+        const bool press = preview_ && preview_->toolSetup();
+        if (orbitLockAction_) {
+            orbitLockAction_->setEnabled(hasGeometry && press);
+            orbitLockButton_->setVisible(press);
+            orbitLockButton_->setEnabled(hasGeometry && press);
+            positionOrbitLock();
+        }
         updateNavigationCube();
         dimensionsAction_->setEnabled(ready_ && document_ != nullptr);
         const auto description = dimensions_.labels.join(QStringLiteral("\n"));
@@ -1101,6 +1172,20 @@ class OcctCanvas final : public QWidget {
     QToolButton *dimensionsButton_ = nullptr;
     QAction *dimensionsAction_ = nullptr;
     QMenu *navigationMenu_ = nullptr;
+    QAction *orbitLockAction_ = nullptr;
+    QToolButton *orbitLockButton_ = nullptr;
+    bool pressOrbitLocked() const {
+        return orbitLockAction_ && orbitLockAction_->isChecked() && preview_ &&
+               preview_->toolSetup();
+    }
+    void positionOrbitLock() {
+        if (orbitLockButton_)
+            orbitLockButton_->move(qMax(0, width() - 82 - orbitLockButton_->width() / 2), 174);
+    }
+    void levelPressCamera() {
+        if (pressOrbitLocked() && std::abs(view_->Camera()->Direction().Y()) < 1. - 1.e-10)
+            view_->SetUp(0, 1, 0);
+    }
     QWidget *controls_ = nullptr;
     DisplayStyle displayStyle_ = DisplayStyle::Edges;
     Handle(AIS_ViewCube) navigationCube_;
