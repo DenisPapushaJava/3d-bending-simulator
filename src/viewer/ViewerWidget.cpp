@@ -210,8 +210,9 @@ class OcctCanvas final : public QWidget {
         orbitLockAction_->setCheckable(true);
         orbitLockAction_->setIconText(QStringLiteral("Y"));
         orbitLockAction_->setToolTip(QStringLiteral(
-            "ПКМ: поворот вокруг вертикали Y без наклона. "
-            "СКМ: перенос, колесо: масштаб. Повторное нажатие возвращает свободное вращение."));
+            "Выравнивает Y строго вверх, камеру — горизонтально. ПКМ: обход вокруг Y. "
+            "СКМ: перенос, колесо: масштаб. Изометрия и вид сверху/снизу снимают якорь. "
+            "Повторное нажатие возвращает свободное вращение."));
         orbitLockButton_ = new QToolButton(this);
         orbitLockButton_->setObjectName(QStringLiteral("pressOrbitLock"));
         orbitLockButton_->setAttribute(Qt::WA_NativeWindow);
@@ -244,9 +245,10 @@ class OcctCanvas final : public QWidget {
         orbitLockButton_->hide();
         orbitLockAction_->setEnabled(false);
         connect(orbitLockAction_, &QAction::toggled, this, [this](bool locked) {
-            if (locked)
+            if (locked && pressOrbitLocked())
                 guarded([&] {
                     levelPressCamera();
+                    refreshDimensions();
                     view_->Redraw();
                 });
         });
@@ -418,6 +420,8 @@ class OcctCanvas final : public QWidget {
                     if (preview->toolSetup()) {
                         view_->SetProj(1.0, 0.5, 3.0);
                         view_->SetUp(0.0, 1.0, 0.0);
+                        if (orbitLockAction_->isChecked())
+                            levelPressCamera();
                     } else {
                         view_->SetProj(V3d_XposYnegZpos);
                     }
@@ -685,6 +689,7 @@ class OcctCanvas final : public QWidget {
                 if (yup) {
                     view_->SetProj(1.0, 0.5, 3.0);
                     view_->SetUp(0.0, 1.0, 0.0);
+                    releaseOrbitForInclinedView();
                     fitAll();
                     return;
                 }
@@ -709,6 +714,7 @@ class OcctCanvas final : public QWidget {
                 break;
             }
             view_->SetProj(projection, yup);
+            releaseOrbitForInclinedView();
             fitAll();
         });
     }
@@ -806,6 +812,7 @@ class OcctCanvas final : public QWidget {
                     Handle(AIS_ViewCubeOwner)::DownCast(context_->DetectedOwner());
                 if (!cubeOwner.IsNull()) {
                     view_->SetProj(cubeOwner->MainOrientation(), preview_ && preview_->toolSetup());
+                    releaseOrbitForInclinedView();
                     fitAll();
                     return;
                 }
@@ -830,17 +837,12 @@ class OcctCanvas final : public QWidget {
             if (event->buttons().testFlag(Qt::RightButton)) {
                 if (pressOrbitLocked()) {
                     const auto camera = view_->Camera();
-                    // Looking exactly along Y has no azimuth. Keep explicit top/bottom
-                    // views stationary rather than turning a horizontal drag into roll.
-                    if (std::abs(camera->Direction().Y()) < 1. - 1.e-10) {
-                        gp_Trsf orbit;
-                        orbit.SetRotation(gp_Ax1(camera->Center(), gp_Dir(0, 1, 0)),
-                                          -2 * std::numbers::pi *
-                                              (position.x() - lastPosition_.x()) /
-                                              physicalSize().width());
-                        camera->Transform(orbit);
-                        levelPressCamera();
-                    }
+                    gp_Trsf orbit;
+                    orbit.SetRotation(gp_Ax1(camera->Center(), gp_Dir(0, 1, 0)),
+                                      -2 * std::numbers::pi * (position.x() - lastPosition_.x()) /
+                                          physicalSize().width());
+                    camera->Transform(orbit);
+                    levelPressCamera();
                 } else
                     view_->Rotation(position.x(), position.y());
             } else if (event->buttons().testFlag(Qt::MiddleButton)) {
@@ -1183,8 +1185,24 @@ class OcctCanvas final : public QWidget {
             orbitLockButton_->move(qMax(0, width() - 82 - orbitLockButton_->width() / 2), 174);
     }
     void levelPressCamera() {
-        if (pressOrbitLocked() && std::abs(view_->Camera()->Direction().Y()) < 1. - 1.e-10)
-            view_->SetUp(0, 1, 0);
+        const auto camera = view_->Camera();
+        const auto direction = camera->Direction();
+        // Preserve azimuth, target, distance and scale; remove both pitch and roll.
+        // At a top/bottom pole azimuth is undefined, so use the press home azimuth.
+        camera->SetDirection(direction.X() * direction.X() + direction.Z() * direction.Z() > 1.e-10
+                                 ? gp_Dir(direction.X(), 0, direction.Z())
+                                 : gp_Dir(-1, 0, -3));
+        camera->SetUp(gp_Dir(0, 1, 0));
+    }
+    void releaseOrbitForInclinedView() {
+        if (!pressOrbitLocked())
+            return;
+        // Honour explicit cube/menu views, without showing a checked anchor on
+        // an inclined camera or silently replacing the requested projection.
+        if (std::abs(view_->Camera()->Direction().Y()) > 1.e-10)
+            orbitLockAction_->setChecked(false);
+        else
+            levelPressCamera();
     }
     QWidget *controls_ = nullptr;
     DisplayStyle displayStyle_ = DisplayStyle::Edges;

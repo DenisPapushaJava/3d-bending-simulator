@@ -1644,28 +1644,44 @@ void testPressOrbit() {
         }
     };
     const auto home = [&] { viewer->setOrientation(Viewer::Orientation::Isometric); };
+    const auto anchoredHome = [&] {
+        home();
+        require(!lock->isChecked(), "Explicit isometry retained the horizontal anchor");
+        button->click();
+    };
     home();
+    const auto inclined = image();
     button->click();
     require(lock->isChecked() && button->isChecked(), "Anchor did not enable fixed-Y orbit");
     const auto locked = image();
+    require(differences(inclined, locked) > 100, "Anchor retained the isometric camera pitch");
     drag(Qt::RightButton, {0, 80});
     require(differences(locked, image()) == 0, "Vertical drag tilted the anchored scene");
     drag(Qt::RightButton, {85, 0});
     const auto horizontal = image();
     require(differences(locked, horizontal) > 100,
             "Anchored horizontal orbit did not move the scene");
-    home();
+    anchoredHome();
     drag(Qt::RightButton, {85, 80});
     require(differences(horizontal, image()) <= 2,
             "Diagonal input added pitch/roll while Y was anchored");
     home();
-    button->click();
     require(!lock->isChecked(), "Anchor did not restore free rotation");
     drag(Qt::RightButton, {85, 0});
     const auto freeHorizontal = image();
     home();
     drag(Qt::RightButton, {85, 80});
     require(differences(freeHorizontal, image()) > 100, "Released anchor still suppresses pitch");
+    viewer->setOrientation(Viewer::Orientation::Front);
+    const auto front = image();
+    drag(Qt::RightButton, {0, 80});
+    require(differences(front, image()) > 100, "Free camera did not incline from the front");
+    button->click();
+    require(differences(front, image()) <= 2,
+            "Anchor did not restore the exact horizontal front projection");
+    button->click();
+    require(!lock->isChecked() && differences(front, image()) <= 2,
+            "Releasing the anchor moved the camera");
     button->click();
     const auto beforePan = image();
     drag(Qt::MiddleButton, {30, 15});
@@ -1681,9 +1697,23 @@ void testPressOrbit() {
     require(button->isChecked() && button->isVisible(), "Changing frames lost the anchor");
     viewer->setOrientation(Viewer::Orientation::Top);
     const auto top = image();
+    require(!lock->isChecked(), "Explicit top view retained the horizontal anchor");
+    button->click();
+    require(lock->isChecked() && differences(top, image()) > 100,
+            "Anchor could not level the top view with a defined horizontal azimuth");
+    const auto level = image();
     drag(Qt::RightButton, {85, 70});
-    require(differences(top, image()) == 0, "Anchored top view turned mouse input into roll");
-    home();
+    const auto fromTop = image();
+    require(differences(level, fromTop) > 100, "Anchor from a pole cannot orbit horizontally");
+    viewer->setOrientation(Viewer::Orientation::Bottom);
+    require(!lock->isChecked(), "Explicit bottom view retained the horizontal anchor");
+    button->click();
+    require(differences(level, image()) <= 2,
+            "Top and bottom anchor entry disagree on the horizontal fallback");
+    drag(Qt::RightButton, {85, 0});
+    require(differences(fromTop, image()) <= 2,
+            "Pole entry did not retain strictly horizontal orbit");
+    anchoredHome();
     window.resize(1120, 760);
     QApplication::processEvents();
     require(canvas->rect().contains(button->geometry()), "Orbit control clipped after resize");
