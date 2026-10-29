@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QLabel>
 #include <QPainter>
 #include <QPushButton>
@@ -20,6 +21,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 #include <QToolButton>
+#include <algorithm>
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
@@ -95,11 +97,16 @@ int main(int argc, char **argv) {
         auto *k = window.findChild<QDoubleSpinBox *>("unfoldK");
         check(material && button && custom && k && material->currentIndex() == 0,
               "Missing material controls or silently selected material");
+        check(custom->isChecked() && k->value() == .45 && !c.session().unfoldSettings().manualK &&
+                  !c.session().modified() &&
+                  !window.findChild<QPushButton *>("partInputContinue")->isEnabled(),
+              "New-part K default was not a pending 0.45 or skipped material confirmation");
         material->setCurrentIndex(1);
         window.findChild<QPushButton *>("partInputContinue")->click();
         QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         check(c.session().modified() &&
-                  c.session().unfoldSettings().material == core::SheetMaterial::MildSteel,
+                  c.session().unfoldSettings().material == core::SheetMaterial::MildSteel &&
+                  c.session().unfoldSettings().manualK == .45,
               "Material not edited in project");
         button->click();
         wait([&] { return !c.hasWork(); });
@@ -107,6 +114,10 @@ int main(int argc, char **argv) {
             throw std::runtime_error(c.flatPatternError() ? c.flatPatternError()->detail
                                                           : "No flat snapshot");
         const auto first = c.flatPattern();
+        check(!first->info().bends.empty() &&
+                  std::all_of(first->info().bends.begin(), first->info().bends.end(),
+                              [](const auto &bend) { return bend.k == .45; }),
+              "Default 0.45 did not reach the actual flat-pattern calculation");
         const auto edit = c.session().editRevision();
         button->click();
         check(c.flatPattern() == first && !c.hasWork() && edit == c.session().editRevision(),
@@ -199,6 +210,30 @@ int main(int argc, char **argv) {
         check(saved.open(QIODevice::ReadOnly), "Cannot read saved project");
         auto root = QJsonDocument::fromJson(saved.readAll()).object();
         saved.close();
+        // An explicitly saved material-table mode must not become the new default constant.
+        auto tableRoot = root;
+        auto tableParams = tableRoot.value("parameters").toObject();
+        auto tableRule = tableParams.value("unfold").toObject();
+        tableRule.insert("manualK", QJsonValue::Null);
+        tableParams.insert("unfold", tableRule);
+        tableRoot.insert("parameters", tableParams);
+        const auto tablePath = native(dir.path()) / "table.bend";
+        QFile tableFile(qtPath(tablePath));
+        check(tableFile.open(QIODevice::WriteOnly), "Cannot write table-mode project");
+        tableFile.write(QJsonDocument(tableRoot).toJson());
+        tableFile.close();
+        c.open(tablePath);
+        wait([&] { return !c.hasWork(); });
+        window.findChild<QPushButton *>("editPartInputs")->click();
+        check(!window.findChild<QCheckBox *>("customUnfoldK")->isChecked() &&
+                  !c.session().unfoldSettings().manualK && !c.session().modified(),
+              "Saved table mode was silently replaced by K 0.45");
+        window.findChild<QPushButton *>("partInputViewOnly")->click();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        c.open(path);
+        wait([&] { return !c.hasWork(); });
+        check(c.session().unfoldSettings().manualK == .42 && !c.session().modified(),
+              "Saved explicit K was replaced by the new default");
         auto params = root.value("parameters").toObject();
         auto rule = params.value("unfold").toObject();
         rule.insert("referenceVersion", 99);
@@ -236,6 +271,14 @@ int main(int argc, char **argv) {
         check(c.session().unfoldSettings().material == core::SheetMaterial::Unknown &&
                   !c.session().unfoldSettings().manualK,
               "Material leaked to another STEP");
+        window.findChild<QPushButton *>("editPartInputs")->click();
+        check(window.findChild<QDoubleSpinBox *>("unfoldK")->value() == .45,
+              "A fresh STEP did not offer the constant default");
+        window.findChild<QPushButton *>("partInputViewOnly")->click();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        check(!c.session().unfoldSettings().manualK && !c.session().modified() &&
+                  !c.session().hasPartInputs(),
+              "Cancelling the default applied unconfirmed calculation inputs");
         c.shutdown();
         return 0;
     } catch (const std::exception &e) {

@@ -22,6 +22,7 @@ class PartInputDialog final : public QDialog {
     std::optional<double> manual_, automatic_;
     core::UnfoldSettings settings_;
     bool applying_ = false;
+    bool requireMaterial_ = false;
     QComboBox *material_;
     QDoubleSpinBox *thickness_, *k_;
     QCheckBox *customK_;
