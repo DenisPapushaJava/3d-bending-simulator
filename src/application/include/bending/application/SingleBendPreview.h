@@ -97,6 +97,8 @@ struct BendPreviewError {
 using BendPreviewResult = std::variant<BendPreviewPtr, BendPreviewError>;
 class SingleBendPreviewBuilder {
   public:
+    // Drop retained route work on close/new import. Must not wait for an active CAD call.
+    virtual void discardRouteCache() const {}
     [[nodiscard]] virtual BendRouteResult buildRoute(DocumentPtr, BendRouteRequest,
                                                      std::stop_token) const {
         return BendRouteError{BendRouteErrorCode::Unsupported, "Route builder unavailable"};

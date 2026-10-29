@@ -124,6 +124,11 @@ class ImportController::Impl {
     std::optional<BendRouteError> routeError;
     std::uint64_t routeId = 0, routeRevision = 0, routeEditRevision = 0;
     bool preparingRoute = false;
+    std::weak_ptr<const SingleBendPreviewBuilder> routeBuilder;
+    void discardRouteCache() {
+        if (const auto builder = routeBuilder.lock())
+            builder->discardRouteCache();
+    }
     void invalidateRoute() {
         ++routeId;
         route.reset();
@@ -188,6 +193,7 @@ void ImportController::open(std::filesystem::path path) {
         return;
     }
     impl_->stop.request_stop();
+    impl_->discardRouteCache();
     impl_->invalidateRoute();
     impl_->invalidateFlat();
     impl_->invalidatePreview();
@@ -200,9 +206,10 @@ void ImportController::open(std::filesystem::path path) {
 }
 
 void ImportController::cancel() {
+    impl_->stop.request_stop();
+    impl_->discardRouteCache();
     impl_->invalidateRoute();
     impl_->invalidateFlat();
-    impl_->stop.request_stop();
     impl_->invalidatePreview();
     impl_->invalidateDrawing();
     ++impl_->saveId;
@@ -231,6 +238,7 @@ void ImportController::shutdown() {
     // No terminate(): a non-interruptible OCCT call must finish before its dependencies die.
     impl_->thread.quit();
     impl_->thread.wait();
+    impl_->discardRouteCache();
 }
 
 const DocumentSession &ImportController::session() const {
@@ -605,6 +613,9 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     }
     request.manualThicknessMm = session.manualThicknessMm();
     auto *s = impl_.get();
+    if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
+        previous->discardRouteCache();
+    s->routeBuilder = builder;
     s->invalidateRoute();
     s->invalidatePreview();
     const auto id = s->routeId, revision = session.revision(), edit = session.editRevision();

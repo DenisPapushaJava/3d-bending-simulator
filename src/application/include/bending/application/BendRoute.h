@@ -15,6 +15,7 @@ struct RouteOperation {
     core::BendTarget target;
     std::optional<core::PressTools> tools;
     std::optional<core::ToolAssignment> assignment;
+    bool operator==(const RouteOperation &) const = default;
 };
 struct BendRouteRequest {
     // Complete list in the requested forward order; Automatic may reorder it.
@@ -25,6 +26,15 @@ struct BendRouteRequest {
     std::optional<double> manualThicknessMm;
     std::size_t maximumChecks = 96;
     unsigned maximumTimeMs = 60000;
+    // Diagnostic/reference switches; the UI uses both optimizations.
+    bool rankCandidates = true;
+    bool reuseCalculations = true;
+};
+struct BendRouteStatistics {
+    std::size_t builtStates = 0, reusedStates = 0;
+    std::size_t builtTransitions = 0, reusedTransitions = 0;
+    bool reusedFlatPattern = false;
+    std::size_t reorderedStates = 0;
 };
 struct BendRouteStep {
     std::string id;
@@ -38,6 +48,7 @@ struct BendRoute {
     std::size_t evaluatedOperations = 0;
     bool withTools = false;
     bool partialEndSupport = false;
+    BendRouteStatistics statistics = {};
     // The first route is geometric K=0.5; material BA remains a separate flat pattern.
     // Tool mode checks each cycle; extraction/repositioning/machine are NOT certified.
 };
@@ -69,6 +80,7 @@ struct BendRouteError {
     std::size_t evaluatedOperations = 0;
     std::optional<BendPreviewErrorCode> operationError = {};
     std::optional<BendRouteToolLengthIssue> toolLengths = {};
+    BendRouteStatistics statistics = {};
 };
 using BendRouteResult = std::variant<BendRoutePtr, BendRouteError>;
 } // namespace bending::application

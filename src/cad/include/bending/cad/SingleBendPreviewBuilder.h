@@ -1,10 +1,14 @@
 #pragma once
 
 #include "bending/application/SingleBendPreview.h"
+#include <mutex>
 
 namespace bending::cad {
 class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuilder {
   public:
+    SingleBendPreviewBuilder() = default;
+    ~SingleBendPreviewBuilder() override;
+    void discardRouteCache() const override;
     [[nodiscard]] application::BendRouteResult buildRoute(application::DocumentPtr,
                                                           application::BendRouteRequest,
                                                           std::stop_token) const override;
@@ -26,5 +30,10 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
                                                        std::size_t bendIndex,
                                                        core::BendTarget target, bool fixedSecond,
                                                        std::stop_token stop) const override;
+
+  private:
+    struct RouteCache;
+    mutable std::mutex routeCacheMutex_;
+    mutable std::shared_ptr<RouteCache> routeCache_;
 };
 } // namespace bending::cad

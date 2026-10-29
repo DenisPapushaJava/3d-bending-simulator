@@ -716,8 +716,15 @@ class MainWindow::Impl {
         const auto bendCount = document ? document->metadata().bendAnalysis.bends.size() : 0;
         processSteps[0]->setStatus(document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
                                             : QStringLiteral("Открыть STEP"));
-        processSteps[1]->setStatus(chosen && document ? toolSelection->shortSummary()
-                                                      : QStringLiteral("Выбрать пару"));
+        if (document && bendCount > 1 && toolAssignmentScope->currentIndex() == 1) {
+            std::size_t assigned = 0;
+            for (const auto index : session.orderedBends())
+                assigned += session.bend(index)->tools.has_value() ? 1 : 0;
+            processSteps[1]->setStatus(
+                QStringLiteral("По гибам: %1 из %2").arg(assigned).arg(bendCount));
+        } else
+            processSteps[1]->setStatus(chosen && document ? toolSelection->shortSummary()
+                                                          : QStringLiteral("Выбрать пару"));
         processSteps[2]->setStatus(
             controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
             : viewingRoute && controller->bendRoute() && controller->bendRoute()->partialEndSupport

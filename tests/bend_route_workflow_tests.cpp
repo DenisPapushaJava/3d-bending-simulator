@@ -80,9 +80,8 @@ int main(int argc, char **argv) {
                 throw std::runtime_error(*error);
             catalog = std::get<core::ToolCatalog>(std::move(loaded));
         }
-        ui::MainWindow window({"test", "test"}, files, files,
-                              std::make_shared<cad::SingleBendPreviewBuilder>(),
-                              std::move(catalog));
+        auto previewBuilder = std::make_shared<cad::SingleBendPreviewBuilder>();
+        ui::MainWindow window({"test", "test"}, files, files, previewBuilder, std::move(catalog));
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
         window.show();
@@ -250,8 +249,8 @@ int main(int argc, char **argv) {
                                              *controller.session().bendTarget(index), entry->tools,
                                              entry->catalogTools});
             }
-            const auto result = cad::SingleBendPreviewBuilder{}.buildRoute(
-                controller.session().document(), strict, {});
+            const auto result =
+                previewBuilder->buildRoute(controller.session().document(), strict, {});
             require(std::holds_alternative<application::BendRouteError>(result) &&
                         std::get<application::BendRouteError>(result).operationError ==
                             application::BendPreviewErrorCode::SupportNotProven,

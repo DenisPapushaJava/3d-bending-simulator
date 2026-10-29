@@ -21,6 +21,7 @@
 #include <QToolButton>
 #include <STEPControl_Writer.hxx>
 #include <algorithm>
+#include <atomic>
 #include <iostream>
 #include <stdexcept>
 using namespace bending;
@@ -48,6 +49,10 @@ std::filesystem::path native(const QString &path) {
 }
 class LimitedBuilder final : public application::SingleBendPreviewBuilder {
   public:
+    mutable std::atomic<unsigned> discards = 0;
+    void discardRouteCache() const override {
+        ++discards;
+    }
     mutable std::optional<application::BendRouteRequest> last;
     application::BendRouteResult buildRoute(application::DocumentPtr,
                                             application::BendRouteRequest request,
@@ -187,6 +192,22 @@ int main(int argc, char **argv) {
             require(controller.bendRoute() == route && !controller.hasWork(),
                     "Step selection recalculated the route");
         }
+        window.findChild<QSlider *>("bendFrame")->setValue(20);
+        window.findChild<QPushButton *>("checkBendRoute")->click();
+        wait([&] { return !controller.hasWork(); });
+        const auto reused = controller.bendRoute();
+        require(reused && reused->statistics.builtTransitions == 0 &&
+                    reused->statistics.reusedTransitions == route->steps.size() &&
+                    window.findChild<QSlider *>("bendFrame")->value() == 0,
+                "The UI did not reuse complete verified cycles");
+        require(window.findChild<QToolButton *>("processStage1")
+                    ->accessibleName()
+                    .contains(QStringLiteral("По гибам")),
+                "The process card reports another bend's editor tool as the route tool");
+        for (std::size_t i = 0; i < reused->steps.size(); ++i)
+            require(reused->steps[i].preview == route->steps[i].preview,
+                    "Matching cached cycles were replaced or reordered");
+        window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(bends.size()))->click();
         if (!sample)
             require(window.findChild<QLabel *>("bendRouteStatus")
                         ->text()
@@ -262,6 +283,9 @@ int main(int argc, char **argv) {
                         !builder->last->automatic && !builder->last->withTools &&
                         expand->isHidden() && !expand->isEnabled(),
                     "Explicit retry changed the mode or kept offering an identical retry");
+            const auto discards = builder->discards.load();
+            budgetController.closeDocument();
+            require(builder->discards > discards, "Closing a document retained cached route work");
             budgetController.shutdown();
         }
         std::cout << "Independent tool assignments, checked cycles and portable reopening passed\n";

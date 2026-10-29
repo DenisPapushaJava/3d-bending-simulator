@@ -20,12 +20,16 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Compound.hxx>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <list>
 #include <map>
+#include <mutex>
 #include <set>
+#include <tuple>
 
 namespace bending::cad {
 namespace {
@@ -73,6 +77,43 @@ struct State {
     std::shared_ptr<const CadDocument> document;
     std::vector<std::optional<std::size_t>> indices;
 };
+struct TransitionKey {
+    Mask mask;
+    RouteOperation operation;
+    bool fixedSecond, withTools, partialEndSupport;
+    bool operator==(const TransitionKey &) const = default;
+};
+struct Transition {
+    TransitionKey key;
+    BendPreviewResult result;
+};
+struct CacheData {
+    DocumentPtr source;
+    std::optional<double> thickness;
+    FlatPatternPtr flat;
+    std::map<Mask, std::shared_ptr<const State>> states;
+    std::list<Mask> stateOrder;
+    std::list<Transition> transitions;
+    std::mutex mutex;
+};
+bool stableRejection(BendPreviewErrorCode code) {
+    switch (code) {
+    case BendPreviewErrorCode::ToolIntersection:
+    case BendPreviewErrorCode::SheetIntersection:
+    case BendPreviewErrorCode::MissingLeftSupport:
+    case BendPreviewErrorCode::MissingRightSupport:
+    case BendPreviewErrorCode::SupportNotProven:
+    case BendPreviewErrorCode::ToolAngleConflict:
+    case BendPreviewErrorCode::NoseTooLarge:
+    case BendPreviewErrorCode::NarrowDieOpening:
+    case BendPreviewErrorCode::ContactLost:
+    case BendPreviewErrorCode::RetractionNotProven:
+    case BendPreviewErrorCode::UnsupportedToolGeometry:
+        return true;
+    default:
+        return false;
+    }
+}
 class RouteSearch {
   public:
     DocumentPtr source;
@@ -82,7 +123,9 @@ class RouteSearch {
     std::stop_token stop;
     const SheetLayout *layout = nullptr;
     double tolerance = 0, expectedVolume = 0, budget = 0;
-    std::map<Mask, State> states;
+    CacheData *cache = nullptr;
+    BendRouteStatistics statistics;
+    std::vector<Mask> neighbours;
     std::set<Mask> dead;
     std::vector<BendRouteStep> reversed;
     std::size_t attempts = 0;
@@ -92,11 +135,18 @@ class RouteSearch {
     bool incomplete = false;
     std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 
-    State &state(Mask mask) {
-        if (auto found = states.find(mask); found != states.end())
+    void touchState(Mask mask) {
+        cache->stateOrder.remove(mask);
+        cache->stateOrder.push_front(mask);
+    }
+    std::shared_ptr<const State> state(Mask mask) {
+        if (auto found = cache->states.find(mask); found != cache->states.end()) {
+            ++statistics.reusedStates;
+            touchState(mask);
             return found->second;
+        }
         cancelled(stop);
-        if (states.size() >= 128)
+        if (!request.reuseCalculations && cache->states.size() >= 128)
             throw BendRouteError{BendRouteErrorCode::SearchLimit,
                                  "Intermediate state cache limit reached",
                                  {},
@@ -166,26 +216,138 @@ class RouteSearch {
             }
             check(result.indices[i].has_value(), "An intermediate bend lost its stable binding");
         }
-        return states.emplace(mask, std::move(result)).first->second;
+        auto value = std::make_shared<const State>(std::move(result));
+        cache->states.emplace(mask, value);
+        ++statistics.builtStates;
+        touchState(mask);
+        // Shared local handles keep an active before/after state alive during eviction.
+        while (request.reuseCalculations && cache->states.size() > 32) {
+            const auto oldest = cache->stateOrder.back();
+            cache->stateOrder.pop_back();
+            if (oldest == (Mask{1} << request.operations.size()) - 1) {
+                cache->stateOrder.push_front(oldest);
+                continue;
+            }
+            cache->states.erase(oldest);
+        }
+        return value;
     }
 
+    TransitionKey key(Mask mask, const RouteOperation &op, bool side) const {
+        auto operation = op;
+        if (!request.withTools) {
+            operation.tools.reset();
+            operation.assignment.reset();
+        }
+        return {mask, std::move(operation), side, request.withTools,
+                request.allowPartialEndSupport};
+    }
+    // 0 = verified success, 1 = unknown, 2 = stable rejection of this exact transition.
+    int priorResult(Mask mask, const RouteOperation &op, bool side) const {
+        if (!request.reuseCalculations)
+            return 1;
+        const auto wanted = key(mask, op, side);
+        for (const auto &transition : cache->transitions)
+            if (transition.key == wanted)
+                return std::holds_alternative<BendPreviewPtr>(transition.result) ? 0 : 2;
+        return 1;
+    }
+    void remember(TransitionKey key, BendPreviewResult result) {
+        if (!request.reuseCalculations)
+            return;
+        cancelled(stop);
+        cache->transitions.push_front({std::move(key), std::move(result)});
+        while (cache->transitions.size() > 8)
+            cache->transitions.pop_back();
+    }
+    BendPreviewResult transition(Mask mask, const RouteOperation &op, bool fixedSecond) {
+        const auto wanted = key(mask, op, fixedSecond);
+        if (request.reuseCalculations)
+            for (auto it = cache->transitions.begin(); it != cache->transitions.end(); ++it)
+                if (it->key == wanted) {
+                    ++statistics.reusedTransitions;
+                    auto value = it->result;
+                    cache->transitions.splice(cache->transitions.begin(), cache->transitions, it);
+                    return value;
+                }
+        ++statistics.builtTransitions;
+        const auto after = state(mask);
+        const auto before = state(mask ^ (Mask{1} << op.bendIndex));
+        auto preview = buildBendOperation(
+            after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
+            request.withTools ? op.tools : std::nullopt, request.withTools,
+            request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport);
+        if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
+            if (stableRejection(failure->code))
+                remember(wanted, preview);
+            return preview;
+        }
+        const auto p = std::get<BendPreviewPtr>(preview);
+        // The first state must agree with the independently assembled
+        // predecessor up to the same placement of the reference wall.
+        const auto &components = OcctPreviewAccess::sourceComponents(*p);
+        std::optional<std::size_t> rootSide;
+        for (std::size_t side = 0; side < 2; ++side) {
+            const auto overlap = volume(boolean<BRepAlgoAPI_Common>(
+                layout->walls[0].solid, components[side], tolerance, stop));
+            const double rootVolume = volume(layout->walls[0].solid);
+            if (std::abs(overlap - rootVolume) <= std::max(1.e-6, rootVolume * 1.e-7)) {
+                check(!rootSide, "Reference wall crosses both material components");
+                rootSide = side;
+            }
+        }
+        check(rootSide.has_value(), "Reference wall lost from the operation");
+        const auto &first = OcctPreviewAccess::frame(*p, 0);
+        BRep_Builder materialBuilder;
+        TopoDS_Compound material;
+        materialBuilder.MakeCompound(material);
+        for (const auto &region : first.regions)
+            materialBuilder.Add(material, region);
+        const auto expected = moved(OcctDocumentAccess::simulationShape(*before->document),
+                                    first.materialTransforms[*rootSide]);
+        check(volume(boolean<BRepAlgoAPI_Cut>(expected, material, tolerance, stop)) <= budget &&
+                  volume(boolean<BRepAlgoAPI_Cut>(material, expected, tolerance, stop)) <= budget,
+              "Operation start does not match the complete preceding state");
+        remember(wanted, preview);
+        return preview;
+    }
+    std::vector<std::size_t> candidates(Mask mask) {
+        std::vector<std::size_t> result;
+        for (std::size_t order = request.operations.size(); order-- > 0;)
+            if ((mask & (Mask{1} << request.operations[order].bendIndex)) &&
+                (request.automatic || static_cast<std::size_t>(std::popcount(mask)) == order + 1))
+                result.push_back(order);
+        if (request.automatic && request.rankCandidates) {
+            const auto original = result;
+            const auto score = [&](std::size_t order) {
+                const auto &op = request.operations[order];
+                // Soft accessibility estimate: fewer still-formed bends on the adjacent
+                // walls. It changes order only, never rejects a candidate or an orientation.
+                return std::tuple{
+                    std::min(priorResult(mask, op, false), priorResult(mask, op, true)),
+                    std::popcount(neighbours[op.bendIndex] & mask)};
+            };
+            std::stable_sort(result.begin(), result.end(),
+                             [&](auto a, auto b) { return score(a) < score(b); });
+            statistics.reorderedStates += result != original ? 1 : 0;
+        }
+        return result;
+    }
     bool search(Mask mask) {
         cancelled(stop);
         if (!mask)
             return true;
         if (dead.contains(mask))
             return false;
-        for (std::size_t order = request.operations.size(); order-- > 0;) {
+        for (const auto order : candidates(mask)) {
             const auto &op = request.operations[order];
             const auto bit = Mask{1} << op.bendIndex;
-            if (!(mask & bit))
-                continue;
-            if (!request.automatic && static_cast<std::size_t>(std::popcount(mask)) != order + 1)
-                continue;
-            for (const bool fixedSecond : {false, true}) {
+            std::array<bool, 2> sides{false, true};
+            if (request.rankCandidates &&
+                priorResult(mask, op, true) < priorResult(mask, op, false))
+                std::swap(sides[0], sides[1]);
+            for (const bool fixedSecond : sides) {
                 cancelled(stop);
-                // No future path from that canonical predecessor, independently
-                // of this operation's side (inter-operation transport is out of scope).
                 if (dead.contains(mask ^ bit))
                     break;
                 if (attempts >= request.maximumChecks ||
@@ -196,13 +358,7 @@ class RouteSearch {
                                          attempts};
                 ++attempts;
                 try {
-                    auto &after = state(mask);
-                    auto &before = state(mask ^ bit);
-                    auto preview = buildBendOperation(
-                        after.document, *after.indices[op.bendIndex], op.target, fixedSecond, stop,
-                        request.withTools ? op.tools : std::nullopt, request.withTools,
-                        request.withTools ? op.assignment : std::nullopt,
-                        request.allowPartialEndSupport);
+                    auto preview = transition(mask, op, fixedSecond);
                     if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
                         if (failure->code == BendPreviewErrorCode::Cancelled)
                             cancelled(stop);
@@ -213,36 +369,8 @@ class RouteSearch {
                                       failure->code == BendPreviewErrorCode::UnsupportedGeometry;
                         continue;
                     }
-                    const auto p = std::get<BendPreviewPtr>(std::move(preview));
-                    // The first state must agree with the independently assembled
-                    // predecessor up to the same placement of the reference wall.
-                    const auto &components = OcctPreviewAccess::sourceComponents(*p);
-                    std::optional<std::size_t> rootSide;
-                    for (std::size_t side = 0; side < 2; ++side) {
-                        const auto overlap = volume(boolean<BRepAlgoAPI_Common>(
-                            layout->walls[0].solid, components[side], tolerance, stop));
-                        const double rootVolume = volume(layout->walls[0].solid);
-                        if (std::abs(overlap - rootVolume) <= std::max(1.e-6, rootVolume * 1.e-7)) {
-                            check(!rootSide, "Reference wall crosses both material components");
-                            rootSide = side;
-                        }
-                    }
-                    check(rootSide.has_value(), "Reference wall lost from the operation");
-                    const auto &first = OcctPreviewAccess::frame(*p, 0);
-                    BRep_Builder materialBuilder;
-                    TopoDS_Compound material;
-                    materialBuilder.MakeCompound(material);
-                    for (const auto &region : first.regions)
-                        materialBuilder.Add(material, region);
-                    const auto expected =
-                        moved(OcctDocumentAccess::simulationShape(*before.document),
-                              first.materialTransforms[*rootSide]);
-                    check(volume(boolean<BRepAlgoAPI_Cut>(expected, material, tolerance, stop)) <=
-                                  budget &&
-                              volume(boolean<BRepAlgoAPI_Cut>(material, expected, tolerance,
-                                                              stop)) <= budget,
-                          "Operation start does not match the complete preceding state");
-                    reversed.push_back({op.id, op.bendIndex, fixedSecond, p});
+                    reversed.push_back({op.id, op.bendIndex, fixedSecond,
+                                        std::get<BendPreviewPtr>(std::move(preview))});
                     if (search(mask ^ bit))
                         return true;
                     reversed.pop_back();
@@ -256,14 +384,21 @@ class RouteSearch {
                     failedBend = op.bendIndex;
                 }
             }
-            if (!request.automatic)
-                break;
         }
         dead.insert(mask);
         return false;
     }
 };
 } // namespace
+struct SingleBendPreviewBuilder::RouteCache : CacheData {};
+SingleBendPreviewBuilder::~SingleBendPreviewBuilder() = default;
+void SingleBendPreviewBuilder::discardRouteCache() const {
+    std::shared_ptr<RouteCache> old;
+    {
+        std::lock_guard lock(routeCacheMutex_);
+        old = std::move(routeCache_);
+    }
+}
 BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendRouteRequest request,
                                                      std::stop_token stop) const {
     try {
@@ -314,18 +449,46 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                                                                core::punchLengthMm(*op.tools),
                                                                op.tools->lengthMm}};
         }
-        FlatPatternRequest flatRequest{{core::SheetMaterial::Unknown, .5, 1},
-                                       request.manualThicknessMm};
-        auto flatResult = FlatPatternBuilder().build(document, flatRequest, stop);
-        if (const auto *e = std::get_if<FlatPatternError>(&flatResult))
-            return BendRouteError{e->code == FlatPatternErrorCode::Cancelled
-                                      ? BendRouteErrorCode::Cancelled
-                                      : BendRouteErrorCode::Unsupported,
-                                  e->detail};
+        std::shared_ptr<RouteCache> work;
+        if (request.reuseCalculations) {
+            std::lock_guard lock(routeCacheMutex_);
+            cancelled(stop);
+            if (!routeCache_ || routeCache_->source != document ||
+                routeCache_->thickness != request.manualThicknessMm) {
+                routeCache_ = std::make_shared<RouteCache>();
+                routeCache_->source = document;
+                routeCache_->thickness = request.manualThicknessMm;
+            }
+            work = routeCache_;
+        } else {
+            work = std::make_shared<RouteCache>();
+            work->source = document;
+            work->thickness = request.manualThicknessMm;
+        }
+        std::lock_guard workLock(work->mutex);
+        cancelled(stop);
+        const bool reusedFlat = bool(work->flat);
+        if (!work->flat) {
+            FlatPatternRequest flatRequest{{core::SheetMaterial::Unknown, .5, 1},
+                                           request.manualThicknessMm};
+            auto flatResult = FlatPatternBuilder().build(document, flatRequest, stop);
+            if (const auto *e = std::get_if<FlatPatternError>(&flatResult)) {
+                if (e->code == FlatPatternErrorCode::Cancelled)
+                    discardRouteCache();
+                return BendRouteError{e->code == FlatPatternErrorCode::Cancelled
+                                          ? BendRouteErrorCode::Cancelled
+                                          : BendRouteErrorCode::Unsupported,
+                                      e->detail};
+            }
+            cancelled(stop);
+            work->flat = std::get<FlatPatternPtr>(flatResult);
+        }
         RouteSearch search;
         search.source = document;
         search.native = native;
-        search.flat = std::get<FlatPatternPtr>(flatResult);
+        search.cache = work.get();
+        search.statistics.reusedFlatPattern = reusedFlat;
+        search.flat = work->flat;
         search.request = std::move(request);
         search.stop = stop;
         search.layout = &OcctFlatPatternAccess::layout(*search.flat);
@@ -339,21 +502,45 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         State original{native, std::vector<std::optional<std::size_t>>(n)};
         for (std::size_t i = 0; i < n; ++i)
             original.indices[i] = i;
-        search.states.emplace((Mask{1} << n) - 1, std::move(original));
-        if (!search.search((Mask{1} << n) - 1))
-            return BendRouteError{
-                search.incomplete ? BendRouteErrorCode::Unsupported : BendRouteErrorCode::NoRoute,
-                search.lastFailure, search.failedBend, search.attempts, search.lastOperationError};
+        const auto full = (Mask{1} << n) - 1;
+        work->states.try_emplace(full, std::make_shared<const State>(std::move(original)));
+        search.touchState(full);
+        search.neighbours.resize(n);
+        for (const auto &a : search.layout->bends)
+            for (const auto &b : search.layout->bends)
+                if (a.bendIndex != b.bendIndex && (a.parent == b.parent || a.parent == b.child ||
+                                                   a.child == b.parent || a.child == b.child))
+                    search.neighbours[a.bendIndex] |= Mask{1} << b.bendIndex;
+        bool found = false;
+        try {
+            found = search.search((Mask{1} << n) - 1);
+        } catch (BendRouteError &e) {
+            e.statistics = search.statistics;
+            throw;
+        }
+        if (!found)
+            return BendRouteError{search.incomplete ? BendRouteErrorCode::Unsupported
+                                                    : BendRouteErrorCode::NoRoute,
+                                  search.lastFailure,
+                                  search.failedBend,
+                                  search.attempts,
+                                  search.lastOperationError,
+                                  {},
+                                  search.statistics};
+        cancelled(stop);
         auto result = std::make_shared<BendRoute>();
         result->source = document;
         result->withTools = search.request.withTools;
         result->evaluatedOperations = search.attempts;
+        result->statistics = search.statistics;
         result->steps.assign(search.reversed.rbegin(), search.reversed.rend());
         result->partialEndSupport =
             std::any_of(result->steps.begin(), result->steps.end(),
                         [](const auto &step) { return step.preview->partialEndSupport(); });
         return BendRoutePtr(result);
     } catch (const BendRouteError &e) {
+        if (e.code == BendRouteErrorCode::Cancelled)
+            discardRouteCache();
         return e;
     } catch (const FlatPatternError &e) {
         return BendRouteError{e.code == FlatPatternErrorCode::Cancelled
