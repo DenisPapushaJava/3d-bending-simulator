@@ -5,6 +5,9 @@
 namespace bending::cad {
 class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuilder {
   public:
+    [[nodiscard]] application::BendRouteResult buildRoute(application::DocumentPtr,
+                                                          application::BendRouteRequest,
+                                                          std::stop_token) const override;
     [[nodiscard]] application::BendPreviewResult
         buildAssignedToolSetup(application::DocumentPtr, std::size_t, core::BendTarget,
                                core::ToolAssignment, std::stop_token) const override;

@@ -10,6 +10,7 @@
 #include "bending/ui/ImportController.h"
 #include "bending/viewer/ViewerWidget.h"
 
+#include "RoutePanel.h"
 #include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
@@ -346,13 +347,17 @@ class MainWindow::Impl {
                                       (document && drawingBuilder && !controller->hasWork()));
         const bool cancellable =
             session.activeRequest().has_value() || controller->isPreparingPreview() ||
-            controller->isPreparingDrawing() || controller->isPreparingFlatPattern();
+            controller->isPreparingDrawing() || controller->isPreparingFlatPattern() ||
+            controller->isPreparingRoute();
         cancelAction->setVisible(cancellable);
         cancelAction->setEnabled(cancellable);
         progress->setVisible(session.activeRequest().has_value() || controller->isSaving() ||
                              controller->isPreparingPreview() || controller->isPreparingDrawing() ||
-                             controller->isPreparingFlatPattern());
-        if (controller->isPreparingFlatPattern()) {
+                             controller->isPreparingFlatPattern() ||
+                             controller->isPreparingRoute());
+        if (controller->isPreparingRoute()) {
+            window->statusBar()->showMessage(QStringLiteral("Подготовка 3D-порядка гибов…"));
+        } else if (controller->isPreparingFlatPattern()) {
             window->statusBar()->showMessage(QStringLiteral("Подготовка теоретической развёртки…"));
         } else if (controller->isPreparingDrawing()) {
             window->statusBar()->showMessage(
@@ -410,6 +415,7 @@ class MainWindow::Impl {
     void checkTools() {
         if (controller->hasWork())
             return;
+        viewingRoute = false;
         const auto row = bendList->currentIndex().row();
         const auto tools = toolSelection->parameters();
         if (!tools) {
@@ -620,8 +626,11 @@ class MainWindow::Impl {
         processSteps[1]->setStatus(chosen && document ? toolSelection->shortSummary()
                                                       : QStringLiteral("Выбрать пару"));
         processSteps[2]->setStatus(
-            controller->isPreparingPreview() ? QStringLiteral("Проверяем…")
-            : !document                      ? QStringLiteral("Нужна деталь")
+            controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
+            : viewingRoute && controller->bendRoute()
+                ? QStringLiteral("Порядок: %1 шагов").arg(controller->bendRoute()->steps.size())
+            : controller->isPreparingPreview() ? QStringLiteral("Проверяем…")
+            : !document                        ? QStringLiteral("Нужна деталь")
             : !singleBendSupported ? QStringLiteral("Пока не поддерживается")
             : !matchingBendThickness || !entry || !included(entry->review)
                 ? QStringLiteral("Нужно уточнение")
@@ -647,6 +656,10 @@ class MainWindow::Impl {
         playBend->setText(QStringLiteral("Воспроизвести"));
     }
     application::BendPreviewPtr scenePreview() const {
+        if (viewingRoute)
+            if (const auto route = controller->bendRoute(); route && !route->steps.empty())
+                return route->steps[std::min(routePanel->operation(), route->steps.size() - 1)]
+                    .preview;
         if (const auto p = controller->bendPreview())
             return p;
         const auto &e = controller->bendPreviewError();
@@ -711,6 +724,13 @@ class MainWindow::Impl {
     void refreshPreview() {
         const auto &session = controller->session();
         const auto &document = session.document();
+        routePanel->setVisible(propertyTabs->currentIndex() == 2 && document &&
+                               document->metadata().bendAnalysis.bends.size() > 1);
+        routePanel->stepStrip()->setVisible(propertyTabs->currentIndex() == 2 && document &&
+                                            document->metadata().bendAnalysis.bends.size() > 1);
+        routePanel->refresh(session, controller->bendRoute(), controller->bendRouteError(),
+                            controller->hasWork(), controller->isPreparingRoute(),
+                            toolSelection->parameters().has_value());
         const auto row = bendList->currentIndex().row();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
         const bool hasInteriorContours =
@@ -792,6 +812,7 @@ class MainWindow::Impl {
         showKinematics->setVisible(staticSetup && !diagnostic);
         showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
         bendFrame->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
+                              !(viewingRoute && routePanel->selected() == 0) &&
                               previewDisplayError.isEmpty());
         playBend->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
                              previewDisplayError.isEmpty());
@@ -987,10 +1008,13 @@ class MainWindow::Impl {
                 : QStringLiteral("Деталь и пара инструмента выбраны. Можно проверить гибку."));
         checkSummary->setMinimumHeight(std::max(0, checkSummary->heightForWidth(240)));
         checkScope->setText(
-            (document && document->metadata().bendAnalysis.bends.size() > 1
-                 ? QStringLiteral("Выбранный гиб — как последняя операция; остальные гибы "
-                                  "сохраняют форму STEP. Полный порядок не проверен.\n")
-                 : QString{}) +
+            (viewingRoute && controller->bendRoute()
+                 ? QStringLiteral("Промежуточная 3D-форма по выбранному порядку. Извлечение и "
+                                  "перенос между установками не проверены.\n")
+                 : (document && document->metadata().bendAnalysis.bends.size() > 1
+                        ? QStringLiteral("Выбранный гиб — как последняя операция; остальные гибы "
+                                         "сохраняют форму STEP. Полный порядок не проверен.\n")
+                        : QString{})) +
             (preview && preview->usesDrawingTools()
                  ? QStringLiteral("Пуансон: %1. Матрица: %2. ")
                        .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
@@ -1010,7 +1034,7 @@ class MainWindow::Impl {
                        "\nВырезы видимы; опоры и зазоры проверяются по заполненной копии. "
                        "Физика и реальная опора у вырезов не проверены.")
                  : QString{}));
-        checkScope->setVisible(document != nullptr);
+        checkScope->setVisible(document != nullptr && !(viewingRoute && controller->bendRoute()));
         checkScope->setMinimumHeight(std::max(0, checkScope->heightForWidth(240)));
         checkBend->setEnabled(applyTools->isEnabled() && toolSelection->parameters().has_value());
         checkBend->setVisible(!preview);
@@ -1466,6 +1490,8 @@ class MainWindow::Impl {
         controller->saveProject(nativePath(path), writer);
     }
     MainWindow *window;
+    RoutePanel *routePanel = nullptr;
+    bool viewingRoute = false;
     viewer::ViewerWidget *viewer = nullptr;
     ImportController *controller = nullptr;
     QListWidget *project = nullptr;
@@ -1602,7 +1628,16 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         QStringLiteral("3D Bending Simulator · %1").arg(text(runtime.applicationVersion));
     resize(1440, 900);
     impl_->viewer = new viewer::ViewerWidget(this);
-    setCentralWidget(impl_->viewer);
+    auto *workspace = new QWidget(this);
+    auto *workspaceLayout = new QVBoxLayout(workspace);
+    workspaceLayout->setContentsMargins(0, 0, 0, 0);
+    workspaceLayout->setSpacing(0);
+    impl_->routePanel = new RoutePanel(workspace);
+    impl_->viewer->setBottomOverlay(impl_->routePanel->stepStrip());
+    impl_->routePanel->hide();
+    workspaceLayout->addWidget(impl_->routePanel);
+    workspaceLayout->addWidget(impl_->viewer, 1);
+    setCentralWidget(workspace);
     impl_->controller = new ImportController(
         std::move(importer),
         [this](application::DocumentPtr document, std::uint64_t revision) {
@@ -1647,7 +1682,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->saveAsAction->setObjectName(QStringLiteral("saveProjectAsAction"));
     impl_->saveAsAction->setShortcut(QKeySequence::SaveAs);
     connect(impl_->saveAsAction, &QAction::triggered, this, [this] { impl_->save(true); });
-    impl_->cancelAction = fileMenu->addAction(QStringLiteral("Отменить загрузку"));
+    impl_->cancelAction = fileMenu->addAction(QStringLiteral("Отменить операцию"));
     impl_->cancelAction->setObjectName(QStringLiteral("cancelImportAction"));
     impl_->cancelAction->setShortcut(QKeySequence(Qt::Key_Escape));
     connect(impl_->cancelAction, &QAction::triggered, impl_->controller, &ImportController::cancel);
@@ -1891,6 +1926,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->pairs, &QComboBox::currentIndexChanged, this,
             [this](int) { impl_->showThicknessEvidence(true); });
     connect(impl_->bendList->selectionModel(), &QItemSelectionModel::currentChanged, this, [this] {
+        impl_->viewingRoute = false;
         if (impl_->scenePreview() || impl_->controller->isPreparingPreview()) {
             impl_->controller->discardBendPreview();
         }
@@ -2238,6 +2274,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     });
     impl_->toolSelection->onChanged = [this] {
         impl_->toolDraftChanged = true;
+        impl_->controller->discardBendRoute();
         impl_->controller->discardBendPreview();
         impl_->refreshPreview();
     };
@@ -2333,6 +2370,15 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->bendFrame, &QSlider::valueChanged, this, [this] { impl_->showPreviewFrame(); });
     connect(impl_->playback, &QTimer::timeout, this, [this] {
         if (impl_->bendFrame->value() >= impl_->bendFrame->maximum()) {
+            if (impl_->viewingRoute)
+                if (const auto route = impl_->controller->bendRoute();
+                    route &&
+                    impl_->routePanel->selected() < static_cast<int>(route->steps.size())) {
+                    impl_->routePanel->select(impl_->routePanel->selected() + 1);
+                    impl_->playBend->setText(QStringLiteral("Пауза"));
+                    impl_->playback->start();
+                    return;
+                }
             impl_->stopPlayback();
         } else {
             impl_->bendFrame->setValue(impl_->bendFrame->value() + 1);
@@ -2343,6 +2389,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->stopPlayback();
             return;
         }
+        if (impl_->viewingRoute && impl_->routePanel->selected() == 0)
+            impl_->routePanel->select(1);
         if (impl_->bendFrame->value() == impl_->bendFrame->maximum()) {
             impl_->bendFrame->setValue(0);
         }
@@ -2357,6 +2405,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->fixedSide, &QComboBox::currentIndexChanged, impl_->controller,
             &ImportController::discardBendPreview);
     connect(impl_->preparePreview, &QPushButton::clicked, this, [this] {
+        impl_->viewingRoute = false;
         impl_->viewingSource = false;
         const auto row = impl_->bendList->currentIndex().row();
         if (row >= 0) {
@@ -2372,6 +2421,51 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             Qt::BottomDockWidgetArea);
 
     findChild<QDockWidget *>(QStringLiteral("sequenceDock"))->hide();
+    impl_->routePanel->onSelect = [this](int) {
+        impl_->stopPlayback();
+        if (impl_->controller->bendRoute()) {
+            impl_->viewingRoute = true;
+            impl_->viewingSource = false;
+            impl_->wantFlat = false;
+            impl_->positionedPreview.reset();
+            impl_->displayedPreview.reset();
+        }
+        impl_->refreshPreview();
+        if (impl_->controller->bendRoute())
+            impl_->showPlaybackPanel();
+    };
+    impl_->routePanel->onModeChanged = [this] { impl_->controller->discardBendRoute(); };
+    impl_->routePanel->onReorder = [this](std::vector<std::string> ids) {
+        impl_->stopPlayback();
+        impl_->controller->setBendOrder(ids);
+    };
+    impl_->routePanel->onPrepare = [this](bool automatic, bool withTools) {
+        const auto &session = impl_->controller->session();
+        if (!session.document() || impl_->controller->hasWork())
+            return;
+        application::BendRouteRequest request;
+        request.automatic = automatic;
+        request.withTools = withTools;
+        const auto tools = impl_->toolSelection->parameters();
+        const auto assignment = impl_->toolSelection->assignment();
+        if (withTools && !tools)
+            return;
+        for (auto index : session.orderedBends()) {
+            const auto *entry = session.bend(index);
+            const auto target = session.bendTarget(index);
+            if (!entry || !application::included(entry->review) || !target)
+                return;
+            request.operations.push_back({entry->id, index, *target,
+                                          withTools ? tools : std::nullopt,
+                                          withTools ? assignment : std::nullopt});
+        }
+        impl_->stopPlayback();
+        impl_->viewingRoute = true;
+        impl_->viewingSource = false;
+        impl_->wantFlat = false;
+        if (impl_->controller->prepareBendRoute(std::move(request), impl_->previewBuilder))
+            impl_->showPlaybackPanel();
+    };
     auto *processBar = new QToolBar(QStringLiteral("Этапы работы"), this);
     processBar->setObjectName(QStringLiteral("processNavigation"));
     processBar->setMovable(false);

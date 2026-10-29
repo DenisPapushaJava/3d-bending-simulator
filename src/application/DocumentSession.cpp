@@ -1,8 +1,49 @@
 #include "bending/application/DocumentSession.h"
 
+#include <algorithm>
+#include <set>
 #include <utility>
 
 namespace bending::application {
+std::vector<std::size_t> DocumentSession::orderedBends() const {
+    std::vector<std::size_t> result;
+    for (std::size_t entry = 0; entry < bends_.size(); ++entry)
+        for (std::size_t i = 0; i < bendBindings_.byRecognizedBend.size(); ++i)
+            if (bendBindings_.byRecognizedBend[i] == entry)
+                result.push_back(i);
+    return result;
+}
+bool DocumentSession::setBendOrder(const std::vector<std::string> &ids) {
+    if (!document_ || active_ || ids.size() != bendBindings_.byRecognizedBend.size() ||
+        std::set<std::string>(ids.begin(), ids.end()).size() != ids.size())
+        return false;
+    std::vector<BendPreparation> reordered;
+    for (const auto &id : ids) {
+        const auto found =
+            std::find_if(bends_.begin(), bends_.end(), [&](const auto &b) { return b.id == id; });
+        if (found == bends_.end() ||
+            std::none_of(bendBindings_.byRecognizedBend.begin(),
+                         bendBindings_.byRecognizedBend.end(), [&](auto binding) {
+                             return binding &&
+                                    *binding == static_cast<std::size_t>(found - bends_.begin());
+                         }))
+            return false;
+        reordered.push_back(*found);
+    }
+    for (const auto &entry : bends_)
+        if (std::find(ids.begin(), ids.end(), entry.id) == ids.end())
+            reordered.push_back(entry);
+    bool changed = false;
+    for (std::size_t i = 0; i < bends_.size(); ++i)
+        changed |= bends_[i].id != reordered[i].id;
+    if (!changed)
+        return true;
+    bends_ = std::move(reordered);
+    bendBindings_ = restoreBendPreparations(document_->metadata().bendAnalysis, bends_);
+    ++editRevision_;
+    modified_ = true;
+    return true;
+}
 std::optional<std::string> projectSettingsError(const OpenedProject &project) {
     if (!project.document || !validBendPreparations(project.bends) ||
         !core::validUnfoldSettings(project.unfold)) {

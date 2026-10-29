@@ -198,6 +198,19 @@ void testBendPreparation() {
     require(session.bend(0)->review == BendReview::Automatic && session.bendTarget(0) &&
                 session.bendTarget(0)->innerRadiusMm == 4,
             "Automatic CAD target unavailable");
+    const auto secondId = session.bend(1)->id;
+    const auto orderEdit = session.editRevision();
+    require(session.setBendOrder({secondId, id}) &&
+                session.orderedBends() == std::vector<std::size_t>({1, 0}) &&
+                session.bend(0)->id == id && session.bend(1)->id == secondId &&
+                session.editRevision() == orderEdit + 1,
+            "Preferred operation order broke geometric bindings");
+    const auto stableOrderEdit = session.editRevision();
+    require(!session.setBendOrder({id, id}) && !session.setBendOrder({"unknown", id}) &&
+                !session.setBendOrder({id}) && session.setBendOrder({secondId, id}) &&
+                session.editRevision() == stableOrderEdit,
+            "Invalid or unchanged order edited the project");
+    require(session.setBendOrder({id, secondId}), "Original order not restored");
     require(session.setBendReview(0, BendReview::Pending) && !session.bendTarget(0) &&
                 !session.setBendTarget(0, target),
             "Pending zone accepted a target");

@@ -47,6 +47,13 @@ class ImportController final : public QObject {
                        std::shared_ptr<const application::SingleBendPreviewBuilder> builder,
                        application::BendPreviewMode mode = application::BendPreviewMode::Kinematic);
     void discardBendPreview();
+    bool prepareBendRoute(application::BendRouteRequest,
+                          std::shared_ptr<const application::SingleBendPreviewBuilder>);
+    void discardBendRoute();
+    bool setBendOrder(const std::vector<std::string> &);
+    [[nodiscard]] application::BendRoutePtr bendRoute() const;
+    [[nodiscard]] std::optional<application::BendRouteError> bendRouteError() const;
+    [[nodiscard]] bool isPreparingRoute() const;
     [[nodiscard]] application::BendPreviewPtr bendPreview() const;
     [[nodiscard]] const std::optional<application::BendPreviewError> &bendPreviewError() const;
     [[nodiscard]] bool isPreparingPreview() const;

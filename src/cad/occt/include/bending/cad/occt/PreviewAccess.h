@@ -3,6 +3,7 @@
 #include "bending/application/SingleBendPreview.h"
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
 #include <array>
@@ -21,6 +22,7 @@ struct PreviewFrame {
     TopoDS_Shape shape;
     std::array<TopoDS_Shape, 2> tools;   // Die, punch; null in the kinematic preview.
     std::array<TopoDS_Shape, 3> regions; // Flange A, bend, flange B; A is fixed only without tools.
+    std::array<gp_Trsf, 2> materialTransforms; // Source components -> this frame.
     // Optional triangulated source surface with geometrically moved cutouts.
     // Display only: all checks use shape/regions above. Includes the same tools.
     TopoDS_Shape displayShape;
@@ -36,5 +38,7 @@ class OcctPreviewAccess final {
     // Exact occupied volume over the vertical punch return; null without tool motion.
     [[nodiscard]] static const TopoDS_Shape &
     retractionSweep(const application::SingleBendPreview &preview);
+    [[nodiscard]] static const std::array<TopoDS_Shape, 2> &
+    sourceComponents(const application::SingleBendPreview &);
 };
 } // namespace bending::cad

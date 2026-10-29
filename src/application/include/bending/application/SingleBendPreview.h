@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/BendRoute.h"
 #include "bending/application/Document.h"
 #include "bending/core/BendTarget.h"
 #include "bending/core/ToolCatalog.h"
@@ -93,6 +94,10 @@ struct BendPreviewError {
 using BendPreviewResult = std::variant<BendPreviewPtr, BendPreviewError>;
 class SingleBendPreviewBuilder {
   public:
+    [[nodiscard]] virtual BendRouteResult buildRoute(DocumentPtr, BendRouteRequest,
+                                                     std::stop_token) const {
+        return BendRouteError{BendRouteErrorCode::Unsupported, "Route builder unavailable"};
+    }
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
                            core::ToolAssignment assignment, std::stop_token stop) const {

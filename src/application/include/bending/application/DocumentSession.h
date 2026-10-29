@@ -36,6 +36,9 @@ class DocumentSession final {
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
     [[nodiscard]] std::optional<core::BendTarget> bendTarget(std::size_t recognizedIndex) const;
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
+    [[nodiscard]] std::vector<std::size_t> orderedBends() const;
+    // The existing preparation array carries the preferred order, not a validation result.
+    bool setBendOrder(const std::vector<std::string> &ids);
     [[nodiscard]] const std::vector<BendPreparation> &bends() const {
         return bends_;
     }

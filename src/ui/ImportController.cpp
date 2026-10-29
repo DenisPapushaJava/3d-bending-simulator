@@ -3,8 +3,10 @@
 
 #include <QThread>
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -118,6 +120,19 @@ class ImportController::Impl {
     std::optional<BendPreviewError> previewError;
     std::uint64_t previewId = 0;
     bool preparingPreview = false;
+    BendRoutePtr route;
+    std::optional<BendRouteError> routeError;
+    std::uint64_t routeId = 0, routeRevision = 0, routeEditRevision = 0;
+    bool preparingRoute = false;
+    void invalidateRoute() {
+        ++routeId;
+        route.reset();
+        routeError.reset();
+        if (preparingRoute) {
+            stop.request_stop();
+            preparingRoute = false;
+        }
+    }
     BendingDrawingPtr drawing;
     std::optional<DrawingError> drawingError;
     std::uint64_t drawingId = 0;
@@ -173,6 +188,7 @@ void ImportController::open(std::filesystem::path path) {
         return;
     }
     impl_->stop.request_stop();
+    impl_->invalidateRoute();
     impl_->invalidateFlat();
     impl_->invalidatePreview();
     impl_->invalidateDrawing();
@@ -184,6 +200,7 @@ void ImportController::open(std::filesystem::path path) {
 }
 
 void ImportController::cancel() {
+    impl_->invalidateRoute();
     impl_->invalidateFlat();
     impl_->stop.request_stop();
     impl_->invalidatePreview();
@@ -276,6 +293,7 @@ ThicknessValidation ImportController::setManualThickness(double valueMm) {
     const auto before = impl_->session.editRevision();
     const auto result = impl_->session.setManualThickness(valueMm);
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidateFlat();
         impl_->invalidatePreview();
         impl_->invalidateDrawing();
@@ -287,6 +305,7 @@ void ImportController::useAutomaticThickness() {
     const auto before = impl_->session.editRevision();
     impl_->session.useAutomaticThickness();
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidateFlat();
         impl_->invalidatePreview();
         impl_->invalidateDrawing();
@@ -300,6 +319,7 @@ bool ImportController::setBendReview(std::size_t recognizedIndex, BendReview rev
     const auto before = impl_->session.editRevision();
     const auto result = impl_->session.setBendReview(recognizedIndex, review);
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
@@ -313,6 +333,7 @@ bool ImportController::setBendTools(std::size_t recognizedIndex,
     const auto before = impl_->session.editRevision();
     const bool result = impl_->session.setBendTools(recognizedIndex, tools);
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
@@ -325,6 +346,7 @@ bool ImportController::setBendToolAssignment(std::size_t index, core::ToolAssign
     const auto before = impl_->session.editRevision();
     const bool result = impl_->session.setBendToolAssignment(index, std::move(assignment));
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
@@ -338,6 +360,7 @@ bool ImportController::setBendTarget(std::size_t recognizedIndex,
     const auto before = impl_->session.editRevision();
     const auto result = impl_->session.setBendTarget(recognizedIndex, target);
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
@@ -536,6 +559,166 @@ void ImportController::discardBendPreview() {
     impl_->invalidatePreview();
     emit stateChanged();
 }
+void ImportController::discardBendRoute() {
+    impl_->invalidateRoute();
+    emit stateChanged();
+}
+bool ImportController::setBendOrder(const std::vector<std::string> &ids) {
+    if (impl_->stopping || hasWork())
+        return false;
+    const auto before = impl_->session.editRevision();
+    const bool changed = impl_->session.setBendOrder(ids);
+    if (before != impl_->session.editRevision())
+        impl_->invalidateRoute();
+    emit stateChanged();
+    return changed;
+}
+BendRoutePtr ImportController::bendRoute() const {
+    return impl_->routeRevision == impl_->session.revision() &&
+                   impl_->routeEditRevision == impl_->session.editRevision()
+               ? impl_->route
+               : nullptr;
+}
+std::optional<BendRouteError> ImportController::bendRouteError() const {
+    return impl_->routeError;
+}
+bool ImportController::isPreparingRoute() const {
+    return impl_->preparingRoute;
+}
+bool ImportController::prepareBendRoute(BendRouteRequest request,
+                                        std::shared_ptr<const SingleBendPreviewBuilder> builder) {
+    if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
+        return false;
+    const auto &session = impl_->session;
+    if (request.operations.size() != session.document()->metadata().bendAnalysis.bends.size())
+        return false;
+    std::set<std::size_t> seen;
+    for (const auto &op : request.operations) {
+        const auto *entry = session.bend(op.bendIndex);
+        if (!entry || !included(entry->review) || entry->id != op.id ||
+            session.bendTarget(op.bendIndex) != std::optional{op.target} ||
+            !seen.insert(op.bendIndex).second ||
+            (request.withTools &&
+             (!op.tools || !core::validPressTools(*op.tools) ||
+              (op.assignment && core::toolParameters(*op.assignment) != op.tools))))
+            return false;
+    }
+    request.manualThicknessMm = session.manualThicknessMm();
+    auto *s = impl_.get();
+    s->invalidateRoute();
+    s->invalidatePreview();
+    const auto id = s->routeId, revision = session.revision(), edit = session.editRevision();
+    const auto document = session.document();
+    s->stop = std::stop_source{};
+    const auto stop = s->stop.get_token();
+    s->running = s->preparingRoute = true;
+    QMetaObject::invokeMethod(
+        s->worker,
+        [s, id, revision, edit, document, stop, request = std::move(request), builder]() mutable {
+            BendRouteResult result = BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
+            try {
+                if (!stop.stop_requested())
+                    result = builder->buildRoute(document, request, stop);
+            } catch (const std::exception &e) {
+                result = BendRouteError{BendRouteErrorCode::Failed, e.what()};
+            } catch (...) {
+                result = BendRouteError{BendRouteErrorCode::Failed, "Unexpected route failure"};
+            }
+            QMetaObject::invokeMethod(
+                s->owner,
+                [s, id, revision, edit, document, stop, request = std::move(request),
+                 result = std::move(result)] {
+                    s->running = s->preparingRoute = false;
+                    if (s->stopping)
+                        return;
+                    if (id == s->routeId && revision == s->session.revision() &&
+                        edit == s->session.editRevision() && !stop.stop_requested() &&
+                        !s->session.activeRequest()) {
+                        if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
+                            bool valid = *route && (*route)->source == document &&
+                                         (*route)->withTools == request.withTools &&
+                                         (*route)->steps.size() == request.operations.size();
+                            std::set<std::string> ids;
+                            std::vector<std::string> order;
+                            if (valid)
+                                for (const auto &step : (*route)->steps) {
+                                    const auto found =
+                                        std::find_if(request.operations.begin(),
+                                                     request.operations.end(), [&](const auto &op) {
+                                                         return step.id == op.id &&
+                                                                step.bendIndex == op.bendIndex;
+                                                     });
+                                    const auto &p = step.preview;
+                                    valid &= found != request.operations.end() &&
+                                             ids.insert(step.id).second && p && !p->collision() &&
+                                             p->frameCount() >= 2 &&
+                                             (request.withTools
+                                                  ? p->pressMotion() && p->punchRetraction()
+                                                  : !p->toolSetup());
+                                    if (p && found != request.operations.end()) {
+                                        const bool drawingPunch =
+                                            request.withTools && found->assignment &&
+                                            found->assignment->useDrawingGeometry &&
+                                            found->assignment->punch.drawing.has_value();
+                                        const bool drawingDie =
+                                            request.withTools && found->assignment &&
+                                            found->assignment->useDrawingGeometry &&
+                                            found->assignment->die.drawing.has_value();
+                                        valid &= p->usesDrawingPunch() == drawingPunch &&
+                                                 p->usesDrawingDie() == drawingDie &&
+                                                 p->otherFormedBends() == order.size();
+                                        if (request.withTools) {
+                                            const auto *ret = p->punchRetraction();
+                                            valid &= p->frameCount() >= 2 && p->toolSetup() &&
+                                                     p->toolSetup()->tools == *found->tools &&
+                                                     p->pressState(0) &&
+                                                     p->pressState(0)->phase ==
+                                                         simulation::PressPhase::Approach &&
+                                                     p->pressState(p->frameCount() - 1) &&
+                                                     p->pressState(p->frameCount() - 1)->phase ==
+                                                         simulation::PressPhase::Retracting &&
+                                                     ret && std::isfinite(ret->liftMm) &&
+                                                     ret->liftMm > 0 &&
+                                                     std::isfinite(ret->finalClearanceMm) &&
+                                                     ret->finalClearanceMm > 0;
+                                        }
+                                    }
+                                    order.push_back(step.id);
+                                }
+                            if (valid) {
+                                auto candidate = s->session;
+                                if (request.withTools)
+                                    for (const auto &op : request.operations) {
+                                        if (op.assignment)
+                                            valid &= candidate.setBendToolAssignment(
+                                                op.bendIndex, *op.assignment);
+                                        else
+                                            valid &= candidate.setBendTools(op.bendIndex, op.tools);
+                                    }
+                                valid &= candidate.setBendOrder(order);
+                                if (valid)
+                                    s->session = std::move(candidate);
+                            }
+                            if (valid) {
+                                s->route = *route;
+                                s->routeRevision = revision;
+                                s->routeEditRevision = s->session.editRevision();
+                            } else
+                                s->routeError = BendRouteError{BendRouteErrorCode::Failed,
+                                                               "Invalid route result"};
+                        } else if (const auto &e = std::get<BendRouteError>(result);
+                                   e.code != BendRouteErrorCode::Cancelled)
+                            s->routeError = e;
+                    }
+                    s->dispatch();
+                    emit s->owner->stateChanged();
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
+    emit stateChanged();
+    return true;
+}
 BendPreviewPtr ImportController::bendPreview() const {
     return impl_->preview;
 }
@@ -640,6 +823,7 @@ bool ImportController::setPartInputs(std::uint64_t revision, std::uint64_t editR
     const bool accepted =
         impl_->session.setPartInputs(revision, editRevision, manualThicknessMm, settings);
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidateFlat();
         impl_->invalidateDrawing();
         if (oldThickness != impl_->session.manualThicknessMm())
@@ -655,6 +839,7 @@ bool ImportController::setUnfoldSettings(core::UnfoldSettings settings) {
     const auto before = impl_->session.editRevision();
     const bool changed = impl_->session.setUnfoldSettings(settings);
     if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
         impl_->invalidateFlat();
         impl_->invalidateDrawing();
     }

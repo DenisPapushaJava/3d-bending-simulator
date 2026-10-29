@@ -1,5 +1,6 @@
 #include "bending/cad/CadDocument.h"
 
+#include "BendRecognizer.h"
 #include "CadDocumentData.h"
 #include "bending/cad/occt/DocumentAccess.h"
 
@@ -32,5 +33,23 @@ const TopoDS_Shape &OcctDocumentAccess::simulationShape(const CadDocument &docum
 const application::BendAnalysis &OcctDocumentAccess::simulationBends(const CadDocument &document) {
     return document.impl_->filledShape.IsNull() ? document.impl_->metadata.bendAnalysis
                                                 : document.impl_->filledBends;
+}
+const TopoDS_Shape &OcctDocumentAccess::routeSkin(const CadDocument &document) {
+    return document.impl_->routeSkin;
+}
+bool OcctDocumentAccess::isRouteState(const CadDocument &document) {
+    return document.impl_->routeState;
+}
+std::shared_ptr<const CadDocument> OcctDocumentAccess::routeState(const CadDocument &original,
+                                                                  TopoDS_Shape shape,
+                                                                  TopoDS_Shape skin,
+                                                                  std::stop_token stop) {
+    auto data = std::make_unique<CadDocument::Impl>();
+    data->metadata = original.metadata();
+    data->metadata.bendAnalysis = recognizeBends(shape, data->metadata.maximumToleranceMm, stop);
+    data->shape = std::move(shape);
+    data->routeSkin = std::move(skin);
+    data->routeState = true;
+    return std::shared_ptr<const CadDocument>(new CadDocument(std::move(data)));
 }
 } // namespace bending::cad

@@ -47,6 +47,7 @@ class CadFlatPattern final : public FlatPattern {
     TopoDS_Shape geometry;
     std::vector<std::vector<PointMm>> contours;
     std::vector<TopoDS_Shape> lines;
+    SheetLayout layout;
     const FlatPatternInfo &info() const noexcept override {
         return data;
     }
@@ -248,6 +249,9 @@ OcctFlatPatternAccess::openingContours(const FlatPattern &p) {
 const std::vector<TopoDS_Shape> &OcctFlatPatternAccess::bendLines(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).lines;
 }
+const SheetLayout &OcctFlatPatternAccess::layout(const FlatPattern &p) {
+    return dynamic_cast<const CadFlatPattern &>(p).layout;
+}
 FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternRequest request,
                                             std::stop_token stop) const {
     try {
@@ -324,6 +328,9 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         result->data.settings = request.settings;
         result->data.thicknessMm = t;
         result->data.cutoutsIgnored = cutoutsIgnored;
+        // Reserve wall slots in traversal order so links remain stable as children
+        // are discovered. All solid/mapping fields are filled before publication.
+        std::map<Wall, std::size_t> wallIndices{{root, 0}};
         TopoDS_Compound original;
         BRep_Builder builder;
         builder.MakeCompound(original);
@@ -348,6 +355,13 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                 return p.Transformed(placement.map).Translated(gp_Vec(0, 0, zShift));
             };
             regions.push_back({wallSolid, wallMap});
+            gp_Trsf wallToFlat = placement.map;
+            gp_Trsf thicknessShift;
+            thicknessShift.SetTranslation(gp_Vec(0, 0, zShift));
+            wallToFlat = thicknessShift * wallToFlat;
+            if (result->layout.walls.size() <= wi)
+                result->layout.walls.resize(wi + 1);
+            result->layout.walls[wi] = {w, wallSolid, wallToFlat};
             patches.push_back(
                 BRepBuilderAPI_Transform(face(faces, w[0]), placement.map, true).Shape());
             const auto flatBounds = bounds(patches.back());
@@ -397,6 +411,7 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                                flatAcross),
                                   index});
                 pending.push_back(child);
+                wallIndices.emplace(child, pending.size() - 1);
                 used[index] = true;
                 patches.push_back(strip(start, end, offset));
                 const double turn =
@@ -436,6 +451,9 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                          mapped.SetZ(zInner + zSign * (r.Magnitude() - b.innerRadiusMm));
                          return mapped;
                      }});
+                result->layout.bends.push_back(
+                    {index, wallIndices.at(w), wallIndices.at(child), sector,
+                     extruded(TopoDS::Face(patches.back()), gp_Vec(0, 0, t)), regions.back().map});
             }
         }
         require(placements.size() == graph.size() &&

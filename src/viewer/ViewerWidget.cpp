@@ -38,6 +38,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPointer>
 #include <QResizeEvent>
 #include <QStackedLayout>
 #include <QTimer>
@@ -1091,6 +1092,7 @@ class OcctCanvas final : public QWidget {
 
 class ViewerWidget::Impl {
   public:
+    QPointer<QWidget> bottomOverlay;
     OcctCanvas *canvas = nullptr; // Qt parent owns the canvas and its native resources.
     QLabel *errorPage = nullptr;
     QStackedLayout *layout = nullptr;
@@ -1150,7 +1152,45 @@ QString ViewerWidget::errorString() const {
 }
 
 QImage ViewerWidget::captureImage(bool includeControls) {
-    return impl_->canvas ? impl_->canvas->captureImage(includeControls) : QImage{};
+    auto result = impl_->canvas ? impl_->canvas->captureImage(includeControls) : QImage{};
+    if (!result.isNull() && includeControls && impl_->bottomOverlay &&
+        impl_->bottomOverlay->isVisible()) {
+        QPainter painter(&result);
+        painter.drawPixmap(impl_->bottomOverlay->mapTo(impl_->canvas, QPoint()),
+                           impl_->bottomOverlay->grab());
+    }
+    return result;
+}
+void ViewerWidget::setBottomOverlay(QWidget *widget) {
+    if (impl_->bottomOverlay && impl_->bottomOverlay != widget) {
+        impl_->bottomOverlay->removeEventFilter(this);
+        impl_->bottomOverlay->hide();
+    }
+    impl_->bottomOverlay = widget;
+    if (!widget)
+        return;
+    auto *host = impl_->canvas ? static_cast<QWidget *>(impl_->canvas) : this;
+    widget->setParent(host);
+    if (impl_->canvas)
+        widget->setAttribute(Qt::WA_NativeWindow);
+    host->installEventFilter(this);
+    widget->installEventFilter(this);
+    widget->hide();
+}
+bool ViewerWidget::eventFilter(QObject *watched, QEvent *event) {
+    auto *widget = impl_->bottomOverlay.data();
+    if (widget && (watched == widget || watched == widget->parentWidget()) &&
+        (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
+         event->type() == QEvent::LayoutRequest)) {
+        const auto size = widget->parentWidget()->size();
+        const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
+        const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
+        const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
+        if (widget->geometry() != target)
+            widget->setGeometry(target);
+        widget->raise();
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 QMenu *ViewerWidget::navigationMenu() const {

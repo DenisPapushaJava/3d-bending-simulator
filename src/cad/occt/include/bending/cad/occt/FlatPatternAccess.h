@@ -1,8 +1,27 @@
 #pragma once
 #include "bending/application/FlatPattern.h"
 #include <TopoDS_Shape.hxx>
+#include <functional>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 namespace bending::cad {
+// Immutable decomposition in the unnormalised common flat frame. Used by the
+// route builder; the drawing's final origin translation is deliberately separate.
+struct SheetWallRegion {
+    std::array<std::size_t, 2> faces;
+    TopoDS_Shape solid;
+    gp_Trsf toFlat;
+};
+struct SheetBendRegion {
+    std::size_t bendIndex, parent, child;
+    TopoDS_Shape solid, flatSolid;
+    std::function<gp_Pnt(gp_Pnt)> toFlat;
+};
+struct SheetLayout {
+    std::vector<SheetWallRegion> walls;
+    std::vector<SheetBendRegion> bends;
+};
 class OcctFlatPatternAccess final {
   public:
     [[nodiscard]] static bool belongsTo(const application::FlatPattern &,
@@ -15,5 +34,6 @@ class OcctFlatPatternAccess final {
     openingContours(const application::FlatPattern &);
     [[nodiscard]] static const std::vector<TopoDS_Shape> &
     bendLines(const application::FlatPattern &);
+    [[nodiscard]] static const SheetLayout &layout(const application::FlatPattern &);
 };
 } // namespace bending::cad

@@ -1,4 +1,5 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "BendOperation.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/DrawingTools.h"
 #include "bending/cad/occt/PreviewAccess.h"
@@ -77,6 +78,7 @@ class CadPreview final : public SingleBendPreview {
     simulation::SingleBend geometry{};
     BoundsMm envelope{};
     std::vector<PreviewFrame> frames;
+    std::array<TopoDS_Shape, 2> components;
     std::optional<simulation::FlatToolSetup> setup;
     std::optional<simulation::PressMotion> motion;
     std::vector<simulation::PressState> states;
@@ -236,6 +238,7 @@ void placeFlanges(PreviewFrame &frame, const std::array<TopoDS_Shape, 2> &flange
         gp_Trsf placement;
         placement.SetDisplacement(flangeAxes(sourceBasis, sourceSection, i == 1),
                                   flangeAxes(targetBasis, targetSection, i == 1));
+        frame.materialTransforms[i] = placement;
         frame.regions[i * 2] = BRepBuilderAPI_Transform(flanges[i], placement, true).Shape();
     }
     assemble(frame);
@@ -558,10 +561,16 @@ const TopoDS_Shape &
 OcctPreviewAccess::retractionSweep(const application::SingleBendPreview &preview) {
     return dynamic_cast<const CadPreview &>(preview).sweep;
 }
-static application::BendPreviewResult
-buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
-             std::stop_token stop, std::optional<core::PressTools> toolParameters,
-             bool withMotion = false, std::optional<core::ToolAssignment> realTools = {}) {
+const std::array<TopoDS_Shape, 2> &
+OcctPreviewAccess::sourceComponents(const application::SingleBendPreview &preview) {
+    return dynamic_cast<const CadPreview &>(preview).components;
+}
+application::BendPreviewResult buildBendOperation(DocumentPtr document, std::size_t bendIndex,
+                                                  core::BendTarget target, bool fixedSecond,
+                                                  std::stop_token stop,
+                                                  std::optional<core::PressTools> toolParameters,
+                                                  bool withMotion,
+                                                  std::optional<core::ToolAssignment> realTools) {
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -586,7 +595,7 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
         return unsupported("Requires a complete selected straight bend");
     }
     const auto &bend = analysis.bends[bendIndex];
-    const bool multi = analysis.bends.size() > 1;
+    const bool multi = analysis.bends.size() > 1 || OcctDocumentAccess::isRouteState(*native);
     if (!core::validBendTarget(target) ||
         std::abs(target.angleRadians - bend.angleRadians) > analysis.angleToleranceRadians ||
         std::abs(target.innerRadiusMm - bend.innerRadiusMm) > analysis.lengthToleranceMm) {
@@ -684,6 +693,7 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
             return unsupported("Isolated flanges and complete bend do not match the entire STEP");
         }
         auto preview = std::make_shared<CadPreview>();
+        preview->components = flanges;
         preview->otherBends = multi ? analysis.bends.size() - 1 : 0;
         preview->geometry = model;
         const auto toolGeometry = realTools && realTools->useDrawingGeometry
@@ -706,7 +716,9 @@ buildPreview(DocumentPtr document, std::size_t bendIndex, core::BendTarget targe
         if (realTools)
             preview->gaps = {realTools->dieAssembly ? realTools->dieAssembly->gapMm : 0,
                              realTools->punchAssembly ? realTools->punchAssembly->gapMm : 0};
-        const auto displaySource = preview->filledCutouts
+        const auto displaySource = !OcctDocumentAccess::routeSkin(*native).IsNull()
+                                       ? OcctDocumentAccess::routeSkin(*native)
+                                   : preview->filledCutouts
                                        ? visibleSource(OcctDocumentAccess::shape(*native))
                                        : TopoDS_Shape{};
         if (toolParameters) {
@@ -1079,19 +1091,19 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
                                                                core::BendTarget target,
                                                                bool fixedSecond,
                                                                std::stop_token stop) const {
-    return buildPreview(std::move(document), bendIndex, target, fixedSecond, stop, {});
+    return buildBendOperation(std::move(document), bendIndex, target, fixedSecond, stop, {});
 }
 application::BendPreviewResult
 SingleBendPreviewBuilder::buildToolSetup(DocumentPtr document, std::size_t bendIndex,
                                          core::BendTarget target, core::PressTools tools,
                                          std::stop_token stop) const {
-    return buildPreview(std::move(document), bendIndex, target, false, stop, tools);
+    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools);
 }
 application::BendPreviewResult
 SingleBendPreviewBuilder::buildToolMotion(DocumentPtr document, std::size_t bendIndex,
                                           core::BendTarget target, core::PressTools tools,
                                           std::stop_token stop) const {
-    return buildPreview(std::move(document), bendIndex, target, false, stop, tools, true);
+    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools, true);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion(
     DocumentPtr document, std::size_t index, core::BendTarget target,
@@ -1100,8 +1112,8 @@ application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
-    return buildPreview(std::move(document), index, target, false, stop, *tools, true,
-                        std::optional{std::move(assignment)});
+    return buildBendOperation(std::move(document), index, target, false, stop, *tools, true,
+                              std::optional{std::move(assignment)});
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
     DocumentPtr document, std::size_t index, core::BendTarget target,
@@ -1110,7 +1122,7 @@ application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
-    return buildPreview(std::move(document), index, target, false, stop, *tools, false,
-                        std::optional{std::move(assignment)});
+    return buildBendOperation(std::move(document), index, target, false, stop, *tools, false,
+                              std::optional{std::move(assignment)});
 }
 } // namespace bending::cad
