@@ -21,6 +21,7 @@ struct BendRouteRequest {
     std::vector<RouteOperation> operations;
     bool automatic = false;
     bool withTools = false;
+    bool allowPartialEndSupport = false; // Explicit geometric-preview scope, never a force check.
     std::optional<double> manualThicknessMm;
     std::size_t maximumChecks = 96;
     unsigned maximumTimeMs = 60000;
@@ -36,8 +37,16 @@ struct BendRoute {
     std::vector<BendRouteStep> steps;
     std::size_t evaluatedOperations = 0;
     bool withTools = false;
+    bool partialEndSupport = false;
     // The first route is geometric K=0.5; material BA remains a separate flat pattern.
     // Tool mode checks each cycle; extraction/repositioning/machine are NOT certified.
+};
+// A common uninterrupted material strip on both flanges for the whole forming interval.
+// Axial coordinates along this operation's bend line; end overhangs are NOT certified.
+struct BendEndSupport {
+    double bendLengthMm;
+    double supportedFromMm;
+    double supportedToMm;
 };
 using BendRoutePtr = std::shared_ptr<const BendRoute>;
 enum class BendRouteErrorCode {

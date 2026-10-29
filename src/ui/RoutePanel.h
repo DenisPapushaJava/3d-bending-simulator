@@ -36,6 +36,8 @@ class RoutePanel final : public QWidget {
     std::function<void()> onModeChanged;
 
   private:
+    void resizeEvent(QResizeEvent *) override;
+    void updateStatusHeight();
     void move(int delta);
     application::BendRoutePtr route_;
     std::vector<std::string> ids_;
@@ -46,6 +48,7 @@ class RoutePanel final : public QWidget {
     QPushButton *automatic_, *manual_, *earlier_, *later_;
     QLabel *status_;
     QHBoxLayout *strip_;
+    QHBoxLayout *details_;
     QWidget *stepStrip_;
 };
 } // namespace bending::ui

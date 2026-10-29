@@ -419,6 +419,7 @@ class MainWindow::Impl {
         application::BendRouteRequest request;
         request.automatic = automatic;
         request.withTools = withTools;
+        request.allowPartialEndSupport = withTools;
         const auto tools = toolSelection->parameters();
         const auto assignment = toolSelection->assignment();
         routePanel->setWithTools(withTools);
@@ -674,6 +675,8 @@ class MainWindow::Impl {
                                                       : QStringLiteral("Выбрать пару"));
         processSteps[2]->setStatus(
             controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
+            : viewingRoute && controller->bendRoute() && controller->bendRoute()->partialEndSupport
+                ? QStringLiteral("Просмотр: неполная опора")
             : viewingRoute && controller->bendRoute()
                 ? QStringLiteral("Порядок: %1 шагов").arg(controller->bendRoute()->steps.size())
             : controller->isPreparingPreview() ? QStringLiteral("Проверяем…")
@@ -1052,6 +1055,8 @@ class MainWindow::Impl {
                 : QString{};
         const bool busy = controller->isPreparingPreview() || controller->isPreparingRoute();
         const auto routeFailure = controller->bendRouteError();
+        const bool partialEndSupport =
+            viewingRoute && controller->bendRoute() && controller->bendRoute()->partialEndSupport;
         const bool failed = controller->bendPreviewError().has_value() || routeFailure ||
                             !previewDisplayError.isEmpty();
         checkSummary->setText(
@@ -1059,6 +1064,10 @@ class MainWindow::Impl {
             : routeFailure
                 ? QStringLiteral("Порядок не подготовлен. Причина указана над 3D-видом; "
                                  "отказ этой проверки не доказывает невозможность изготовления.")
+            : partialEndSupport
+                ? QStringLiteral("Геометрический просмотр с неполной опорой у торца. "
+                                 "Пригодность к изготовлению и устойчивость не подтверждены. "
+                                 "Столкновения и отвод пуансона проверяются.")
             : failed ? outcome
             : preview && preview->pressMotion()
                 ? QStringLiteral("Геометрическая проверка пройдена.\nПодвод и гибка — по кадрам, "
@@ -1072,6 +1081,12 @@ class MainWindow::Impl {
             : toolDraftChanged
                 ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                 : QStringLiteral("Деталь и пара инструмента выбраны. Можно проверить гибку."));
+        checkSummary->setStyleSheet(
+            partialEndSupport
+                ? QStringLiteral("background:#FFF2CC;color:#704500;border:1px solid #D0AA52;"
+                                 "border-radius:4px;padding:12px;")
+                : QStringLiteral(
+                      "background:#F0F3F6;color:#1C2938;border-radius:4px;padding:12px;"));
         checkSummary->setMinimumHeight(std::max(0, checkSummary->heightForWidth(240)));
         checkScope->setText(
             (viewingRoute && controller->bendRoute()

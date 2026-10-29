@@ -58,8 +58,11 @@ int main(int argc, char **argv) {
         auto files = std::make_shared<project::ProjectFiles>();
         const int libraryArgument = app.arguments().indexOf("--library");
         const bool shortTools = app.arguments().contains("--short-tools");
-        const bool withTools =
-            app.arguments().contains("--tools") || shortTools || libraryArgument > 0;
+        const bool partialSupport = app.arguments().contains("--partial-support");
+        const bool narrowSupport = app.arguments().contains("--narrow-support");
+        const bool interruptedSupport = app.arguments().contains("--interrupted-support");
+        const bool withTools = app.arguments().contains("--tools") || shortTools ||
+                               libraryArgument > 0 || partialSupport || interruptedSupport;
         auto pair = tool_fixture::pair(16);
         if (shortTools) {
             pair.punch.lengthMm = 40;
@@ -88,7 +91,20 @@ int main(int argc, char **argv) {
         if (!sample) {
             STEPControl_Writer writer;
             auto shape = fixtures::channel();
-            if (withTools && !shortTools)
+            if (partialSupport) {
+                BRepBuilderAPI_MakeWire wire;
+                const std::array<gp_Pnt, 3> points{
+                    {{83, 6, 80}, {83, 42, 80}, {83, 42, narrowSupport ? -200. : 72.}}};
+                for (std::size_t i = 0; i < points.size(); ++i)
+                    wire.Add(BRepBuilderAPI_MakeEdge(points[i], points[(i + 1) % points.size()]));
+                const auto wedge =
+                    BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(8, 0, 0))
+                        .Shape();
+                shape = BRepAlgoAPI_Cut(shape, wedge).Shape();
+            } else if (interruptedSupport)
+                shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(83, 10, 39), 8, 40, 2))
+                            .Shape();
+            else if (withTools && !shortTools)
                 shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(80, -1, 40), 20, 50, 50))
                             .Shape();
             require(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone &&
@@ -113,7 +129,10 @@ int main(int argc, char **argv) {
             std::min_element(bends.begin(), bends.end(),
                              [](const auto &a, const auto &b) { return a.lengthMm < b.lengthMm; }) -
             bends.begin());
-        const auto draftIndex = withTools && !sample && !shortTools ? shorter : std::size_t{1};
+        const auto draftIndex =
+            withTools && !sample && !shortTools && !partialSupport && !interruptedSupport
+                ? shorter
+                : std::size_t{1};
         auto *draft =
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(draftIndex + 1));
         require(draft && draft->toolTip().contains(QStringLiteral("Черновик")),
@@ -135,7 +154,7 @@ int main(int argc, char **argv) {
                         << '\n'
                         << window.findChild<QLabel *>("toolRecommendation")->text().toStdString()
                         << '\n';
-                if (!sample) {
+                if (!sample && !partialSupport && !interruptedSupport) {
                     require(bends[draftIndex].lengthMm < std::max_element(
                                                              bends.begin(), bends.end(),
                                                              [](const auto &a, const auto &b) {
@@ -176,6 +195,24 @@ int main(int argc, char **argv) {
                             .contains(QStringLiteral("Порядок не подготовлен")) &&
                         window.findChild<QPushButton *>("resolveCheckProblem")->isVisible(),
                     "The short-tool diagnostic lacks lengths or pretends a geometry search failed");
+            QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+            QApplication::processEvents();
+            require(window.findChild<QWidget *>("bendRoutePanel")->height() < 160,
+                    "A stale wrapped-label minimum consumed the viewport height");
+            if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+                !output.isEmpty())
+                require(window.grab().save(output), "Diagnostic layout snapshot failed");
+            controller.shutdown();
+            return 0;
+        }
+        if (interruptedSupport || narrowSupport) {
+            const auto error = controller.bendRouteError();
+            require(error &&
+                        error->operationError ==
+                            application::BendPreviewErrorCode::SupportNotProven &&
+                        !controller.bendRoute() && !controller.bendPreview(),
+                    "An interrupted or off-center support strip was allowed as a central "
+                    "end-support preview");
             controller.shutdown();
             return 0;
         }
@@ -196,6 +233,30 @@ int main(int argc, char **argv) {
                     route->steps[0].preview->usesDrawingPunch() == withTools &&
                     route->steps[0].preview->usesDrawingDie() == withTools,
                 "UI route lost its actual tool profile mode");
+        if (partialSupport) {
+            require(route->partialEndSupport &&
+                        window.findChild<QLabel *>("bendCheckSummary")
+                            ->text()
+                            .contains(QStringLiteral("неполной опорой")) &&
+                        !window.findChild<QLabel *>("bendCheckSummary")
+                             ->text()
+                             .contains(QStringLiteral("проверка пройдена")),
+                    "The partial support preview was presented as a fully checked setup");
+            application::BendRouteRequest strict;
+            strict.withTools = true;
+            for (auto index : controller.session().orderedBends()) {
+                const auto *entry = controller.session().bend(index);
+                strict.operations.push_back({entry->id, index,
+                                             *controller.session().bendTarget(index), entry->tools,
+                                             entry->catalogTools});
+            }
+            const auto result = cad::SingleBendPreviewBuilder{}.buildRoute(
+                controller.session().document(), strict, {});
+            require(std::holds_alternative<application::BendRouteError>(result) &&
+                        std::get<application::BendRouteError>(result).operationError ==
+                            application::BendPreviewErrorCode::SupportNotProven,
+                    "The strict route API silently accepted a partial end support");
+        }
         if (withTools && !sample)
             for (int i = 0; i < count; ++i) {
                 const auto *entry = controller.session().bend(static_cast<std::size_t>(i));
@@ -242,6 +303,17 @@ int main(int argc, char **argv) {
                     "Arbitrary navigation recalculated or showed the end of another step");
         }
         if (sample) {
+            if (route->partialEndSupport)
+                for (std::size_t i = 0; i < route->steps.size(); ++i)
+                    if (const auto *support = route->steps[i].preview->partialEndSupport()) {
+                        std::cout << "B" << route->steps[i].bendIndex + 1 << " support material "
+                                  << support->supportedFromMm << ".." << support->supportedToMm
+                                  << " / " << support->bendLengthMm << " mm\n";
+                        window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(i + 1))
+                            ->click();
+                        frame->setValue(frame->maximum() / 2);
+                        break;
+                    }
             const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
             if (!output.isEmpty()) {
                 auto shot = window.grab().toImage();
@@ -274,6 +346,9 @@ int main(int argc, char **argv) {
         QApplication::processEvents();
         require(strip->parentWidget()->rect().contains(strip->geometry()) && !controller.hasWork(),
                 "Viewport strip clipped on resize");
+        const auto *routeStatus = window.findChild<QLabel *>("bendRouteStatus");
+        require(routeStatus->height() >= routeStatus->heightForWidth(routeStatus->width()),
+                "The route warning is clipped instead of wrapping at the current width");
         window.resize(1280, 850);
         QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
         QApplication::processEvents();

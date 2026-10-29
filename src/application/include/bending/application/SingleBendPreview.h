@@ -32,6 +32,9 @@ class SingleBendPreview {
     [[nodiscard]] virtual std::array<double, 2> toolSegmentGaps() const noexcept {
         return {0, 0};
     }
+    [[nodiscard]] virtual const BendEndSupport *partialEndSupport() const noexcept {
+        return nullptr;
+    }
     [[nodiscard]] virtual bool usesDrawingTools() const noexcept {
         return false;
     }

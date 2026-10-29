@@ -4,8 +4,10 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <numbers>
@@ -62,6 +64,7 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     earlier_->setToolTip(QStringLiteral("Изменить порядок; потребуется новая проверка"));
     later_->setToolTip(earlier_->toolTip());
     auto *details = new QHBoxLayout;
+    details_ = details;
     status_ = new QLabel(this);
     status_->setObjectName("bendRouteStatus");
     status_->setWordWrap(true);
@@ -102,6 +105,30 @@ void RoutePanel::select(int step) {
 void RoutePanel::setWithTools(bool withTools) {
     const QSignalBlocker block(mode_);
     mode_->setCurrentIndex(withTools ? 1 : 0);
+}
+void RoutePanel::resizeEvent(QResizeEvent *event) {
+    QWidget::resizeEvent(event);
+    updateStatusHeight();
+}
+void RoutePanel::updateStatusHeight() {
+    const auto margins = layout()->contentsMargins();
+    const int horizontalSpacing = details_->spacing() >= 0
+                                      ? details_->spacing()
+                                      : style()->pixelMetric(QStyle::PM_LayoutHorizontalSpacing);
+    const int available = width() - margins.left() - margins.right() -
+                          earlier_->sizeHint().width() - later_->sizeHint().width() -
+                          2 * horizontalSpacing;
+    status_->setMinimumHeight(0);
+    status_->setMaximumHeight(QWIDGETSIZE_MAX);
+    const int statusHeight = std::max(0, status_->heightForWidth(std::max(1, available)));
+    status_->setFixedHeight(statusHeight);
+    const int verticalSpacing = layout()->spacing() >= 0
+                                    ? layout()->spacing()
+                                    : style()->pixelMetric(QStyle::PM_LayoutVerticalSpacing);
+    setFixedHeight(
+        margins.top() + margins.bottom() + layout()->itemAt(0)->sizeHint().height() +
+        std::max({statusHeight, earlier_->sizeHint().height(), later_->sizeHint().height()}) +
+        verticalSpacing);
 }
 void RoutePanel::move(int delta) {
     const int from = selected_ - 1, to = from + delta;
@@ -255,8 +282,15 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     .arg(step.fixedSecond ? "B" : "A")
                     .arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
         }
-        message += route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
-                                     : QStringLiteral("Движение без инструмента. ");
+        message += route_->partialEndSupport ? QStringLiteral("Неполная опора у торца. ")
+                   : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
+                                       : QStringLiteral("Движение без инструмента. ");
+        if (selected_ > 0)
+            if (const auto *support = route_->steps[operation()].preview->partialEndSupport())
+                message += QStringLiteral("Материал под опорой: %1–%2 из %3 мм. ")
+                               .arg(support->supportedFromMm, 0, 'f', 2)
+                               .arg(support->supportedToMm, 0, 'f', 2)
+                               .arg(support->bendLengthMm, 0, 'f', 2);
         if (selected_ > 0 && route_->withTools) {
             const auto *entry = session.bend(route_->steps[operation()].bendIndex);
             if (entry && entry->catalogTools)
@@ -277,6 +311,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                                  "подготовит 3D-шаги из заготовки. После перестановки нажмите "
                                  "«Проверить мой порядок».");
     status_->setText(message);
+    updateStatusHeight();
     status_->setToolTip(
         error ? QString::fromStdString(error->detail)
               : QStringLiteral("Геометрическая заготовка сохраняет среднюю поверхность. "

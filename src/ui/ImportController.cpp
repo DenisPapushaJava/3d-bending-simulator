@@ -640,6 +640,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                          (*route)->steps.size() == request.operations.size();
                             std::set<std::string> ids;
                             std::vector<std::string> order;
+                            bool partialEndSupport = false;
                             if (valid)
                                 for (const auto &step : (*route)->steps) {
                                     const auto found =
@@ -656,6 +657,22 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                                   ? p->pressMotion() && p->punchRetraction()
                                                   : !p->toolSetup());
                                     if (p && found != request.operations.end()) {
+                                        if (const auto *support = p->partialEndSupport()) {
+                                            partialEndSupport = true;
+                                            valid &=
+                                                request.withTools &&
+                                                request.allowPartialEndSupport &&
+                                                std::isfinite(support->bendLengthMm) &&
+                                                std::isfinite(support->supportedFromMm) &&
+                                                std::isfinite(support->supportedToMm) &&
+                                                support->bendLengthMm == p->model().widthMm &&
+                                                support->supportedFromMm >= 0 &&
+                                                support->supportedFromMm <
+                                                    support->bendLengthMm / 2 &&
+                                                support->supportedToMm >
+                                                    support->bendLengthMm / 2 &&
+                                                support->supportedToMm <= support->bendLengthMm;
+                                        }
                                         const bool drawingPunch =
                                             request.withTools && found->assignment &&
                                             found->assignment->useDrawingGeometry &&
@@ -685,6 +702,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                     }
                                     order.push_back(step.id);
                                 }
+                            valid &= *route && (*route)->partialEndSupport == partialEndSupport;
                             if (valid) {
                                 auto candidate = s->session;
                                 if (request.withTools)

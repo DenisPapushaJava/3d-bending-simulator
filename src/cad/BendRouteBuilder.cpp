@@ -201,7 +201,8 @@ class RouteSearch {
                     auto preview = buildBendOperation(
                         after.document, *after.indices[op.bendIndex], op.target, fixedSecond, stop,
                         request.withTools ? op.tools : std::nullopt, request.withTools,
-                        request.withTools ? op.assignment : std::nullopt);
+                        request.withTools ? op.assignment : std::nullopt,
+                        request.allowPartialEndSupport);
                     if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
                         if (failure->code == BendPreviewErrorCode::Cancelled)
                             cancelled(stop);
@@ -271,6 +272,9 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         check(native != nullptr, "Unsupported document type");
         const auto &analysis = OcctDocumentAccess::simulationBends(*native);
         const auto n = analysis.bends.size();
+        if (request.allowPartialEndSupport && !request.withTools)
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "Partial end support requires explicit tool preview"};
         if (!n || n > 12 || request.operations.size() != n || !request.maximumChecks ||
             request.maximumChecks > 512 || !request.maximumTimeMs ||
             request.maximumTimeMs > 120000 ||
@@ -345,6 +349,9 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         result->withTools = search.request.withTools;
         result->evaluatedOperations = search.attempts;
         result->steps.assign(search.reversed.rbegin(), search.reversed.rend());
+        result->partialEndSupport =
+            std::any_of(result->steps.begin(), result->steps.end(),
+                        [](const auto &step) { return step.preview->partialEndSupport(); });
         return BendRoutePtr(result);
     } catch (const BendRouteError &e) {
         return e;

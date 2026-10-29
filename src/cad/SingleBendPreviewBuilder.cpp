@@ -52,6 +52,10 @@ class CadPreview final : public SingleBendPreview {
     bool filledCutouts = false;
     bool realPunch = false, realDie = false;
     std::array<double, 2> gaps{};
+    std::optional<BendEndSupport> endSupport;
+    const BendEndSupport *partialEndSupport() const noexcept override {
+        return endSupport ? &*endSupport : nullptr;
+    }
     std::size_t otherBends = 0;
     std::size_t otherFormedBends() const noexcept override {
         return otherBends;
@@ -565,12 +569,11 @@ const std::array<TopoDS_Shape, 2> &
 OcctPreviewAccess::sourceComponents(const application::SingleBendPreview &preview) {
     return dynamic_cast<const CadPreview &>(preview).components;
 }
-application::BendPreviewResult buildBendOperation(DocumentPtr document, std::size_t bendIndex,
-                                                  core::BendTarget target, bool fixedSecond,
-                                                  std::stop_token stop,
-                                                  std::optional<core::PressTools> toolParameters,
-                                                  bool withMotion,
-                                                  std::optional<core::ToolAssignment> realTools) {
+application::BendPreviewResult
+buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
+                   bool fixedSecond, std::stop_token stop,
+                   std::optional<core::PressTools> toolParameters, bool withMotion,
+                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport) {
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -774,29 +777,86 @@ application::BendPreviewResult buildBendOperation(DocumentPtr document, std::siz
                 supportSection.moving[2] =
                     shorten(sourceSection.moving[1], sourceSection.moving[2], model.movingFlangeMm);
                 const auto support = makeSectionFrame(model, sourceBasis, supportSection);
-                for (std::size_t i = 0; i < flanges.size(); ++i) {
-                    if (stop.stop_requested()) {
-                        return cancelled();
-                    }
+                const auto missingMaterial = [&](const TopoDS_Shape &region, std::size_t side) {
                     BRepAlgoAPI_Cut missing;
                     TopTools_ListOfShape arguments, tools;
-                    arguments.Append(support.regions[i * 2]);
-                    tools.Append(flanges[i]);
+                    arguments.Append(region);
+                    tools.Append(flanges[side]);
                     missing.SetArguments(arguments);
                     missing.SetTools(tools);
                     missing.SetNonDestructive(true);
                     missing.SetFuzzyValue(analysis.lengthToleranceMm);
                     missing.Build();
-                    const double supportBudget =
-                        area(support.regions[i * 2]) * analysis.lengthToleranceMm * 2.0;
                     if (!missing.IsDone() || missing.HasErrors() ||
                         !BRepCheck_Analyzer(missing.Shape()).IsValid() ||
-                        !std::isfinite(volume(missing.Shape())) ||
-                        volume(missing.Shape()) > supportBudget) {
-                        return BendPreviewError{BendPreviewErrorCode::SupportNotProven,
-                                                "A hole or contour interrupts the conservative "
-                                                "full-width support strip"};
+                        !std::isfinite(volume(missing.Shape())))
+                        throw std::runtime_error("Support-strip Boolean failed");
+                    return missing.Shape();
+                };
+                double supportedFrom = 0, supportedTo = model.widthMm;
+                bool partial = false;
+                const double axialMargin = analysis.lengthToleranceMm * 4;
+                for (std::size_t i = 0; i < flanges.size(); ++i) {
+                    if (stop.stop_requested())
+                        return cancelled();
+                    const auto missing = missingMaterial(support.regions[i * 2], i);
+                    const double supportBudget =
+                        area(support.regions[i * 2]) * analysis.lengthToleranceMm * 2.0;
+                    if (volume(missing) > supportBudget) {
+                        if (!allowPartialEndSupport)
+                            return BendPreviewError{BendPreviewErrorCode::SupportNotProven,
+                                                    "A hole or contour interrupts the conservative "
+                                                    "full-width support strip"};
+                        partial = true;
+                        gp_Trsf local;
+                        local.SetTransformation(flangeAxes(sourceBasis, sourceSection, i == 1));
+                        bool foundSolid = false;
+                        for (TopExp_Explorer e(missing, TopAbs_SOLID); e.More(); e.Next()) {
+                            foundSolid = true;
+                            Bnd_Box bounds;
+                            BRepBndLib::AddOptimal(
+                                BRepBuilderAPI_Transform(e.Current(), local, true).Shape(), bounds,
+                                false, false);
+                            const auto low = bounds.CornerMin().Z(), high = bounds.CornerMax().Z();
+                            const bool atStart = low <= axialMargin;
+                            const bool atEnd = high >= model.widthMm - axialMargin;
+                            if (atStart == atEnd)
+                                return BendPreviewError{BendPreviewErrorCode::SupportNotProven,
+                                                        "Support is interrupted inside the bend "
+                                                        "span or along its entire length"};
+                            if (atStart)
+                                supportedFrom = std::max(supportedFrom, high + axialMargin);
+                            else
+                                supportedTo = std::min(supportedTo, low - axialMargin);
+                        }
+                        if (!foundSolid)
+                            throw std::runtime_error("Cannot bound missing support material");
                     }
+                }
+                if (partial) {
+                    // One common uninterrupted strip must contain the bend midpoint.
+                    // This restricts a preview; it does not prove end support or stability.
+                    if (supportedFrom >= model.widthMm / 2 - axialMargin ||
+                        supportedTo <= model.widthMm / 2 + axialMargin)
+                        return BendPreviewError{BendPreviewErrorCode::SupportNotProven,
+                                                "No common central support strip on both flanges"};
+                    auto centralModel = model;
+                    centralModel.widthMm = supportedTo - supportedFrom;
+                    auto centralBasis = sourceBasis;
+                    centralBasis.origin.Translate(sourceBasis.z * supportedFrom);
+                    const auto central =
+                        makeSectionFrame(centralModel, centralBasis, supportSection);
+                    for (std::size_t i = 0; i < flanges.size(); ++i) {
+                        if (stop.stop_requested())
+                            return cancelled();
+                        const auto missing = missingMaterial(central.regions[i * 2], i);
+                        if (volume(missing) >
+                            area(central.regions[i * 2]) * analysis.lengthToleranceMm * 2)
+                            return BendPreviewError{
+                                BendPreviewErrorCode::SupportNotProven,
+                                "The bounded central support strip still loses material"};
+                    }
+                    preview->endSupport = BendEndSupport{model.widthMm, supportedFrom, supportedTo};
                 }
             }
             basis = {{-simulation::bendAllowanceMm(model) / 2.0, model.thicknessMm,
