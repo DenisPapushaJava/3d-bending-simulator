@@ -59,6 +59,10 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     layout->addWidget(mode_);
     recommend_ = new QPushButton(QStringLiteral("Подобрать по детали"), this);
     recommend_->setObjectName(QStringLiteral("recommendTools"));
+    recommend_->setToolTip(QStringLiteral(
+        "V около 8t — ориентир подбора, а не минимальный размер. Можно вручную выбрать другой "
+        "ручей в пределах текущего режима V/t ≥ 5. Материал, угол, паспорт и нагрузка могут "
+        "задавать более строгие ограничения; нагрузка пока не проверяется."));
     layout->addWidget(recommend_);
     stock_ = new QPushButton(QStringLiteral("Секции и наличие…"), this);
     stock_->setObjectName("toolStock");
@@ -461,10 +465,12 @@ QString ToolSelectionWidget::openingIssue() const {
     }
     return core::standardAirBendOpening(selectionRequest_->thicknessMm, v)
                ? QString{}
-               : QStringLiteral("V %1 мм слишком мало для t %2 мм. Проверка заблокирована. "
-                                "Ориентир 8t: %3 мм.")
+               : QStringLiteral("V %1 мм слишком мало для t %2 мм. Граница текущего режима: "
+                                "%3 мм (5t). Проверка заблокирована. Ориентир подбора: "
+                                "%4 мм (8t), не минимальный размер.")
                      .arg(v)
                      .arg(selectionRequest_->thicknessMm)
+                     .arg(core::minimumStandardDieOpeningMm(selectionRequest_->thicknessMm))
                      .arg(core::referenceDieOpeningMm(selectionRequest_->thicknessMm));
 }
 void ToolSelectionWidget::selectPreset(QComboBox *combo, const core::ToolPreset &p) {

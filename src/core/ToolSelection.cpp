@@ -42,6 +42,9 @@ bool standardAirBendOpening(double t, double v) noexcept {
     return std::isfinite(t) && std::isfinite(v) && t > 0 && v > 0 &&
            v / t >= minimumAirBendOpeningRatio - 1.e-12;
 }
+double minimumStandardDieOpeningMm(double t) noexcept {
+    return t * minimumAirBendOpeningRatio;
+}
 double referenceDieOpeningMm(double t) noexcept {
     return t * 8.;
 }

@@ -10,6 +10,7 @@
 #include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QFile>
@@ -157,6 +158,10 @@ int main(int argc, char **argv) {
                                      [&](const auto &t) { return t.id == die.id; });
         dieBox->setCurrentIndex(dieBox->findData(static_cast<int>(di - catalog.begin())));
         require(groove->count() == 4, "Four choices missing in UI");
+        // This fixture defines the punch/die only, with no compatible machine mounting.
+        auto *machine = window.findChild<QCheckBox *>("demoMachine");
+        require(machine, "Machine selection unavailable");
+        machine->setChecked(false);
         for (int g = 0; g < 4; ++g) {
             groove->setCurrentIndex(g);
             require(groove->currentText().contains(QStringLiteral("°")), "Groove angle hidden");
@@ -165,6 +170,8 @@ int main(int argc, char **argv) {
         require(check->isEnabled(), "Cannot check rotated die in UI");
         check->click();
         wait([&] { return !c.hasWork(); });
+        if (const auto error = c.bendPreviewError())
+            throw std::runtime_error("UI check failed: " + error->detail);
         require(c.bendPreview() != nullptr, "UI check failed");
         if (args.contains("--snapshot")) {
             pump();
@@ -202,6 +209,7 @@ int main(int argc, char **argv) {
             window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
                             QStringLiteral("/bend-90-6mm.step"));
             wait([&] { return !c.hasWork(); });
+            machine->setChecked(false);
             punch->setCurrentIndex(punch->findData(static_cast<int>(p - catalog.begin())));
             dieBox->setCurrentIndex(dieBox->findData(static_cast<int>(di - catalog.begin())));
             groove->setCurrentIndex(0);

@@ -61,8 +61,19 @@ int main() {
                     std::abs(geometry->punchTip.y) < 1.e-8,
                 "Round shoulder references not recognized");
         require(!standardAirBendOpening(6, 12) && standardAirBendOpening(6, 50) &&
-                    referenceDieOpeningMm(6) == 48,
+                    minimumStandardDieOpeningMm(6) == 30 && referenceDieOpeningMm(6) == 48,
                 "Opening guard or 8t reference changed");
+        auto v20 = tool_fixture::pair(20), v22 = tool_fixture::pair(22);
+        v20.die.id = "die-v20";
+        v22.die.id = "die-v22";
+        const ToolSelectionRequest threeMm{3, std::numbers::pi / 2, 4, 40};
+        require(minimumStandardDieOpeningMm(3) == 15 && referenceDieOpeningMm(3) == 24 &&
+                    screenTools(threeMm, v20.punch, v20.die, 0) == ToolRejection::None &&
+                    screenTools(threeMm, v22.punch, v22.die, 0) == ToolRejection::None,
+                "8t recommendation became a hard minimum for 3 mm on V20/V22");
+        const auto belowReference = selectTools({v20.punch, v20.die, v22.die}, threeMm);
+        require(belowReference.candidates.size() == 2 && belowReference.candidates.front().die == 2,
+                "Selection lost valid openings below the 8t preference");
         auto wide = tool_fixture::pair(50);
         wide.die.id = "wide";
         const auto choice =

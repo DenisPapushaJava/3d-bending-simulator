@@ -7,6 +7,8 @@ namespace bending::core {
 // Product guard for the current standard air-bending scope, not a material norm.
 inline constexpr double minimumAirBendOpeningRatio = 5.;
 [[nodiscard]] bool standardAirBendOpening(double thicknessMm, double openingMm) noexcept;
+// Boundary of our current mode; does not certify tool load or a material-specific minimum.
+[[nodiscard]] double minimumStandardDieOpeningMm(double thicknessMm) noexcept;
 [[nodiscard]] double referenceDieOpeningMm(double thicknessMm) noexcept;
 struct ToolSelectionRequest {
     double thicknessMm;
@@ -34,7 +36,7 @@ struct ToolSelectionResult {
     bool segmentSearchLimited = false;
 };
 // Parameter screening only, no material/force/mounting or CAD collision certificate.
-// V/t >= 5 is a conservative scope of this initial standard-air-bending search.
+// V/t >= 5 is the current product boundary; material/tool limits can be stricter.
 [[nodiscard]] ToolRejection screenTools(const ToolSelectionRequest &request,
                                         const ToolPreset &punch, const ToolPreset &die,
                                         std::size_t groove);
