@@ -17,6 +17,19 @@ int main() {
     using namespace bending::core;
     try {
         const auto drawn = tool_fixture::pair();
+        require(hasCompleteDrawingToolGeometry(drawn), "Explicit tool bodies were rejected");
+        auto incomplete = drawn;
+        incomplete.useDrawingGeometry = false;
+        require(!hasCompleteDrawingToolGeometry(incomplete),
+                "Legacy idealized assignment passed real-body policy");
+        incomplete = drawn;
+        incomplete.die.drawing.reset();
+        require(!hasCompleteDrawingToolGeometry(incomplete),
+                "Partial DXF pair passed real-body policy");
+        incomplete = drawn;
+        incomplete.punch.teaching = true;
+        require(!hasCompleteDrawingToolGeometry(incomplete),
+                "Teaching profile passed real-body policy");
         auto tang = tool_fixture::tangPair();
         const auto mount = punchMountReference(tang);
         require(mount && std::abs(mount->heightMm - 30) < 1.e-6 &&
@@ -41,6 +54,8 @@ int main() {
             const ToolAssignment a{drawn.punch, multi, g, 3, "", true};
             require(toolParameters(a).has_value() && drawingToolGeometry(a).has_value(),
                     "Quarter-turn groove not recognized");
+            require(hasCompleteDrawingToolGeometry(a),
+                    "Multi-V physical body lost its working side");
             require(std::abs(toolParameters(a)->dieAngleRadians -
                              (60 + 10 * static_cast<double>(g)) * std::numbers::pi / 180) < 1.e-10,
                     "Global angle leaked into active groove");

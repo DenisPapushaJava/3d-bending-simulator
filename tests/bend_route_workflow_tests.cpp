@@ -385,6 +385,10 @@ int main(int argc, char **argv) {
         wait([&] { return !controller.hasWork(); });
         require(controller.session().orderedBends() == expected && !controller.bendRoute(),
                 "Saved preference lost or cached validation restored");
+        if (!withTools) {
+            mode->setCurrentIndex(0); // Geometry-only inspection is an explicit command.
+            wait([&] { return !controller.hasWork(); });
+        }
         prepare->click();
         require(controller.hasWork(), "No queued route");
         controller.closeDocument();

@@ -3,18 +3,24 @@
 #include <QWidget>
 #include <optional>
 class QLabel;
+class QHBoxLayout;
 namespace bending::ui {
-class ToolProfilesWidget;
-// Passive workspace; choices and inventory remain owned by ToolSelectionWidget.
+class ToolContourButton;
+class ToolSelectionWidget;
+// Graphical workspace; choices and inventory remain owned by ToolSelectionWidget.
 class ToolWorkspace final : public QWidget {
   public:
     explicit ToolWorkspace(QWidget *parent = nullptr);
-    void setChoice(std::optional<core::PressTools>, std::optional<core::ToolAssignment>);
+    void bindSelection(ToolSelectionWidget *);
+    void refresh();
 
   private:
-    ToolProfilesWidget *profiles_;
+    ToolSelectionWidget *selection_ = nullptr;
+    QWidget *profiles_;
+    ToolContourButton *punchProfile_, *dieProfile_;
+    QHBoxLayout *grooves_;
+    QWidget *grooveRow_;
+    std::optional<core::ToolPreset> shownDie_;
     QLabel *punch_, *die_;
-    std::optional<core::PressTools> tools_;
-    std::optional<core::ToolAssignment> assignment_;
 };
 } // namespace bending::ui

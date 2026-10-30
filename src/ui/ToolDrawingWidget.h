@@ -1,11 +1,10 @@
 #pragma once
 
+#include "ToolDrawingPath.h"
 #include "bending/core/ToolCatalog.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QWidget>
-#include <cmath>
-#include <numbers>
 
 namespace bending::ui {
 class ToolDrawingWidget final : public QWidget {
@@ -16,19 +15,7 @@ class ToolDrawingWidget final : public QWidget {
         setObjectName(QStringLiteral("toolDrawingCanvas"));
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setAccessibleName(QStringLiteral("Контур из исходного чертежа инструмента"));
-        const auto &first = drawing_.edges.front();
-        path_.moveTo(first.start.x, -first.start.y);
-        for (const auto &e : drawing_.edges) {
-            if (!e.center) {
-                path_.lineTo(e.end.x, -e.end.y);
-                continue;
-            }
-            const double r = std::hypot(e.start.x - e.center->x, e.start.y - e.center->y);
-            const double start = std::atan2(e.start.y - e.center->y, e.start.x - e.center->x);
-            path_.arcTo(e.center->x - r, -e.center->y - r, 2 * r, 2 * r,
-                        start * 180 / std::numbers::pi, e.sweepRadians * 180 / std::numbers::pi);
-        }
-        path_.closeSubpath();
+        path_ = toolDrawingPath(drawing_);
         setToolTip(QStringLiteral("%1\nSHA-256: %2")
                        .arg(QString::fromStdString(drawing_.sourceFile),
                             QString::fromStdString(drawing_.sha256)));

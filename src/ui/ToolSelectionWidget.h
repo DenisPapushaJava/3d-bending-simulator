@@ -3,8 +3,8 @@
 #include "bending/application/ToolProfileImport.h"
 #include "bending/core/ToolCatalog.h"
 #include "bending/core/ToolSelection.h"
+#include <QPointer>
 #include <QWidget>
-#include <array>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -17,10 +17,10 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QToolButton;
+class QDialog;
 
 namespace bending::ui {
 // UI drafts and local preferences; only MainWindow commits a choice to DocumentSession.
-class ToolProfilesWidget;
 class ImportController;
 class ToolSelectionWidget final : public QWidget {
   public:
@@ -38,7 +38,19 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] QString openingIssue() const;
     [[nodiscard]] QString shortSummary() const;
     void rememberChoice();
-    void setEmbeddedPreviewVisible(bool);
+    [[nodiscard]] std::optional<core::ToolPreset> selectedTool(core::ToolKind) const;
+    [[nodiscard]] std::size_t selectedGroove() const;
+    [[nodiscard]] std::optional<core::ToolAssembly> selectedAssembly(core::ToolKind kind) const {
+        return kind == core::ToolKind::Punch ? punchAssembly_ : dieAssembly_;
+    }
+    [[nodiscard]] bool punchReversed() const {
+        return punchReversed_;
+    }
+    [[nodiscard]] QString optionIssue(const core::ToolPreset &, std::size_t groove) const;
+    [[nodiscard]] QString geometryIssue() const;
+    [[nodiscard]] static QString assignmentIssue(const std::optional<core::ToolAssignment> &);
+    void showPicker(core::ToolKind, QWidget *anchor);
+    bool chooseTool(const core::ToolPreset &, std::size_t groove);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
                              bool allBends = false);
     void setToolProfileImport(ImportController &,
@@ -87,11 +99,8 @@ class ToolSelectionWidget final : public QWidget {
     QLabel *sources_;
     QLineEdit *machine_;
     QWidget *catalogPanel_;
-    QWidget *manualPanel_;
     QWidget *catalogDetails_;
     QToolButton *detailsToggle_;
-    ToolProfilesWidget *profiles_;
-    QPushButton *enlargeProfiles_;
     QPushButton *drawings_;
     QPushButton *recommend_;
     QPushButton *stock_;
@@ -101,9 +110,10 @@ class ToolSelectionWidget final : public QWidget {
     QLabel *recommendation_;
     std::optional<core::ToolSelectionRequest> selectionRequest_;
     bool allBends_ = false;
-    std::array<QDoubleSpinBox *, 7> fields_{};
+    QDoubleSpinBox *clearance_;
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;
+    QPointer<QDialog> picker_;
     bool punchReversed_ = false;
     core::MachineModel machineModel_ = core::MachineModel::DemoPressV2;
     std::optional<core::ToolAssembly> punchAssembly_, dieAssembly_;

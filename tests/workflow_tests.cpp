@@ -1,3 +1,4 @@
+#include "ToolFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
@@ -9,6 +10,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
@@ -993,25 +995,33 @@ void testSingleBendWorkflow(bool graphics) {
     auto *applyTools = window.findChild<QPushButton *>(QStringLiteral("applyToolSetup"));
     auto *clearTools = window.findChild<QPushButton *>(QStringLiteral("clearToolSetup"));
     auto *toolStatus = window.findChild<QLabel *>(QStringLiteral("toolSetupStatus"));
-    auto *opening = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolOpening"));
-    auto *length = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolLength"));
-    require(applyTools && clearTools && toolStatus && opening && length && applyTools->isEnabled(),
+    bending::core::PressTools draftTools{
+        48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
+    const auto assignDraft = [&] {
+        require(controller.setBendToolAssignment(0, tool_fixture::explicitPair(draftTools)),
+                "Cannot assign explicit UI fixture");
+    };
+    assignDraft();
+    require(applyTools && clearTools && toolStatus && applyTools->isEnabled(),
             "Missing tool setup editor");
-    length->setValue(50);
+    draftTools.lengthMm = 50;
+    assignDraft();
     applyTools->click();
     waitUntil(finished);
     require(controller.bendPreviewError() &&
                 controller.bendPreviewError()->code == BendPreviewErrorCode::ToolTooShort &&
                 !controller.bendPreview() && !slider->isEnabled(),
             "Short tool accepted in UI");
-    length->setValue(100);
-    opening->setValue(100);
+    draftTools.lengthMm = 100;
+    draftTools.openingMm = 100;
+    assignDraft();
     applyTools->click();
     waitUntil(finished);
     require(controller.bendPreviewError() &&
                 controller.bendPreviewError()->code == BendPreviewErrorCode::MissingLeftSupport,
             "Missing shoulder support accepted in UI");
-    opening->setValue(48);
+    draftTools.openingMm = 48;
+    assignDraft();
     applyTools->click();
     waitUntil(finished);
     if (controller.bendPreviewError()) {
@@ -1111,9 +1121,10 @@ void testSingleBendWorkflow(bool graphics) {
     waitUntil(finished);
     list->setCurrentIndex(list->model()->index(0, 0));
     tabs->setCurrentIndex(3);
-    require(controller.session().bend(0)->tools && opening->value() == 48 &&
-                length->value() == 100 && !controller.session().modified() &&
-                !controller.bendPreview(),
+    require(controller.session().bend(0)->tools &&
+                controller.session().bend(0)->tools->openingMm == 48 &&
+                controller.session().bend(0)->tools->lengthMm == 100 &&
+                !controller.session().modified() && !controller.bendPreview(),
             "Saved setup not restored as parameters");
     applyTools->click();
     waitUntil(finished);
@@ -1200,24 +1211,25 @@ void testSingleBendWorkflow(bool graphics) {
                 controller.session().revision() == pressRevision &&
                 !controller.session().modified(),
             "Press playback changed source or project");
-    auto *dieAngle = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolDieAngle"));
-    dieAngle->setValue(110);
+    draftTools.dieAngleRadians = 110 * std::numbers::pi / 180;
+    assignDraft();
     applyTools->click();
     waitUntil(finished);
     require(controller.bendPreviewError() &&
                 controller.bendPreviewError()->code == BendPreviewErrorCode::ToolAngleConflict &&
                 !controller.bendPreview() && controller.session().document() == pressSource,
             "Die angle conflict not shown");
-    dieAngle->setValue(90);
-    auto *nose = window.findChild<QDoubleSpinBox *>(QStringLiteral("toolNoseRadius"));
-    nose->setValue(10);
+    draftTools.dieAngleRadians = std::numbers::pi / 2;
+    draftTools.noseRadiusMm = 10;
+    assignDraft();
     applyTools->click();
     waitUntil(finished);
     require(controller.bendPreviewError() &&
                 controller.bendPreviewError()->code == BendPreviewErrorCode::NoseTooLarge,
             "Nose conflict not shown");
-    nose->setValue(2);
-    opening->setValue(70);
+    draftTools.noseRadiusMm = 2;
+    draftTools.openingMm = 70;
+    assignDraft();
     applyTools->click();
     waitUntil(finished);
     require(controller.bendPreviewError() &&
@@ -1229,7 +1241,8 @@ void testSingleBendWorkflow(bool graphics) {
     require(controller.bendPreview() && !controller.bendPreview()->pressMotion() &&
                 controller.bendPreview()->toolSetup(),
             "Static setup incorrectly inherited motion-only restrictions");
-    opening->setValue(48);
+    draftTools.openingMm = 48;
+    assignDraft();
     mode->setCurrentIndex(0);
     applyTools->click();
     waitUntil(finished);
@@ -1279,6 +1292,10 @@ void testProfiledBendWorkflow(bool graphics) {
         list->setCurrentIndex(list->model()->index(0, 0));
         controller.setBendReview(0, BendReview::Confirmed);
         window.findChild<QPushButton *>(QStringLiteral("applyBendTarget"))->click();
+        require(controller.setBendToolAssignment(
+                    0, tool_fixture::explicitPair(
+                           {48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10})),
+                "Cannot assign profiled-contour fixture");
         const auto original = controller.session().document();
         const auto revision = controller.session().revision();
         tabs->setCurrentIndex(3);
@@ -1412,8 +1429,8 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
                 "Cannot confirm approximate bend");
         applyTarget->click();
         const auto edits = controller.session().editRevision();
-        require(prepare->isEnabled() && applyTools->isEnabled(),
-                "A selected complete bend of the whole part is disabled");
+        require(prepare->isEnabled() && !applyTools->isEnabled(),
+                "A complete bend lost kinematics or enabled a tool check without real profiles");
         require(window.findChild<QLabel *>(QStringLiteral("bendPreviewStatus"))
                     ->text()
                     .contains(QStringLiteral("ПРИБЛИЖЕНИЕ")),
@@ -1612,8 +1629,9 @@ void testPressOrbit() {
     auto *button = viewer->findChild<QToolButton *>("pressOrbitLock");
     require(lock && button && !lock->isChecked() && !lock->isEnabled() && !button->isVisible(),
             "Press-only orbit lock is active in the source CAD scene");
-    require(controller.setBendTools(
-                0, core::PressTools{48, std::numbers::pi / 2, std::numbers::pi / 6, 1, 100, 10}),
+    require(controller.setBendToolAssignment(
+                0, tool_fixture::explicitPair(core::PressTools{48, std::numbers::pi / 2,
+                                                               std::numbers::pi / 6, 1, 100, 10})),
             "Cannot configure orbit test tooling");
     window.findChild<QToolButton *>("processStage1")->click();
     window.findChild<QPushButton *>("applyToolSetup")->click();
@@ -1846,16 +1864,30 @@ void testGuidedWorkflow(bool graphics) {
         require(std::holds_alternative<core::ToolCatalog>(catalog),
                 "Private test catalogue failed");
     } else {
-        // Own analytic fixture only; private manufacturer's contours are never committed.
-        for (auto &tool : std::get<core::ToolCatalog>(catalog))
-            if (tool.code == "ST1405S" || tool.code == "ST3412S")
-                tool.drawing = core::ToolDrawing{
-                    "own-test-contour.dxf",
-                    std::string(64, 'a'),
-                    true,
-                    {{{0, 0}, {2, 0}, {}, 0},
-                     {{2, 0}, {0, 2}, core::DrawingPoint{0, 0}, std::numbers::pi / 2},
-                     {{0, 2}, {0, 0}, {}, 0}}};
+        // Owned explicit contours only; no manufacturer's private drawing is bundled.
+        for (auto &tool : std::get<core::ToolCatalog>(catalog)) {
+            if (!tool.parametersConfirmed)
+                continue;
+            if (tool.kind == core::ToolKind::Punch) {
+                const auto fixture =
+                    tool_fixture::explicitPair({48, std::numbers::pi / 2, tool.angleRadians,
+                                                *tool.noseRadiusMm, tool.lengthMm, 10});
+                tool.drawing = fixture.punch.drawing;
+                tool.heightMm = fixture.punch.heightMm;
+            } else if (tool.openingsMm.size() == 4) {
+                const auto fixture = tool_fixture::fourWayDie(tool.openingsMm);
+                tool.drawing = fixture.drawing;
+                tool.grooveSettings = fixture.grooveSettings;
+                tool.heightMm = fixture.heightMm;
+            } else if (tool.openingsMm.size() == 1) {
+                const auto fixture =
+                    tool_fixture::explicitPair({tool.openingsMm[0], tool.angleRadians,
+                                                std::numbers::pi / 3, .8, tool.lengthMm, 10});
+                tool.drawing = fixture.die.drawing;
+                tool.heightMm = fixture.die.heightMm;
+            }
+            tool.source = "Owned test contour; not a manufacturer's profile";
+        }
     }
     ui::MainWindow window({"test", cad::kernelVersion()}, files, files, builder,
                           std::get<core::ToolCatalog>(catalog));
@@ -1896,6 +1928,7 @@ void testGuidedWorkflow(bool graphics) {
     window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
                     QStringLiteral("/bend-zone-hole-6mm.step"));
     waitUntil(finished);
+    window.findChild<QCheckBox *>("demoMachine")->setChecked(false);
     require(controller.session().bend(0)->review == BendReview::Automatic &&
                 !controller.session().bend(0)->target && controller.session().bendTarget(0) &&
                 !controller.session().modified() &&

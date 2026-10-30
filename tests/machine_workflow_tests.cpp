@@ -78,8 +78,8 @@ int main(int argc, char **argv) {
         core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
         require(controller.setBendTools(0, tools), "Cannot set tools");
         auto *check = window.findChild<QPushButton *>("checkBend");
-        require(checkbox && !checkbox->isChecked() && check && check->isEnabled(),
-                "Legacy tool choice enabled machine or lost check action");
+        require(checkbox && !checkbox->isChecked() && check && !check->isEnabled(),
+                "Legacy conditional choice enabled a new tool check or changed the machine");
         checkbox->setChecked(true);
         auto tang = tool_fixture::tangPair();
         if (const auto path = qEnvironmentVariable("BENDING_PUNCH_CATALOG"); !path.isEmpty()) {

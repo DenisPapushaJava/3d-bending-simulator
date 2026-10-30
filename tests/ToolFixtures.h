@@ -1,5 +1,6 @@
 #pragma once
 #include "bending/core/ToolGeometry.h"
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 namespace tool_fixture {
@@ -92,14 +93,14 @@ inline bending::core::ToolAssignment tangPair() {
 }
 } // namespace tool_fixture
 namespace tool_fixture {
-inline bending::core::ToolPreset fourWayDie() {
+inline bending::core::ToolPreset fourWayDie(std::vector<double> openings = {12, 18, 24, 30}) {
     using namespace bending::core;
     constexpr double pi = std::numbers::pi;
     auto t = pair().die;
     t.id = "own-four-way";
     t.code = "Own four-way";
     t.heightMm = 70;
-    t.openingsMm = {12, 18, 24, 30};
+    t.openingsMm = std::move(openings);
     t.angleRadians = pi / 3;
     ToolDrawing drawing{"own-four-way.dxf", std::string(64, 'c'), true, {}};
     for (std::size_t i = 0; i < 4; ++i) {
@@ -132,5 +133,81 @@ inline bending::core::ToolPreset fourWayDie() {
     for (const auto &g : detectDieGrooves(*t.drawing))
         t.grooveSettings.push_back(g.settings);
     return t;
+}
+} // namespace tool_fixture
+
+namespace tool_fixture {
+// Owned, explicit finite contours for GUI regressions. Never part of the application catalogue.
+inline bending::core::ToolAssignment explicitPair(const bending::core::PressTools &tools) {
+    using namespace bending::core;
+    constexpr double pi = std::numbers::pi;
+    ToolAssignment a;
+    const auto key = std::to_string(tools.openingMm) + "-" + std::to_string(tools.dieAngleRadians) +
+                     "-" + std::to_string(tools.punchAngleRadians) + "-" +
+                     std::to_string(tools.noseRadiusMm) + "-" + std::to_string(tools.lengthMm) +
+                     "-" + std::to_string(punchLengthMm(tools));
+    a.punch = {"fixture-p-" + key,
+               "Own GUI fixture",
+               "Owned punch",
+               ToolKind::Punch,
+               tools.punchAngleRadians,
+               punchLengthMm(tools),
+               tools.openingMm,
+               tools.noseRadiusMm,
+               {},
+               "Own explicit test contour",
+               "",
+               false};
+    a.die = {"fixture-d-" + key,
+             "Own GUI fixture",
+             "Owned die",
+             ToolKind::Die,
+             tools.dieAngleRadians,
+             tools.lengthMm,
+             {},
+             {},
+             {tools.openingMm},
+             "Own explicit test contour",
+             "",
+             false};
+    ToolDrawing punch{"owned-punch.dxf", std::string(64, 'a'), true, {}},
+        die{"owned-die.dxf", std::string(64, 'b'), true, {}};
+    const auto line = [](DrawingPoint x, DrawingPoint y) { return DrawingEdge{x, y, {}, 0}; };
+    const auto arc = [](DrawingPoint c, double r, double start, double sweep) {
+        return DrawingEdge{{c.x + r * std::cos(start), c.y + r * std::sin(start)},
+                           {c.x + r * std::cos(start + sweep), c.y + r * std::sin(start + sweep)},
+                           c,
+                           sweep};
+    };
+    const auto half = tools.punchAngleRadians / 2;
+    const auto nose =
+        arc({0, tools.noseRadiusMm}, tools.noseRadiusMm, pi + half, pi - tools.punchAngleRadians);
+    const double x = nose.end.x + (tools.openingMm - nose.end.y) * std::tan(half);
+    punch.edges = {line({-x, tools.openingMm}, nose.start), nose,
+                   line(nose.end, {x, tools.openingMm}),
+                   line({x, tools.openingMm}, {-x, tools.openingMm})};
+    const double tilt = (pi - tools.dieAngleRadians) / 2, r = .2,
+                 c = tools.openingMm / 2 + r * std::tan(tilt / 2);
+    const auto left = arc({-c, -r}, r, pi / 2, -tilt),
+               right = arc({c, -r}, r, pi / 2 + tilt, -tilt);
+    const double bottom = left.end.y + left.end.x * std::tan(tilt),
+                 outer = std::max(tools.openingMm, c + 10), base = bottom - tools.openingMm / 2;
+    die.edges = {line({-outer, 0}, left.start),
+                 left,
+                 line(left.end, {0, bottom}),
+                 line({0, bottom}, right.start),
+                 right,
+                 line(right.end, {outer, 0}),
+                 line({outer, 0}, {outer, base}),
+                 line({outer, base}, {-outer, base}),
+                 line({-outer, base}, {-outer, 0})};
+    a.die.heightMm = -base;
+    a.punch.drawing = std::move(punch);
+    a.die.drawing = std::move(die);
+    a.clearanceMm = tools.clearanceMm;
+    a.machineModel = tools.machineModel;
+    a.punchReversed = tools.punchReversed;
+    a.useDrawingGeometry = true;
+    return a;
 }
 } // namespace tool_fixture

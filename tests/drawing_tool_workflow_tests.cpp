@@ -19,6 +19,7 @@
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QToolButton>
 #include <STEPControl_Controller.hxx>
 #include <STEPControl_Writer.hxx>
 #include <algorithm>
@@ -66,11 +67,10 @@ int main(int argc, char **argv) {
                 "Fixture transfer");
         require(writer.Write(file.toUtf8().constData()) == IFSelect_RetDone, "Fixture write");
         auto tools = tool_fixture::pair();
-        auto wider = tool_fixture::pair(50);
+        auto wider = tool_fixture::explicitPair(
+            core::PressTools{50, std::numbers::pi / 3, std::numbers::pi / 3, .8, 80, 3});
         wider.die.id = "own-v50";
         wider.die.code = "V50";
-        // Deliberately unknown: the punch must keep its drawing independently of this die.
-        wider.die.drawing.reset();
         auto unsupported = tool_fixture::pair(46).die;
         unsupported.id = "own-unsupported-v48";
         unsupported.code = "V48-unsupported";
@@ -104,6 +104,7 @@ int main(int argc, char **argv) {
              *d = window.findChild<QComboBox *>("diePreset");
         p->setCurrentIndex(p->findData(0));
         d->setCurrentIndex(d->findData(1));
+        window.findChild<QCheckBox *>("demoMachine")->setChecked(false);
         auto *real = window.findChild<QCheckBox *>("useDrawingToolGeometry");
         require(real && real->isEnabled() && real->isChecked(),
                 "Explicit tool choice did not activate its known shape");
@@ -146,7 +147,7 @@ int main(int argc, char **argv) {
         require(json.open(QIODevice::ReadOnly), "Read saved");
         auto root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();
-        require(root.value("version").toInt() == 10, "Wrong version");
+        require(root.value("version").toInt() == 12, "Wrong version");
         root.insert("version", 7);
         require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Write full v7");
         json.write(QJsonDocument(root).toJson());
@@ -209,6 +210,7 @@ int main(int argc, char **argv) {
         c.closeDocument();
         c.open(std::filesystem::path(BENDING_EXAMPLE_DIR) / "bend-90-6mm.step");
         wait([&] { return !c.hasWork(); });
+        window.findChild<QCheckBox *>("demoMachine")->setChecked(false);
         p->setCurrentIndex(p->findData(0));
         d->setCurrentIndex(d->findData(1));
         real->setChecked(false);
@@ -228,27 +230,35 @@ int main(int argc, char **argv) {
         check->click();
         wait([&] { return !c.hasWork(); });
         if (c.bendPreviewError())
-            throw std::runtime_error("Mixed UI motion: " + c.bendPreviewError()->detail);
+            throw std::runtime_error("Real UI motion: " + c.bendPreviewError()->detail);
         require(c.bendPreview() && c.bendPreview()->usesDrawingPunch() &&
-                    !c.bendPreview()->usesDrawingDie(),
-                "Mixed UI source mismatch");
+                    c.bendPreview()->usesDrawingDie(),
+                "Complete real pair was replaced with generated geometry");
         const auto scope = window.findChild<QLabel *>("bendCheckScope")->text();
         require(scope.contains(QStringLiteral("Пуансон: по DXF")) &&
-                    scope.contains(QStringLiteral("Матрица: условная")),
-                "Mixed scope hidden");
+                    scope.contains(QStringLiteral("Матрица: по DXF")),
+                "Real scope hidden");
         if (graphics && args.contains("--snapshot"))
             require(viewer->captureImage(true).save(args.at(args.indexOf("--snapshot") + 1) +
-                                                    "-mixed.png"),
-                    "Mixed snapshot failed");
+                                                    "-wide.png"),
+                    "Wide pair snapshot failed");
+        // Legacy partial assignments remain portable, but cannot launch a new UI tool check.
+        auto mixed = *c.session().bend(0)->catalogTools;
+        mixed.die.drawing.reset();
+        require(c.setBendToolAssignment(0, mixed), "Cannot retain legacy partial assignment");
         c.saveProject(projectPath, files);
         wait([&] { return !c.hasWork(); });
-        require(c.saveError().isEmpty(), "Mixed save failed");
+        require(c.saveError().isEmpty(), "Legacy partial save failed");
         c.closeDocument();
         c.open(projectPath);
         wait([&] { return !c.hasWork(); });
         require(!c.session().error() && c.session().bend(0)->catalogTools->useDrawingGeometry &&
                     !c.session().bend(0)->catalogTools->die.drawing && real->isChecked(),
                 "Mixed project not portable");
+        window.findChild<QToolButton *>("processStage2")->click();
+        require(!c.hasWork() && !c.bendPreview() &&
+                    window.findChild<QLabel *>("bendCheckSummary")->text().contains("DXF"),
+                "Legacy partial assignment launched a generated tool check");
         require(json.open(QIODevice::ReadOnly), "Read mixed project");
         root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();

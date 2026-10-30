@@ -156,6 +156,13 @@ std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
     result.hasPunch = geometry.hasPunch;
     return result;
 }
+bool hasCompleteDrawingToolGeometry(const ToolAssignment &assignment) {
+    if (!assignment.useDrawingGeometry || assignment.punch.teaching || assignment.die.teaching ||
+        !assignment.punch.drawing || !assignment.die.drawing)
+        return false;
+    const auto geometry = drawingToolGeometry(assignment);
+    return geometry && geometry->hasPunch && geometry->hasDie;
+}
 std::optional<PunchMount> punchMountReference(const ToolAssignment &assignment) {
     if (!assignment.useDrawingGeometry || !assignment.punch.drawing)
         return {};

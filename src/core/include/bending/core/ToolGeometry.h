@@ -15,6 +15,8 @@ struct ToolGeometry {
 };
 // Derived from the immutable assignment, never from an article name or external file.
 [[nodiscard]] std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &assignment);
+// Both explicit supported bodies; does not certify stock, clamps, load or a part setup.
+[[nodiscard]] bool hasCompleteDrawingToolGeometry(const ToolAssignment &assignment);
 struct PunchMount {
     double centreX, shoulderY, heightMm, minX, maxX; // Relative to the working tip.
 };

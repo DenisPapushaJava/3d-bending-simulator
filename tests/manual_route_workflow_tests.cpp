@@ -190,10 +190,10 @@ int main(int argc, char **argv) {
         const auto indices = controller.session().orderedBends();
         auto other = pair;
         other.clearanceMm += 2;
-        auto manual = *core::toolParameters(pair);
-        manual.clearanceMm += 3;
+        auto third = pair;
+        third.clearanceMm += 3;
         require(controller.setBendToolAssignment(indices[1], other) &&
-                    controller.setBendTools(indices[2], manual),
+                    controller.setBendToolAssignment(indices[2], third),
                 "Cannot prepare different per-bend tools");
         step(0)->click();
         wait([&] { return !controller.hasWork(); });
@@ -208,17 +208,18 @@ int main(int argc, char **argv) {
                 "Global reversal searched an order, lost zero or skipped collision checks");
         for (const auto i : indices) {
             const auto *entry = controller.session().bend(i);
-            auto expected =
-                i == indices[2] ? manual : *core::toolParameters(i == indices[1] ? other : pair);
+            auto expected = *core::toolParameters(i == indices[2]   ? third
+                                                  : i == indices[1] ? other
+                                                                    : pair);
             expected.punchReversed = true;
             require(entry->tools == expected, "Global reversal replaced a per-bend setup");
             if (entry->catalogTools) {
-                auto expectedAssignment = i == indices[1] ? other : pair;
+                auto expectedAssignment = i == indices[2] ? third : i == indices[1] ? other : pair;
                 expectedAssignment.punchReversed = true;
                 require(entry->catalogTools == expectedAssignment,
                         "Global reversal lost a catalog profile or assembly");
             } else
-                require(i == indices[2], "Catalog assignment was converted to manual parameters");
+                require(false, "Catalog assignment was converted to manual parameters");
         }
         step(3)->click();
         wait([&] { return !controller.hasWork(); });

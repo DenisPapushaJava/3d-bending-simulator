@@ -125,18 +125,11 @@ int main(int argc, char **argv) {
         for (std::size_t index = 0; index < bends.size(); ++index) {
             selection->setCurrentIndex(selection->findData(static_cast<int>(index)));
             if (sample) {
-                // Conditional tools: this audit does not claim workshop stock/force compatibility.
-                window.findChild<QComboBox *>("toolSourceMode")->setCurrentIndex(1);
-                const auto set = [&](const char *name, double value) {
-                    window.findChild<QDoubleSpinBox *>(name)->setValue(value);
-                };
-                set("toolOpening", 8 * bends[index].thicknessMm);
-                set("toolDieAngle", 60);
-                set("toolPunchAngle", 30);
-                set("toolNoseRadius", .8);
-                set("toolLength", bends[index].lengthMm + 5);
-                set("toolPunchLength", bends[index].lengthMm + 5);
-                set("toolClearance", 10);
+                // Owned finite contours; this audit makes no workshop stock/force claim.
+                const core::PressTools tools{8 * bends[index].thicknessMm, std::numbers::pi / 3,
+                                             std::numbers::pi / 6,         .8,
+                                             bends[index].lengthMm + 5,    10};
+                controller.setBendToolAssignment(index, tool_fixture::explicitPair(tools));
             } else {
                 window.findChild<QComboBox *>("punchPreset")->setCurrentIndex(index == 0 ? 1 : 2);
                 window.findChild<QComboBox *>("diePreset")->setCurrentIndex(index == 0 ? 1 : 2);
