@@ -435,6 +435,13 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
                 return BendRouteError{BendRouteErrorCode::InvalidInput,
                                       "Draft target must match CAD", op.bendIndex};
         }
+        const auto &active = request.operations[request.step ? request.step - 1 : 0];
+        if (request.withTools && active.tools &&
+            !core::standardAirBendOpening(analysis.bends[active.bendIndex].thicknessMm,
+                                          active.tools->openingMm))
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "V is below the current standard air-bending scope",
+                                  active.bendIndex, 0, BendPreviewErrorCode::NarrowDieOpening};
         std::shared_ptr<RouteCache> work;
         {
             std::lock_guard lock(routeCacheMutex_);

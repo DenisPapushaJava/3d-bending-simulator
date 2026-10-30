@@ -139,6 +139,40 @@ int main(int argc, char **argv) {
         const auto warm = run(builder, doc, request);
         require(warm->visual == tool->visual, "Warm draft recomputed geometry");
         if (!sample) {
+            const auto thickFile = folder / "six-mm.step";
+            STEPControl_Writer writer;
+            require(writer.Transfer(fixtures::bentStrip(8, 6), STEPControl_AsIs) ==
+                            IFSelect_RetDone &&
+                        writer.Write(thickFile.string().c_str()) == IFSelect_RetDone,
+                    "Cannot write 6 mm fixture");
+            const auto thick = resultDocument(cad::StepImporter{}.load(thickFile, {}, {}));
+            require(thick && thick->metadata().bendAnalysis.bends.size() == 1, "No 6 mm bend");
+            const auto &bend = thick->metadata().bendAnalysis.bends.front();
+            require(std::abs(bend.thicknessMm - 6) < 1.e-6, "Wrong regression thickness");
+            auto narrow = tool_fixture::pair(12);
+            RouteDraftRequest forbidden;
+            forbidden.withTools = true;
+            forbidden.operations.push_back({"six-mm",
+                                            0,
+                                            {bend.angleRadians, bend.innerRadiusMm},
+                                            core::toolParameters(narrow),
+                                            narrow});
+            require(forbidden.operations.front().tools.has_value(), "Invalid test assignment");
+            for (bool captured : {false, true}) {
+                forbidden.operations.front().assignment =
+                    captured ? std::optional{narrow} : std::nullopt;
+                for (std::size_t step : {0u, 1u}) {
+                    forbidden.step = step;
+                    const auto rejected = builder.buildRouteDraft(thick, forbidden, {});
+                    const auto *error = std::get_if<BendRouteError>(&rejected);
+                    require(error && error->code == BendRouteErrorCode::InvalidInput &&
+                                error->operationError == BendPreviewErrorCode::NarrowDieOpening &&
+                                error->bendIndex == 0,
+                            "Manual draft accepted V12 for 6 mm material");
+                }
+            }
+            require(run(builder, doc, request)->visual == warm->visual,
+                    "Rejected narrow tool evicted the previous valid preview");
             auto segmented = tool_fixture::pair(16);
             segmented.punch.segments = std::vector<core::ToolSegment>{{40, 2}};
             segmented.die.segments = std::vector<core::ToolSegment>{{40, 2}};

@@ -916,10 +916,13 @@ class MainWindow::Impl {
             result = QStringLiteral("Проверяем гибку…");
         else if (!previewDisplayError.isEmpty())
             result = QStringLiteral("Не удалось показать положение.\n%1").arg(previewDisplayError);
-        else if (viewingDraft && controller->routeDraftError())
-            result = QStringLiteral("Положение не проверено.\n%1")
-                         .arg(text(controller->routeDraftError()->detail));
-        else if (machineCollision)
+        else if (viewingDraft && controller->routeDraftError()) {
+            const auto error = *controller->routeDraftError();
+            result = error.operationError == BendPreviewErrorCode::NarrowDieOpening
+                         ? QStringLiteral("Раскрытие V слишком мало для толщины детали. "
+                                          "Выберите другую матрицу; ориентир — около 8t.")
+                         : QStringLiteral("Положение не проверено.\n%1").arg(text(error.detail));
+        } else if (machineCollision)
             result =
                 QStringLiteral("Столкновение: %1 — %2.\nКонфликтующие тела выделены красным.")
                     .arg(text(machineCollision->firstName), text(machineCollision->secondName));
