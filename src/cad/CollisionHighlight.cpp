@@ -66,16 +66,19 @@ struct LocalMesh {
     CollisionHighlightPatch &patch;
     std::stop_token stop;
     std::size_t triangleLimit = maxTrianglesPerPatch;
+    std::size_t vertexLimit = 3 * triangleLimit;
+    double refinementDivisor = 9;
     std::size_t visits = 0;
     bool full() const {
-        return stop.stop_requested() || patch.vertices.size() >= 3 * triangleLimit ||
+        return stop.stop_requested() || patch.vertices.size() >= vertexLimit ||
                visits >= maxVisitsPerPatch;
     }
     float strength(const gp_Pnt &p) const {
         double distance2 = patch.radiusMm * patch.radiusMm;
         for (const auto &centre : patch.centres)
             distance2 = std::min(distance2, p.SquareDistance(centre));
-        const double t = std::clamp(1 - std::sqrt(distance2) / patch.radiusMm, 0., 1.);
+        // Keep the inner fifth clearly red; fade only the surrounding surface marker.
+        const double t = std::clamp((1 - std::sqrt(distance2) / patch.radiusMm) / .8, 0., 1.);
         return static_cast<float>(t * t * (3 - 2 * t));
     }
     void triangle(const std::array<gp_Pnt, 3> &v, unsigned depth = 0) {
@@ -102,7 +105,7 @@ struct LocalMesh {
                                     v[2].SquareDistance(v[0])};
         const auto edge =
             static_cast<std::size_t>(std::max_element(edges.begin(), edges.end()) - edges.begin());
-        if (depth < maxDepth && edges[edge] > r2 / (triangleLimit >= 512 ? 9 : 4)) {
+        if (depth < maxDepth && edges[edge] > r2 / refinementDivisor) {
             const auto a = edge, b = (edge + 1) % 3, c = (edge + 2) % 3;
             const gp_Pnt middle((v[a].XYZ() + v[b].XYZ()) / 2);
             triangle({v[a], middle, v[c]}, depth + 1);
@@ -110,27 +113,67 @@ struct LocalMesh {
             return;
         }
         const std::array<float, 3> weights{strength(v[0]), strength(v[1]), strength(v[2])};
+        // Preserve a bright centre even on a coarse triangle crossing the witness point.
+        // The projected point remains on the original surface triangle.
+        if (patch.vertices.size() + 9 <= vertexLimit &&
+            *std::max_element(weights.begin(), weights.end()) < .99f) {
+            const auto normal = gp_Vec(v[0], v[1]).Crossed(gp_Vec(v[0], v[2]));
+            const auto n2 = normal.SquareMagnitude();
+            if (n2 > 1.e-24)
+                for (const auto &centre : patch.centres) {
+                    const auto height = gp_Vec(v[0], centre).Dot(normal);
+                    const auto projected = centre.Translated(normal * (-height / n2));
+                    if (triangleDistance2(projected, v) > 1.e-16)
+                        continue;
+                    const auto peak = strength(projected);
+                    if (peak < .99f)
+                        continue;
+                    for (std::size_t i = 0; i < 3; ++i) {
+                        patch.vertices.push_back({v[i], weights[i]});
+                        patch.vertices.push_back({v[(i + 1) % 3], weights[(i + 1) % 3]});
+                        patch.vertices.push_back({projected, peak});
+                    }
+                    return;
+                }
+        }
         if (*std::max_element(weights.begin(), weights.end()) <= 0)
             return;
         for (std::size_t i = 0; i < 3; ++i)
             patch.vertices.push_back({v[i], weights[i]});
     }
-    void shape(const TopoDS_Shape &shape) {
-        for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More() && !full(); faces.Next()) {
-            const auto face = TopoDS::Face(faces.Current());
-            Bnd_Box bounds;
-            BRepBndLib::Add(face, bounds);
-            if (bounds.IsVoid())
-                continue;
-            bounds.Enlarge(patch.radiusMm);
-            if (std::none_of(patch.centres.begin(), patch.centres.end(),
-                             [&](const auto &p) { return !bounds.IsOut(p); }))
-                continue;
-            TopLoc_Location location;
-            const auto mesh = BRep_Tool::Triangulation(face, location);
-            if (mesh.IsNull())
-                continue;
-            const auto &transform = location.Transformation();
+    void shapes(const std::vector<TopoDS_Shape> &shapes) {
+        struct FaceMesh {
+            Handle(Poly_Triangulation) mesh;
+            gp_Trsf transform;
+        };
+        std::vector<FaceMesh> nearby;
+        for (const auto &shape : shapes)
+            for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+                if (stop.stop_requested())
+                    return;
+                const auto face = TopoDS::Face(faces.Current());
+                Bnd_Box bounds;
+                BRepBndLib::Add(face, bounds);
+                if (bounds.IsVoid())
+                    continue;
+                bounds.Enlarge(patch.radiusMm);
+                if (std::none_of(patch.centres.begin(), patch.centres.end(),
+                                 [&](const auto &p) { return !bounds.IsOut(p); }))
+                    continue;
+                TopLoc_Location location;
+                const auto mesh = BRep_Tool::Triangulation(face, location);
+                if (mesh.IsNull())
+                    continue;
+                nearby.push_back({mesh, location.Transformation()});
+            }
+        for (std::size_t f = 0; f < nearby.size(); ++f) {
+            const auto remaining = triangleLimit - patch.vertices.size() / 3;
+            if (remaining == 0 || stop.stop_requested())
+                break;
+            const auto quota = std::max(std::size_t{1}, remaining / (nearby.size() - f));
+            vertexLimit = patch.vertices.size() + 3 * quota;
+            refinementDivisor = quota >= 512 ? 9 : quota >= 128 ? 4 : 1;
+            const auto &[mesh, transform] = nearby[f];
             for (int i = 1; i <= mesh->NbTriangles() && !full(); ++i) {
                 int a, b, c;
                 mesh->Triangle(i).Get(a, b, c);
@@ -147,8 +190,7 @@ void buildCollisionHighlights(PreviewFrame &frame, const std::vector<CollisionEv
     if (evidence.empty() || stop.stop_requested())
         return;
     std::vector<CollisionHighlightPatch> pending;
-    // User requested four times the original diameter (therefore four times the radius).
-    const auto radius = 4 * std::clamp(4 * thicknessMm, 8., 20.);
+    const auto radius = std::clamp(4 * thicknessMm, 8., 20.);
     for (const auto &item : evidence) {
         if (item.overlap.IsNull())
             continue;
@@ -174,17 +216,18 @@ void buildCollisionHighlights(PreviewFrame &frame, const std::vector<CollisionEv
     for (auto &patch : pending) {
         patch.vertices.reserve(3 * std::min(std::size_t{256}, limit));
         LocalMesh mesh{patch, stop, limit};
+        std::vector<TopoDS_Shape> surfaces;
         if (patch.bodyId == "sheet") {
             const auto &regions =
                 frame.displayShape.IsNull() ? frame.regions : frame.displayRegions;
-            for (const auto &region : regions)
-                mesh.shape(region);
+            surfaces.assign(regions.begin(), regions.end());
         } else if (patch.bodyId == "die" || patch.bodyId == "punch")
-            mesh.shape(frame.tools[patch.bodyId == "die" ? 0 : 1]);
+            surfaces.push_back(frame.tools[patch.bodyId == "die" ? 0 : 1]);
         else
             for (const auto &component : frame.machine)
                 if (component.id == patch.bodyId)
-                    mesh.shape(component.shape);
+                    surfaces.push_back(component.shape);
+        mesh.shapes(surfaces);
         if (!patch.vertices.empty())
             frame.collisionHighlights.push_back(std::move(patch));
     }

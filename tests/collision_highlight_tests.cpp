@@ -53,7 +53,7 @@ int main() {
         for (const auto &patch : frame.collisionHighlights) {
             require(patch.vertices.size() <= 2048 * 3 && patch.vertices.size() % 3 == 0,
                     "Local mesh exceeded its per-body budget");
-            require(patch.centres.size() <= 16 && patch.radiusMm == 32,
+            require(patch.centres.size() <= 16 && patch.radiusMm == 8,
                     "Unexpected or unbounded marker region");
             float faintest = 1, brightest = 0;
             for (const auto &v : patch.vertices) {
@@ -61,15 +61,16 @@ int main() {
                 double distance = patch.radiusMm;
                 for (const auto &p : patch.centres)
                     distance = std::min(distance, p.Distance(v.point));
-                const double t = std::clamp(1 - distance / patch.radiusMm, 0., 1.);
+                const double t = std::clamp((1 - distance / patch.radiusMm) / .8, 0., 1.);
                 require(std::abs(v.strength - t * t * (3 - 2 * t)) < 1.e-6,
                         "Gradient is not derived from the localized collision");
-                require(v.point.X() > 60 && v.point.X() < 140,
+                require(v.point.X() > 85 && v.point.X() < 115,
                         "A distant part of the body was painted red");
                 faintest = std::min(faintest, v.strength);
                 brightest = std::max(brightest, v.strength);
             }
-            require(brightest > .8 && faintest < .1, "Marker lost its bright centre or soft edge");
+            require(brightest > .99 && faintest < .1,
+                    "Marker lost its saturated centre or soft edge");
             bytes += patch.vertices.capacity() * sizeof(CollisionHighlightVertex);
         }
         require(triangles(sheet) == sheetTriangles && triangles(die) == dieTriangles,

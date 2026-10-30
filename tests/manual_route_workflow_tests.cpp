@@ -562,6 +562,16 @@ x.XCloseDisplay(d)
                                       std::abs(c.blue() - background.blue()) >
                                   35;
                 }
+            if (!(red > 5 && red * 4 < foreground)) {
+                std::cerr << "Local collision pixels: red=" << red << " foreground=" << foreground
+                          << '\n';
+                for (const auto &patch : failedFrame.collisionHighlights)
+                    std::cerr << patch.bodyId << " vertices=" << patch.vertices.size()
+                              << " centres=" << patch.centres.size() << '\n';
+                if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+                    !output.isEmpty())
+                    image.save(output + "-patch.png");
+            }
             require(red > 5 && red * 4 < foreground,
                     "Native collision rendering lost the local red patch or painted whole bodies");
             const auto beforeRefresh = viewer->captureImage(false);

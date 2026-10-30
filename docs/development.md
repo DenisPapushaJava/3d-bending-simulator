@@ -1041,3 +1041,5 @@ D051 соблюдён: без push/PR/тегов/релиза; HiDPI не зап
 ## Локальные коллизии — D099, 2026-10-30
 
 `dev` собран, независимый `core` прошёл 8 тестов. Прошли `cad.collision-highlight`, `cad.drawing-tools`, `cad.machine`, `app.machine`, `app.drawing-tools`, `app.step-workflow`, `application.import-controller`, `cad.route-draft`; на Linux/X11/100% дополнительно `manual_route_workflow_tests` с реальным framebuffer, остановкой 3× и F5. Проверены оба тела, два раздельных контакта, два препятствия, неизменность исходных сеток и мягкий край. [Метод/результаты измерения](collision-highlighting.md#проверка-и-измерения). D051 соблюдён, HiDPI и Windows/GPU не запускались; SDK/форматы не менялись.
+
+Полировка D099 после обратной связи: компактный диаметр и насыщенный центр; исправлено исчерпание сетки на одной грани. Собран `dev`, прошли `cad.collision-highlight` и native `manual_route_workflow_tests` при 100%, включая проверку красного пятна сбоку, нескольких коллизий, остановки 3× и F5. Расчёт столкновений/форматы/SDK не менялись, D051 сохраняется.
