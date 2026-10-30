@@ -153,9 +153,7 @@ int main(int argc, char **argv) {
         for (std::size_t i = 0; i < controller.routeDraft()->request.operations.size(); ++i)
             require(controller.routeDraft()->request.operations[i].tools->punchReversed == (i == 0),
                     "Reversal changed an unrelated operation");
-        auto *normal = window.findChild<QToolButton *>("normalPunch");
-        require(normal && normal->isEnabled(), "Normal orientation choice missing");
-        normal->click();
+        reverse->click();
         wait([&] { return !controller.hasWork(); });
         require(controller.routeDraft() &&
                     !controller.routeDraft()->request.operations[0].tools->punchReversed,

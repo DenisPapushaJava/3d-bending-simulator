@@ -105,26 +105,31 @@ int main(int argc, char **argv) {
                 "UI checkbox was not applied to the checked cycle");
         require(preview->seatedPunchMount(), "UI cycle did not seat tang in holder");
         auto *reverse = window.findChild<QToolButton *>("reversePunch");
-        auto *normal = window.findChild<QToolButton *>("normalPunch");
-        require(normal && normal->isChecked() && !normal->icon().isNull() && reverse &&
-                    !reverse->icon().isNull() && reverse->text().isEmpty(),
-                "Orientation choices are not two explicit icon states");
+        require(reverse && !reverse->icon().isNull() && reverse->text().isEmpty() &&
+                    !window.findChild<QToolButton *>("normalPunch"),
+                "Orientation is not one icon toggle");
         require(reverse && reverse->isEnabled() && !reverse->isChecked(),
                 "Punch reversal control missing");
+        const auto normalIcon = reverse->icon().cacheKey();
         reverse->click();
         wait(controller);
         require(controller.bendPreview() && controller.bendPreview() != preview &&
                     controller.bendPreview()->toolSetup()->tools.punchReversed &&
-                    reverse->isChecked(),
+                    reverse->isChecked() && reverse->icon().cacheKey() != normalIcon,
                 "Punch reversal reused old geometry or failed to recheck");
         preview = controller.bendPreview();
-        const auto orientationRevision = controller.session().editRevision();
         reverse->click();
-        QApplication::processEvents();
-        require(!controller.hasWork() && controller.bendPreview() == preview &&
-                    controller.session().editRevision() == orientationRevision &&
-                    !normal->isChecked(),
-                "Already selected orientation reran CAD or changed inputs");
+        wait(controller);
+        require(controller.bendPreview() && !reverse->isChecked() &&
+                    !controller.bendPreview()->toolSetup()->tools.punchReversed &&
+                    reverse->icon().cacheKey() == normalIcon,
+                "Second toggle click did not restore normal orientation");
+        reverse->click();
+        wait(controller);
+        require(controller.bendPreview() && reverse->isChecked() &&
+                    controller.bendPreview()->toolSetup()->tools.punchReversed,
+                "Third toggle click did not reverse again");
+        preview = controller.bendPreview();
         auto *summary = window.findChild<QLabel *>("bendCheckSummary");
         require(summary && summary->text().contains("Демонстрационный станок"),
                 "Demo scope not visible beside result");

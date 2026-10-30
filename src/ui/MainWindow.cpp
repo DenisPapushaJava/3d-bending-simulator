@@ -981,12 +981,19 @@ class MainWindow::Impl {
             individual && selected ? selected->tools : toolSelection->parameters();
         if (reversePunchButton) {
             const QSignalBlocker block(reversePunchButton);
-            const QSignalBlocker normalBlock(normalPunchButton);
             reversePunchButton->setEnabled(index && selected && included(selected->review) &&
                                            selectedTools && !controller->hasWork());
-            normalPunchButton->setEnabled(reversePunchButton->isEnabled());
-            normalPunchButton->setChecked(!selectedTools || !selectedTools->punchReversed);
-            reversePunchButton->setChecked(selectedTools && selectedTools->punchReversed);
+            const bool reversed = selectedTools && selectedTools->punchReversed;
+            reversePunchButton->setChecked(reversed);
+            reversePunchButton->setIcon(punchOrientationIcons[reversed ? 1 : 0]);
+            reversePunchButton->setToolTip(
+                reversed
+                    ? QStringLiteral("Пуансон развёрнут. Нажмите, чтобы вернуть обычную установку.")
+                    : QStringLiteral(
+                          "Пуансон установлен обычно. Нажмите, чтобы развернуть на 180°."));
+            reversePunchButton->setAccessibleDescription(
+                reversed ? QStringLiteral("Развёрнутая установка")
+                         : QStringLiteral("Обычная установка"));
         }
         operationSummary->clear();
         if (const auto &document = session.document(); document) {
@@ -2100,7 +2107,7 @@ class MainWindow::Impl {
     QSlider *bendFrame = nullptr;
     QPushButton *playBend = nullptr;
     QToolButton *reversePunchButton = nullptr;
-    QToolButton *normalPunchButton = nullptr;
+    std::array<QIcon, 2> punchOrientationIcons;
     QWidget *playbackSpeedControls = nullptr;
     QSlider *playbackSpeed = nullptr;
     QLabel *playbackSpeedValue = nullptr;
@@ -2918,44 +2925,22 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->returnToCad = new QPushButton(QStringLiteral("Деталь"), sequence);
     impl_->returnToCad->setObjectName(QStringLiteral("returnToCad"));
     playLayout->addWidget(impl_->playBend);
-    auto *orientationControl = new QWidget(sequence);
-    orientationControl->setObjectName("punchOrientationControl");
-    auto *orientationLayout = new QHBoxLayout(orientationControl);
-    orientationLayout->setContentsMargins(0, 0, 0, 0);
-    orientationLayout->setSpacing(2);
-    auto *orientations = new QButtonGroup(orientationControl);
-    orientations->setExclusive(true);
-    impl_->normalPunchButton = new QToolButton(orientationControl);
-    impl_->normalPunchButton->setObjectName("normalPunch");
-    impl_->normalPunchButton->setIcon(punchOrientationIcon(false));
-    impl_->normalPunchButton->setToolTip(QStringLiteral("Пуансон: обычная установка"));
-    impl_->normalPunchButton->setAccessibleName(QStringLiteral("Обычная установка пуансона"));
-    impl_->reversePunchButton = new QToolButton(orientationControl);
+    impl_->reversePunchButton = new QToolButton(sequence);
     impl_->reversePunchButton->setObjectName("reversePunch");
-    impl_->reversePunchButton->setIcon(punchOrientationIcon(true));
-    impl_->reversePunchButton->setAccessibleName(
-        QStringLiteral("Развернуть пуансон на 180 градусов"));
-    impl_->reversePunchButton->setToolTip(
-        QStringLiteral("Развернуть пуансон выбранного гиба на 180° вокруг вертикали. "
-                       "Положение и столкновения пересчитываются; порядок не подбирается."));
-    for (auto *button : {impl_->normalPunchButton, impl_->reversePunchButton}) {
-        button->setCheckable(true);
-        button->setIconSize(QSize(28, 28));
-        button->setFixedSize(36, 34);
-        orientations->addButton(button);
-        orientationLayout->addWidget(button);
-    }
-    impl_->normalPunchButton->setChecked(true);
-    orientationControl->setStyleSheet(QStringLiteral(
+    impl_->punchOrientationIcons = {punchOrientationIcon(false), punchOrientationIcon(true)};
+    impl_->reversePunchButton->setIcon(impl_->punchOrientationIcons[0]);
+    impl_->reversePunchButton->setCheckable(true);
+    impl_->reversePunchButton->setIconSize(QSize(28, 28));
+    impl_->reversePunchButton->setFixedSize(36, 34);
+    impl_->reversePunchButton->setAccessibleName(QStringLiteral("Переключить ориентацию пуансона"));
+    impl_->reversePunchButton->setStyleSheet(QStringLiteral(
         "QToolButton{background:#F7F9FA;border:1px solid #C5CFD8;border-radius:4px;padding:1px;}"
         "QToolButton:checked{background:#D8EEEE;border:2px solid #087F83;}"
         "QToolButton:hover:!checked{background:#E8EEF2;}QToolButton:disabled{border-color:#DCE3E9;"
         "}"));
-    playLayout->addWidget(orientationControl);
+    playLayout->addWidget(impl_->reversePunchButton);
     connect(impl_->reversePunchButton, &QToolButton::clicked, this,
-            [this] { impl_->setPunchOrientation(true); });
-    connect(impl_->normalPunchButton, &QToolButton::clicked, this,
-            [this] { impl_->setPunchOrientation(false); });
+            [this](bool reversed) { impl_->setPunchOrientation(reversed); });
     playLayout->addWidget(impl_->previewControls, 1);
     impl_->showKinematics =
         new QPushButton(QStringLiteral("Подготовить движение без инструмента"), sequence);
