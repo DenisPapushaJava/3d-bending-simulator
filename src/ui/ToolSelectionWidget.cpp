@@ -55,7 +55,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     mode_ = new QComboBox(this);
     mode_->setObjectName(QStringLiteral("toolSourceMode"));
     mode_->setAccessibleName(QStringLiteral("Источник параметров инструмента"));
-    mode_->addItems({QStringLiteral("Каталог инструмента"), QStringLiteral("Ручные параметры")});
+    mode_->addItems({QStringLiteral("Библиотека инструмента"), QStringLiteral("Ручные параметры")});
     layout->addWidget(mode_);
     recommend_ = new QPushButton(QStringLiteral("Подобрать по детали"), this);
     recommend_->setObjectName(QStringLiteral("recommendTools"));

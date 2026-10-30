@@ -115,7 +115,7 @@ inline TopoDS_Shape bendWithZoneOpening(bool through = true) {
             .Shape();
     return BRepAlgoAPI_Cut(bentStrip(8, 6), cutter).Shape();
 }
-inline TopoDS_Shape channel(double length = 80) {
+inline TopoDS_Shape channel(double length = 80, double baseWidth = 80, double flangeTop = 40) {
     BRepBuilderAPI_MakeWire wire;
     const auto line = [&](const gp_Pnt &a, const gp_Pnt &b) {
         wire.Add(BRepBuilderAPI_MakeEdge(a, b).Edge());
@@ -128,18 +128,18 @@ inline TopoDS_Shape channel(double length = 80) {
                      .Edge());
     };
     constexpr double pi = std::numbers::pi;
-    line({-6, 40, 0}, {-6, 6, 0});
+    line({-6, flangeTop, 0}, {-6, 6, 0});
     arc(0, 6, pi, 1.5 * pi);
-    line({0, 0, 0}, {80, 0, 0});
-    arc(80, 6, 1.5 * pi, 2 * pi);
-    line({86, 6, 0}, {86, 40, 0});
-    line({86, 40, 0}, {84, 40, 0});
-    line({84, 40, 0}, {84, 6, 0});
-    arc(80, 4, 2 * pi, 1.5 * pi);
-    line({80, 2, 0}, {0, 2, 0});
+    line({0, 0, 0}, {baseWidth, 0, 0});
+    arc(baseWidth, 6, 1.5 * pi, 2 * pi);
+    line({baseWidth + 6, 6, 0}, {baseWidth + 6, flangeTop, 0});
+    line({baseWidth + 6, flangeTop, 0}, {baseWidth + 4, flangeTop, 0});
+    line({baseWidth + 4, flangeTop, 0}, {baseWidth + 4, 6, 0});
+    arc(baseWidth, 4, 2 * pi, 1.5 * pi);
+    line({baseWidth, 2, 0}, {0, 2, 0});
     arc(0, 4, 1.5 * pi, pi);
-    line({-4, 6, 0}, {-4, 40, 0});
-    line({-4, 40, 0}, {-6, 40, 0});
+    line({-4, 6, 0}, {-4, flangeTop, 0});
+    line({-4, flangeTop, 0}, {-6, flangeTop, 0});
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, length))
         .Shape();
 }

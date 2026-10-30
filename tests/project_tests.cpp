@@ -373,8 +373,8 @@ void testCatalogProject() {
     const auto bundled = project::builtInToolCatalog();
     require(std::holds_alternative<core::ToolCatalog>(bundled), "Bundled catalogue unreadable");
     const auto &catalog = std::get<core::ToolCatalog>(bundled);
-    require(catalog.size() == 17 && std::count_if(catalog.begin(), catalog.end(),
-                                                  [](const auto &t) { return !t.teaching; }) == 15,
+    require(catalog.size() == 15 && std::none_of(catalog.begin(), catalog.end(),
+                                                 [](const auto &t) { return t.teaching; }),
             "Wrong catalogue contents");
     const auto find = [&](const std::string &id) -> const core::ToolPreset & {
         const auto it =

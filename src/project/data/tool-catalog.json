@@ -129,36 +129,6 @@
       "teaching": false
     },
     {
-      "id": "teaching-punch-85",
-      "manufacturer": "Учебный",
-      "code": "Клин 85° R2",
-      "kind": "punch",
-      "angleRadians": 1.4835298641951802,
-      "lengthMm": 100,
-      "heightMm": null,
-      "noseRadiusMm": 2,
-      "openingsMm": [],
-      "source": "Собственная параметрическая модель проекта, MIT",
-      "notes": "Условный профиль, без держателя.",
-      "teaching": true
-    },
-    {
-      "id": "teaching-die-v48",
-      "manufacturer": "Учебный",
-      "code": "V48 90°",
-      "kind": "die",
-      "angleRadians": 1.5707963267948966,
-      "lengthMm": 100,
-      "heightMm": null,
-      "noseRadiusMm": null,
-      "openingsMm": [
-        48
-      ],
-      "source": "Собственная параметрическая модель проекта, MIT",
-      "notes": "Условный профиль с острыми плечами, без станка.",
-      "teaching": true
-    },
-    {
       "id": "s-tool-st1701s",
       "manufacturer": "S-Tool",
       "code": "ST1701S",

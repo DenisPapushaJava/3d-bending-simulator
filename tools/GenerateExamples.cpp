@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "TrayFixtures.h"
 
 #include <APIHeaderSection_MakeHeader.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -20,6 +21,7 @@
 #include <iostream>
 #include <numbers>
 #include <stdexcept>
+#include <string_view>
 
 namespace {
 TopoDS_Shape rotateAroundZ(const TopoDS_Shape &shape, double degrees) {
@@ -53,8 +55,8 @@ void write(const std::filesystem::path &path, const TopoDS_Shape &shape, const c
 }
 } // namespace
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: step_examples OUTPUT_DIRECTORY\n";
+    if (argc != 2 && !(argc == 3 && std::string_view(argv[2]) == "--new-only")) {
+        std::cerr << "Usage: step_examples OUTPUT_DIRECTORY [--new-only]\n";
         return 1;
     }
     try {
@@ -62,6 +64,10 @@ int main(int argc, char *argv[]) {
         std::filesystem::create_directories(output);
         STEPControl_Controller::Init();
         Interface_Static::SetCVal("write.step.assembly", "Off");
+        write(output / "tray-four-bends-2mm.step", bending::fixtures::tray(), "MM");
+        write(output / "tool-clearance-2mm.step", bending::fixtures::channel(80, 24, 40), "MM");
+        if (argc == 3)
+            return 0;
         const auto plate = BRepPrimAPI_MakeBox(100.0, 60.0, 2.0).Shape();
         write(output / "plate-mm.step", plate, "MM");
         write(output / "plate-inch.stp", plate, "INCH");
