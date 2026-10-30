@@ -837,6 +837,18 @@ class MainWindow::Impl {
         const auto row = bendList->currentIndex().row();
         return row >= 0 ? std::optional{static_cast<std::size_t>(row)} : std::nullopt;
     }
+    bool blankSetupSelected() const {
+        return (viewingRoute || viewingDraft) && routePanel->selected() == 0;
+    }
+    std::optional<std::size_t> selectedPunchIndex() const {
+        if (!blankSetupSelected())
+            return selectedOperationIndex();
+        if (const auto route = controller->bendRoute();
+            viewingRoute && route && !route->steps.empty())
+            return route->steps.front().bendIndex;
+        const auto indices = controller->session().orderedBends();
+        return indices.empty() ? std::nullopt : std::optional{indices.front()};
+    }
     void beginPreviewReplacement(bool preserveFrame = false) {
         if (!viewingSource && displayedPreview && !previewReplacement) {
             previewReplacement = PreviewReplacement{
@@ -847,7 +859,7 @@ class MainWindow::Impl {
         }
     }
     void setPunchOrientation(bool reversed) {
-        const auto index = selectedOperationIndex();
+        const auto index = selectedPunchIndex();
         if (!index || controller->hasWork())
             return;
         const auto &session = controller->session();
@@ -860,11 +872,21 @@ class MainWindow::Impl {
         auto assignment = individual ? entry->catalogTools : toolSelection->assignment();
         if (!tools)
             return;
-        if (tools->punchReversed == reversed)
+        const bool all = multi && blankSetupSelected();
+        if (!all && tools->punchReversed == reversed)
             return;
         beginPreviewReplacement(true);
         const int step = routePanel->selected();
         stopPlayback();
+        if (all) {
+            if (!controller->setAllBendPunchOrientations(reversed,
+                                                         individual ? std::nullopt : tools,
+                                                         individual ? std::nullopt : assignment))
+                return;
+            routePanel->setWithTools(true, individual);
+            routePanel->select(0); // Check only the new blank setup, without searching an order.
+            return;
+        }
         // A per-step orientation must not turn every bend in a shared setup.
         if (multi && !individual) {
             const auto indices = session.orderedBends();
@@ -1000,23 +1022,28 @@ class MainWindow::Impl {
                       "background:#F0F3F6;color:#1C2938;border-radius:4px;padding:10px;"));
         checkSummary->setMinimumHeight(0);
         const auto index = selectedOperationIndex();
+        const auto punchIndex = selectedPunchIndex();
         const bool individual = toolAssignmentScope->currentIndex() == 1 && session.document() &&
                                 session.document()->metadata().bendAnalysis.bends.size() > 1;
-        const auto *selected = index ? session.bend(*index) : nullptr;
+        const auto *selected = punchIndex ? session.bend(*punchIndex) : nullptr;
         const auto selectedTools =
             individual && selected ? selected->tools : toolSelection->parameters();
         if (reversePunchButton) {
             const QSignalBlocker block(reversePunchButton);
-            reversePunchButton->setEnabled(index && selected && included(selected->review) &&
+            reversePunchButton->setEnabled(punchIndex && selected && included(selected->review) &&
                                            selectedTools && !controller->hasWork());
             const bool reversed = selectedTools && selectedTools->punchReversed;
             reversePunchButton->setChecked(reversed);
             reversePunchButton->setIcon(punchOrientationIcons[reversed ? 1 : 0]);
+            const auto scope = blankSetupSelected()
+                                   ? QStringLiteral("\nШаг 0: для всех гибов с инструментом.")
+                                   : QStringLiteral("\nТолько выбранный гиб.");
             reversePunchButton->setToolTip(
-                reversed
-                    ? QStringLiteral("Пуансон развёрнут. Нажмите, чтобы вернуть обычную установку.")
-                    : QStringLiteral(
-                          "Пуансон установлен обычно. Нажмите, чтобы развернуть на 180°."));
+                (reversed ? QStringLiteral(
+                                "Пуансон развёрнут. Нажмите, чтобы вернуть обычную установку.")
+                          : QStringLiteral(
+                                "Пуансон установлен обычно. Нажмите, чтобы развернуть на 180°.")) +
+                scope);
             reversePunchButton->setAccessibleDescription(
                 reversed ? QStringLiteral("Развёрнутая установка")
                          : QStringLiteral("Обычная установка"));

@@ -458,6 +458,52 @@ bool ImportController::setBendToolAssignment(std::size_t index, core::ToolAssign
     emit stateChanged();
     return result;
 }
+bool ImportController::setAllBendPunchOrientations(
+    bool reversed, std::optional<core::PressTools> sharedTools,
+    std::optional<core::ToolAssignment> sharedAssignment) {
+    if (impl_->stopping || hasWork() || !impl_->session.document())
+        return false;
+    auto candidate = impl_->session;
+    const auto before = candidate.editRevision();
+    bool assigned = false;
+    for (const auto index : candidate.orderedBends()) {
+        const auto *entry = candidate.bend(index);
+        if (!entry || !included(entry->review))
+            continue;
+        auto assignment = sharedAssignment ? sharedAssignment
+                          : sharedTools    ? std::nullopt
+                                           : entry->catalogTools;
+        auto tools = assignment    ? core::toolParameters(*assignment)
+                     : sharedTools ? sharedTools
+                                   : entry->tools;
+        if (!tools) {
+            if (assignment || sharedTools)
+                return false;
+            continue; // Unassigned bends remain unassigned.
+        }
+        assigned = true;
+        const bool changed = tools->punchReversed != reversed;
+        tools->punchReversed = reversed;
+        if (changed && tools->machineModel == core::MachineModel::DemoPressV1)
+            tools->machineModel = core::MachineModel::DemoPressV2;
+        if (assignment) {
+            assignment->punchReversed = reversed;
+            assignment->machineModel = tools->machineModel;
+        }
+        if (assignment ? !candidate.setBendToolAssignment(index, std::move(*assignment))
+                       : !candidate.setBendTools(index, *tools))
+            return false;
+    }
+    if (!assigned)
+        return false;
+    if (before != candidate.editRevision()) {
+        impl_->session = std::move(candidate);
+        impl_->invalidateRoute();
+        impl_->invalidatePreview();
+        emit stateChanged();
+    }
+    return true;
+}
 bool ImportController::setBendTarget(std::size_t recognizedIndex,
                                      std::optional<core::BendTarget> target) {
     if (impl_->stopping || hasWork()) {

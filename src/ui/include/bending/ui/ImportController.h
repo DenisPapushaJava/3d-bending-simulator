@@ -31,6 +31,11 @@ class ImportController final : public QObject {
     bool setBendReview(std::size_t recognizedIndex, application::BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
+    // One transaction for included, assigned bends. A shared setup replaces their assignments;
+    // without one, only orientation changes and each bend retains its own tools.
+    bool setAllBendPunchOrientations(bool reversed,
+                                     std::optional<core::PressTools> sharedTools = {},
+                                     std::optional<core::ToolAssignment> sharedAssignment = {});
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     void saveProject(std::filesystem::path path,
                      std::shared_ptr<const application::ProjectWriter> writer);

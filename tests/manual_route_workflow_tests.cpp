@@ -136,6 +136,73 @@ int main(int argc, char **argv) {
         require(controller.routeDraft() && controller.routeDraft()->request.step == 0 &&
                     controller.routeDraft()->checkedToolPositions == 1 && builder->searches == 0,
                 "Zero launched a search or skipped tool checks");
+        auto *reverse = window.findChild<QToolButton *>("reversePunch");
+        require(reverse && reverse->isEnabled() && reverse->toolTip().contains("для всех гибов"),
+                "Blank setup does not offer global punch orientation");
+        const auto indices = controller.session().orderedBends();
+        auto other = pair;
+        other.clearanceMm += 2;
+        auto manual = *core::toolParameters(pair);
+        manual.clearanceMm += 3;
+        require(controller.setBendToolAssignment(indices[1], other) &&
+                    controller.setBendTools(indices[2], manual),
+                "Cannot prepare different per-bend tools");
+        step(0)->click();
+        wait([&] { return !controller.hasWork(); });
+        const auto globalDrafts = builder->drafts.load();
+        const auto originalOrder = order(controller);
+        reverse->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && controller.routeDraft()->request.step == 0 &&
+                    controller.routeDraft()->checkedToolPositions == 1 &&
+                    builder->drafts == globalDrafts + 1 && builder->searches == 0 &&
+                    order(controller) == originalOrder && mode->currentIndex() == 2,
+                "Global reversal searched an order, lost zero or skipped collision checks");
+        for (const auto i : indices) {
+            const auto *entry = controller.session().bend(i);
+            auto expected =
+                i == indices[2] ? manual : *core::toolParameters(i == indices[1] ? other : pair);
+            expected.punchReversed = true;
+            require(entry->tools == expected, "Global reversal replaced a per-bend setup");
+            if (entry->catalogTools) {
+                auto expectedAssignment = i == indices[1] ? other : pair;
+                expectedAssignment.punchReversed = true;
+                require(entry->catalogTools == expectedAssignment,
+                        "Global reversal lost a catalog profile or assembly");
+            } else
+                require(i == indices[2], "Catalog assignment was converted to manual parameters");
+        }
+        step(3)->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && controller.routeDraft()->request.step == 3 &&
+                    controller.routeDraft()->checkedToolPositions == 21 &&
+                    controller.routeDraft()->visual->toolSetup() &&
+                    controller.routeDraft()->visual->toolSetup()->tools.punchReversed &&
+                    reverse->isChecked() && builder->searches == 0,
+                "Another step lost the global orientation or skipped its collision checks");
+        const auto projectPath = folder.path() + "/global-orientation.bend";
+        controller.saveProject(projectPath.toStdString(), files);
+        wait([&] { return !controller.isSaving(); });
+        require(controller.saveError().isEmpty(), "Cannot save global orientation");
+        controller.closeDocument();
+        window.openStep(projectPath);
+        wait([&] { return !controller.hasWork(); });
+        for (const auto i : controller.session().orderedBends())
+            require(controller.session().bend(i)->tools->punchReversed,
+                    "Global orientation was not restored from the project");
+        window.findChild<QToolButton *>("processStage2")->click();
+        step(0)->click();
+        wait([&] { return !controller.hasWork(); });
+        mode->setCurrentIndex(1); // A shared setup can also be set once on zero.
+        wait([&] { return !controller.hasWork(); });
+        require(reverse->isChecked(), "Shared zero setup lost its current orientation");
+        reverse->click();
+        wait([&] { return !controller.hasWork(); });
+        require(mode->currentIndex() == 1 && controller.routeDraft() && builder->searches == 0,
+                "Global reversal forced individual mode or launched search");
+        for (const auto i : controller.session().orderedBends())
+            require(controller.session().bend(i)->catalogTools == pair,
+                    "Shared zero orientation did not apply the common setup to every bend");
         auto *report = window.findChild<QToolButton *>("checkReportToggle");
         report->click();
         require(window.findChild<QLabel *>("bendPreviewStatus")->isVisible() &&
@@ -165,7 +232,6 @@ int main(int argc, char **argv) {
         require(presentations == 0 && builder->drafts == draftsBefore,
                 "Reselecting the displayed endpoint rebuilt CAD or its presentation");
         slider->setValue(10);
-        auto *reverse = window.findChild<QToolButton *>("reversePunch");
         require(reverse && reverse->isEnabled(), "Manual punch orientation control missing");
         const auto searchesBefore = builder->searches.load();
         reverse->click();
