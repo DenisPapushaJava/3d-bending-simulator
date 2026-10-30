@@ -1048,3 +1048,7 @@ D051 соблюдён: без push/PR/тегов/релиза; HiDPI не зап
 ## Допуск торцевой опоры — D100, 2026-10-30
 
 Собраны `dev` и независимый `core` (8/8). Прошли 14 целевых CTest: `cad.end-support`, `cad.bend-preview`, `cad.drawing-tools`, шесть сценариев `app.bend-route*`, `app.per-bend-tools`, `app.machine`, `app.step-workflow`, `app.drawing-tools`, `application.import-controller`. Новый `end_support_workflow_tests` прошёл на Linux/X11 при 100%: значение 3, жёлтый статус и фактическая нехватка, уменьшение/восстановление лимита, отсутствие автоматического расчёта и изменение только локальной настройки. Проверены ровно 3 мм с каждого торца, превышение, строгий ноль, центральный разрыв и корректность кэша при смене лимита. Локальная пользовательская t4/R4/L50 со ST1405M/2030-1 V35 прошла 61 положение со станком и обеими ориентациями; частные данные/снимки только в `out/end-support-allowance/`. [Контракт](end-support-allowance.md). D051/100% действуют, Windows/GPU не проверены; формат/SDK/зависимости не менялись.
+
+## Составные торцы — D101
+
+`ctest --preset dev -R "^cad.composite-bend$"` проверяет собственную геометрию с кусочными торцевыми границами, аналитическую площадь/объём развёртки, обе фиксации и зеркало, полный цикл и независимые Boolean-конфликты. Затронутые регрессии — cad.bend-recognition, cad.flat-pattern, cad.bend-preview, cad.route-draft, cad.bend-route*, cad.multi-bend-operation, cad.end-support, app.bending-drawing и project.portable-file. Подробности — [контракт](composite-bend-ends.md).

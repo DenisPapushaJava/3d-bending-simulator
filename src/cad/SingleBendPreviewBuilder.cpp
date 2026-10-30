@@ -4,6 +4,7 @@
 #include "CollisionHighlight.h"
 #include "GeometryCacheInternal.h"
 #include "RouteGeometry.h"
+#include "TrimmedBend.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/DrawingTools.h"
 #include "bending/cad/occt/MachineAssembly.h"
@@ -640,8 +641,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
         return BendPreviewError{BendPreviewErrorCode::BendZoneInteriorContours,
                                 "Enclosed opening boundaries interrupt a cylindrical bend zone"};
     }
-    if (analysis.status != BendRecognitionStatus::Completed || bendIndex >= analysis.bends.size() ||
-        analysis.bends[bendIndex].trimmedEnds) {
+    if (analysis.status != BendRecognitionStatus::Completed || bendIndex >= analysis.bends.size()) {
         return unsupported("Requires a complete selected straight bend");
     }
     const auto &bend = analysis.bends[bendIndex];
@@ -703,6 +703,18 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
         }
         const auto sourceSection = *simulation::singleBendSection(model, 1.0);
         auto finalFrame = makeFrame(model, basis, 1.0);
+        if (bend.trimmedEnds) {
+            const auto region =
+                extractFlange(source, finalFrame.regions[1], analysis.lengthToleranceMm);
+            if (!region)
+                return unsupported("Cannot isolate the trimmed bend region");
+            finalFrame.regions[1] = *region;
+            const auto radial = mapTrimmedBend(
+                *region, [](gp_Pnt p) { return p; }, 1, analysis.lengthToleranceMm, nullptr, stop);
+            if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
+                            std::max(1e-4, volume(source) * 1e-7), stop))
+                return unsupported("The trimmed end is not a supported radial ruled surface");
+        }
         const auto sourceSector = finalFrame.regions[1];
         std::array<TopoDS_Shape, 2> flanges;
         if (multi) {
@@ -768,7 +780,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                              realTools->punchAssembly ? realTools->punchAssembly->gapMm : 0};
         const auto displaySource = !OcctDocumentAccess::routeSkin(*native).IsNull()
                                        ? OcctDocumentAccess::routeSkin(*native)
-                                   : preview->filledCutouts
+                                   : preview->filledCutouts || bend.trimmedEnds
                                        ? visibleSource(OcctDocumentAccess::shape(*native))
                                        : TopoDS_Shape{};
         if (toolParameters) {
@@ -990,6 +1002,20 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             const auto section = withMotion ? preview->states.back().section
                                             : *simulation::singleBendSection(model, progress);
             auto frame = makeSectionFrame(model, basis, section);
+            if (bend.trimmedEnds)
+                frame.regions[1] = mapTrimmedBend(
+                    sourceSector,
+                    [&](gp_Pnt p) {
+                        const gp_Vec v(sourceBasis.origin, p);
+                        const auto mapped = simulation::mapBendPoint(
+                            model, {v.Dot(sourceBasis.x), v.Dot(sourceBasis.y)}, section);
+                        if (!mapped)
+                            throw std::runtime_error("Cannot map a trimmed bend point");
+                        return sectionPoint(basis, *mapped)
+                            .Translated(basis.z * v.Dot(sourceBasis.z));
+                    },
+                    section.angleRadians / model.angleRadians, analysis.lengthToleranceMm, nullptr,
+                    stop);
             placeFlanges(frame, flanges, sourceBasis, sourceSection, basis, section);
             if (multi)
                 for (const auto &pair : {std::pair{0U, 1U}, std::pair{0U, 2U}, std::pair{1U, 2U}}) {
@@ -1266,6 +1292,10 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                      preview->envelope.minimum.z, preview->envelope.maximum.x,
                      preview->envelope.maximum.y, preview->envelope.maximum.z);
         return BendPreviewPtr(std::move(preview));
+    } catch (const TrimmedBendError &error) {
+        if (stop.stop_requested())
+            return cancelled();
+        return unsupported(error.what());
     } catch (const Standard_Failure &error) {
         return BendPreviewError{BendPreviewErrorCode::Failed, error.GetMessageString()
                                                                   ? error.GetMessageString()

@@ -116,10 +116,10 @@ void requireCompactOrientation(const QImage &preview) {
 }
 void drawingMeasurements(const QString &folder) {
     const auto trimmedDoc = load(fixtures::cornerTrimmedBend(), folder + "/split-cap.step");
-    require(trimmedDoc->metadata().bendAnalysis.bends.empty(),
-            "Drawing cap support changed strict simulation recognition");
+    require(trimmedDoc->metadata().bendAnalysis.bends.size() == 1,
+            "A composite cap was not recognized");
     const auto trimmed = build(trimmedDoc);
-    require(trimmed->drawingOnlyRecognition && trimmed->bends.size() == 1 &&
+    require(!trimmed->drawingOnlyRecognition && trimmed->bends.size() == 1 &&
                 trimmed->bends[0].trimmedEnds && trimmed->bends[0].interiorAngleRadians &&
                 std::abs(*trimmed->bends[0].interiorAngleRadians - std::numbers::pi / 2) < 1e-5 &&
                 std::abs(trimmed->bends[0].thicknessMm - 2) < 1e-5,
@@ -139,14 +139,13 @@ void drawingMeasurements(const QString &folder) {
     require(ui::DrawingSheet::writePdf(folder + "/tolerant.pdf", *tolerant, {}).isEmpty(),
             "Drawing-only measurement PDF failed");
     const auto mixedDoc = load(fixtures::cornerTrimmedChannel(), folder + "/mixed.step");
-    require(mixedDoc->metadata().bendAnalysis.bends.size() == 1,
-            "Fixture lost its one strictly supported bend");
+    require(mixedDoc->metadata().bendAnalysis.bends.size() == 2, "Fixture lost a recognized bend");
     const auto mixed = build(mixedDoc);
-    require(mixed->drawingOnlyRecognition && mixed->bends.size() == 2 &&
+    require(!mixed->drawingOnlyRecognition && mixed->bends.size() == 2 &&
                 mixed->details.size() == 1 && mixed->details[0].fullProfile &&
                 std::abs(mixed->bends[0].axialLengthMm -
                          mixedDoc->metadata().bendAnalysis.bends[0].lengthMm) < 1e-5 &&
-                mixedDoc->metadata().bendAnalysis.bends.size() == 1,
+                mixedDoc->metadata().bendAnalysis.bends.size() == 2,
             "Drawing-only additions lost or replaced a strictly recognized zone");
     const auto excessive = build(load(withVertexGap(.025), folder + "/excessive.step"));
     require(excessive->bends.empty() && !excessive->drawingOnlyRecognition &&

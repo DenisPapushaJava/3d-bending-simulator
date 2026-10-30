@@ -1,6 +1,7 @@
 #include "bending/cad/FlatPatternBuilder.h"
 #include "FlatPatternDisplay.h"
 #include "RouteGeometry.h"
+#include "TrimmedBend.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -162,14 +163,13 @@ TopoDS_Shape bendSolid(const RecognizedBend &b, const TopTools_IndexedMapOfShape
                        double tolerance) {
     const auto f = face(faces, b.innerFace);
     BRepAdaptor_Surface s(f);
-    require(s.GetType() == GeomAbs_Cylinder && !b.trimmedEnds,
-            "Only complete cylindrical bends are supported");
+    require(s.GetType() == GeomAbs_Cylinder, "Only cylindrical bends are supported");
     double u0, u1, v0, v1;
     BRepTools::UVBounds(f, u0, u1, v0, v1);
     require(std::abs((u1 - u0) - b.angleRadians) < 1e-6 &&
                 std::abs((v1 - v0) - b.lengthMm) < tolerance * 20 &&
-                std::abs(area(f) - b.innerRadiusMm * (u1 - u0) * (v1 - v0)) <
-                    std::max(1e-5, area(f) * 1e-7),
+                (b.trimmedEnds || std::abs(area(f) - b.innerRadiusMm * (u1 - u0) * (v1 - v0)) <
+                                      std::max(1e-5, area(f) * 1e-7)),
             "A bend has openings, cut edges or an incomplete cylindrical surface");
     const auto cylinder = s.Cylinder();
     const auto p = [&](double u, double offset) {
@@ -209,8 +209,8 @@ int materialSide(const TopoDS_Face &wallFace, const gp_Pln &wallPlane, const Rec
                                                     stop, "Tangency rail intersection failed");
     GProp_GProps properties;
     BRepGProp::LinearProperties(common, properties, true);
-    require(std::abs(properties.Mass() - first.Distance(second)) <=
-                std::max(tolerance * 20, bend.lengthMm * 1e-7),
+    const double minimumRail = bend.trimmedEnds ? bend.minimumStraightLengthMm : bend.lengthMm;
+    require(properties.Mass() + std::max(tolerance * 20, bend.lengthMm * 1e-7) >= minimumRail,
             "A complete tangency rail is not on the outer boundary of its wall");
     const double inset =
         std::max(tolerance * 50, std::min(bend.thicknessMm, bend.innerRadiusMm) * .05);
@@ -288,8 +288,8 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         std::map<Wall, std::vector<std::size_t>> graph;
         for (std::size_t i = 0; i < bends.size(); ++i) {
             const auto &b = bends[i];
-            require(std::abs(b.thicknessMm - t) <= tolerance && !b.trimmedEnds,
-                    "Requires constant thickness and complete straight bends");
+            require(std::abs(b.thicknessMm - t) <= tolerance,
+                    "Requires constant thickness and straight bends");
             graph[wall(b, 0)].push_back(i);
             graph[wall(b, 1)].push_back(i);
         }
@@ -428,7 +428,25 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                               b.innerRadiusMm,
                                               k,
                                               *ba});
-                const auto sector = bendSolid(b, faces, tolerance);
+                const auto fullSector = bendSolid(b, faces, tolerance);
+                const auto sector =
+                    b.trimmedEnds ? boolean<BRepAlgoAPI_Common>(fullSector, source, tolerance, stop)
+                                  : fullSector;
+                if (b.trimmedEnds) {
+                    const auto radial = mapTrimmedBend(
+                        sector, [](gp_Pnt p) { return p; }, 1, tolerance, nullptr, stop);
+                    const double budget = std::max(1e-4, volume(source) * 1e-7);
+                    const double missing =
+                        volume(boolean<BRepAlgoAPI_Cut>(sector, radial, tolerance, stop));
+                    const double excess =
+                        volume(boolean<BRepAlgoAPI_Cut>(radial, sector, tolerance, stop));
+                    if (missing > budget || excess > budget)
+                        throw FlatPatternError{FlatPatternErrorCode::UnsupportedGeometry,
+                                               "The trimmed end is not a supported radial ruled "
+                                               "surface: missing=" +
+                                                   std::to_string(missing) +
+                                                   " excess=" + std::to_string(excess)};
+                }
                 builder.Add(original, sector);
                 const auto center = point(b.axisStart);
                 const gp_Dir radial(gp_Vec(center, projected(center, pa)));
@@ -453,6 +471,16 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                          mapped.SetZ(zInner + zSign * (r.Magnitude() - b.innerRadiusMm));
                          return mapped;
                      }});
+                TopoDS_Shape flatSector;
+                if (b.trimmedEnds) {
+                    TopoDS_Face patch;
+                    flatSector =
+                        mapTrimmedBend(sector, regions.back().map, 0, tolerance, &patch, stop);
+                    gp_Trsf lower;
+                    lower.SetTranslation(gp_Vec(0, 0, -zInner));
+                    patches.back() = BRepBuilderAPI_Transform(patch, lower, true).Shape();
+                } else
+                    flatSector = extruded(TopoDS::Face(patches.back()), gp_Vec(0, 0, t));
                 const auto tangent = center.Translated(gp_Vec(radial) * b.innerRadiusMm);
                 const gp_Vec bx = gp_Vec(bendAxis).Crossed(gp_Vec(radial)) * sign;
                 const gp_Vec by = -gp_Vec(radial), bz(bendAxis);
@@ -480,13 +508,18 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                 };
                 const gp_Ax3 sectionAxes(sign > 0 ? tangent : tangent.Translated(bz * b.lengthMm),
                                          gp_Dir(bx.Crossed(by)), gp_Dir(bx));
-                const auto solidAtProgress = [model, sectionAxes](double progress) {
+                const auto solidAtProgress = [model, sectionAxes, sector, atProgress, b,
+                                              tolerance](double progress) {
+                    if (b.trimmedEnds)
+                        return mapTrimmedBend(
+                            sector,
+                            [atProgress, progress](gp_Pnt p) { return atProgress(p, progress); },
+                            progress, tolerance);
                     return makeRouteSector(model, sectionAxes, progress);
                 };
-                result->layout.bends.push_back(
-                    {index, wallIndices.at(w), wallIndices.at(child), sector,
-                     extruded(TopoDS::Face(patches.back()), gp_Vec(0, 0, t)), regions.back().map,
-                     atProgress, childAtProgress, solidAtProgress, sectionAxes});
+                result->layout.bends.push_back({index, wallIndices.at(w), wallIndices.at(child),
+                                                sector, flatSector, regions.back().map, atProgress,
+                                                childAtProgress, solidAtProgress, sectionAxes});
             }
         }
         require(placements.size() == graph.size() &&
@@ -583,6 +616,10 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         result->display = display;
         cancelled(stop);
         return FlatPatternPtr(std::move(result));
+    } catch (const TrimmedBendError &e) {
+        return FlatPatternError{stop.stop_requested() ? FlatPatternErrorCode::Cancelled
+                                                      : FlatPatternErrorCode::UnsupportedGeometry,
+                                e.what()};
     } catch (const FlatPatternError &e) {
         return e;
     } catch (const Standard_Failure &e) {

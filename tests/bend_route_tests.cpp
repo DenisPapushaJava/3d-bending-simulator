@@ -80,10 +80,15 @@ int main(int argc, char **argv) {
                 const auto &frame = cad::OcctPreviewAccess::frame(*step.preview, f);
                 const double materialVolume =
                     volume(frame.regions[0]) + volume(frame.regions[1]) + volume(frame.regions[2]);
-                require(BRepCheck_Analyzer(frame.shape).IsValid() &&
-                            std::abs(materialVolume - document->metadata().volumeMm3 -
-                                     document->metadata().closedCutouts.addedVolumeMm3) < .02,
-                        "Route lost material");
+                require(
+                    BRepCheck_Analyzer(frame.shape).IsValid() &&
+                        std::abs(materialVolume - document->metadata().volumeMm3 -
+                                 document->metadata().closedCutouts.addedVolumeMm3) <
+                            std::max(.02, step.preview->model().widthMm *
+                                              step.preview->model().thicknessMm *
+                                              document->metadata().bendAnalysis.lengthToleranceMm *
+                                              2),
+                    "Route lost material");
                 require(!frame.displayShape.IsNull(), "Route lost visible cutouts");
             }
         }
