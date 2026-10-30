@@ -202,10 +202,6 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         if (active.tools->machineModel != core::MachineModel::None)
             machineAssembly.emplace(*active.tools, tools, stop, active.assignment);
         visual->seatedMount = machineAssembly && machineAssembly->seatedPunchMount();
-        for (const auto &t : tools) {
-            BRepMesh_IncrementalMesh mesh(t, .05, false, .35, false);
-            require(mesh.IsDone(), "Draft tool meshing failed");
-        }
     }
     Bnd_Box envelope;
     const std::size_t count = request.step ? 21 : 1;

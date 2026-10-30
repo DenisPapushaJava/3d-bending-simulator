@@ -1,4 +1,5 @@
 #include "bending/cad/occt/MachineAssembly.h"
+#include "GeometryCacheInternal.h"
 #include "bending/core/ToolGeometry.h"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
@@ -59,19 +60,26 @@ bool intersects(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
     return std::abs(p.Mass()) > std::max(1.e-5, 8 * tolerance * tolerance * tolerance);
 }
 TopoDS_Shape prism(const std::vector<std::array<double, 2>> &points, double from, double to) {
-    BRepBuilderAPI_MakePolygon polygon;
+    const auto origin = points.front();
+    auto key = geometryKey("machine-prism");
+    key << to - from << ' ' << points.size();
     for (const auto &p : points)
-        polygon.Add(gp_Pnt(p[0], p[1], from));
-    polygon.Close();
-    auto shape = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(polygon.Wire()).Face(),
-                                       gp_Vec(0, 0, to - from))
-                     .Shape();
-    if (!BRepCheck_Analyzer(shape).IsValid())
-        throw std::runtime_error("Invalid demonstration machine component");
-    BRepMesh_IncrementalMesh mesh(shape, .1, false, .35, false);
-    if (!mesh.IsDone())
-        throw std::runtime_error("Machine component meshing failed");
-    return shape;
+        key << ' ' << p[0] - origin[0] << ' ' << p[1] - origin[1];
+    auto shape = cachedToolShape(
+        key.str(),
+        [&] {
+            BRepBuilderAPI_MakePolygon polygon;
+            for (const auto &p : points)
+                polygon.Add(gp_Pnt(p[0] - origin[0], p[1] - origin[1], 0));
+            polygon.Close();
+            return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(polygon.Wire()).Face(),
+                                         gp_Vec(0, 0, to - from))
+                .Shape();
+        },
+        .1);
+    gp_Trsf translation;
+    translation.SetTranslation(gp_Vec(origin[0], origin[1], from));
+    return shape.Moved(TopLoc_Location(translation));
 }
 } // namespace
 MachineAssembly::MachineAssembly(const core::PressTools &tools,

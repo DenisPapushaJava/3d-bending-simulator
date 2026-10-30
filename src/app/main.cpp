@@ -4,6 +4,7 @@
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/DxfToolImporter.h"
+#include "bending/project/GeometryCacheFiles.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
@@ -23,9 +24,11 @@
 #include <QPalette>
 #include <QProxyStyle>
 #include <QSslSocket>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
 #include <algorithm>
+#include <filesystem>
 
 namespace {
 class ApplicationStyle final : public QProxyStyle {
@@ -115,6 +118,12 @@ int main(int argc, char *argv[]) {
                                         QStringLiteral("Внутренняя папка portable-комплекта"),
                                         QStringLiteral("directory"));
     parser.addOptions({updateProbe, updateToken, updateRoot});
+    const QCommandLineOption noToolCache(QStringLiteral("no-tool-cache"),
+                                         QStringLiteral("Отключить кэш оснастки для диагностики"));
+    const QCommandLineOption toolCacheDirectory(QStringLiteral("tool-cache-dir"),
+                                                QStringLiteral("Папка постоянного кэша оснастки"),
+                                                QStringLiteral("directory"));
+    parser.addOptions({noToolCache, toolCacheDirectory});
     QCommandLineOption smokeTest(QStringLiteral("smoke-test"),
                                  QStringLiteral("Проверить создание окна и завершиться"));
     parser.addOption(smokeTest);
@@ -143,7 +152,23 @@ int main(int argc, char *argv[]) {
     }
 
     const auto files = std::make_shared<bending::project::ProjectFiles>();
-    const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
+    std::shared_ptr<bending::cad::ToolGeometryCache> toolCache;
+    if (!parser.isSet(noToolCache)) {
+        const auto cacheDirectory =
+            parser.isSet(toolCacheDirectory) ? parser.value(toolCacheDirectory)
+            : !portableRoot.isEmpty()
+                ? QDir(portableRoot).filePath("data/cache/tool-geometry")
+                : QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+                      .filePath("cache/tool-geometry");
+#ifdef _WIN32
+        const std::filesystem::path cachePath(cacheDirectory.toStdWString());
+#else
+        const std::filesystem::path cachePath(cacheDirectory.toStdString());
+#endif
+        toolCache = std::make_shared<bending::cad::ToolGeometryCache>(
+            std::make_shared<bending::project::GeometryCacheFiles>(cachePath));
+    }
+    const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>(toolCache);
     auto catalogue = bending::project::builtInToolCatalog();
     if (const auto *error = std::get_if<std::string>(&catalogue)) {
         qCritical() << "Tool catalogue failed:" << QString::fromStdString(*error);

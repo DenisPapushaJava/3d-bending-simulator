@@ -13,6 +13,8 @@
 !/.vscode/launch.json
 *.user
 *.swp
+*.brepc
+*.brepc.*
 __pycache__/
 *.pyc
 .DS_Store

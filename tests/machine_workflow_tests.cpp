@@ -1,6 +1,7 @@
 #include "BendFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/project/GeometryCacheFiles.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
@@ -53,7 +54,17 @@ int main(int argc, char **argv) {
                     writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
                 "Fixture failed");
         auto files = std::make_shared<project::ProjectFiles>();
-        auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
+        std::shared_ptr<const application::GeometryArtifactStore> artifacts;
+        if (const auto cache = qEnvironmentVariable("BENDING_TOOL_CACHE_ROOT"); !cache.isEmpty()) {
+#ifdef _WIN32
+            const std::filesystem::path root(cache.toStdWString());
+#else
+            const std::filesystem::path root(cache.toStdString());
+#endif
+            artifacts = std::make_shared<project::GeometryCacheFiles>(root);
+        }
+        auto toolCache = std::make_shared<cad::ToolGeometryCache>(artifacts);
+        auto builder = std::make_shared<cad::SingleBendPreviewBuilder>(toolCache);
         ui::MainWindow window({"test", "test"}, files, files, builder);
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
@@ -211,6 +222,12 @@ int main(int argc, char **argv) {
                 "Cannot return to tool-only verification");
         controller.closeDocument();
         window.close();
+        const auto statistics = toolCache->statistics();
+        std::cout << "Tool cache: builds=" << statistics.builds << " RAM=" << statistics.memoryHits
+                  << " disk=" << statistics.diskHits << '\n';
+        if (qEnvironmentVariableIsSet("BENDING_EXPECT_TOOL_CACHE_HIT"))
+            require(statistics.builds == 0 && statistics.diskHits > 0,
+                    "Restarted UI rebuilt persisted tool geometry");
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         return 1;

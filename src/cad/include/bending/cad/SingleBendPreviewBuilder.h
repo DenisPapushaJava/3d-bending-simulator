@@ -1,12 +1,14 @@
 #pragma once
 
 #include "bending/application/SingleBendPreview.h"
+#include "bending/cad/ToolGeometryCache.h"
 #include <mutex>
 
 namespace bending::cad {
 class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuilder {
   public:
-    SingleBendPreviewBuilder() = default;
+    explicit SingleBendPreviewBuilder(
+        std::shared_ptr<ToolGeometryCache> = std::make_shared<ToolGeometryCache>());
     ~SingleBendPreviewBuilder() override;
     void discardRouteCache() const override;
     [[nodiscard]] application::RouteDraftResult buildRouteDraft(application::DocumentPtr,
@@ -38,5 +40,6 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
     struct RouteCache;
     mutable std::mutex routeCacheMutex_;
     mutable std::shared_ptr<RouteCache> routeCache_;
+    std::shared_ptr<ToolGeometryCache> toolCache_;
 };
 } // namespace bending::cad

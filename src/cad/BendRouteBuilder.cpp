@@ -1,6 +1,7 @@
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "FlatPatternDisplay.h"
+#include "GeometryCacheInternal.h"
 #include "RouteDraftGeometry.h"
 #include "RouteGeometry.h"
 #include "bending/cad/FlatPatternBuilder.h"
@@ -394,6 +395,8 @@ class RouteSearch {
 };
 } // namespace
 struct SingleBendPreviewBuilder::RouteCache : CacheData {};
+SingleBendPreviewBuilder::SingleBendPreviewBuilder(std::shared_ptr<ToolGeometryCache> cache)
+    : toolCache_(std::move(cache)) {}
 SingleBendPreviewBuilder::~SingleBendPreviewBuilder() = default;
 void SingleBendPreviewBuilder::discardRouteCache() const {
     std::shared_ptr<RouteCache> old;
@@ -405,6 +408,7 @@ void SingleBendPreviewBuilder::discardRouteCache() const {
 RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
                                                            RouteDraftRequest request,
                                                            std::stop_token stop) const {
+    GeometryCacheScope cacheScope(toolCache_, stop);
     try {
         cancelled(stop);
         const auto native = std::dynamic_pointer_cast<const CadDocument>(document);
@@ -486,6 +490,7 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
 }
 BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendRouteRequest request,
                                                      std::stop_token stop) const {
+    GeometryCacheScope cacheScope(toolCache_, stop);
     try {
         cancelled(stop);
         const auto native = std::dynamic_pointer_cast<const CadDocument>(document);

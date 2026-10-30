@@ -1,4 +1,5 @@
 #include "bending/cad/occt/DrawingTools.h"
+#include "GeometryCacheInternal.h"
 #include "bending/cad/ToolProfileValidation.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include <BRepAlgoAPI_Common.hxx>
@@ -23,6 +24,7 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <algorithm>
 #include <cmath>
 #include <gp_Vec.hxx>
@@ -59,8 +61,8 @@ DrawingPoint at(const DrawingEdge &e, double fraction) {
 DrawingEdge line(DrawingPoint a, DrawingPoint b) {
     return {a, b, {}, 0};
 }
-TopoDS_Shape sectionPrism(const std::vector<DrawingEdge> &edges, DrawingPoint origin, double tip,
-                          double length, double z) {
+TopoDS_Shape buildSectionPrism(const std::vector<DrawingEdge> &edges, DrawingPoint origin,
+                               double tip, double length, double z) {
     std::vector<TopoDS_Vertex> vertices;
     for (const auto &e : edges) {
         auto p = shifted(e.start, origin, tip);
@@ -92,6 +94,27 @@ TopoDS_Shape sectionPrism(const std::vector<DrawingEdge> &edges, DrawingPoint or
         throw std::runtime_error("Invalid DXF tool solid");
     return solid;
 }
+std::string sectionDescriptor(const std::vector<core::DrawingEdge> &edges,
+                              core::DrawingPoint origin, double length) {
+    auto key = geometryKey("section-prism");
+    key << length << ' ' << edges.size();
+    for (const auto &e : edges) {
+        key << ' ' << e.start.x - origin.x << ' ' << e.start.y - origin.y << ' '
+            << e.end.x - origin.x << ' ' << e.end.y - origin.y << ' ' << bool(e.center);
+        if (e.center)
+            key << ' ' << e.center->x - origin.x << ' ' << e.center->y - origin.y;
+        key << ' ' << e.sweepRadians;
+    }
+    return key.str();
+}
+TopoDS_Shape sectionPrism(const std::vector<core::DrawingEdge> &edges, core::DrawingPoint origin,
+                          double tip, double length, double z) {
+    auto shape = cachedToolShape(sectionDescriptor(edges, origin, length),
+                                 [&] { return buildSectionPrism(edges, origin, 0, length, 0); });
+    gp_Trsf translation;
+    translation.SetTranslation(gp_Vec(0, tip, z));
+    return shape.Moved(TopLoc_Location(translation));
+}
 } // namespace
 std::optional<std::string> validateToolProfile(const core::ToolDrawing &drawing,
                                                std::stop_token stop) {
@@ -100,7 +123,7 @@ std::optional<std::string> validateToolProfile(const core::ToolDrawing &drawing,
     if (!drawing.millimeters || !core::validToolDrawing(drawing))
         return "Некорректный контур или единицы. Требуется замкнутое сечение в мм.";
     try {
-        const auto body = sectionPrism(drawing.edges, {}, 0, 1, 0);
+        const auto body = buildSectionPrism(drawing.edges, {}, 0, 1, 0);
         if (body.IsNull() || stop.stop_requested())
             return "Проверка отменена или тело не построено.";
         GProp_GProps properties;
@@ -126,9 +149,10 @@ std::array<TopoDS_Shape, 2> makeDrawingTools(const core::ToolAssignment &a,
                                      2);
     return result;
 }
-TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &tool,
-                             const std::optional<core::ToolAssembly> &assembly, double startZ,
-                             std::stop_token stop, std::vector<ToolDisplaySegment> *display) {
+static TopoDS_Shape buildSegmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &tool,
+                                         const std::optional<core::ToolAssembly> &assembly,
+                                         double startZ, std::stop_token stop,
+                                         std::vector<ToolDisplaySegment> *display) {
     if (display)
         display->clear();
     if (!assembly) {
@@ -173,16 +197,60 @@ TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &
     }
     return parts;
 }
-TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGeometry &g,
-                               double tip, double lift, std::stop_token stop) {
+TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &tool,
+                             const std::optional<core::ToolAssembly> &assembly, double startZ,
+                             std::stop_token stop, std::vector<ToolDisplaySegment> *display) {
+    if (!assembly) {
+        if (display)
+            *display = {{whole, tool.lengthMm}};
+        return whole;
+    }
+    if (!tool.segments || !core::assemblyLength(*tool.segments, *assembly))
+        throw std::runtime_error("Invalid tool assembly");
+    const auto location = whole.Location();
+    const auto form = location.Transformation().Form();
+    const bool translation = form == gp_Identity || form == gp_Translation;
+    const auto source = translation ? whole.Located(TopLoc_Location()) : whole;
+    const double localStart =
+        translation ? startZ - location.Transformation().TranslationPart().Z() : startZ;
+    auto key = geometryKey("segments/fuzzy=1e-7");
+    const auto sourceKey = GeometryCacheScope::descriptor(source);
+    key << sourceKey.size() << ':' << sourceKey << ' ' << localStart << ' ' << assembly->gapMm
+        << ' ' << assembly->pieces.size();
+    for (auto row : assembly->pieces) {
+        const auto &piece = tool.segments->at(row);
+        key << ' ' << piece.lengthMm << ' ' << static_cast<int>(piece.shape);
+    }
+    auto result = cachedToolShape(
+        GeometryCacheScope::enabled() && sourceKey.empty() ? std::string{} : key.str(),
+        [&] { return buildSegmentToolBody(source, tool, assembly, localStart, stop, nullptr); });
+    if (translation)
+        result = result.Moved(location);
+    if (display) {
+        display->clear();
+        TopoDS_Iterator child(result);
+        for (auto row : assembly->pieces) {
+            if (!child.More())
+                throw std::runtime_error("Incomplete cached tool assembly");
+            display->push_back({child.Value(), tool.segments->at(row).lengthMm});
+            child.Next();
+        }
+        if (child.More())
+            throw std::runtime_error("Unexpected cached tool sections");
+    }
+    return result;
+}
+static TopoDS_Shape buildDrawingPunchSweep(const core::ToolAssignment &a,
+                                           const core::ToolGeometry &g, double tip, double lift,
+                                           std::stop_token stop) {
     if (!g.hasPunch || !a.punch.drawing || !std::isfinite(lift) || lift <= 0)
         throw std::runtime_error("Invalid DXF punch lift");
     const auto &p = *a.punch.drawing;
     const double z =
         (*core::toolLength(a.die, a.dieAssembly) - *core::toolLength(a.punch, a.punchAssembly)) / 2;
     TopTools_ListOfShape arguments, tools;
-    arguments.Append(
-        sectionPrism(p.edges, g.punchTip, tip, *core::toolLength(a.punch, a.punchAssembly), z));
+    arguments.Append(buildSectionPrism(p.edges, g.punchTip, tip,
+                                       *core::toolLength(a.punch, a.punchAssembly), z));
     // Sweep of a region = original region union the swept boundary. Split circular
     // edges at X extrema: each strip then is the region between y(x) and y(x)+lift.
     for (const auto &e : p.edges) {
@@ -216,8 +284,8 @@ TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGe
             if (back.center)
                 back.center->y += lift;
             tools.Append(
-                sectionPrism({edge, line(edge.end, upEnd), back, line(upStart, edge.start)},
-                             g.punchTip, tip, *core::toolLength(a.punch, a.punchAssembly), z));
+                buildSectionPrism({edge, line(edge.end, upEnd), back, line(upStart, edge.start)},
+                                  g.punchTip, tip, *core::toolLength(a.punch, a.punchAssembly), z));
         }
     }
     if (tools.IsEmpty())
@@ -231,5 +299,19 @@ TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGe
     if (!fuse.IsDone() || fuse.HasErrors() || !BRepCheck_Analyzer(fuse.Shape()).IsValid())
         throw std::runtime_error("Cannot validate DXF punch sweep");
     return fuse.Shape();
+}
+TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGeometry &g,
+                               double tip, double lift, std::stop_token stop) {
+    if (!a.punch.drawing)
+        throw std::runtime_error("No punch drawing");
+    auto key = geometryKey("vertical-punch-sweep/fuzzy=1e-7");
+    key << sectionDescriptor(a.punch.drawing->edges, g.punchTip,
+                             *core::toolLength(a.punch, a.punchAssembly))
+        << ' ' << *core::toolLength(a.die, a.dieAssembly) << ' ' << lift;
+    auto shape =
+        cachedToolShape(key.str(), [&] { return buildDrawingPunchSweep(a, g, 0, lift, stop); }, 0);
+    gp_Trsf translation;
+    translation.SetTranslation(gp_Vec(0, tip, 0));
+    return shape.Moved(TopLoc_Location(translation));
 }
 } // namespace bending::cad

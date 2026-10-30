@@ -1,6 +1,7 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "BendOperation.h"
 #include "CadPreview.h"
+#include "GeometryCacheInternal.h"
 #include "RouteGeometry.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/DrawingTools.h"
@@ -453,7 +454,7 @@ PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &ba
 }
 // The profile width is nondecreasing with Y. Its exact upward translational
 // sweep is the original profile plus the vertical strip above its full-width top.
-TopoDS_Shape makePunch(const core::PressTools &t, double tip, double extension = 0.0) {
+TopoDS_Shape buildPunch(const core::PressTools &t, double tip, double extension = 0.0) {
     const auto profile = simulation::toolProfiles(t).value();
     const auto point = [tip](simulation::Point2Mm p) { return gp_Pnt(p.x, p.y + tip, 0); };
     const auto leftTop = point(profile.punch[0]), rightTop = point(profile.punch[4]);
@@ -479,22 +480,39 @@ TopoDS_Shape makePunch(const core::PressTools &t, double tip, double extension =
         .Shape()
         .Moved(TopLoc_Location(center));
 }
-std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, double thickness) {
+TopoDS_Shape makePunch(const core::PressTools &t, double tip, double extension = 0.0) {
+    auto canonical = t;
+    canonical.lengthMm = core::punchLengthMm(t);
+    auto key = geometryKey("ideal-punch");
+    key << canonical.lengthMm << ' ' << extension;
+    const auto profile = simulation::toolProfiles(canonical).value();
+    for (const auto &p : profile.punch)
+        key << ' ' << p.x << ' ' << p.y;
+    auto shape = cachedToolShape(
+        key.str(), [&] { return buildPunch(canonical, 0, extension); }, extension > 0 ? 0 : .05);
+    gp_Trsf translation;
+    translation.SetTranslation(gp_Vec(0, tip, (t.lengthMm - core::punchLengthMm(t)) / 2));
+    return shape.Moved(TopLoc_Location(translation));
+}
+std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, double thickness,
+                                      std::array<bool, 2> required = {true, true}) {
     const auto &t = setup.tools;
     const auto profile = simulation::toolProfiles(t).value();
-    std::vector<gp_Pnt> contour;
-    for (const auto p : profile.die) {
-        contour.emplace_back(p.x, p.y, 0);
-    }
-    const auto die = prism(contour, gp_Vec(0, 0, t.lengthMm));
-    const auto punch = makePunch(t, thickness + t.clearanceMm);
-    for (const auto &shape : {die, punch}) {
-        if (!BRepCheck_Analyzer(shape).IsValid() || !std::isfinite(volume(shape)) ||
-            volume(shape) <= 0.0) {
-            throw std::runtime_error("Invalid tool solid");
+    std::array<TopoDS_Shape, 2> result;
+    if (required[0]) {
+        auto key = geometryKey("ideal-die");
+        key << t.lengthMm;
+        std::vector<gp_Pnt> contour;
+        for (const auto p : profile.die) {
+            contour.emplace_back(p.x, p.y, 0);
+            key << ' ' << p.x << ' ' << p.y;
         }
+        result[0] =
+            cachedToolShape(key.str(), [&] { return prism(contour, gp_Vec(0, 0, t.lengthMm)); });
     }
-    return {die, punch};
+    if (required[1])
+        result[1] = makePunch(t, thickness + t.clearanceMm);
+    return result;
 }
 bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
                      bool *completed = nullptr) {
@@ -551,7 +569,10 @@ std::array<TopoDS_Shape, 2>
 makeRouteDraftTools(const core::PressTools &tools,
                     const std::optional<core::ToolAssignment> &assignment, std::stop_token stop,
                     std::array<std::vector<ToolDisplaySegment>, 2> &segments) {
-    auto result = makeTools({tools, 0, 0, 0, 0, 0}, 0);
+    std::array<TopoDS_Shape, 2> result;
+    const bool drawn = assignment && assignment->useDrawingGeometry;
+    const auto g = drawn ? core::drawingToolGeometry(*assignment) : std::nullopt;
+    result = makeTools({tools, 0, 0, 0, 0, 0}, 0, {!g || !g->hasDie, !g || !g->hasPunch});
     if (assignment && assignment->useDrawingGeometry) {
         const auto geometry = core::drawingToolGeometry(*assignment);
         if (!geometry)
@@ -889,7 +910,10 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
         std::array<TopoDS_Shape, 2> initialTools;
         std::array<std::vector<ToolDisplaySegment>, 2> initialSegments;
         if (preview->setup) {
-            initialTools = makeTools(*preview->setup, model.thicknessMm);
+            const bool drawn = realTools && realTools->useDrawingGeometry;
+            initialTools =
+                makeTools(*preview->setup, model.thicknessMm,
+                          {!drawn || !toolGeometry->hasDie, !drawn || !toolGeometry->hasPunch});
             if (realTools && realTools->useDrawingGeometry) {
                 const auto drawn = makeDrawingTools(
                     *realTools, *toolGeometry, model.thicknessMm + toolParameters->clearanceMm);
@@ -959,6 +983,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                                           : "Component intersection Boolean failed",
                                                 i};
                 }
+            const auto materialShape = frame.shape;
             const double materialVolume = volume(frame.shape);
             if (!std::isfinite(materialVolume) ||
                 std::abs(materialVolume - expectedVolume) > budget) {
@@ -1075,7 +1100,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         for (const auto &t : frame.tools)
                             builder.Add(assembly, t);
                         frame.shape = assembly;
-                        BRepMesh_IncrementalMesh mesh(frame.shape, .05, false, .35, false);
+                        BRepMesh_IncrementalMesh mesh(materialShape, .05, false, .35, false);
                         if (!mesh.IsDone())
                             return BendPreviewError{BendPreviewErrorCode::Failed,
                                                     "Collision snapshot mesh failed", i};
@@ -1174,7 +1199,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                 }
                 frame.shape = assembly;
             }
-            BRepMesh_IncrementalMesh mesh(frame.shape, 0.05, false, 0.35, false);
+            BRepMesh_IncrementalMesh mesh(materialShape, 0.05, false, 0.35, false);
             if (!mesh.IsDone()) {
                 return BendPreviewError{BendPreviewErrorCode::Failed, "Preview mesh failed"};
             }
@@ -1214,23 +1239,27 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
                                                                core::BendTarget target,
                                                                bool fixedSecond,
                                                                std::stop_token stop) const {
+    GeometryCacheScope cacheScope(toolCache_, stop);
     return buildBendOperation(std::move(document), bendIndex, target, fixedSecond, stop, {});
 }
 application::BendPreviewResult
 SingleBendPreviewBuilder::buildToolSetup(DocumentPtr document, std::size_t bendIndex,
                                          core::BendTarget target, core::PressTools tools,
                                          std::stop_token stop) const {
+    GeometryCacheScope cacheScope(toolCache_, stop);
     return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools);
 }
 application::BendPreviewResult
 SingleBendPreviewBuilder::buildToolMotion(DocumentPtr document, std::size_t bendIndex,
                                           core::BendTarget target, core::PressTools tools,
                                           std::stop_token stop) const {
+    GeometryCacheScope cacheScope(toolCache_, stop);
     return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools, true);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion(
     DocumentPtr document, std::size_t index, core::BendTarget target,
     core::ToolAssignment assignment, std::stop_token stop) const {
+    GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
@@ -1241,6 +1270,7 @@ application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
     DocumentPtr document, std::size_t index, core::BendTarget target,
     core::ToolAssignment assignment, std::stop_token stop) const {
+    GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
