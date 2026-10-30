@@ -515,6 +515,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             case Code::SupportNotProven:
                 message += QStringLiteral(" Не подтверждена опора на матрицу.");
                 break;
+            case Code::EndSupportLimitExceeded:
+                message += QStringLiteral("Нехватка опоры у торца превышает заданный допуск.");
+                break;
             case Code::ToolIntersection:
                 message += QStringLiteral(" Обнаружено столкновение с инструментом.");
                 break;

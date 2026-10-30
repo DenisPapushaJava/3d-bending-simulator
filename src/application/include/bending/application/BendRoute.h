@@ -2,6 +2,7 @@
 #include "bending/application/Document.h"
 #include "bending/core/BendTarget.h"
 #include "bending/core/ToolCatalog.h"
+#include <cmath>
 #include <optional>
 #include <stop_token>
 #include <variant>
@@ -29,6 +30,8 @@ struct BendRouteRequest {
     // Diagnostic/reference switches; the UI uses both optimizations.
     bool rankCandidates = true;
     bool reuseCalculations = true;
+    std::optional<double> maximumEndSupportLossMm =
+        std::nullopt; // Null: legacy explicitly unbounded preview.
 };
 struct BendRouteStatistics {
     std::size_t builtStates = 0, reusedStates = 0;
@@ -59,6 +62,19 @@ struct BendEndSupport {
     double supportedFromMm;
     double supportedToMm;
 };
+[[nodiscard]] inline bool validEndSupportLimitMm(double limit) noexcept {
+    return std::isfinite(limit) && limit >= 0;
+}
+[[nodiscard]] inline bool withinEndSupportLimit(const BendEndSupport &s, double limit,
+                                                double toleranceMm = 0) noexcept {
+    return validEndSupportLimitMm(limit) && validEndSupportLimitMm(toleranceMm) &&
+           std::isfinite(s.bendLengthMm) && s.bendLengthMm > 0 &&
+           std::isfinite(s.supportedFromMm) && std::isfinite(s.supportedToMm) &&
+           s.supportedFromMm >= 0 && s.supportedFromMm < s.bendLengthMm / 2 &&
+           s.supportedToMm > s.bendLengthMm / 2 && s.supportedToMm <= s.bendLengthMm &&
+           s.supportedFromMm <= limit + toleranceMm &&
+           s.bendLengthMm - s.supportedToMm <= limit + toleranceMm;
+}
 using BendRoutePtr = std::shared_ptr<const BendRoute>;
 enum class BendRouteErrorCode {
     Unsupported,

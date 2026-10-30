@@ -578,8 +578,9 @@ void ImportController::saveProject(std::filesystem::path path,
 }
 bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
                                           std::shared_ptr<const SingleBendPreviewBuilder> builder,
-                                          BendPreviewMode mode) {
-    if (impl_->stopping || hasWork() || !builder || !impl_->session.document()) {
+                                          BendPreviewMode mode, double maximumEndSupportLossMm) {
+    if (impl_->stopping || hasWork() || !builder || !impl_->session.document() ||
+        !validEndSupportLimitMm(maximumEndSupportLossMm)) {
         return false;
     }
     const auto *entry = impl_->session.bend(recognizedIndex);
@@ -620,22 +621,25 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     QMetaObject::invokeMethod(
         state->worker,
         [state, document, revision, editRevision, id, target, recognizedIndex, fixedSecond, stop,
-         tools, assignment, mode, builder = std::move(builder)] {
+         tools, assignment, mode, maximumEndSupportLossMm, builder = std::move(builder)] {
             BendPreviewResult result =
                 BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
             try {
                 result =
                     mode == BendPreviewMode::ToolMotion
-                        ? (assignment ? builder->buildAssignedToolMotion(document, recognizedIndex,
-                                                                         target, *assignment, stop)
-                                      : builder->buildToolMotion(document, recognizedIndex, target,
-                                                                 *tools, stop))
-                    : tools
-                        ? (assignment ? builder->buildAssignedToolSetup(document, recognizedIndex,
-                                                                        target, *assignment, stop)
-                                      : builder->buildToolSetup(document, recognizedIndex, target,
-                                                                *tools, stop))
-                        : builder->build(document, recognizedIndex, target, fixedSecond, stop);
+                        ? (assignment
+                               ? builder->buildAssignedToolMotion(document, recognizedIndex, target,
+                                                                  *assignment, stop,
+                                                                  maximumEndSupportLossMm)
+                               : builder->buildToolMotion(document, recognizedIndex, target, *tools,
+                                                          stop, maximumEndSupportLossMm))
+                    : tools ? (assignment
+                                   ? builder->buildAssignedToolSetup(document, recognizedIndex,
+                                                                     target, *assignment, stop,
+                                                                     maximumEndSupportLossMm)
+                                   : builder->buildToolSetup(document, recognizedIndex, target,
+                                                             *tools, stop, maximumEndSupportLossMm))
+                            : builder->build(document, recognizedIndex, target, fixedSecond, stop);
             } catch (const std::exception &error) {
                 result = BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
             } catch (...) {
@@ -643,7 +647,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
             }
             QMetaObject::invokeMethod(
                 state->owner,
-                [state, revision, editRevision, id, mode,
+                [state, revision, editRevision, id, mode, maximumEndSupportLossMm,
                  expectedPunch = assignment && assignment->useDrawingGeometry &&
                                  assignment->punch.drawing.has_value(),
                  expectedDie = assignment && assignment->useDrawingGeometry &&
@@ -691,6 +695,14 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                             if (*preview)
                                 for (std::size_t f = 0; f < (*preview)->frameCount(); ++f)
                                     matchingMode &= !(*preview)->machineCollisionAtFrame(f);
+                            if (*preview && (*preview)->partialEndSupport())
+                                matchingMode &= withinEndSupportLimit(
+                                    *(*preview)->partialEndSupport(), maximumEndSupportLossMm,
+                                    state->session.document()
+                                                ->metadata()
+                                                .bendAnalysis.lengthToleranceMm *
+                                            4 +
+                                        1.e-8);
                             if (matchingMode) {
                                 state->preview = *preview;
                             } else {
@@ -720,7 +732,18 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                                    (!error.diagnostic->collisionAtFrame(f) &&
                                                     !error.diagnostic->machineCollisionAtFrame(f)));
                                 }
-                                if (!collision || !prefix || !error.diagnostic->toolSetup() ||
+                                const bool matchingSupport =
+                                    !error.diagnostic->partialEndSupport() ||
+                                    withinEndSupportLimit(
+                                        *error.diagnostic->partialEndSupport(),
+                                        maximumEndSupportLossMm,
+                                        state->session.document()
+                                                    ->metadata()
+                                                    .bendAnalysis.lengthToleranceMm *
+                                                4 +
+                                            1.e-8);
+                                if (!collision || !prefix || !matchingSupport ||
+                                    !error.diagnostic->toolSetup() ||
                                     error.diagnostic->machineModel() != expectedMachine ||
                                     error.diagnostic->toolSetup()->tools.punchReversed !=
                                         expectedReversed)
@@ -909,6 +932,14 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                                 support->supportedToMm >
                                                     support->bendLengthMm / 2 &&
                                                 support->supportedToMm <= support->bendLengthMm;
+                                            if (request.maximumEndSupportLossMm)
+                                                valid &= withinEndSupportLimit(
+                                                    *support, *request.maximumEndSupportLossMm,
+                                                    s->session.document()
+                                                                ->metadata()
+                                                                .bendAnalysis.lengthToleranceMm *
+                                                            4 +
+                                                        1.e-8);
                                         }
                                         const bool drawingPunch =
                                             request.withTools && found->assignment &&

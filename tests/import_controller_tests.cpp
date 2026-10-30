@@ -302,7 +302,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
   public:
     BendPreviewResult buildToolMotion(DocumentPtr document, std::size_t index,
                                       bending::core::BendTarget target, bending::core::PressTools,
-                                      std::stop_token stop) const override {
+                                      std::stop_token stop, double = 0) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
@@ -311,7 +311,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     }
     BendPreviewResult buildToolSetup(DocumentPtr document, std::size_t index,
                                      bending::core::BendTarget target, bending::core::PressTools,
-                                     std::stop_token stop) const override {
+                                     std::stop_token stop, double = 0) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;

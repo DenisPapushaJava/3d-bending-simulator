@@ -1,3 +1,4 @@
+#include "bending/application/BendRoute.h"
 #include "bending/application/DocumentSession.h"
 
 #include <algorithm>
@@ -290,6 +291,12 @@ int main() {
         testProjectState();
         testPartInputs();
         testBendPreparation();
+        require(withinEndSupportLimit({50, .46, 49.54}, 3) &&
+                    withinEndSupportLimit({50, 3, 47}, 3) &&
+                    !withinEndSupportLimit({50, 3.01, 47}, 3) &&
+                    !withinEndSupportLimit({50, .46, 49.54}, 0) &&
+                    !withinEndSupportLimit({4, 3, 3.5}, 3),
+                "Per-end support allowance/central-strip boundaries failed");
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

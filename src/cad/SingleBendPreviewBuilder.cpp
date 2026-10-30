@@ -616,7 +616,8 @@ application::BendPreviewResult
 buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
                    bool fixedSecond, std::stop_token stop,
                    std::optional<core::PressTools> toolParameters, bool withMotion,
-                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport) {
+                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+                   std::optional<double> maximumEndSupportLossMm) {
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -626,6 +627,9 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
     if (stop.stop_requested()) {
         return cancelled();
     }
+    if (maximumEndSupportLossMm && !validEndSupportLimitMm(*maximumEndSupportLossMm))
+        return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                "Invalid end support limit"};
     const auto native = std::dynamic_pointer_cast<const CadDocument>(document);
     if (!native) {
         return unsupported("Unsupported document type");
@@ -883,6 +887,18 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         supportedTo <= model.widthMm / 2 + axialMargin)
                         return BendPreviewError{BendPreviewErrorCode::SupportNotProven,
                                                 "No common central support strip on both flanges"};
+                    const BendEndSupport report{model.widthMm, supportedFrom, supportedTo};
+                    if (maximumEndSupportLossMm &&
+                        !withinEndSupportLimit(report, *maximumEndSupportLossMm,
+                                               axialMargin + 1.e-8)) {
+                        BendPreviewError error{
+                            BendPreviewErrorCode::EndSupportLimitExceeded,
+                            "End support loss " + std::to_string(supportedFrom) + " / " +
+                                std::to_string(model.widthMm - supportedTo) + " mm exceeds " +
+                                std::to_string(*maximumEndSupportLossMm) + " mm per end"};
+                        error.endSupport = report;
+                        return error;
+                    }
                     auto centralModel = model;
                     centralModel.widthMm = supportedTo - supportedFrom;
                     auto centralBasis = sourceBasis;
@@ -899,7 +915,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                 BendPreviewErrorCode::SupportNotProven,
                                 "The bounded central support strip still loses material"};
                     }
-                    preview->endSupport = BendEndSupport{model.widthMm, supportedFrom, supportedTo};
+                    preview->endSupport = report;
                 }
             }
             basis = {{-simulation::bendAllowanceMm(model) / 2.0, model.thicknessMm,
@@ -1139,6 +1155,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         diagnostic->realDie = preview->realDie;
                         diagnostic->filledCutouts = preview->filledCutouts;
                         diagnostic->gaps = preview->gaps;
+                        diagnostic->endSupport = preview->endSupport;
                         diagnostic->otherBends = preview->otherBends;
                         if (pair < pairs.size())
                             diagnostic->conflict = static_cast<ToolCollisionPair>(pair);
@@ -1267,40 +1284,42 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
     GeometryCacheScope cacheScope(toolCache_, stop);
     return buildBendOperation(std::move(document), bendIndex, target, fixedSecond, stop, {});
 }
-application::BendPreviewResult
-SingleBendPreviewBuilder::buildToolSetup(DocumentPtr document, std::size_t bendIndex,
-                                         core::BendTarget target, core::PressTools tools,
-                                         std::stop_token stop) const {
+application::BendPreviewResult SingleBendPreviewBuilder::buildToolSetup(
+    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
+    std::stop_token stop, double maximumEndSupportLossMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
-    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools);
+    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools, false, {},
+                              maximumEndSupportLossMm > 0, maximumEndSupportLossMm);
 }
-application::BendPreviewResult
-SingleBendPreviewBuilder::buildToolMotion(DocumentPtr document, std::size_t bendIndex,
-                                          core::BendTarget target, core::PressTools tools,
-                                          std::stop_token stop) const {
+application::BendPreviewResult SingleBendPreviewBuilder::buildToolMotion(
+    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
+    std::stop_token stop, double maximumEndSupportLossMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
-    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools, true);
+    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools, true, {},
+                              maximumEndSupportLossMm > 0, maximumEndSupportLossMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion(
     DocumentPtr document, std::size_t index, core::BendTarget target,
-    core::ToolAssignment assignment, std::stop_token stop) const {
+    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
     return buildBendOperation(std::move(document), index, target, false, stop, *tools, true,
-                              std::optional{std::move(assignment)});
+                              std::optional{std::move(assignment)}, maximumEndSupportLossMm > 0,
+                              maximumEndSupportLossMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
     DocumentPtr document, std::size_t index, core::BendTarget target,
-    core::ToolAssignment assignment, std::stop_token stop) const {
+    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
     return buildBendOperation(std::move(document), index, target, false, stop, *tools, false,
-                              std::optional{std::move(assignment)});
+                              std::optional{std::move(assignment)}, maximumEndSupportLossMm > 0,
+                              maximumEndSupportLossMm);
 }
 } // namespace bending::cad

@@ -48,6 +48,7 @@ class ToolSelectionWidget final : public QWidget {
     }
     [[nodiscard]] QString optionIssue(const core::ToolPreset &, std::size_t groove) const;
     [[nodiscard]] QString geometryIssue() const;
+    [[nodiscard]] double maximumEndSupportLossMm() const;
     [[nodiscard]] static QString assignmentIssue(const std::optional<core::ToolAssignment> &);
     void showPicker(core::ToolKind, QWidget *anchor);
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
@@ -111,6 +112,7 @@ class ToolSelectionWidget final : public QWidget {
     std::optional<core::ToolSelectionRequest> selectionRequest_;
     bool allBends_ = false;
     QDoubleSpinBox *clearance_;
+    QDoubleSpinBox *endSupportLimit_;
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;
     QPointer<QDialog> picker_;

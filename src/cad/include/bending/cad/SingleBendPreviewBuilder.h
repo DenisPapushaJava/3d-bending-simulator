@@ -18,19 +18,21 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
                                                           application::BendRouteRequest,
                                                           std::stop_token) const override;
     [[nodiscard]] application::BendPreviewResult
-        buildAssignedToolSetup(application::DocumentPtr, std::size_t, core::BendTarget,
-                               core::ToolAssignment, std::stop_token) const override;
+    buildAssignedToolSetup(application::DocumentPtr, std::size_t, core::BendTarget,
+                           core::ToolAssignment, std::stop_token,
+                           double maximumEndSupportLossMm = 0) const override;
     [[nodiscard]] application::BendPreviewResult
-        buildAssignedToolMotion(application::DocumentPtr, std::size_t, core::BendTarget,
-                                core::ToolAssignment, std::stop_token) const override;
+    buildAssignedToolMotion(application::DocumentPtr, std::size_t, core::BendTarget,
+                            core::ToolAssignment, std::stop_token,
+                            double maximumEndSupportLossMm = 0) const override;
     [[nodiscard]] application::BendPreviewResult
     buildToolMotion(application::DocumentPtr document, std::size_t bendIndex,
-                    core::BendTarget target, core::PressTools tools,
-                    std::stop_token stop) const override;
+                    core::BendTarget target, core::PressTools tools, std::stop_token stop,
+                    double maximumEndSupportLossMm = 0) const override;
     [[nodiscard]] application::BendPreviewResult
     buildToolSetup(application::DocumentPtr document, std::size_t bendIndex,
-                   core::BendTarget target, core::PressTools tools,
-                   std::stop_token stop) const override;
+                   core::BendTarget target, core::PressTools tools, std::stop_token stop,
+                   double maximumEndSupportLossMm = 0) const override;
     [[nodiscard]] application::BendPreviewResult build(application::DocumentPtr document,
                                                        std::size_t bendIndex,
                                                        core::BendTarget target, bool fixedSecond,

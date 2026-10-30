@@ -518,6 +518,8 @@ class MainWindow::Impl {
         request.automatic = automatic;
         request.withTools = withTools;
         request.allowPartialEndSupport = withTools;
+        if (withTools)
+            request.maximumEndSupportLossMm = toolSelection->maximumEndSupportLossMm();
         if (expanded) {
             request.maximumChecks = 512;
             request.maximumTimeMs = 120000;
@@ -611,7 +613,8 @@ class MainWindow::Impl {
         if (controller->prepareBendPreview(static_cast<std::size_t>(row), false, previewBuilder,
                                            toolMode->currentIndex() == 0
                                                ? BendPreviewMode::ToolMotion
-                                               : BendPreviewMode::ToolSetup))
+                                               : BendPreviewMode::ToolSetup,
+                                           toolSelection->maximumEndSupportLossMm()))
             showPlaybackPanel();
     }
 
@@ -918,6 +921,8 @@ class MainWindow::Impl {
             : controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
             : viewingRoute && controller->bendRoute() && controller->bendRoute()->partialEndSupport
                 ? QStringLiteral("Просмотр: неполная опора")
+            : scenePreview() && scenePreview()->partialEndSupport()
+                ? QStringLiteral("Просмотр: неполная опора")
             : viewingRoute && controller->bendRoute()
                 ? QStringLiteral("Порядок: %1 шагов").arg(controller->bendRoute()->steps.size())
             : controller->isPreparingPreview() ? QStringLiteral("Проверяем…")
@@ -1068,7 +1073,8 @@ class MainWindow::Impl {
             preview ? preview->machineCollisionAtFrame(frame) : std::nullopt;
         const bool collision = preview && (preview->collision() ||
                                            preview->collisionAtFrame(frame) || machineCollision);
-        const bool partial = viewingRoute && route && route->partialEndSupport;
+        const bool partial = (preview && preview->partialEndSupport()) ||
+                             (viewingRoute && route && route->partialEndSupport);
         const bool preparing = controller->isPreparingDraft() || controller->isPreparingRoute() ||
                                controller->isPreparingPreview();
         QString result;
@@ -1108,12 +1114,19 @@ class MainWindow::Impl {
         else if (collision)
             result = QStringLiteral("Обнаружено столкновение с инструментом.\n"
                                     "Положение выделено красным.");
-        else if (partial)
-            result = QStringLiteral("Просмотр с неполной опорой у торца.\n"
-                                    "Пригодность к изготовлению не подтверждена.");
         else if (controller->bendPreviewError())
             result = operationFailureSummary;
-        else if (preview && preview->pressMotion())
+        else if (partial) {
+            result = QStringLiteral("Просмотр с неполной опорой у торца.\n"
+                                    "Пригодность к изготовлению не подтверждена.");
+            if (preview && preview->partialEndSupport()) {
+                const auto &s = *preview->partialEndSupport();
+                result += QStringLiteral("\nНехватка у торцов: %1 / %2 мм; допуск %3 мм на каждый.")
+                              .arg(s.supportedFromMm, 0, 'f', 2)
+                              .arg(s.bendLengthMm - s.supportedToMm, 0, 'f', 2)
+                              .arg(toolSelection->maximumEndSupportLossMm(), 0, 'f', 2);
+            }
+        } else if (preview && preview->pressMotion())
             result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.")
                                    : QStringLiteral("Геометрическая проверка пройдена.")) +
                      (preview->machineModel() == core::MachineModel::None
@@ -1610,6 +1623,16 @@ class MainWindow::Impl {
                 : failure->code == BendPreviewErrorCode::NoseTooLarge
                     ? QStringLiteral("Радиус носика должен быть меньше внутреннего радиуса сгиба. "
                                      "Конформный контакт пока не поддерживается.")
+                : failure->code == BendPreviewErrorCode::EndSupportLimitExceeded &&
+                        failure->endSupport
+                    ? QStringLiteral(
+                          "Нехватка опоры у торцов %1 / %2 мм превышает допуск %3 мм. "
+                          "Проверьте матрицу или измените допуск в параметрах установки.")
+                          .arg(failure->endSupport->supportedFromMm, 0, 'f', 2)
+                          .arg(failure->endSupport->bendLengthMm -
+                                   failure->endSupport->supportedToMm,
+                               0, 'f', 2)
+                          .arg(toolSelection->maximumEndSupportLossMm(), 0, 'f', 2)
                 : failure->code == BendPreviewErrorCode::SupportNotProven
                     ? QStringLiteral(
                           "Не удалось подтвердить сплошной участок опоры обеих полок: проверьте "

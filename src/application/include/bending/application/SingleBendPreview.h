@@ -107,13 +107,15 @@ enum class BendPreviewErrorCode {
     SheetIntersection,
     RetractionNotProven,
     Cancelled,
-    Failed
+    Failed,
+    EndSupportLimitExceeded
 };
 struct BendPreviewError {
     BendPreviewErrorCode code;
     std::string detail;
     std::optional<std::size_t> frameIndex = std::nullopt;
     BendPreviewPtr diagnostic = {}; // Safe prefix + failed state, never a successful ToolMotion.
+    std::optional<BendEndSupport> endSupport = std::nullopt;
 };
 using BendPreviewResult = std::variant<BendPreviewPtr, BendPreviewError>;
 class SingleBendPreviewBuilder {
@@ -130,37 +132,41 @@ class SingleBendPreviewBuilder {
     }
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
-                           core::ToolAssignment assignment, std::stop_token stop) const {
+                           core::ToolAssignment assignment, std::stop_token stop,
+                           double maximumEndSupportLossMm = 0) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF setup unavailable"};
         const auto tools = core::toolParameters(assignment);
-        return tools ? buildToolSetup(document, index, target, *tools, stop)
-                     : BendPreviewResult(BendPreviewError{
-                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
+        return tools
+                   ? buildToolSetup(document, index, target, *tools, stop, maximumEndSupportLossMm)
+                   : BendPreviewResult(BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                                        "Invalid assignment"});
     }
 
     virtual ~SingleBendPreviewBuilder() = default;
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolMotion(DocumentPtr document, std::size_t index, core::BendTarget target,
-                            core::ToolAssignment assignment, std::stop_token stop) const {
+                            core::ToolAssignment assignment, std::stop_token stop,
+                            double maximumEndSupportLossMm = 0) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF tool contact unavailable"};
         const auto tools = core::toolParameters(assignment);
-        return tools ? buildToolMotion(document, index, target, *tools, stop)
-                     : BendPreviewResult(BendPreviewError{
-                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
+        return tools
+                   ? buildToolMotion(document, index, target, *tools, stop, maximumEndSupportLossMm)
+                   : BendPreviewResult(BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                                        "Invalid assignment"});
     }
     [[nodiscard]] virtual BendPreviewResult buildToolMotion(DocumentPtr, std::size_t,
                                                             core::BendTarget, core::PressTools,
-                                                            std::stop_token) const {
+                                                            std::stop_token, double = 0) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool motion unavailable"};
     }
     [[nodiscard]] virtual BendPreviewResult buildToolSetup(DocumentPtr, std::size_t,
                                                            core::BendTarget, core::PressTools,
-                                                           std::stop_token) const {
+                                                           std::stop_token, double = 0) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool setup unavailable"};
     }

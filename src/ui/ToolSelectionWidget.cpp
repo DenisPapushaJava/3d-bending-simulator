@@ -3,6 +3,7 @@
 #include "ToolImportDialog.h"
 #include "ToolPickerPopup.h"
 #include "ToolStockDialog.h"
+#include "bending/application/BendRoute.h"
 #include "bending/core/ToolGeometry.h"
 #include <QCheckBox>
 
@@ -192,6 +193,24 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(clearance_, &QDoubleSpinBox::valueChanged, this, [this] { changed(); });
     auto *clearanceForm = new QFormLayout;
     clearanceForm->addRow(QStringLiteral("Начальный зазор, мм:"), clearance_);
+    endSupportLimit_ = new QDoubleSpinBox(this);
+    endSupportLimit_->setObjectName("maximumEndSupportLoss");
+    endSupportLimit_->setAccessibleName(QStringLiteral("Допуск нехватки опоры у каждого торца"));
+    endSupportLimit_->setRange(0, 1000);
+    endSupportLimit_->setDecimals(3);
+    endSupportLimit_->setSuffix(QStringLiteral(" мм"));
+    endSupportLimit_->setKeyboardTracking(false);
+    const auto storedLimit = preferences()->value("checks/maximumEndSupportLossMm", 3.).toDouble();
+    endSupportLimit_->setValue(application::validEndSupportLimitMm(storedLimit) ? storedLimit : 3.);
+    endSupportLimit_->setToolTip(QStringLiteral(
+        "Нехватка материала только у каждого торца линии гиба. 0 — полная опора. "
+        "В пределах допуска доступен просмотр с предупреждением; нагрузка и устойчивость "
+        "не подтверждаются. Внутренние разрывы и столкновения не разрешаются."));
+    clearanceForm->addRow(QStringLiteral("Допуск у торца:"), endSupportLimit_);
+    connect(endSupportLimit_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        preferences()->setValue("checks/maximumEndSupportLossMm", value);
+        changed();
+    });
     realGeometry_ = new QCheckBox(QStringLiteral("Использовать известные формы DXF"), this);
     realGeometry_->setObjectName(QStringLiteral("useDrawingToolGeometry"));
     realGeometry_->setToolTip(QStringLiteral(
@@ -349,6 +368,9 @@ void ToolSelectionWidget::populateGrooves(std::size_t selected) {
 }
 bool ToolSelectionWidget::usesCatalog() const {
     return mode_->currentIndex() == 0;
+}
+double ToolSelectionWidget::maximumEndSupportLossMm() const {
+    return endSupportLimit_->value();
 }
 std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
     const auto *p = preset(punch_);

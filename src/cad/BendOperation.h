@@ -6,5 +6,6 @@ namespace bending::cad {
 application::BendPreviewResult
 buildBendOperation(application::DocumentPtr, std::size_t, core::BendTarget, bool fixedSecond,
                    std::stop_token, std::optional<core::PressTools>, bool withMotion = false,
-                   std::optional<core::ToolAssignment> = {}, bool allowPartialEndSupport = false);
+                   std::optional<core::ToolAssignment> = {}, bool allowPartialEndSupport = false,
+                   std::optional<double> maximumEndSupportLossMm = {});
 } // namespace bending::cad

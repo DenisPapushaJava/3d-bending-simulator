@@ -85,6 +85,7 @@ struct TransitionKey {
     Mask mask;
     RouteOperation operation;
     bool fixedSecond, withTools, partialEndSupport;
+    std::optional<double> maximumEndSupportLossMm;
     bool operator==(const TransitionKey &) const = default;
 };
 struct Transition {
@@ -109,6 +110,7 @@ bool stableRejection(BendPreviewErrorCode code) {
     case BendPreviewErrorCode::SheetIntersection:
     case BendPreviewErrorCode::MissingLeftSupport:
     case BendPreviewErrorCode::MissingRightSupport:
+    case BendPreviewErrorCode::EndSupportLimitExceeded:
     case BendPreviewErrorCode::SupportNotProven:
     case BendPreviewErrorCode::ToolAngleConflict:
     case BendPreviewErrorCode::NoseTooLarge:
@@ -243,8 +245,12 @@ class RouteSearch {
             operation.tools.reset();
             operation.assignment.reset();
         }
-        return {mask, std::move(operation), side, request.withTools,
-                request.allowPartialEndSupport};
+        return {mask,
+                std::move(operation),
+                side,
+                request.withTools,
+                request.allowPartialEndSupport,
+                request.maximumEndSupportLossMm};
     }
     // 0 = verified success, 1 = unknown, 2 = stable rejection of this exact transition.
     int priorResult(Mask mask, const RouteOperation &op, bool side) const {
@@ -277,10 +283,11 @@ class RouteSearch {
         ++statistics.builtTransitions;
         const auto after = state(mask);
         const auto before = state(mask ^ (Mask{1} << op.bendIndex));
-        auto preview = buildBendOperation(
-            after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
-            request.withTools ? op.tools : std::nullopt, request.withTools,
-            request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport);
+        auto preview =
+            buildBendOperation(after->document, *after->indices[op.bendIndex], op.target,
+                               fixedSecond, stop, request.withTools ? op.tools : std::nullopt,
+                               request.withTools, request.withTools ? op.assignment : std::nullopt,
+                               request.allowPartialEndSupport, request.maximumEndSupportLossMm);
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
             if (stableRejection(failure->code))
                 remember(wanted, preview);
@@ -504,7 +511,10 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         check(native != nullptr, "Unsupported document type");
         const auto &analysis = OcctDocumentAccess::simulationBends(*native);
         const auto n = analysis.bends.size();
-        if (request.allowPartialEndSupport && !request.withTools)
+        if ((request.allowPartialEndSupport && !request.withTools) ||
+            (request.maximumEndSupportLossMm &&
+             (!request.allowPartialEndSupport ||
+              !validEndSupportLimitMm(*request.maximumEndSupportLossMm))))
             return BendRouteError{BendRouteErrorCode::InvalidInput,
                                   "Partial end support requires explicit tool preview"};
         if (!n || n > 12 || request.operations.size() != n || !request.maximumChecks ||
