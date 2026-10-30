@@ -224,13 +224,24 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     demoMachine_->setObjectName(QStringLiteral("demoMachine"));
     demoMachine_->setChecked(true);
     demoMachine_->setToolTip(QStringLiteral(
-        "Показывать и проверять приближённые стол, адаптер, держатели, траверсу и боковые рамы. "
+        "Проверять приближённый станок и пол. Высота стола от пола 900 мм; "
+        "учитывается посадка адаптера и матрицы. "
         "Это учебная сборка, не точная модель SPEED BEND. Проверка по кадрам; ход и перенос не "
         "проверены."));
     layout->insertWidget(0, demoMachine_);
     connect(demoMachine_, &QCheckBox::toggled, this, [this](bool checked) {
         if (checked && !updating_)
-            machineModel_ = core::MachineModel::DemoPressV2;
+            machineModel_ = core::MachineModel::DemoPressV3;
+        changed();
+    });
+    upgradeFloor_ = new QPushButton(QStringLiteral("Добавить пол"), this);
+    upgradeFloor_->setObjectName(QStringLiteral("upgradeFloorCheck"));
+    upgradeFloor_->setToolTip(
+        QStringLiteral("Обновить учебную установку и заново проверить её с полом."));
+    upgradeFloor_->hide();
+    layout->insertWidget(1, upgradeFloor_);
+    connect(upgradeFloor_, &QPushButton::clicked, this, [this] {
+        machineModel_ = core::MachineModel::DemoPressV3;
         changed();
     });
     geometryScope_ = wrapped(this);
@@ -584,7 +595,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         mode_->setCurrentIndex(1);
     } else {
         // New/unassigned bend: use workshop stock, never a previous project's captured stock.
-        machineModel_ = core::MachineModel::DemoPressV2;
+        machineModel_ = core::MachineModel::DemoPressV3;
         punchReversed_ = false;
         demoMachine_->setChecked(true);
         for (auto *combo : {punch_, die_}) {
@@ -644,6 +655,11 @@ void ToolSelectionWidget::refreshFavorites() {
     }
 }
 void ToolSelectionWidget::updateDetails() {
+    const bool legacyMachine =
+        demoMachine_->isChecked() && machineModel_ != core::MachineModel::DemoPressV3;
+    upgradeFloor_->setVisible(legacyMachine);
+    demoMachine_->setText(legacyMachine ? QStringLiteral("Демонстрационный станок · без пола")
+                                        : QStringLiteral("Демонстрационный станок и пол"));
     QStringList assemblyLines;
     if (allBends_ && selectionRequest_)
         assemblyLines << QStringLiteral("Для всех гибов: длина инструмента не менее %1 мм.")

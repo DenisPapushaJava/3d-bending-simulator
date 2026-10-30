@@ -4,7 +4,7 @@
 
 namespace bending::core {
 // Stable built-in profile revision. None preserves the scope of legacy projects.
-enum class MachineModel { None, DemoPressV1, DemoPressV2 };
+enum class MachineModel { None, DemoPressV1, DemoPressV2, DemoPressV3 };
 // Standard V-tool working dimensions. Full body geometry belongs to ToolAssignment.
 struct PressTools {
     double openingMm;

@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
         require(json.open(QIODevice::ReadOnly), "Read saved");
         auto root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();
-        require(root.value("version").toInt() == 12, "Wrong version");
+        require(root.value("version").toInt() == 13, "Wrong version");
         root.insert("version", 7);
         require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Write full v7");
         json.write(QJsonDocument(root).toJson());

@@ -233,8 +233,10 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             frame.tools[1] = tools[1].Moved(TopLoc_Location(lift));
             for (auto &s : frame.toolSegments[1])
                 s.shape = s.shape.Moved(TopLoc_Location(lift));
-            if (machineAssembly)
+            if (machineAssembly) {
                 frame.machine = machineAssembly->at(state->punchTipYmm - active.tools->clearanceMm);
+                frame.floor = machineAssembly->floor();
+            }
         }
         std::vector<TopoDS_Shape> material;
         for (std::size_t w = 0; w < layout.walls.size(); ++w)

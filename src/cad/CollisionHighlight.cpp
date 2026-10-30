@@ -196,6 +196,12 @@ void buildCollisionHighlights(PreviewFrame &frame, const std::vector<CollisionEv
             continue;
         const auto add = [&](const TopoDS_Shape &region) {
             const auto points = witnesses(region, radius);
+            if (frame.floor && (item.firstId == "floor" || item.secondId == "floor"))
+                for (auto point : points)
+                    if (std::abs(point.Y() - frame.floor->yMm) < radius / 4) {
+                        point.SetY(frame.floor->yMm);
+                        frame.floorContacts.push_back(point);
+                    }
             if (!points.empty())
                 for (const auto &id : {item.firstId, item.secondId})
                     pending.push_back({id, radius, points, {}});
@@ -223,6 +229,8 @@ void buildCollisionHighlights(PreviewFrame &frame, const std::vector<CollisionEv
             surfaces.assign(regions.begin(), regions.end());
         } else if (patch.bodyId == "die" || patch.bodyId == "punch")
             surfaces.push_back(frame.tools[patch.bodyId == "die" ? 0 : 1]);
+        else if (patch.bodyId == "floor" && frame.floor)
+            surfaces.push_back(frame.floor->surface);
         else
             for (const auto &component : frame.machine)
                 if (component.id == patch.bodyId)

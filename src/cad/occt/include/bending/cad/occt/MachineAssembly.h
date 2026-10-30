@@ -18,6 +18,9 @@ class MachineAssembly {
         return seated_;
     }
     [[nodiscard]] std::vector<MachineDisplayComponent> at(double punchTranslationY) const;
+    [[nodiscard]] const std::optional<FloorPlane> &floor() const {
+        return floor_;
+    }
     [[nodiscard]] static std::optional<application::MachineCollision>
     check(const PreviewFrame &, double toleranceMm, std::stop_token,
           TopoDS_Shape *confirmedOverlap = nullptr);
@@ -27,5 +30,6 @@ class MachineAssembly {
   private:
     std::vector<MachineDisplayComponent> components_;
     bool seated_ = false;
+    std::optional<FloorPlane> floor_;
 };
 } // namespace bending::cad

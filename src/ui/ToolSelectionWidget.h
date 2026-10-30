@@ -89,6 +89,7 @@ class ToolSelectionWidget final : public QWidget {
     std::size_t workshopSize_ = 0;
     QCheckBox *realGeometry_;
     QCheckBox *demoMachine_;
+    QPushButton *upgradeFloor_;
     QLabel *geometryScope_;
     QComboBox *mode_;
     QComboBox *punch_;
@@ -117,7 +118,7 @@ class ToolSelectionWidget final : public QWidget {
     bool updating_ = false;
     QPointer<QDialog> picker_;
     bool punchReversed_ = false;
-    core::MachineModel machineModel_ = core::MachineModel::DemoPressV2;
+    core::MachineModel machineModel_ = core::MachineModel::DemoPressV3;
     std::optional<core::ToolAssembly> punchAssembly_, dieAssembly_;
     ImportController *controller_ = nullptr;
     std::shared_ptr<const application::ToolProfileImporter> profileImporter_;

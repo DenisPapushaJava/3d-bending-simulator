@@ -1118,6 +1118,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                                   model.thicknessMm - toolParameters->clearanceMm
                                             : 0;
                     frame.machine = machine->at(lift);
+                    frame.floor = machine->floor();
                 }
                 const auto machineHits =
                     MachineAssembly::collisions(frame, analysis.lengthToleranceMm, stop);

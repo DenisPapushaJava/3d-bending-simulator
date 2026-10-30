@@ -1095,7 +1095,9 @@ class MainWindow::Impl {
                          ? QStringLiteral("Раскрытие V слишком мало для толщины детали. "
                                           "Выберите другую матрицу; ориентир — около 8t.")
                          : QStringLiteral("Положение не проверено.\n%1").arg(text(error.detail));
-        } else if (machineCollision)
+        } else if (machineCollision && machineCollision->secondId == "floor")
+            result = QStringLiteral("Упор в пол.\nИзмените порядок или установку детали.");
+        else if (machineCollision)
             result =
                 QStringLiteral("Столкновение: %1 — %2.\nКонфликтующие тела выделены красным.")
                     .arg(text(machineCollision->firstName), text(machineCollision->secondName));
@@ -1146,11 +1148,18 @@ class MainWindow::Impl {
                          ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                          : QStringLiteral("Деталь и инструмент выбраны. Можно проверить.");
         if (preview && !preparing) {
-            if (preview->machineModel() != core::MachineModel::None)
+            if (preview->floorChecked())
                 result += QStringLiteral(
-                    "\nДемонстрационный станок: приближённые контуры, проверка по кадрам. "
-                    "Ход, перенос и реальная машина не подтверждены.");
-            if (preview->machineModel() == core::MachineModel::DemoPressV2 &&
+                    "\nДемонстрационный станок и пол · стол 900 мм. Проверка по кадрам; "
+                    "ход и перенос не проверены.");
+            else if (preview->machineModel() != core::MachineModel::None)
+                result += QStringLiteral(
+                    "\nДемонстрационный станок: проверка по кадрам. Пол не проверен; "
+                    "добавьте его на этапе «Инструмент».");
+            else if (preview->toolSetup())
+                result += QStringLiteral("\nСтанок и пол не проверены.");
+            if ((preview->machineModel() == core::MachineModel::DemoPressV2 ||
+                 preview->machineModel() == core::MachineModel::DemoPressV3) &&
                 preview->usesDrawingPunch() && !preview->seatedPunchMount())
                 result += QStringLiteral("\nХвостовик не распознан; посадка условная.");
             if (preview->ignoresClosedCutouts())

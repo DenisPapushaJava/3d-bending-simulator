@@ -257,12 +257,18 @@ QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
                        {"dieAssembly", assembly(a->dieAssembly)}};
 }
 QString machineModelJson(core::MachineModel model) {
+    if (model == core::MachineModel::DemoPressV3)
+        return QStringLiteral("demo-press-v3");
     if (model == core::MachineModel::DemoPressV2)
         return QStringLiteral("demo-press-v2");
     return model == core::MachineModel::DemoPressV1 ? QStringLiteral("demo-press-v1")
                                                     : QStringLiteral("none");
 }
 bool readMachineModel(const QJsonValue &value, core::MachineModel &model) {
+    if (value.isString() && value.toString() == QStringLiteral("demo-press-v3")) {
+        model = core::MachineModel::DemoPressV3;
+        return true;
+    }
     if (value.isUndefined() || (value.isString() && value.toString() == QStringLiteral("none"))) {
         model = core::MachineModel::None;
         return true;

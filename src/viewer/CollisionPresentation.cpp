@@ -1,6 +1,7 @@
 #include "CollisionPresentation.h"
 #include <Aspect_PolygonOffsetMode.hxx>
 #include <Graphic3d_AspectFillArea3d.hxx>
+#include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Group.hxx>
 #include <Prs3d_Presentation.hxx>
 #include <algorithm>
@@ -8,11 +9,19 @@
 namespace bending::viewer {
 CollisionPresentation::CollisionPresentation(
     const TopoDS_Shape &shape, const std::vector<cad::CollisionHighlightPatch> &patches,
-    bool machineVisible)
+    bool machineVisible, bool floorVisible, const std::vector<gp_Pnt> &floorContacts)
     : AIS_ColoredShape(shape) {
+    if (!floorContacts.empty()) {
+        floorContacts_ = new Graphic3d_ArrayOfPoints(static_cast<int>(floorContacts.size()));
+        for (auto point : floorContacts) {
+            point.SetY(point.Y() + .2); // Render-only depth offset, not a clearance allowance.
+            floorContacts_->AddVertex(point);
+        }
+    }
     for (const auto &patch : patches) {
-        if (patch.vertices.empty() || (!machineVisible && patch.bodyId != "sheet" &&
-                                       patch.bodyId != "die" && patch.bodyId != "punch"))
+        if (patch.vertices.empty() || (patch.bodyId == "floor" && !floorVisible) ||
+            (patch.bodyId != "floor" && !machineVisible && patch.bodyId != "sheet" &&
+             patch.bodyId != "die" && patch.bodyId != "punch"))
             continue;
         Handle(Graphic3d_ArrayOfTriangles) triangles =
             new Graphic3d_ArrayOfTriangles(static_cast<int>(patch.vertices.size()), 0, false, true);
@@ -30,7 +39,7 @@ void CollisionPresentation::Compute(const Handle(PrsMgr_PresentationManager) & m
                                     const Handle(Prs3d_Presentation) & presentation,
                                     Standard_Integer mode) {
     AIS_ColoredShape::Compute(manager, presentation, mode);
-    if (patches_.empty())
+    if (patches_.empty() && floorContacts_.IsNull())
         return;
     Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d;
     aspect->SetInteriorStyle(Aspect_IS_SOLID);
@@ -44,5 +53,11 @@ void CollisionPresentation::Compute(const Handle(PrsMgr_PresentationManager) & m
     group->SetGroupPrimitivesAspect(aspect);
     for (const auto &patch : patches_)
         group->AddPrimitiveArray(patch, false);
+    if (!floorContacts_.IsNull()) {
+        auto markers = presentation->NewGroup();
+        markers->SetGroupPrimitivesAspect(new Graphic3d_AspectMarker3d(
+            Aspect_TOM_O_POINT, Quantity_Color(.95, .04, .03, Quantity_TOC_RGB), 1.2));
+        markers->AddPrimitiveArray(floorContacts_, false);
+    }
 }
 } // namespace bending::viewer

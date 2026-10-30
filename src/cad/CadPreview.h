@@ -1,10 +1,16 @@
 #pragma once
 #include "bending/cad/occt/PreviewAccess.h"
+#include <algorithm>
 namespace bending::cad {
 using namespace application;
 class CadPreview : public SingleBendPreview {
   public:
     bool draft = false;
+    bool floorChecked() const noexcept override {
+        return machineModel() == core::MachineModel::DemoPressV3 && !frames.empty() &&
+               std::all_of(frames.begin(), frames.end(),
+                           [](const auto &f) { return f.floor.has_value(); });
+    }
     bool seatedMount = false;
     bool seatedPunchMount() const noexcept override {
         return seatedMount;

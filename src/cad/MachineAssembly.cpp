@@ -1,4 +1,5 @@
 #include "bending/cad/occt/MachineAssembly.h"
+#include "FloorGeometry.h"
 #include "GeometryCacheInternal.h"
 #include "bending/core/ToolGeometry.h"
 #include <BRepAlgoAPI_Common.hxx>
@@ -89,7 +90,8 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
     if (tools.machineModel == core::MachineModel::None)
         return;
     if (tools.machineModel != core::MachineModel::DemoPressV1 &&
-        tools.machineModel != core::MachineModel::DemoPressV2)
+        tools.machineModel != core::MachineModel::DemoPressV2 &&
+        tools.machineModel != core::MachineModel::DemoPressV3)
         throw std::runtime_error("Unknown machine profile revision");
     checkStop(stop);
     const double centre = tools.lengthMm / 2;
@@ -97,14 +99,13 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
     // heights and punch profiles retain the same stack without bounding-box centring.
     const double dieSeat = bounds(bodies[0]).CornerMin().Y();
     const double punchSeat = bounds(bodies[1]).CornerMax().Y();
-    const auto mount = tools.machineModel == core::MachineModel::DemoPressV2 && assignment
-                           ? core::punchMountReference(*assignment)
-                           : std::nullopt;
+    const bool modern = tools.machineModel != core::MachineModel::DemoPressV1;
+    const auto mount = modern && assignment ? core::punchMountReference(*assignment) : std::nullopt;
     seated_ = mount.has_value();
     const double shoulder = mount ? punchSeat - mount->heightMm : punchSeat;
     const double cx = mount ? mount->centreX : 0;
-    const bool pocketDie = tools.machineModel == core::MachineModel::DemoPressV2 && assignment &&
-                           assignment->useDrawingGeometry && assignment->die.drawing;
+    const bool pocketDie =
+        modern && assignment && assignment->useDrawingGeometry && assignment->die.drawing;
     // A known die bottom seats on the pocket floor. An idealized working wedge
     // has no known mounting foot: rest it on the lips without inventing a shank.
     const double adapterTop = dieSeat + (pocketDie ? 10 : 0);
@@ -128,7 +129,7 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
          {-40, dieSeat - 1}},
         -1550, 1550);
     components_.back().allowDieContact = tools.machineModel == core::MachineModel::DemoPressV1;
-    if (tools.machineModel == core::MachineModel::DemoPressV2) {
+    if (modern) {
         // 9 mm is the straight inner wall; .8/.2 chamfers make 10 mm total depth.
         const double bottom = tableTop, top = adapterTop, pocket = top - 10;
         components_.back().shape = prism({{-39, bottom},
@@ -163,7 +164,7 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
                                                    {40, punchSeat + 100}, {18, punchSeat + 100},
                                                    {18, holderTop},       {-18, holderTop},
                                                    {-18, punchSeat + 70}, {-22, punchSeat + 60}};
-        if (tools.machineModel == core::MachineModel::DemoPressV2) {
+        if (modern) {
             profile = {{cx - 22, shoulder},
                        {cx + 40, shoulder},
                        {cx + 40, shoulder + 80},
@@ -187,6 +188,8 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
         {410, tableTop + 550}, {410, tableTop},    {80, tableTop}};
     add("frame-left", "Левая боковая рама", frame, -1450, -1300);
     add("frame-right", "Правая боковая рама", frame, 1300, 1450);
+    if (tools.machineModel == core::MachineModel::DemoPressV3)
+        floor_ = makeFloorPlane(floor, centre);
 }
 std::vector<MachineDisplayComponent> MachineAssembly::at(double lift) const {
     auto result = components_;
@@ -201,6 +204,17 @@ namespace {
 std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &frame, double tolerance,
                                                         std::stop_token stop, bool firstOnly) {
     std::vector<MachineCollisionEvidence> result;
+    std::optional<Bnd_Box> sheetBounds;
+    if (frame.floor) {
+        sheetBounds = bounds(frame.shape);
+        const auto overlap =
+            floorOverlap(frame.shape, *sheetBounds, frame.floor->yMm, tolerance, stop);
+        if (!overlap.IsNull()) {
+            result.push_back({{"sheet", "Деталь", "floor", "Пол"}, overlap});
+            if (firstOnly)
+                return result;
+        }
+    }
     if (frame.machine.empty())
         return result;
     std::vector<TopoDS_Shape> shapes{frame.shape, frame.tools[0], frame.tools[1]};
@@ -211,7 +225,7 @@ std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &fram
     boxes.reserve(shapes.size());
     for (const auto &shape : shapes) {
         checkStop(stop);
-        auto b = bounds(shape);
+        auto b = boxes.empty() && sheetBounds ? *sheetBounds : bounds(shape);
         b.Enlarge(tolerance);
         boxes.push_back(b);
     }

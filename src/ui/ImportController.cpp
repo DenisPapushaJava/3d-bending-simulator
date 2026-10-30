@@ -246,17 +246,20 @@ void ImportController::Impl::dispatchDraft() {
                                                    core::validPressTools(*op.tools);
                                 valid = bool(p->toolSetup()) == tools;
                                 if (tools)
-                                    valid = valid && p->toolSetup() &&
-                                            p->toolSetup()->tools == *op.tools &&
-                                            p->machineModel() == op.tools->machineModel &&
-                                            p->usesDrawingPunch() ==
-                                                bool(op.assignment &&
-                                                     op.assignment->useDrawingGeometry &&
-                                                     op.assignment->punch.drawing) &&
-                                            p->usesDrawingDie() ==
-                                                bool(op.assignment &&
-                                                     op.assignment->useDrawingGeometry &&
-                                                     op.assignment->die.drawing);
+                                    valid =
+                                        valid && p->toolSetup() &&
+                                        p->toolSetup()->tools == *op.tools &&
+                                        p->machineModel() == op.tools->machineModel &&
+                                        p->floorChecked() == (op.tools->machineModel ==
+                                                              core::MachineModel::DemoPressV3) &&
+                                        p->usesDrawingPunch() ==
+                                            bool(op.assignment &&
+                                                 op.assignment->useDrawingGeometry &&
+                                                 op.assignment->punch.drawing) &&
+                                        p->usesDrawingDie() ==
+                                            bool(op.assignment &&
+                                                 op.assignment->useDrawingGeometry &&
+                                                 op.assignment->die.drawing);
                             } else
                                 valid = false;
                             if (valid)
@@ -666,6 +669,8 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                             bool matchingMode =
                                 *preview && !(*preview)->unverifiedDraft() &&
                                 (*preview)->machineModel() == expectedMachine &&
+                                (*preview)->floorChecked() ==
+                                    (expectedMachine == core::MachineModel::DemoPressV3) &&
                                 (!(*preview)->toolSetup() ||
                                  (*preview)->toolSetup()->tools.punchReversed ==
                                      expectedReversed) &&
@@ -745,6 +750,8 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                 if (!collision || !prefix || !matchingSupport ||
                                     !error.diagnostic->toolSetup() ||
                                     error.diagnostic->machineModel() != expectedMachine ||
+                                    error.diagnostic->floorChecked() !=
+                                        (expectedMachine == core::MachineModel::DemoPressV3) ||
                                     error.diagnostic->toolSetup()->tools.punchReversed !=
                                         expectedReversed)
                                     state->previewError->diagnostic.reset();
@@ -955,6 +962,9 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         valid &= p->machineModel() ==
                                                  (request.withTools ? found->tools->machineModel
                                                                     : core::MachineModel::None);
+                                        valid &=
+                                            p->floorChecked() ==
+                                            (p->machineModel() == core::MachineModel::DemoPressV3);
                                         for (std::size_t f = 0; f < p->frameCount(); ++f)
                                             valid &= !p->machineCollisionAtFrame(f);
                                         if (request.withTools) {

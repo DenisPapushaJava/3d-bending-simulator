@@ -159,6 +159,16 @@ class OcctCanvas final : public QWidget {
             if (preview_)
                 presentPreview(preview_, previewFrame_, revision_);
         });
+        floorVisibleAction_ = navigationMenu_->addAction(QStringLiteral("Показать пол"));
+        floorVisibleAction_->setObjectName(QStringLiteral("showFloor"));
+        floorVisibleAction_->setCheckable(true);
+        floorVisibleAction_->setChecked(true);
+        floorVisibleAction_->setToolTip(
+            QStringLiteral("Видимость пола не отключает проверку столкновений."));
+        connect(floorVisibleAction_, &QAction::toggled, this, [this] {
+            if (preview_)
+                presentPreview(preview_, previewFrame_, revision_);
+        });
         auto *fitMachine = navigationMenu_->addAction(QStringLiteral("Вписать станок"));
         fitMachineAction_ = fitMachine;
         fitMachine->setObjectName(QStringLiteral("fitMachine"));
@@ -427,8 +437,13 @@ class OcctCanvas final : public QWidget {
                 if (machineVisibleAction_->isChecked())
                     for (const auto &c : frame.machine)
                         builder.Add(display, c.shape);
-                candidate = new CollisionPresentation(display, frame.collisionHighlights,
-                                                      machineVisibleAction_->isChecked());
+                if (frame.floor && floorVisibleAction_->isChecked()) {
+                    builder.Add(display, frame.floor->surface);
+                    builder.Add(display, frame.floor->grid);
+                }
+                candidate = new CollisionPresentation(
+                    display, frame.collisionHighlights, machineVisibleAction_->isChecked(),
+                    floorVisibleAction_->isChecked(), frame.floorContacts);
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
                 const std::array<Quantity_Color, 3> colors{
@@ -474,6 +489,13 @@ class OcctCanvas final : public QWidget {
                                                c.moving ? .55 : .48, Quantity_TOC_RGB);
                     candidate->SetCustomColor(c.shape, color);
                     candidate->SetCustomTransparency(c.shape, .55);
+                }
+                if (frame.floor) {
+                    candidate->SetCustomColor(frame.floor->surface,
+                                              Quantity_Color(.14, .19, .22, Quantity_TOC_RGB));
+                    candidate->SetCustomTransparency(frame.floor->surface, .82);
+                    candidate->SetCustomColor(frame.floor->grid,
+                                              Quantity_Color(.25, .31, .36, Quantity_TOC_RGB));
                 }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
@@ -1060,6 +1082,9 @@ class OcctCanvas final : public QWidget {
             action->setEnabled(hasGeometry);
         const bool press = preview_ && preview_->toolSetup();
         const bool machine = press && preview_->machineModel() != core::MachineModel::None;
+        const bool floor = press && preview_->machineModel() == core::MachineModel::DemoPressV3;
+        floorVisibleAction_->setVisible(floor);
+        floorVisibleAction_->setEnabled(hasGeometry && floor);
         for (auto *action : {machineVisibleAction_, fitMachineAction_}) {
             action->setVisible(machine);
             action->setEnabled(hasGeometry && machine);
@@ -1310,6 +1335,7 @@ class OcctCanvas final : public QWidget {
     QAction *dimensionsAction_ = nullptr;
     QMenu *navigationMenu_ = nullptr;
     QAction *machineVisibleAction_ = nullptr;
+    QAction *floorVisibleAction_ = nullptr;
     QAction *fitMachineAction_ = nullptr;
     QAction *orbitLockAction_ = nullptr;
     QPointer<QWidget> bottomOverlay_;

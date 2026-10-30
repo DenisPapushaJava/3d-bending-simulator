@@ -192,7 +192,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 12, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 13, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -525,7 +525,7 @@ void testMachineProfile() {
     QTemporaryDir folder;
     const auto destination = folder.path() + "/machine.bend";
     const auto path = nativePath(destination);
-    for (int variant = 0; variant < 4; ++variant) {
+    for (int variant = 0; variant < 6; ++variant) {
         const bool catalog = variant % 2;
         const bool modern = variant >= 2;
         DocumentSession session;
@@ -536,8 +536,9 @@ void testMachineProfile() {
         require(session.document() && session.bend(0), "Missing machine project fixture");
         require(session.setBendReview(0, BendReview::Confirmed), "Cannot confirm project fixture");
         auto assignment = tool_fixture::pair(16);
-        assignment.machineModel = modern ? bending::core::MachineModel::DemoPressV2
-                                         : bending::core::MachineModel::DemoPressV1;
+        assignment.machineModel = variant >= 4 ? bending::core::MachineModel::DemoPressV3
+                                  : modern     ? bending::core::MachineModel::DemoPressV2
+                                               : bending::core::MachineModel::DemoPressV1;
         assignment.punchReversed = modern;
         const auto parameters = bending::core::toolParameters(assignment);
         require(parameters.has_value(), "Invalid machine fixture tools");
@@ -559,6 +560,11 @@ void testMachineProfile() {
         write(destination, QJsonDocument(old).toJson());
         require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
                 "v10 accepted machine data");
+        old.insert("version", 12);
+        write(destination, QJsonDocument(old).toJson());
+        require(variant >= 4 ? std::holds_alternative<ImportError>(files.load(path, {}, {}))
+                             : std::holds_alternative<OpenedProject>(files.load(path, {}, {})),
+                "v12 changed floor scope or accepted V3");
         old.insert("version", 11);
         write(destination, QJsonDocument(old).toJson());
         require(modern ? std::holds_alternative<ImportError>(files.load(path, {}, {}))

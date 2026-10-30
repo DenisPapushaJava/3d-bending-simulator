@@ -1052,3 +1052,7 @@ D051 соблюдён: без push/PR/тегов/релиза; HiDPI не зап
 ## Составные торцы — D101
 
 `ctest --preset dev -R "^cad.composite-bend$"` проверяет собственную геометрию с кусочными торцевыми границами, аналитическую площадь/объём развёртки, обе фиксации и зеркало, полный цикл и независимые Boolean-конфликты. Затронутые регрессии — cad.bend-recognition, cad.flat-pattern, cad.bend-preview, cad.route-draft, cad.bend-route*, cad.multi-bend-operation, cad.end-support, app.bending-drawing и project.portable-file. Подробности — [контракт](composite-bend-ends.md).
+
+## Пол установки — D102
+
+Целевые проверки: cad.floor, cad.machine, cad.route-draft, cad.bend-route*, cad.collision-highlight, app.machine, app.manual-route, project.portable-file и application.import-controller; независимый core проверяет новый идентификатор без Qt/OCCT. Для native 100%: `QT_SCALE_FACTOR=1 build/dev/bin/machine_workflow_tests out/floor-check/native` сохраняет также конфликт с полом и проверяет видимость/сохранность расчёта. [Охват](floor-collision.md).

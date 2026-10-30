@@ -28,6 +28,10 @@ struct MachineCollision {
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    // True only when every published position includes the checked floor scope.
+    [[nodiscard]] virtual bool floorChecked() const noexcept {
+        return false;
+    }
     [[nodiscard]] virtual bool seatedPunchMount() const noexcept {
         return false;
     }

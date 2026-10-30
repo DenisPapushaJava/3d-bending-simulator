@@ -1,6 +1,7 @@
 #include "BendFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/cad/occt/PreviewAccess.h"
 #include "bending/project/GeometryCacheFiles.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/project/ToolCatalog.h"
@@ -18,6 +19,7 @@
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <STEPControl_Writer.hxx>
 #include <algorithm>
@@ -109,12 +111,23 @@ int main(int argc, char **argv) {
             }
         }
         require(controller.setBendToolAssignment(0, tang), "Cannot set tang tool");
+        auto *upgrade = window.findChild<QPushButton *>("upgradeFloorCheck");
+        require(upgrade && !upgrade->isHidden() &&
+                    controller.session().bend(0)->tools->machineModel ==
+                        core::MachineModel::DemoPressV2,
+                "Opening a legacy assignment silently changed floor scope");
+        upgrade->click();
+        require(upgrade->isHidden() && controller.session().bend(0)->tools->machineModel ==
+                                           core::MachineModel::DemoPressV2,
+                "Floor draft changed the project before applying");
         window.findChild<QToolButton *>("processStage2")->click();
         wait(controller);
         auto preview = controller.bendPreview();
-        require(preview && preview->machineModel() == core::MachineModel::DemoPressV2,
+        require(preview && preview->machineModel() == core::MachineModel::DemoPressV3,
                 "UI checkbox was not applied to the checked cycle");
         require(preview->seatedPunchMount(), "UI cycle did not seat tang in holder");
+        require(cad::OcctPreviewAccess::frame(*preview, 0).floor.has_value(),
+                "Applied floor scope was not passed to the checker");
         auto *blankStep = window.findChild<QPushButton *>("routeStep0");
         auto *formedStep = window.findChild<QPushButton *>("routeStep1");
         auto *cycleFrame = window.findChild<QSlider *>("bendFrame");
@@ -137,6 +150,15 @@ int main(int argc, char **argv) {
             require(fitMachine && visible && visible->isChecked(), "Default machine is hidden");
             QApplication::processEvents();
             const auto defaultView = viewer->captureImage(false);
+            auto *floor = viewer->findChild<QAction *>("showFloor");
+            require(floor && floor->isChecked() && floor->isVisible(), "Default floor is hidden");
+            const auto floorRevision = controller.session().editRevision();
+            floor->setChecked(false);
+            require(viewer->captureImage(false) != defaultView &&
+                        controller.bendPreview() == preview && !controller.hasWork() &&
+                        controller.session().editRevision() == floorRevision,
+                    "Floor visibility changed the check or did not affect the view");
+            floor->setChecked(true);
             visible->setChecked(false);
             const auto hidden = viewer->captureImage(false);
             unsigned changed = 0;
@@ -274,7 +296,7 @@ int main(int argc, char **argv) {
         window.openStep(projectPath);
         wait(controller);
         require(controller.session().bend(0)->tools->machineModel ==
-                        core::MachineModel::DemoPressV2 &&
+                        core::MachineModel::DemoPressV3 &&
                     checkbox->isChecked(),
                 "Saved machine not restored to UI");
         require(controller.session().bend(0)->tools->punchReversed && reverse->isChecked(),
@@ -285,6 +307,75 @@ int main(int argc, char **argv) {
         require(controller.bendPreview() &&
                     controller.bendPreview()->machineModel() == core::MachineModel::None,
                 "Cannot return to tool-only verification");
+        controller.closeDocument();
+        const auto floorFile = folder.path() + "/floor-profile.step";
+        STEPControl_Writer floorWriter;
+        require(floorWriter.Transfer(fixtures::floorClearanceProfile(), STEPControl_AsIs) ==
+                        IFSelect_RetDone &&
+                    floorWriter.Write(floorFile.toUtf8().constData()) == IFSelect_RetDone,
+                "Cannot export the floor workflow fixture");
+        window.openStep(floorFile);
+        wait(controller);
+        require(controller.session().document()->metadata().bendAnalysis.bends.size() == 2,
+                "Floor workflow lost its bends");
+        auto floorTools = tool_fixture::pair(16);
+        floorTools.machineModel = core::MachineModel::DemoPressV3;
+        for (std::size_t i = 0; i < 2; ++i)
+            require(controller.setBendToolAssignment(i, floorTools),
+                    "Cannot assign floor fixture tools");
+        require(controller.setBendOrder(
+                    {controller.session().bend(1)->id, controller.session().bend(0)->id}),
+                "Cannot set floor-conflicting order");
+        window.findChild<QToolButton *>("processStage2")->click();
+        wait(controller);
+        auto *lastStep = window.findChild<QPushButton *>("routeStep2");
+        require(lastStep, "Floor workflow has no last step");
+        lastStep->click();
+        wait(controller);
+        const auto draft = controller.routeDraft();
+        require(draft && draft->visual->floorChecked(),
+                "UI did not accept the floor-checked draft");
+        int badFrame = -1;
+        for (std::size_t f = 0; f < draft->visual->frameCount(); ++f)
+            if (const auto hit = draft->visual->machineCollisionAtFrame(f);
+                hit && hit->secondId == "floor") {
+                badFrame = static_cast<int>(f);
+                break;
+            }
+        require(badFrame >= 0, "UI lost the floor collision");
+        require(!cad::OcctPreviewAccess::frame(*draft->visual, static_cast<std::size_t>(badFrame))
+                     .floorContacts.empty(),
+                "Profile view lost the floor contact markers");
+        frame->setValue(badFrame);
+        auto *play = window.findChild<QPushButton *>("playBend");
+        auto *timer = window.findChild<QTimer *>("bendPlaybackTimer");
+        auto *floorSummary = window.findChild<QLabel *>("bendCheckSummary");
+        require(play && timer && floorSummary &&
+                    floorSummary->text().contains(QStringLiteral("Упор в пол")) &&
+                    !play->isEnabled() && !timer->isActive(),
+                "Floor collision did not stop playback or lost its explanation");
+        if (viewer->isReady()) {
+            const auto beforeHide = controller.session().editRevision();
+            viewer->findChild<QAction *>("showFloor")->setChecked(false);
+            require(controller.routeDraft() == draft && !controller.hasWork() &&
+                        controller.session().editRevision() == beforeHide && !play->isEnabled(),
+                    "Hiding the floor disabled the collision check");
+            viewer->findChild<QAction *>("showFloor")->setChecked(true);
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Right);
+            viewer->fitAll();
+            capture("-floor-conflict.png");
+            const auto profile = viewer->captureImage(false);
+            unsigned contactPixels = 0;
+            for (int y = profile.height() / 2; y < profile.height(); ++y)
+                for (int x = 0; x < profile.width(); ++x) {
+                    const auto color = profile.pixelColor(x, y);
+                    contactPixels += color.red() > 130 && color.green() < 100 && color.blue() < 110;
+                }
+            require(contactPixels > 10, "Floor contact is not legible in the profile view");
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+            viewer->findChild<QAction *>("fitMachine")->trigger();
+            capture("-floor-isometric.png");
+        }
         controller.closeDocument();
         window.close();
         const auto statistics = toolCache->statistics();
