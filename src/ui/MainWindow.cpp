@@ -67,36 +67,44 @@ namespace bending::ui {
 namespace {
 using namespace application;
 QIcon punchOrientationIcon(bool reversed) {
+    QPainterPath profile;
+    profile.moveTo(8, 3);
+    profile.lineTo(15, 3);
+    profile.lineTo(15, 8);
+    profile.lineTo(24, 8);
+    profile.lineTo(24, 13);
+    profile.lineTo(19, 15);
+    profile.lineTo(17, 23);
+    profile.lineTo(16, 29);
+    profile.lineTo(13, 27);
+    profile.lineTo(10, 21);
+    profile.quadTo(6, 15, 10, 13);
+    profile.lineTo(4, 12);
+    profile.lineTo(4, 8);
+    profile.lineTo(8, 8);
+    profile.closeSubpath();
     QIcon icon;
     for (int ratio : {1, 2}) {
-        QPixmap pixmap(32 * ratio, 32 * ratio);
+        QPixmap pixmap(48 * ratio, 32 * ratio);
         pixmap.setDevicePixelRatio(ratio);
         pixmap.fill(Qt::transparent);
         QPainter painter(&pixmap);
         painter.setRenderHint(QPainter::Antialiasing);
-        if (reversed) {
-            painter.translate(32, 0);
-            painter.scale(-1, 1);
+        painter.setPen(QPen(QColor("#94A3AE"), 1, Qt::DashDotLine));
+        painter.drawLine(QPointF(24, 1), QPointF(24, 31));
+        for (bool mirrored : {false, true}) {
+            painter.save();
+            if (mirrored) {
+                painter.translate(48, 0);
+                painter.scale(-1, 1);
+            }
+            painter.scale(0.75, 1);
+            const bool active = mirrored == reversed;
+            painter.setPen(QPen(QColor(active ? "#075F65" : "#8595A2"), 1));
+            painter.setBrush(QColor(active ? "#087F83" : "#B9C4CD"));
+            painter.drawPath(profile);
+            painter.restore();
         }
-        QPainterPath profile;
-        profile.moveTo(8, 3);
-        profile.lineTo(15, 3);
-        profile.lineTo(15, 8);
-        profile.lineTo(24, 8);
-        profile.lineTo(24, 13);
-        profile.lineTo(19, 15);
-        profile.lineTo(17, 23);
-        profile.lineTo(16, 29);
-        profile.lineTo(13, 27);
-        profile.lineTo(10, 21);
-        profile.quadTo(6, 15, 10, 13);
-        profile.lineTo(4, 12);
-        profile.lineTo(4, 8);
-        profile.lineTo(8, 8);
-        profile.closeSubpath();
-        painter.setPen(QPen(QColor("#334657"), 1));
-        painter.setBrush(QColor("#627787"));
-        painter.drawPath(profile);
         painter.end();
         icon.addPixmap(pixmap);
     }
@@ -2930,8 +2938,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->punchOrientationIcons = {punchOrientationIcon(false), punchOrientationIcon(true)};
     impl_->reversePunchButton->setIcon(impl_->punchOrientationIcons[0]);
     impl_->reversePunchButton->setCheckable(true);
-    impl_->reversePunchButton->setIconSize(QSize(28, 28));
-    impl_->reversePunchButton->setFixedSize(36, 34);
+    impl_->reversePunchButton->setIconSize(QSize(42, 28));
+    impl_->reversePunchButton->setFixedSize(50, 34);
     impl_->reversePunchButton->setAccessibleName(QStringLiteral("Переключить ориентацию пуансона"));
     impl_->reversePunchButton->setStyleSheet(QStringLiteral(
         "QToolButton{background:#F7F9FA;border:1px solid #C5CFD8;border-radius:4px;padding:1px;}"
