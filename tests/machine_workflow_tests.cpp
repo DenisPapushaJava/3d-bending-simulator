@@ -109,12 +109,25 @@ int main(int argc, char **argv) {
             }
         }
         require(controller.setBendToolAssignment(0, tang), "Cannot set tang tool");
-        check->click();
+        window.findChild<QToolButton *>("processStage2")->click();
         wait(controller);
         auto preview = controller.bendPreview();
         require(preview && preview->machineModel() == core::MachineModel::DemoPressV2,
                 "UI checkbox was not applied to the checked cycle");
         require(preview->seatedPunchMount(), "UI cycle did not seat tang in holder");
+        auto *blankStep = window.findChild<QPushButton *>("routeStep0");
+        auto *formedStep = window.findChild<QPushButton *>("routeStep1");
+        auto *cycleFrame = window.findChild<QSlider *>("bendFrame");
+        require(blankStep && formedStep && blankStep->isVisible() && formedStep->isEnabled(),
+                "Single-bend cycle has no 0/1 navigation");
+        formedStep->click();
+        require(cycleFrame->value() == 60 && controller.bendPreview() == preview &&
+                    !controller.hasWork(),
+                "Selecting formed single bend rebuilt or replaced the checked cycle");
+        blankStep->click();
+        require(cycleFrame->value() == 0 && controller.bendPreview() == preview &&
+                    !controller.hasWork(),
+                "Single-bend zero did not restore the flat setup");
         auto *viewer = window.findChild<viewer::ViewerWidget *>();
         auto *frame = window.findChild<QSlider *>("bendFrame");
         require(viewer && frame && frame->maximum() >= 40, "Scene transport missing");

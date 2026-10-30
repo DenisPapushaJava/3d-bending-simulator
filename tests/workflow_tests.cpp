@@ -1734,7 +1734,7 @@ void testPressOrbit() {
     const auto source = image();
     drag(Qt::RightButton, {0, 80});
     require(differences(source, image()) > 100, "Source CAD lost free orbit");
-    window.findChild<QPushButton *>("partPrimaryAction")->click();
+    window.findChild<QToolButton *>("processStage2")->click();
     require(button->isVisible() && lock->isChecked() && !controller.hasWork() &&
                 controller.bendPreview() == preview && controller.session().editRevision() == edit,
             "Camera toggle edited the project, recalculated frames or lost its preference");
@@ -1885,8 +1885,9 @@ void testGuidedWorkflow(bool graphics) {
         QApplication::processEvents();
         auto image = window.grab().toImage();
         QPainter painter(&image);
-        painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
-                          viewer->captureImage(true));
+        if (viewer->isVisible())
+            painter.drawImage(QRect(viewer->mapTo(&window, QPoint()), viewer->size()),
+                              viewer->captureImage(true));
         painter.end();
         require(image.save(output + QLatin1Char('-') + QString::fromLatin1(suffix) +
                            QStringLiteral(".png")),
@@ -2028,9 +2029,8 @@ void testGuidedWorkflow(bool graphics) {
     waitUntil([&] { return sources->height() >= sources->heightForWidth(sources->width()); });
     require(!sources->text().isEmpty(), "Preset provenance missing");
     sourcesToggle->setChecked(false);
-    auto *profile = window.findChild<QWidget *>(QStringLiteral("toolProfilesPreview"));
-    auto *enlarge = window.findChild<QPushButton *>(QStringLiteral("enlargeToolProfiles"));
-    require(profile && enlarge && enlarge->isEnabled() &&
+    auto *profile = window.findChild<QWidget *>(QStringLiteral("toolWorkspaceProfiles"));
+    require(profile && profile->isVisible() && profile->width() > 500 &&
                 profile->accessibleDescription().contains(QStringLiteral("525")),
             "Missing working profile preview");
     const auto v35 = profile->grab().toImage();
@@ -2039,26 +2039,12 @@ void testGuidedWorkflow(bool graphics) {
                 profile->accessibleDescription().contains(QStringLiteral("V 22")),
             "Groove did not update profile");
     groove->setCurrentIndex(3);
-    bool popupOkay = false;
-    QTimer::singleShot(50, &window, [&] {
-        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
-        if (!dialog)
-            return;
-        auto *large = dialog->findChild<QWidget *>(QStringLiteral("enlargedToolProfiles"));
-        popupOkay = large && large->width() > profile->width() &&
-                    large->accessibleDescription().contains(QStringLiteral("V 35"));
-        const auto output = qEnvironmentVariable("BENDING_TOOL_PROFILE_SNAPSHOT");
-        if (!output.isEmpty())
-            popupOkay = popupOkay && dialog->grab().save(output);
-        dialog->reject();
-    });
-    enlarge->click();
-    require(popupOkay && !controller.session().modified(),
-            "Enlarged section unavailable or changed project");
+    require(profile->accessibleDescription().contains(QStringLiteral("V 35")) &&
+                !controller.session().modified(),
+            "Large workspace profile changed the project or lost its groove");
     const int selectedPunch = punch->currentIndex();
     punch->setCurrentIndex(0);
-    require(!enlarge->isEnabled() &&
-                !profile->accessibleDescription().contains(QStringLiteral("525")),
+    require(!profile->accessibleDescription().contains(QStringLiteral("525")),
             "Incomplete pair retained stale profile");
     punch->setCurrentIndex(selectedPunch);
     toolDetails->click();
@@ -2068,6 +2054,7 @@ void testGuidedWorkflow(bool graphics) {
             "Primary check action is outside the visible tool task");
     snapshot("tools");
     stage(2)->click();
+    waitUntil(finished);
     require(tabs->currentIndex() == 2 && stage(2)->isChecked(), "Check stage missing");
     auto *check = window.findChild<QPushButton *>(QStringLiteral("checkBend"));
     require(check->isEnabled(), "Automatic CAD target did not enable check");
@@ -2082,7 +2069,6 @@ void testGuidedWorkflow(bool graphics) {
     require(tabs->currentIndex() == 3, "Missing-tool action did not open tool selection");
     punch->setCurrentIndex(selectedPunch);
     stage(2)->click();
-    check->click();
     waitUntil(finished);
     if (controller.bendPreviewError())
         throw std::runtime_error("Guided catalogue check: " +
@@ -2161,6 +2147,9 @@ void testGuidedWorkflow(bool graphics) {
                 !window.findChild<QWidget *>(QStringLiteral("playbackControls"))->isVisible(),
             "Part navigation recalculated the result or kept transport controls");
     window.findChild<QPushButton *>(QStringLiteral("partPrimaryAction"))->click();
+    require(tabs->currentIndex() == 3 && !viewer->isVisible(),
+            "Part primary action did not open the tool workspace");
+    stage(2)->click();
     require(controller.bendPreview() == checkedPreview && slider->value() == checkedFrame &&
                 play->isEnabled() && controller.session().editRevision() == checkedEdit,
             "Primary result action did not reuse the current calculation");
@@ -2203,9 +2192,11 @@ void testGuidedWorkflow(bool graphics) {
             "Snapshot depends on local catalogue");
     const auto restoredEdit = restored.importController().session().editRevision();
     auto *restoredPrimary = restored.findChild<QPushButton *>(QStringLiteral("partPrimaryAction"));
-    require(restoredPrimary->text() == QStringLiteral("Проверить гибку"),
-            "Saved pair did not allow direct check from the part task");
+    require(restoredPrimary->text() == QStringLiteral("К инструменту →"),
+            "Saved pair bypassed the tool task");
     restoredPrimary->click();
+    require(!restored.importController().hasWork(), "Tool navigation started CAD");
+    restored.findChild<QPushButton *>(QStringLiteral("applyToolSetup"))->click();
     waitUntil([&] { return !restored.importController().hasWork(); });
     require(restored.importController().bendPreview() &&
                 restored.importController().session().editRevision() == restoredEdit,

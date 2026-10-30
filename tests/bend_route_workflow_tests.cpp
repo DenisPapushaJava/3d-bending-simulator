@@ -117,6 +117,7 @@ int main(int argc, char **argv) {
         auto *stage = window.findChild<QToolButton *>("processStage2");
         require(stage, "No check stage");
         stage->click();
+        wait([&] { return !controller.hasWork(); });
         auto *mode = window.findChild<QComboBox *>("bendRouteMode");
         auto *prepare = window.findChild<QPushButton *>("prepareBendRoute");
         require(mode && prepare, "No route controls");

@@ -28,12 +28,17 @@ class ToolSelectionWidget final : public QWidget {
     void setChoice(const std::optional<core::PressTools> &tools,
                    const std::optional<core::ToolAssignment> &assignment);
     [[nodiscard]] std::optional<core::PressTools> parameters() const;
+    // Display only: a geometrically valid profile may still fail the die/thickness rule.
+    [[nodiscard]] std::optional<core::PressTools> previewParameters() const {
+        return rawParameters();
+    }
     [[nodiscard]] std::optional<core::ToolAssignment> assignment() const;
     [[nodiscard]] bool usesCatalog() const;
     [[nodiscard]] QString summary() const;
     [[nodiscard]] QString openingIssue() const;
     [[nodiscard]] QString shortSummary() const;
     void rememberChoice();
+    void setEmbeddedPreviewVisible(bool);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
                              bool allBends = false);
     void setToolProfileImport(ImportController &,

@@ -75,6 +75,7 @@ struct FaceHighlights {
 };
 
 class OcctCanvas final : public QWidget {
+    enum class CameraSpace : std::size_t { Cad, Flat, Kinematic, Press };
     enum class DisplayStyle { Edges, Shaded, Wireframe };
     enum class SceneSpace { Cad, Flat, Kinematic, Press };
 
@@ -336,6 +337,11 @@ class OcctCanvas final : public QWidget {
 
     QString present(const TopoDS_Shape &shape, application::DocumentPtr document, quint64 revision,
                     bool diagnostic = false) {
+        const bool sameSource = document && document == document_ && revision == revision_;
+        if (sameSource)
+            rememberSceneCamera();
+        else
+            sceneCameras_ = {};
         TopTools_IndexedMapOfShape faces;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
         Handle(AIS_ColoredShape) candidate;
@@ -354,8 +360,10 @@ class OcctCanvas final : public QWidget {
                     context_->Remove(presentation_, false);
                 }
                 removeDimensions();
-                view_->SetProj(V3d_XposYnegZpos);
-                view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
+                if (!restoreSceneCamera(CameraSpace::Cad)) {
+                    view_->SetProj(V3d_XposYnegZpos);
+                    view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
+                }
                 view_->ZFitAll();
                 context_->ClearSelected(false);
                 view_->Redraw();
@@ -405,6 +413,8 @@ class OcctCanvas final : public QWidget {
         // from CAD or changing between the machine (Y-up) and kinematic (Z-up) spaces.
         const bool preserveView =
             preview_ && bool(preview_->toolSetup()) == bool(preview->toolSetup());
+        if (entering && !preserveView)
+            rememberSceneCamera();
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
@@ -518,7 +528,9 @@ class OcctCanvas final : public QWidget {
                     }
                 }
                 context_->ClearSelected(false);
-                if (entering && !preserveView) {
+                if (entering && !preserveView &&
+                    !restoreSceneCamera(preview->toolSetup() ? CameraSpace::Press
+                                                             : CameraSpace::Kinematic)) {
                     if (preview->toolSetup()) {
                         // Y is vertical, Z runs along the bend line. From +Z the
                         // right-hand profile shows the operator's open throat to the left.
@@ -574,6 +586,8 @@ class OcctCanvas final : public QWidget {
         if (revision != revision_ || !document_ || !flat)
             return QStringLiteral("Неактуальная развёртка");
         const bool entering = flat_ != flat;
+        if (entering)
+            rememberSceneCamera();
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
@@ -594,7 +608,7 @@ class OcctCanvas final : public QWidget {
                         context_->Remove(old, false);
                 removeDimensions();
                 context_->ClearSelected(false);
-                if (entering) {
+                if (entering && !restoreSceneCamera(CameraSpace::Flat)) {
                     view_->SetProj(V3d_Zpos);
                     view_->FitAll(.25, false);
                 }
@@ -636,6 +650,7 @@ class OcctCanvas final : public QWidget {
         preview_.reset();
         flat_.reset();
         revision_ = revision;
+        sceneCameras_ = {};
         diagnostic_ = false;
         updateDimensionButton();
         if (onSelection) {
@@ -1338,6 +1353,28 @@ class OcctCanvas final : public QWidget {
     QAction *fitMachineAction_ = nullptr;
     QAction *orbitLockAction_ = nullptr;
     QPointer<QWidget> bottomOverlay_;
+    std::array<Handle(Graphic3d_Camera), 4> sceneCameras_;
+    CameraSpace cameraSpace() const {
+        return flat_                   ? CameraSpace::Flat
+               : !preview_             ? CameraSpace::Cad
+               : preview_->toolSetup() ? CameraSpace::Press
+                                       : CameraSpace::Kinematic;
+    }
+    void rememberSceneCamera() {
+        if (ready_ && !view_.IsNull() && restoreCamera_.IsNull())
+            sceneCameras_[static_cast<std::size_t>(cameraSpace())] =
+                new Graphic3d_Camera(view_->Camera());
+    }
+    bool restoreSceneCamera(CameraSpace space) {
+        const auto &saved = sceneCameras_[static_cast<std::size_t>(space)];
+        if (saved.IsNull())
+            return false;
+        Handle(Graphic3d_Camera) camera = new Graphic3d_Camera(saved);
+        const auto size = physicalSize();
+        camera->SetAspect(static_cast<double>(size.width()) / size.height());
+        view_->SetCamera(camera);
+        return true;
+    }
     QToolButton *orbitLockButton_ = nullptr;
     bool pressOrbitLocked() const {
         return orbitLockAction_ && orbitLockAction_->isChecked() && preview_ &&

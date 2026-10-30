@@ -107,6 +107,7 @@ int main(int argc, char **argv) {
         const auto &bends = controller.session().document()->metadata().bendAnalysis.bends;
         require(bends.size() > 1, "Expected a multi-bend example");
         window.findChild<QToolButton *>("processStage2")->click();
+        wait([&] { return !controller.hasWork(); });
         auto *mode = window.findChild<QComboBox *>("bendRouteMode");
         mode->setCurrentIndex(2);
         auto *prepare = window.findChild<QPushButton *>("prepareBendRoute");
@@ -166,6 +167,7 @@ int main(int argc, char **argv) {
         }
         require(prepare->isEnabled(), "All assigned bends still block the route");
         window.findChild<QToolButton *>("processStage2")->click();
+        wait([&] { return !controller.hasWork(); });
         window.findChild<QPushButton *>("checkBend")->click();
         require(controller.hasWork(), "Primary check did not launch the per-bend route");
         wait([&] { return !controller.hasWork(); });
@@ -270,7 +272,9 @@ int main(int argc, char **argv) {
             budgetWindow.openStep(saved);
             wait([&] { return !budgetController.hasWork(); });
             budgetWindow.findChild<QToolButton *>("processStage2")->click();
+            wait([&] { return !budgetController.hasWork(); });
             budgetWindow.findChild<QComboBox *>("bendRouteMode")->setCurrentIndex(0);
+            wait([&] { return !budgetController.hasWork(); });
             budgetWindow.findChild<QPushButton *>("checkBendRoute")->click();
             wait([&] { return !budgetController.hasWork(); });
             auto *expand = budgetWindow.findChild<QPushButton *>("expandBendRouteSearch");

@@ -495,6 +495,10 @@ bool ToolSelectionWidget::chooseDrawingGeometry() {
     realGeometry_->setChecked(known);
     return true;
 }
+void ToolSelectionWidget::setEmbeddedPreviewVisible(bool visible) {
+    profiles_->setVisible(visible);
+    enlargeProfiles_->setVisible(visible);
+}
 void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools,
                                     const std::optional<core::ToolAssignment> &a) {
     updating_ = true;

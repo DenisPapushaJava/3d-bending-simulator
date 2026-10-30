@@ -1,4 +1,4 @@
-add_library(bending_ui STATIC MainWindow.cpp ImportController.cpp RoutePanel.cpp RoutePanel.h PartInputDialog.cpp ToolSelectionWidget.cpp ToolProfilesWidget.cpp ToolImportDialog.cpp ToolImportDialog.h ToolStockDialog.cpp ToolStockDialog.h DrawingSheet.cpp DrawingDialog.cpp UpdateDialog.cpp Preferences.cpp
+add_library(bending_ui STATIC MainWindow.cpp ImportController.cpp RoutePanel.cpp RoutePanel.h PartInputDialog.cpp ToolSelectionWidget.cpp ToolProfilesWidget.cpp ToolWorkspace.cpp ToolImportDialog.cpp ToolImportDialog.h ToolStockDialog.cpp ToolStockDialog.h DrawingSheet.cpp DrawingDialog.cpp UpdateDialog.cpp Preferences.cpp
     include/bending/ui/MainWindow.h include/bending/ui/ImportController.h)
 add_library(Bending::Ui ALIAS bending_ui)
 set_target_properties(bending_ui PROPERTIES AUTOMOC ON)

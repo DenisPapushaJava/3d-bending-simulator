@@ -105,7 +105,55 @@ int main(int argc, char **argv) {
         require(order(controller).size() == 4, "Expected four bends");
         for (auto i : controller.session().orderedBends())
             require(controller.setBendToolAssignment(i, pair), "Assignment failed");
+        auto *viewer = window.findChild<viewer::ViewerWidget *>();
+        require(viewer, "Viewer missing");
+        const auto snapshotStage = [&](const char *suffix) {
+            const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+            if (output.isEmpty())
+                return;
+            QApplication::processEvents();
+            auto shot = window.grab().toImage();
+            if (viewer->isVisible() && viewer->isReady()) {
+                QPainter p(&shot);
+                p.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
+            }
+            require(shot.save(output + QString::fromLatin1(suffix)), "Cannot save workspace");
+        };
+        if (viewer->isReady())
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
+        const auto partScene = viewer->captureImage(false);
+        const auto stageRevision = controller.session().editRevision();
+        window.findChild<QToolButton *>("processStage1")->click();
+        auto *toolWorkspace = window.findChild<QWidget *>("toolWorkspace");
+        require(toolWorkspace && toolWorkspace->isVisible() && !viewer->isVisible() &&
+                    !controller.hasWork() && builder->drafts == 0 && builder->searches == 0,
+                "Tool stage retained the part scene or started CAD");
+        snapshotStage("-tools.png");
+        window.findChild<QToolButton *>("processStage0")->click();
+        require(viewer->isVisible() && !toolWorkspace->isVisible() &&
+                    (partScene.isNull() || viewer->captureImage(false) == partScene) &&
+                    controller.session().editRevision() == stageRevision,
+                "Returning from tools changed the source camera or project");
+        snapshotStage("-part.png");
         window.findChild<QToolButton *>("processStage2")->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && controller.routeDraft()->request.step == 0 &&
+                    controller.routeDraft()->checkedToolPositions == 1 && builder->drafts == 1 &&
+                    builder->searches == 0,
+                "Bending stage did not automatically check only the blank setup");
+        snapshotStage("-zero.png");
+        if (viewer->isReady())
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Right);
+        const auto machineScene = viewer->captureImage(false);
+        window.findChild<QPushButton *>("editSelectedBend")->click();
+        require(partScene.isNull() || viewer->captureImage(false) == partScene,
+                "Part stage retained the bending scene or lost its camera");
+        window.findChild<QToolButton *>("processStage1")->click();
+        require(toolWorkspace->isVisible(), "Tool workspace disappeared after bending");
+        window.findChild<QToolButton *>("processStage2")->click();
+        require(!controller.hasWork() && builder->drafts == 1 && builder->searches == 0 &&
+                    (machineScene.isNull() || viewer->captureImage(false) == machineScene),
+                "Returning to bending rebuilt CAD or lost its camera");
         auto *task = window.findChild<QWidget *>("propertiesDock");
         auto *routeActions = window.findChild<QWidget *>("bendRoutePanel");
         auto *overlay = window.findChild<QWidget *>("operationOverlay");
@@ -213,8 +261,6 @@ int main(int argc, char **argv) {
         mode->setCurrentIndex(1); // Shared setup before changing one operation's orientation.
         step(1)->click();
         wait([&] { return !controller.hasWork(); });
-        auto *viewer = window.findChild<viewer::ViewerWidget *>();
-        require(viewer, "Viewer missing");
         if (viewer->isReady())
             viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
         slider->setValue(10);
@@ -368,6 +414,10 @@ x.XCloseDisplay(d)
         step(1)->click();
         wait([&] { return builder->entered.load(); });
         const auto started = builder->drafts.load();
+        window.findChild<QToolButton *>("processStage0")->click();
+        window.findChild<QToolButton *>("processStage2")->click();
+        require(builder->drafts == started,
+                "Returning to the in-flight setup launched another CAD job");
         step(2)->click();
         step(3)->click();
         step(0)->click();

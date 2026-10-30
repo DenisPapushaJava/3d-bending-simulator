@@ -294,11 +294,11 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
             onModeChanged();
     });
 }
-void RoutePanel::select(int step) {
+void RoutePanel::select(int step, bool notify) {
     selected_ = std::clamp(step, 0, static_cast<int>(ids_.size()));
     for (std::size_t i = 0; i < steps_.size(); ++i)
         steps_[i]->setChecked(static_cast<int>(i) == selected_);
-    if (onSelect)
+    if (notify && onSelect)
         onSelect(selected_);
 }
 void RoutePanel::setWithTools(bool withTools, bool perBend) {

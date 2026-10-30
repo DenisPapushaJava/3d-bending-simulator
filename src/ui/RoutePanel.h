@@ -17,7 +17,7 @@ class RoutePanel final : public QWidget {
                  bool toolsAvailable, application::RouteDraftPtr draft = {},
                  std::optional<application::BendRouteError> draftError = {},
                  bool preparingDraft = false);
-    void select(int step);
+    void select(int step, bool notify = true);
     void setWithTools(bool, bool perBend = false);
     [[nodiscard]] bool perBendTools() const;
     [[nodiscard]] bool withTools() const;
