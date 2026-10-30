@@ -157,24 +157,16 @@ class OcctCanvas final : public QWidget {
             if (preview_)
                 presentPreview(preview_, previewFrame_, revision_);
         });
-        auto *fitMachine = navigationMenu_->addAction(QStringLiteral("Весь станок"));
+        auto *fitMachine = navigationMenu_->addAction(QStringLiteral("Вписать станок"));
         fitMachineAction_ = fitMachine;
         fitMachine->setObjectName(QStringLiteral("fitMachine"));
         connect(fitMachine, &QAction::triggered, this, [this] {
-            if (!ready_ || !preview_)
+            if (!ready_ || !preview_ || !machineVisibleAction_->isChecked())
                 return;
-            machineVisibleAction_->setChecked(true);
-            wholeMachine_ = true;
-            presentPreview(preview_, previewFrame_, revision_);
-            Bnd_Box b;
-            const auto &frame = cad::OcctPreviewAccess::frame(*preview_, previewFrame_);
-            BRepBndLib::Add(frame.displayShape.IsNull() ? frame.shape : frame.displayShape, b);
-            for (const auto &c : frame.machine)
-                BRepBndLib::Add(c.shape, b);
-            view_->FitAll(b, .1, false);
-            reserveTransportSpace();
-            view_->ZFitAll();
-            view_->Redraw();
+            guarded([&] {
+                fitPreview(*preview_, previewFrame_, true);
+                view_->Redraw();
+            });
         });
         enum class NavigationIcon { Home, Fit, Refresh };
         const auto icon = [](NavigationIcon type) {
@@ -413,8 +405,6 @@ class OcctCanvas final : public QWidget {
         // from CAD or changing between the machine (Y-up) and kinematic (Z-up) spaces.
         const bool preserveView =
             preview_ && bool(preview_->toolSetup()) == bool(preview->toolSetup());
-        if (entering && !preserveView)
-            wholeMachine_ = false;
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
@@ -425,8 +415,7 @@ class OcctCanvas final : public QWidget {
                             frame.displayShape.IsNull() ? frame.shape : frame.displayShape);
                 if (machineVisibleAction_->isChecked())
                     for (const auto &c : frame.machine)
-                        if (wholeMachine_ || localMachineComponent(c, *preview, index))
-                            builder.Add(display, c.shape);
+                        builder.Add(display, c.shape);
                 candidate = new AIS_ColoredShape(display);
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
@@ -531,14 +520,16 @@ class OcctCanvas final : public QWidget {
                 context_->ClearSelected(false);
                 if (entering && !preserveView) {
                     if (preview->toolSetup()) {
-                        view_->SetProj(1.0, 0.5, 3.0);
+                        // Y is vertical, Z runs along the bend line. From +Z the
+                        // right-hand profile shows the operator's open throat to the left.
+                        view_->SetProj(V3d_Zpos, true);
                         view_->SetUp(0.0, 1.0, 0.0);
                         if (orbitLockAction_->isChecked())
                             levelPressCamera();
                     } else {
                         view_->SetProj(V3d_XposYnegZpos);
                     }
-                    fitPreview(*preview);
+                    fitPreview(*preview, index, preview->toolSetup() != nullptr);
                 }
                 view_->ZFitAll();
                 if (!dimensionsVisible_) {
@@ -781,14 +772,9 @@ class OcctCanvas final : public QWidget {
         if (shape_.IsNull()) {
             return;
         }
-        if (wholeMachine_) {
-            wholeMachine_ = false;
-            if (preview_)
-                presentPreview(preview_, previewFrame_, revision_);
-        }
         guarded([&] {
             if (preview_) {
-                fitPreview(*preview_);
+                fitPreview(*preview_, previewFrame_, false);
             } else {
                 view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
             }
@@ -805,7 +791,7 @@ class OcctCanvas final : public QWidget {
             switch (orientation) {
             case ViewerWidget::Orientation::Isometric:
                 if (yup) {
-                    view_->SetProj(1.0, 0.5, 3.0);
+                    view_->SetProj(-1.0, 0.5, 3.0);
                     view_->SetUp(0.0, 1.0, 0.0);
                     releaseOrbitForInclinedView();
                     fitAll();
@@ -813,10 +799,10 @@ class OcctCanvas final : public QWidget {
                 }
                 break;
             case ViewerWidget::Orientation::Front:
-                projection = yup ? V3d_Zpos : V3d_Yneg;
+                projection = yup ? V3d_Xneg : V3d_Yneg;
                 break;
             case ViewerWidget::Orientation::Back:
-                projection = yup ? V3d_Zneg : V3d_Ypos;
+                projection = yup ? V3d_Xpos : V3d_Ypos;
                 break;
             case ViewerWidget::Orientation::Top:
                 projection = yup ? V3d_Ypos : V3d_Zpos;
@@ -825,10 +811,10 @@ class OcctCanvas final : public QWidget {
                 projection = yup ? V3d_Yneg : V3d_Zneg;
                 break;
             case ViewerWidget::Orientation::Left:
-                projection = V3d_Xneg;
+                projection = yup ? V3d_Zneg : V3d_Xneg;
                 break;
             case ViewerWidget::Orientation::Right:
-                projection = V3d_Xpos;
+                projection = yup ? V3d_Zpos : V3d_Xpos;
                 break;
             }
             view_->SetProj(projection, yup);
@@ -1069,12 +1055,12 @@ class OcctCanvas final : public QWidget {
                 const auto label = [&](V3d_TypeOfOrientation side, const char *value) {
                     navigationCube_->SetBoxSideLabel(side, value);
                 };
-                label(V3d_Xpos, "СПРАВА");
-                label(V3d_Xneg, "СЛЕВА");
+                label(V3d_Xpos, yup ? "СЗАДИ" : "СПРАВА");
+                label(V3d_Xneg, yup ? "СПЕРЕДИ" : "СЛЕВА");
                 label(yup ? V3d_Ypos : V3d_Zpos, "СВЕРХУ");
                 label(yup ? V3d_Yneg : V3d_Zneg, "СНИЗУ");
-                label(yup ? V3d_Zpos : V3d_Yneg, "СПЕРЕДИ");
-                label(yup ? V3d_Zneg : V3d_Ypos, "СЗАДИ");
+                label(yup ? V3d_Zpos : V3d_Yneg, yup ? "СПРАВА" : "СПЕРЕДИ");
+                label(yup ? V3d_Zneg : V3d_Ypos, yup ? "СЛЕВА" : "СЗАДИ");
                 navigationCube_->SetTransformPersistence(new Graphic3d_TransformPers(
                     Graphic3d_TMF_TriedronPers, Aspect_TOTP_RIGHT_UPPER,
                     Graphic3d_Vec2i(qRound(82 * ratio), qRound(116 * ratio))));
@@ -1103,6 +1089,7 @@ class OcctCanvas final : public QWidget {
             action->setVisible(machine);
             action->setEnabled(hasGeometry && machine);
         }
+        fitMachineAction_->setEnabled(hasGeometry && machine && machineVisibleAction_->isChecked());
         if (orbitLockAction_) {
             orbitLockAction_->setEnabled(hasGeometry && press);
             orbitLockButton_->setVisible(press);
@@ -1175,11 +1162,15 @@ class OcctCanvas final : public QWidget {
         return {qMax(1, qRound(width() * devicePixelRatioF())),
                 qMax(1, qRound(height() * devicePixelRatioF()))};
     }
-    void fitPreview(const application::SingleBendPreview &preview) {
+    void fitPreview(const application::SingleBendPreview &preview, std::size_t index,
+                    bool includeMachine) {
         const auto bounds = preview.bounds();
         Bnd_Box box;
         box.Add(gp_Pnt(bounds.minimum.x, bounds.minimum.y, bounds.minimum.z));
         box.Add(gp_Pnt(bounds.maximum.x, bounds.maximum.y, bounds.maximum.z));
+        if (includeMachine && machineVisibleAction_->isChecked())
+            for (const auto &component : cad::OcctPreviewAccess::frame(preview, index).machine)
+                BRepBndLib::Add(component.shape, box);
         view_->FitAll(box, dimensionsVisible_ ? 0.3 : 0.1, false);
         reserveTransportSpace();
         view_->ZFitAll();
@@ -1194,20 +1185,6 @@ class OcctCanvas final : public QWidget {
             const auto camera = view_->Camera();
             camera->SetScale(camera->Scale() * size.height() / available);
         }
-    }
-
-    bool localMachineComponent(const cad::MachineDisplayComponent &c,
-                               const application::SingleBendPreview &preview,
-                               std::size_t index) const {
-        if (const auto collision = preview.machineCollisionAtFrame(index);
-            collision && (c.id == collision->firstId || c.id == collision->secondId))
-            return true;
-        Bnd_Box b;
-        BRepBndLib::AddOptimal(c.shape, b, false, false);
-        const auto bounds = preview.bounds();
-        const double margin = std::max(50., (bounds.maximum.z - bounds.minimum.z) / 4);
-        return b.CornerMax().Z() >= bounds.minimum.z - margin &&
-               b.CornerMin().Z() <= bounds.maximum.z + margin;
     }
 
     QPoint physicalPoint(QPointF point) const {
@@ -1359,7 +1336,6 @@ class OcctCanvas final : public QWidget {
     QMenu *navigationMenu_ = nullptr;
     QAction *machineVisibleAction_ = nullptr;
     QAction *fitMachineAction_ = nullptr;
-    bool wholeMachine_ = false;
     QAction *orbitLockAction_ = nullptr;
     QPointer<QWidget> bottomOverlay_;
     QToolButton *orbitLockButton_ = nullptr;
@@ -1378,7 +1354,7 @@ class OcctCanvas final : public QWidget {
         // At a top/bottom pole azimuth is undefined, so use the press home azimuth.
         camera->SetDirection(direction.X() * direction.X() + direction.Z() * direction.Z() > 1.e-10
                                  ? gp_Dir(direction.X(), 0, direction.Z())
-                                 : gp_Dir(-1, 0, -3));
+                                 : gp_Dir(1, 0, -3));
         camera->SetUp(gp_Dir(0, 1, 0));
     }
     void releaseOrbitForInclinedView() {

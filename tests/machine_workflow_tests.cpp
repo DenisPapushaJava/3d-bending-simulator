@@ -118,9 +118,29 @@ int main(int argc, char **argv) {
         auto *viewer = window.findChild<viewer::ViewerWidget *>();
         auto *frame = window.findChild<QSlider *>("bendFrame");
         require(viewer && frame && frame->maximum() >= 40, "Scene transport missing");
+        if (viewer->isReady()) {
+            auto *fitMachine = viewer->findChild<QAction *>("fitMachine");
+            auto *visible = viewer->findChild<QAction *>("showMachine");
+            require(fitMachine && visible && visible->isChecked(), "Default machine is hidden");
+            QApplication::processEvents();
+            const auto defaultView = viewer->captureImage(false);
+            visible->setChecked(false);
+            const auto hidden = viewer->captureImage(false);
+            unsigned changed = 0;
+            for (int y = 0; y < hidden.height(); y += 4)
+                for (int x = 0; x < hidden.width(); x += 4)
+                    changed += hidden.pixel(x, y) != defaultView.pixel(x, y);
+            require(changed > static_cast<unsigned>(hidden.width() * hidden.height() / 320),
+                    "Full machine geometry was filtered from the default view");
+            visible->setChecked(true);
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Right);
+            fitMachine->trigger();
+            require(viewer->captureImage(false) == defaultView,
+                    "Initial press view is not the right-hand profile");
+        }
         frame->setValue(30);
         if (viewer->isReady()) {
-            viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Right);
             viewer->findChild<QAction *>("lockPressVertical")->setChecked(true);
             viewer->findChild<QAction *>("fitMachine")->trigger();
         }
@@ -228,7 +248,7 @@ int main(int argc, char **argv) {
         frame->setValue(40);
         require(controller.bendPreview() == preview && !controller.hasWork(),
                 "Frame change reran machine check");
-        capture("-local.png");
+        capture("-work-area.png");
         if (whole)
             whole->trigger();
         capture("-whole.png");
