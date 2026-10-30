@@ -113,7 +113,7 @@ struct BendPreviewError {
     BendPreviewErrorCode code;
     std::string detail;
     std::optional<std::size_t> frameIndex = std::nullopt;
-    BendPreviewPtr diagnostic = {}; // Failed state only, never a successful ToolMotion.
+    BendPreviewPtr diagnostic = {}; // Safe prefix + failed state, never a successful ToolMotion.
 };
 using BendPreviewResult = std::variant<BendPreviewPtr, BendPreviewError>;
 class SingleBendPreviewBuilder {

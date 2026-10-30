@@ -31,12 +31,10 @@ Bnd_Box bounds(const TopoDS_Shape &s) {
         throw std::runtime_error("Invalid machine bounds");
     return b;
 }
-bool intersects(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
-                std::stop_token stop) {
+bool intersects(const TopoDS_Shape &a, const TopoDS_Shape &b, const Bnd_Box &first,
+                const Bnd_Box &second, double tolerance, std::stop_token stop,
+                TopoDS_Shape *overlap) {
     checkStop(stop);
-    auto first = bounds(a), second = bounds(b);
-    first.Enlarge(tolerance);
-    second.Enlarge(tolerance);
     if (first.IsOut(second))
         return false;
     BRepAlgoAPI_Common common;
@@ -57,7 +55,10 @@ bool intersects(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
     if (!std::isfinite(p.Mass()))
         throw std::runtime_error("Invalid machine intersection volume");
     // Numerical volume allowance only; never use the forming-zone volume budget.
-    return std::abs(p.Mass()) > std::max(1.e-5, 8 * tolerance * tolerance * tolerance);
+    const bool hit = std::abs(p.Mass()) > std::max(1.e-5, 8 * tolerance * tolerance * tolerance);
+    if (hit && overlap)
+        *overlap = common.Shape();
+    return hit;
 }
 TopoDS_Shape prism(const std::vector<std::array<double, 2>> &points, double from, double to) {
     const auto origin = points.front();
@@ -196,26 +197,64 @@ std::vector<MachineDisplayComponent> MachineAssembly::at(double lift) const {
             c.shape = c.shape.Moved(TopLoc_Location(translation));
     return result;
 }
-std::optional<application::MachineCollision>
-MachineAssembly::check(const PreviewFrame &frame, double tolerance, std::stop_token stop) {
-    for (const auto &c : frame.machine) {
-        if (intersects(frame.shape, c.shape, tolerance, stop))
-            return application::MachineCollision{"sheet", "Деталь", c.id, c.name};
+namespace {
+std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &frame, double tolerance,
+                                                        std::stop_token stop, bool firstOnly) {
+    std::vector<MachineCollisionEvidence> result;
+    if (frame.machine.empty())
+        return result;
+    std::vector<TopoDS_Shape> shapes{frame.shape, frame.tools[0], frame.tools[1]};
+    shapes.reserve(frame.machine.size() + 3);
+    for (const auto &c : frame.machine)
+        shapes.push_back(c.shape);
+    std::vector<Bnd_Box> boxes;
+    boxes.reserve(shapes.size());
+    for (const auto &shape : shapes) {
+        checkStop(stop);
+        auto b = bounds(shape);
+        b.Enlarge(tolerance);
+        boxes.push_back(b);
+    }
+    const auto test = [&](std::size_t a, std::size_t b, application::MachineCollision pair) {
+        TopoDS_Shape overlap;
+        if (!intersects(shapes[a], shapes[b], boxes[a], boxes[b], tolerance, stop, &overlap))
+            return false;
+        result.push_back({std::move(pair), std::move(overlap)});
+        return firstOnly;
+    };
+    for (std::size_t i = 0; i < frame.machine.size(); ++i) {
+        const auto &c = frame.machine[i];
+        if (test(0, i + 3, {"sheet", "Деталь", c.id, c.name}))
+            return result;
         for (std::size_t t = 0; t < 2; ++t) {
-            // Only named mating pairs. The sheet has no corresponding exemption.
             if ((t == 0 && c.allowDieContact) || (t == 1 && c.allowPunchContact))
                 continue;
-            if (intersects(frame.tools[t], c.shape, tolerance, stop))
-                return application::MachineCollision{t == 0 ? "die" : "punch",
-                                                     t == 0 ? "Матрица" : "Пуансон", c.id, c.name};
+            if (test(t + 1, i + 3,
+                     {t == 0 ? "die" : "punch", t == 0 ? "Матрица" : "Пуансон", c.id, c.name}))
+                return result;
         }
     }
-    for (const auto &upper : frame.machine)
-        if (upper.moving)
-            for (const auto &lower : frame.machine)
-                if (!lower.moving && intersects(upper.shape, lower.shape, tolerance, stop))
-                    return application::MachineCollision{upper.id, upper.name, lower.id,
-                                                         lower.name};
-    return {};
+    for (std::size_t a = 0; a < frame.machine.size(); ++a)
+        if (frame.machine[a].moving)
+            for (std::size_t b = 0; b < frame.machine.size(); ++b)
+                if (!frame.machine[b].moving && test(a + 3, b + 3,
+                                                     {frame.machine[a].id, frame.machine[a].name,
+                                                      frame.machine[b].id, frame.machine[b].name}))
+                    return result;
+    return result;
+}
+} // namespace
+std::optional<application::MachineCollision> MachineAssembly::check(const PreviewFrame &frame,
+                                                                    double tolerance,
+                                                                    std::stop_token stop,
+                                                                    TopoDS_Shape *overlap) {
+    const auto hits = collectCollisions(frame, tolerance, stop, true);
+    if (overlap)
+        *overlap = hits.empty() ? TopoDS_Shape{} : hits.front().overlap;
+    return hits.empty() ? std::nullopt : std::optional{hits.front().pair};
+}
+std::vector<MachineCollisionEvidence>
+MachineAssembly::collisions(const PreviewFrame &frame, double tolerance, std::stop_token stop) {
+    return collectCollisions(frame, tolerance, stop, false);
 }
 } // namespace bending::cad

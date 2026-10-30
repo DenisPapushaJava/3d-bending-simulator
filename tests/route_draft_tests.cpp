@@ -196,8 +196,12 @@ int main(int argc, char **argv) {
             request.operations[0].tools = core::toolParameters(*request.operations[0].assignment);
             const auto collision = run(builder, doc, request);
             bool seen = false;
-            for (std::size_t i = 0; i < 21; ++i)
+            for (std::size_t i = 0; i < 21; ++i) {
                 seen |= collision->visual->collisionAtFrame(i).has_value();
+                const auto &f = cad::OcctPreviewAccess::frame(*collision->visual, i);
+                require(!collision->visual->collisionAtFrame(i) || !f.collisionHighlights.empty(),
+                        "Draft collision lost its localized marker");
+            }
             require(seen, "Known DXF collision was missed");
         }
         std::reverse(request.operations.begin(), request.operations.end());

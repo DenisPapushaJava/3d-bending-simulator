@@ -701,13 +701,26 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                    error.code != BendPreviewErrorCode::Cancelled) {
                             state->previewError = error;
                             if (error.diagnostic) {
+                                const auto count = error.diagnostic->frameCount();
+                                const auto last = count ? count - 1 : 0;
                                 const bool collision =
                                     (error.code == BendPreviewErrorCode::ToolIntersection &&
-                                     error.diagnostic->collision()) ||
+                                     error.diagnostic->collisionAtFrame(last)) ||
                                     (error.code == BendPreviewErrorCode::MachineIntersection &&
-                                     error.diagnostic->machineCollisionAtFrame(0));
-                                if (!collision || error.diagnostic->frameCount() != 1 ||
-                                    !error.diagnostic->toolSetup() ||
+                                     error.diagnostic->machineCollisionAtFrame(last));
+                                bool prefix = count == 1;
+                                if (count > 1 && count <= 61 &&
+                                    mode == BendPreviewMode::ToolMotion &&
+                                    error.frameIndex == last && error.diagnostic->pressMotion() &&
+                                    !error.diagnostic->punchRetraction()) {
+                                    prefix = true;
+                                    for (std::size_t f = 0; f < count; ++f)
+                                        prefix &= error.diagnostic->pressState(f) &&
+                                                  (f == last ||
+                                                   (!error.diagnostic->collisionAtFrame(f) &&
+                                                    !error.diagnostic->machineCollisionAtFrame(f)));
+                                }
+                                if (!collision || !prefix || !error.diagnostic->toolSetup() ||
                                     error.diagnostic->machineModel() != expectedMachine ||
                                     error.diagnostic->toolSetup()->tools.punchReversed !=
                                         expectedReversed)

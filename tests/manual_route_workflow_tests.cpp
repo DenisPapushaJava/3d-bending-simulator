@@ -1,6 +1,7 @@
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/cad/occt/PreviewAccess.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -520,11 +521,55 @@ x.XCloseDisplay(d)
                 break;
             }
         require(collisionFrame.has_value(), "Manual real-tool collision was missed");
+        const auto &failedFrame =
+            cad::OcctPreviewAccess::frame(*diagnostic->visual, *collisionFrame);
+        require(failedFrame.collisionHighlights.size() >= 2,
+                "Manual collision did not mark both participating surfaces");
+        require(*collisionFrame > 0, "The playback fixture needs a safe approach");
+        auto *playback = window.findChild<QTimer *>("bendPlaybackTimer");
+        auto *play = window.findChild<QPushButton *>("playBend");
+        auto *speed = window.findChild<QSlider *>("bendPlaybackSpeed");
+        const auto draftsBeforePlay = builder->drafts.load(),
+                   searchesBeforePlay = builder->searches.load();
+        speed->setValue(speed->maximum());
+        slider->setValue(0);
+        require(play->isEnabled(), "Cannot replay a safe approach to the collision");
+        play->click();
+        wait([&] { return !playback->isActive(); });
+        require(slider->value() == static_cast<int>(*collisionFrame) && !play->isEnabled() &&
+                    builder->drafts == draftsBeforePlay && builder->searches == searchesBeforePlay,
+                "3x playback passed a collision, failed to stop or recalculated CAD");
+        slider->setValue(static_cast<int>(*collisionFrame) - 1);
+        require(play->isEnabled(), "Scrubbing back to a safe frame did not restore playback");
         slider->setValue(static_cast<int>(*collisionFrame));
         require(window.findChild<QLabel *>("bendCheckSummary")
                     ->text()
                     .contains(QStringLiteral("Столкновение"), Qt::CaseInsensitive),
                 "A colliding frame is presented as clear");
+        if (auto *viewer = window.findChild<viewer::ViewerWidget *>();
+            viewer && viewer->isReady()) {
+            window.findChild<QAction *>("viewRight")->trigger();
+            window.findChild<QAction *>("fitModel")->trigger();
+            const auto image = viewer->captureImage(false).convertToFormat(QImage::Format_RGB32);
+            std::size_t red = 0, foreground = 0;
+            const auto background = image.pixelColor(0, 0);
+            for (int y = 0; y < image.height(); ++y)
+                for (int x = 0; x < image.width(); ++x) {
+                    const auto c = image.pixelColor(x, y);
+                    red += c.red() > 160 && c.red() > 2.3 * c.green() && c.red() > 1.8 * c.blue();
+                    foreground += std::abs(c.red() - background.red()) +
+                                      std::abs(c.green() - background.green()) +
+                                      std::abs(c.blue() - background.blue()) >
+                                  35;
+                }
+            require(red > 5 && red * 4 < foreground,
+                    "Native collision rendering lost the local red patch or painted whole bodies");
+            const auto beforeRefresh = viewer->captureImage(false);
+            window.findChild<QAction *>("refreshScene")->trigger();
+            require(viewer->captureImage(false) == beforeRefresh &&
+                        controller.routeDraft() == diagnostic && !controller.hasWork(),
+                    "Refreshing the viewport lost the patch or recalculated collision");
+        }
         if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
             auto shot = window.grab().toImage();
             auto *viewer = window.findChild<viewer::ViewerWidget *>();

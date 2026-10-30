@@ -1,5 +1,6 @@
 #include "RouteDraftGeometry.h"
 #include "CadPreview.h"
+#include "CollisionHighlight.h"
 #include "RouteGeometry.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/MachineAssembly.h"
@@ -55,7 +56,7 @@ Bnd_Box box(const TopoDS_Shape &s) {
 }
 // Conservative broad phase followed by exact occupied-volume intersection.
 double intersectionVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
-                          std::stop_token stop) {
+                          std::stop_token stop, TopoDS_Shape *overlap = nullptr) {
     cancelled(stop);
     auto ba = box(a), bb = box(b);
     ba.Enlarge(tolerance);
@@ -78,6 +79,8 @@ double intersectionVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double t
     GProp_GProps p;
     BRepGProp::VolumeProperties(common.Shape(), p);
     require(std::isfinite(p.Mass()), "Invalid draft collision volume");
+    if (overlap && std::abs(p.Mass()) > 0)
+        *overlap = common.Shape();
     return std::abs(p.Mass());
 }
 } // namespace
@@ -256,28 +259,43 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             builder.Add(sheet, s);
         frame.shape = sheet;
         std::optional<ToolCollisionPair> collision;
+        std::vector<CollisionEvidence> evidence;
         if (withTools) {
             const double budget =
                 std::max(1.e-6, bend.lengthMm * bend.thicknessMm * analysis.lengthToleranceMm * 2);
             for (std::size_t t = 0; t < 2; ++t) {
                 double overlap = 0;
-                for (const auto &s : material)
-                    if ((overlap += intersectionVolume(
-                             s, frame.tools[t], analysis.lengthToleranceMm, stop)) > budget) {
-                        if (!collision)
-                            collision = t == 0 ? ToolCollisionPair::SheetDie
-                                               : ToolCollisionPair::SheetPunch;
-                        break;
-                    }
+                auto occupied = compound();
+                for (const auto &s : material) {
+                    TopoDS_Shape common;
+                    overlap += intersectionVolume(s, frame.tools[t], analysis.lengthToleranceMm,
+                                                  stop, &common);
+                    if (!common.IsNull())
+                        builder.Add(occupied, common);
+                }
+                if (overlap > budget) {
+                    if (!collision)
+                        collision =
+                            t == 0 ? ToolCollisionPair::SheetDie : ToolCollisionPair::SheetPunch;
+                    evidence.push_back({"sheet", t == 0 ? "die" : "punch", occupied});
+                }
             }
-            if (intersectionVolume(frame.tools[0], frame.tools[1], analysis.lengthToleranceMm,
-                                   stop) > budget)
+            TopoDS_Shape toolOverlap;
+            if (intersectionVolume(frame.tools[0], frame.tools[1], analysis.lengthToleranceMm, stop,
+                                   &toolOverlap) > budget) {
                 collision = ToolCollisionPair::DiePunch;
+                evidence.push_back({"die", "punch", toolOverlap});
+            }
             ++result->checkedToolPositions;
         }
         visual->frameConflicts.push_back(collision);
-        visual->machineConflicts.push_back(
-            MachineAssembly::check(frame, analysis.lengthToleranceMm, stop));
+        const auto machineHits =
+            MachineAssembly::collisions(frame, analysis.lengthToleranceMm, stop);
+        const auto machineCollision = machineHits.empty() ? std::optional<MachineCollision>{}
+                                                          : std::optional{machineHits.front().pair};
+        visual->machineConflicts.push_back(machineCollision);
+        for (const auto &hit : machineHits)
+            evidence.push_back({hit.pair.firstId, hit.pair.secondId, hit.overlap});
         std::vector<std::function<gp_Pnt(gp_Pnt)>> maps;
         for (const auto &m : placement.walls)
             maps.push_back([m](gp_Pnt pnt) { return pnt.Transformed(m); });
@@ -330,6 +348,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                 envelope.Add(box(t));
             }
         frame.displayShape = display;
+        buildCollisionHighlights(frame, evidence, bend.thicknessMm, stop);
+        cancelled(stop);
         visual->frames.push_back(std::move(frame));
     }
     require(!envelope.IsVoid(), "Empty draft display");

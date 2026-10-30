@@ -3,6 +3,10 @@
 #include <stop_token>
 
 namespace bending::cad {
+struct MachineCollisionEvidence {
+    application::MachineCollision pair;
+    TopoDS_Shape overlap;
+};
 // Native CAD integration; callers must use the shared CAD worker.
 // Worker-owned solids. The built-in revision uses our approximate teaching
 // profiles, not imported proprietary contours or certified machine dimensions.
@@ -15,7 +19,10 @@ class MachineAssembly {
     }
     [[nodiscard]] std::vector<MachineDisplayComponent> at(double punchTranslationY) const;
     [[nodiscard]] static std::optional<application::MachineCollision>
-    check(const PreviewFrame &, double toleranceMm, std::stop_token);
+    check(const PreviewFrame &, double toleranceMm, std::stop_token,
+          TopoDS_Shape *confirmedOverlap = nullptr);
+    [[nodiscard]] static std::vector<MachineCollisionEvidence>
+    collisions(const PreviewFrame &, double toleranceMm, std::stop_token);
 
   private:
     std::vector<MachineDisplayComponent> components_;

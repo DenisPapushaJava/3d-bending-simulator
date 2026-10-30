@@ -30,7 +30,18 @@ struct MachineDisplayComponent {
     bool allowPunchContact = false; // Legacy V1 only; V2 models the open pocket explicitly.
     bool allowDieContact = false;
 };
+struct CollisionHighlightVertex {
+    gp_Pnt point;
+    float strength; // Smooth radial falloff, 0..1. Visual marker, not contact pressure.
+};
+struct CollisionHighlightPatch {
+    std::string bodyId;
+    double radiusMm;
+    std::vector<gp_Pnt> centres;
+    std::vector<CollisionHighlightVertex> vertices; // Independent triangles; bounded local mesh.
+};
 struct PreviewFrame {
+    std::vector<CollisionHighlightPatch> collisionHighlights;
     std::vector<MachineDisplayComponent> machine;
     TopoDS_Shape shape;
     std::array<TopoDS_Shape, 2> tools; // Die, punch; null in the kinematic preview.

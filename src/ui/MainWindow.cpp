@@ -954,6 +954,18 @@ class MainWindow::Impl {
         playback->stop();
         playBend->setText(QStringLiteral("Воспроизвести"));
     }
+    static bool collisionAt(const application::BendPreviewPtr &preview, std::size_t frame) {
+        return preview &&
+               (preview->collisionAtFrame(frame) || preview->machineCollisionAtFrame(frame));
+    }
+    void refreshPlaybackAvailability(const application::BendPreviewPtr &preview) {
+        const bool animated =
+            preview && (preview->frameCount() > 1 || preview->unverifiedDraft() || viewingRoute);
+        playBend->setEnabled(animated && !viewingSource && !controller->hasWork() &&
+                             previewDisplayError.isEmpty() && stageSetupIssue.isEmpty() &&
+                             !collisionAt(preview, static_cast<std::size_t>(bendFrame->value())));
+        playbackSpeedControls->setEnabled(playBend->isEnabled());
+    }
     void setFrameText(const QString &text) {
         frameLabel->setText(text);
         bendFrame->setToolTip(text);
@@ -1306,6 +1318,11 @@ class MainWindow::Impl {
         }
         previewReplacement.reset();
         previewDisplayError.clear();
+        if (collisionAt(preview, index)) {
+            stopPlayback();
+            draftAutoPlay = false;
+        }
+        refreshPlaybackAvailability(preview);
         refreshCheckResult();
         const double progressValue =
             preview->frameCount() > 1
@@ -1319,11 +1336,11 @@ class MainWindow::Impl {
                                    : QString{};
         if (preview->unverifiedDraft()) {
             const auto draft = controller->routeDraft();
-            const bool collision = preview->collisionAtFrame(index).has_value() ||
-                                   preview->machineCollisionAtFrame(index).has_value();
+            const bool collision = collisionAt(preview, index);
             const auto message =
-                collision ? QStringLiteral(
-                                "Столкновение детали и инструмента — положение выделено красным")
+                collision
+                    ? QStringLiteral(
+                          "Столкновение — место отмечено красным, воспроизведение остановлено")
                 : draft && draft->checkedToolPositions
                     ? QStringLiteral("В этом положении пересечений с инструментом не найдено")
                     : QStringLiteral("Инструмент не задан — столкновения не проверены");
@@ -1332,7 +1349,7 @@ class MainWindow::Impl {
                              .arg(message));
             return;
         }
-        if (preview->collision() || preview->machineCollisionAtFrame(index)) {
+        if (collisionAt(preview, index)) {
             setFrameText(QStringLiteral("Обнаружено столкновение · диагностическое положение"));
             return;
         }
@@ -1500,6 +1517,9 @@ class MainWindow::Impl {
                                    toolSelection->parameters().has_value());
         toolWorkspace->refresh();
         const auto preview = scenePreview();
+        const bool diagnostic =
+            preview && !preview->unverifiedDraft() &&
+            (preview->collision() || preview->machineCollisionAtFrame(preview->frameCount() - 1));
         if (!preview) {
             previewDisplayError.clear();
             positionedPreview.reset();
@@ -1525,6 +1545,7 @@ class MainWindow::Impl {
                     bool(previewReplacement->previous->pressMotion()) ==
                         bool(preview->pressMotion());
                 bendFrame->setValue(restoreFrame ? static_cast<int>(previewReplacement->frame)
+                                    : diagnostic ? bendFrame->maximum()
                                     : (viewingDraft || viewingRoute) &&
                                             routePanel->selected() > 0 && !draftAutoPlay
                                         ? bendFrame->maximum()
@@ -1533,12 +1554,10 @@ class MainWindow::Impl {
             }
             showPreviewFrame();
         }
-        const bool diagnostic =
-            preview && (preview->collision().has_value() ||
-                        (!preview->unverifiedDraft() && preview->machineCollisionAtFrame(0)));
         const bool staticSetup =
-            preview && (diagnostic || (!preview->unverifiedDraft() && preview->toolSetup() &&
-                                       !preview->pressMotion()));
+            preview &&
+            ((diagnostic && preview->frameCount() == 1) ||
+             (!preview->unverifiedDraft() && preview->toolSetup() && !preview->pressMotion()));
         previewControls->setCurrentIndex(staticSetup ? 1 : 0);
         kinematicsToggle->setVisible(!viewingDraft);
         kinematicsPanel->setVisible(!viewingDraft && kinematicsToggle->isChecked());
@@ -1549,9 +1568,7 @@ class MainWindow::Impl {
         bendFrame->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
                               !((viewingRoute || viewingDraft) && routePanel->selected() == 0) &&
                               previewDisplayError.isEmpty());
-        playBend->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
-                             previewDisplayError.isEmpty() && stageSetupIssue.isEmpty());
-        playbackSpeedControls->setEnabled(playBend->isEnabled());
+        refreshPlaybackAvailability(preview);
         returnToCad->setEnabled(preview || previewReplacement || controller->isPreparingPreview() ||
                                 controller->isPreparingDraft());
         if (!preview || viewingSource || staticSetup || controller->hasWork()) {
@@ -1829,8 +1846,10 @@ class MainWindow::Impl {
         if (draftAutoPlay && viewingDraft && preview && !controller->hasWork()) {
             draftAutoPlay = false;
             bendFrame->setValue(0);
-            playBend->setText(QStringLiteral("Пауза"));
-            playback->start();
+            if (playBend->isEnabled()) {
+                playBend->setText(QStringLiteral("Пауза"));
+                playback->start();
+            }
         }
         refreshWorkflow();
     }
@@ -3248,6 +3267,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     updatePlaybackSpeed(impl_->playbackSpeed->value());
     connect(impl_->bendFrame, &QSlider::valueChanged, this, [this] { impl_->showPreviewFrame(); });
     connect(impl_->playback, &QTimer::timeout, this, [this] {
+        if (Impl::collisionAt(impl_->scenePreview(),
+                              static_cast<std::size_t>(impl_->bendFrame->value()))) {
+            impl_->stopPlayback();
+            return;
+        }
         if (impl_->bendFrame->value() >= impl_->bendFrame->maximum()) {
             if (impl_->viewingRoute)
                 if (const auto route = impl_->controller->bendRoute();
@@ -3286,6 +3310,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         if (impl_->bendFrame->value() == impl_->bendFrame->maximum()) {
             impl_->bendFrame->setValue(0);
         }
+        if (!impl_->playBend->isEnabled())
+            return;
         impl_->playBend->setText(QStringLiteral("Пауза"));
         impl_->playback->start();
     });

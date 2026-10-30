@@ -150,8 +150,18 @@ int main() {
         const auto *e = std::get_if<application::BendPreviewError>(&result);
         require(e && e->code == application::BendPreviewErrorCode::ToolIntersection &&
                     e->diagnostic && e->diagnostic->collision() &&
-                    e->diagnostic->frameCount() == 1 && !e->diagnostic->punchRetraction(),
+                    e->diagnostic->frameCount() >= 1 && !e->diagnostic->punchRetraction(),
                 "Collision lost diagnostic or became success");
+        const auto last = e->diagnostic->frameCount() - 1;
+        require(
+            e->diagnostic->collisionAtFrame(last) &&
+                !cad::OcctPreviewAccess::frame(*e->diagnostic, last).collisionHighlights.empty(),
+            "Failed frame lost its local collision marker");
+        for (std::size_t i = 0; i < last; ++i)
+            require(
+                !e->diagnostic->collisionAtFrame(i) &&
+                    cad::OcctPreviewAccess::frame(*e->diagnostic, i).collisionHighlights.empty(),
+                "A safe prefix frame was marked as colliding");
         auto legacy = blocked;
         legacy.useDrawingGeometry = false;
         result = build(legacy);

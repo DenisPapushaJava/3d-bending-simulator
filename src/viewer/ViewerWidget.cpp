@@ -1,4 +1,5 @@
 #include "bending/viewer/ViewerWidget.h"
+#include "CollisionPresentation.h"
 #include "Dimensions.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -426,7 +427,8 @@ class OcctCanvas final : public QWidget {
                 if (machineVisibleAction_->isChecked())
                     for (const auto &c : frame.machine)
                         builder.Add(display, c.shape);
-                candidate = new AIS_ColoredShape(display);
+                candidate = new CollisionPresentation(display, frame.collisionHighlights,
+                                                      machineVisibleAction_->isChecked());
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
                 const std::array<Quantity_Color, 3> colors{
@@ -472,48 +474,6 @@ class OcctCanvas final : public QWidget {
                                                c.moving ? .55 : .48, Quantity_TOC_RGB);
                     candidate->SetCustomColor(c.shape, color);
                     candidate->SetCustomTransparency(c.shape, .55);
-                }
-                if (const auto conflict = preview->machineCollisionAtFrame(index)) {
-                    const Quantity_Color red(.95, .06, .04, Quantity_TOC_RGB);
-                    const auto highlight = [&](const TopoDS_Shape &s) {
-                        TopTools_IndexedMapOfShape faces;
-                        TopExp::MapShapes(s, TopAbs_FACE, faces);
-                        for (int f = 1; f <= faces.Extent(); ++f) {
-                            candidate->SetCustomColor(faces(f), red);
-                            candidate->SetCustomTransparency(faces(f), 0);
-                        }
-                    };
-                    for (const auto &id : {conflict->firstId, conflict->secondId}) {
-                        if (id == "sheet")
-                            for (const auto &r : regions)
-                                highlight(r);
-                        if (id == "die" || id == "punch")
-                            highlight(frame.tools[id == "die" ? 0 : 1]);
-                        if (machineVisibleAction_->isChecked())
-                            for (const auto &c : frame.machine)
-                                if (id == c.id)
-                                    highlight(c.shape);
-                    }
-                }
-                if (const auto conflict = preview->collisionAtFrame(index)) {
-                    const Quantity_Color red(.95, .06, .04, Quantity_TOC_RGB);
-                    if (*conflict != application::ToolCollisionPair::DiePunch)
-                        for (const auto &r : regions) {
-                            TopTools_IndexedMapOfShape faces;
-                            TopExp::MapShapes(r, TopAbs_FACE, faces);
-                            for (int i = 1; i <= faces.Extent(); ++i)
-                                candidate->SetCustomColor(faces(i), red);
-                        }
-                    for (std::size_t tool = 0; tool < frame.tools.size(); ++tool)
-                        if (*conflict == application::ToolCollisionPair::DiePunch ||
-                            (tool == 0 && *conflict == application::ToolCollisionPair::SheetDie) ||
-                            (tool == 1 &&
-                             *conflict == application::ToolCollisionPair::SheetPunch)) {
-                            TopTools_IndexedMapOfShape faces;
-                            TopExp::MapShapes(frame.tools[tool], TopAbs_FACE, faces);
-                            for (int face = 1; face <= faces.Extent(); ++face)
-                                candidate->SetCustomColor(faces(face), red);
-                        }
                 }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame

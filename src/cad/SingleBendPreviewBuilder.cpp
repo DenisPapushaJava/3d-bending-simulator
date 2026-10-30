@@ -1,6 +1,7 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "BendOperation.h"
 #include "CadPreview.h"
+#include "CollisionHighlight.h"
 #include "GeometryCacheInternal.h"
 #include "RouteGeometry.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -515,7 +516,7 @@ std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, do
     return result;
 }
 bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
-                     bool *completed = nullptr) {
+                     bool *completed = nullptr, TopoDS_Shape *overlap = nullptr) {
     BRepAlgoAPI_Common common;
     TopTools_ListOfShape arguments, tools;
     arguments.Append(a);
@@ -525,12 +526,15 @@ bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolera
     common.SetNonDestructive(true);
     common.SetFuzzyValue(tolerance);
     common.Build();
-    const bool valid = common.IsDone() && !common.HasErrors() &&
-                       BRepCheck_Analyzer(common.Shape()).IsValid() &&
-                       std::isfinite(volume(common.Shape()));
+    const bool done =
+        common.IsDone() && !common.HasErrors() && BRepCheck_Analyzer(common.Shape()).IsValid();
+    const double amount = done ? volume(common.Shape()) : 0;
+    const bool valid = done && std::isfinite(amount);
     if (completed)
         *completed = valid;
-    return valid && volume(common.Shape()) <= budget;
+    if (overlap && valid && amount > budget)
+        *overlap = common.Shape();
+    return valid && amount <= budget;
 }
 bool sameVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
                 std::stop_token stop) {
@@ -1073,26 +1077,38 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                             : 0;
                     frame.machine = machine->at(lift);
                 }
-                const auto machineConflict =
-                    MachineAssembly::check(frame, analysis.lengthToleranceMm, stop);
+                const auto machineHits =
+                    MachineAssembly::collisions(frame, analysis.lengthToleranceMm, stop);
+                const auto machineConflict = machineHits.empty()
+                                                 ? std::optional<MachineCollision>{}
+                                                 : std::optional{machineHits.front().pair};
                 const std::array<std::pair<TopoDS_Shape, TopoDS_Shape>, 3> pairs{
                     {{frame.shape, frame.tools[0]},
                      {frame.shape, frame.tools[1]},
                      {frame.tools[0], frame.tools[1]}}};
-                for (std::size_t pair = 0; pair < pairs.size() + 1; ++pair) {
+                std::array<bool, 3> toolHits{};
+                std::vector<CollisionEvidence> evidence;
+                for (std::size_t pair = 0; pair < pairs.size(); ++pair) {
                     if (stop.stop_requested())
                         return cancelled();
-                    bool completed = pair == pairs.size();
+                    bool completed = false;
+                    TopoDS_Shape overlap;
+                    toolHits[pair] = !disjointVolumes(pairs[pair].first, pairs[pair].second,
+                                                      analysis.lengthToleranceMm, collisionBudget,
+                                                      &completed, &overlap);
+                    if (!completed)
+                        return BendPreviewError{BendPreviewErrorCode::Failed,
+                                                "Tool collision Boolean failed", i};
+                    if (toolHits[pair])
+                        evidence.push_back(
+                            {pair == 2 ? "die" : "sheet", pair == 0 ? "die" : "punch", overlap});
+                }
+                for (const auto &hit : machineHits)
+                    evidence.push_back({hit.pair.firstId, hit.pair.secondId, hit.overlap});
+                for (std::size_t pair = 0; pair < pairs.size() + 1; ++pair) {
                     const bool conflict =
-                        pair == pairs.size()
-                            ? machineConflict.has_value()
-                            : !disjointVolumes(pairs[pair].first, pairs[pair].second,
-                                               analysis.lengthToleranceMm, collisionBudget,
-                                               &completed);
+                        pair == pairs.size() ? machineConflict.has_value() : toolHits[pair];
                     if (conflict) {
-                        if (!completed)
-                            return BendPreviewError{BendPreviewErrorCode::Failed,
-                                                    "Tool collision Boolean failed", i};
                         BRep_Builder builder;
                         TopoDS_Compound assembly;
                         builder.MakeCompound(assembly);
@@ -1112,6 +1128,9 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                 makeDisplay(frame, displaySource, model, sourceBasis, basis,
                                             section, stop);
                         }
+                        buildCollisionHighlights(frame, evidence, model.thicknessMm, stop);
+                        if (stop.stop_requested())
+                            return cancelled();
                         auto diagnostic = std::make_shared<CadPreview>();
                         diagnostic->geometry = model;
                         diagnostic->seatedMount = preview->seatedMount;
@@ -1123,13 +1142,19 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         diagnostic->otherBends = preview->otherBends;
                         if (pair < pairs.size())
                             diagnostic->conflict = static_cast<ToolCollisionPair>(pair);
+                        diagnostic->frames = std::move(preview->frames);
+                        diagnostic->frameConflicts.resize(diagnostic->frames.size());
+                        diagnostic->frameConflicts.push_back(diagnostic->conflict);
+                        diagnostic->machineConflicts = std::move(preview->machineConflicts);
                         diagnostic->machineConflicts.push_back(machineConflict);
                         if (withMotion) {
                             diagnostic->motion = preview->motion;
-                            diagnostic->states.push_back(preview->states.back());
+                            diagnostic->states = std::move(preview->states);
                         }
                         Bnd_Box box;
                         BRepBndLib::Add(frame.shape, box);
+                        for (const auto &safe : diagnostic->frames)
+                            BRepBndLib::Add(safe.shape, box);
                         box.Get(diagnostic->envelope.minimum.x, diagnostic->envelope.minimum.y,
                                 diagnostic->envelope.minimum.z, diagnostic->envelope.maximum.x,
                                 diagnostic->envelope.maximum.y, diagnostic->envelope.maximum.z);
