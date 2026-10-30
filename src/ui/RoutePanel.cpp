@@ -595,7 +595,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         }
         const bool demoMachine =
             std::any_of(route_->steps.begin(), route_->steps.end(), [](const auto &s) {
-                return s.preview && s.preview->machineModel() == core::MachineModel::DemoPressV1;
+                return s.preview && s.preview->machineModel() != core::MachineModel::None;
             });
         message += demoMachine
                        ? QStringLiteral("Учебный станок проверен по кадрам. Реальные габариты, "

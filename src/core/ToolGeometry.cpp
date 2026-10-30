@@ -1,5 +1,6 @@
 #include "bending/core/ToolGeometry.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numbers>
 #include <vector>
@@ -154,6 +155,95 @@ std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
     result.noseEdge = geometry.noseEdge;
     result.hasPunch = geometry.hasPunch;
     return result;
+}
+std::optional<PunchMount> punchMountReference(const ToolAssignment &assignment) {
+    if (!assignment.useDrawingGeometry || !assignment.punch.drawing)
+        return {};
+    const auto geometry = drawingToolGeometry(assignment);
+    if (!geometry || !geometry->hasPunch)
+        return {};
+    const auto &drawing = *assignment.punch.drawing;
+    const auto pb = bounds(drawing);
+    const auto interval = [&](double y,
+                              bool single = true) -> std::optional<std::array<double, 2>> {
+        std::vector<double> xs;
+        for (const auto &e : drawing.edges) {
+            if (!e.center) {
+                if ((e.start.y > y) != (e.end.y > y))
+                    xs.push_back(e.start.x +
+                                 (e.end.x - e.start.x) * (y - e.start.y) / (e.end.y - e.start.y));
+            } else {
+                const double r = radius(e), s = (y - e.center->y) / r;
+                if (std::abs(s) < 1) {
+                    const double a = std::asin(s);
+                    for (double angle : {a, pi - a})
+                        if (contains(e, angle))
+                            xs.push_back(e.center->x + r * std::cos(angle));
+                }
+            }
+        }
+        std::sort(xs.begin(), xs.end());
+        xs.erase(std::unique(xs.begin(), xs.end(),
+                             [](double a, double b) { return std::abs(a - b) < tolerance; }),
+                 xs.end());
+        if (xs.size() < 2 || xs.size() % 2 || (single && xs.size() != 2) ||
+            xs.back() - xs.front() < tolerance)
+            return {};
+        return std::array<double, 2>{xs.front(), xs.back()};
+    };
+    std::vector<double> shoulders;
+    for (const auto &e : drawing.edges)
+        if (!e.center && std::abs(e.start.y - e.end.y) < tolerance &&
+            std::abs(e.start.x - e.end.x) >= .5 && pb.maxY - e.start.y >= 5 &&
+            pb.maxY - e.start.y <= 60)
+            shoulders.push_back(e.start.y);
+    std::sort(shoulders.begin(), shoulders.end(), std::greater<>());
+    for (double y : shoulders) {
+        const auto above = interval(y + .001), below = interval(y - .001, false);
+        if (!above || !below)
+            continue;
+        const double width = (*above)[1] - (*above)[0];
+        const double body = (*below)[1] - (*below)[0];
+        if (width < 4 || width > 35 || body < width + 6 || body < width * 1.5)
+            continue;
+        double minX = (*above)[0], maxX = (*above)[1];
+        for (const auto &e : drawing.edges) {
+            for (const auto p : {e.start, e.end})
+                if (p.y > y + tolerance) {
+                    minX = std::min(minX, p.x);
+                    maxX = std::max(maxX, p.x);
+                }
+            if (e.center && e.center->y >= y - tolerance)
+                for (double angle : {0., pi})
+                    if (contains(e, angle)) {
+                        const double x = e.center->x + radius(e) * std::cos(angle);
+                        minX = std::min(minX, x);
+                        maxX = std::max(maxX, x);
+                    }
+        }
+        if (maxX - minX > 35)
+            continue;
+        // Reject disconnected/branched tops; these samples are between contour
+        // vertices, not a mechanical proof of a particular clamping standard.
+        bool connected = true;
+        for (const auto &e : drawing.edges)
+            if (e.start.y > y + tolerance && e.start.y < pb.maxY - tolerance) {
+                const auto section = interval(e.start.y + .001);
+                connected &= section && (*section)[0] >= minX - tolerance &&
+                             (*section)[1] <= maxX + tolerance;
+            }
+        if (!connected)
+            continue;
+        minX -= geometry->punchTip.x;
+        maxX -= geometry->punchTip.x;
+        if (assignment.punchReversed) {
+            const double oldMin = minX;
+            minX = -maxX;
+            maxX = -oldMin;
+        }
+        return PunchMount{(minX + maxX) / 2, y - geometry->punchTip.y, pb.maxY - y, minX, maxX};
+    }
+    return {};
 }
 std::vector<DetectedDieGroove> detectDieGrooves(const ToolDrawing &drawing) {
     std::vector<DetectedDieGroove> result;

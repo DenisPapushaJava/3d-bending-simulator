@@ -15,6 +15,12 @@ struct ToolGeometry {
 };
 // Derived from the immutable assignment, never from an article name or external file.
 [[nodiscard]] std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &assignment);
+struct PunchMount {
+    double centreX, shoulderY, heightMm, minX, maxX; // Relative to the working tip.
+};
+// Bounded recognition of a narrow top tang and a wider horizontal shoulder.
+// No mechanical clamp/retention certification; ambiguous profiles return null.
+[[nodiscard]] std::optional<PunchMount> punchMountReference(const ToolAssignment &);
 struct DetectedDieGroove {
     double openingMm;
     DieGroove settings;

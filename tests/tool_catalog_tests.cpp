@@ -17,6 +17,17 @@ int main() {
     using namespace bending::core;
     try {
         const auto drawn = tool_fixture::pair();
+        auto tang = tool_fixture::tangPair();
+        const auto mount = punchMountReference(tang);
+        require(mount && std::abs(mount->heightMm - 30) < 1.e-6 &&
+                    std::abs(mount->shoulderY - 45) < 1.e-6 && std::abs(mount->centreX - 1) < 1.e-6,
+                "Top tang/shoulder mount not recognized");
+        require(!punchMountReference(drawn), "Plain profile invented a tang mount");
+        tang.punchReversed = true;
+        const auto reversedMount = punchMountReference(tang);
+        require(reversedMount && std::abs(reversedMount->centreX + 1) < 1.e-6 &&
+                    toolParameters(tang)->punchReversed,
+                "Orientation lost mount or assignment");
         auto machine = drawn;
         machine.machineModel = MachineModel::DemoPressV1;
         require(toolParameters(machine)->machineModel == MachineModel::DemoPressV1,

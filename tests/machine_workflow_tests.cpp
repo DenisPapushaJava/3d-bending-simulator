@@ -1,6 +1,8 @@
 #include "BendFixtures.h"
+#include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
+#include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
@@ -15,7 +17,9 @@
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QToolButton>
 #include <STEPControl_Writer.hxx>
+#include <algorithm>
 #include <iostream>
 #include <numbers>
 #include <stdexcept>
@@ -66,11 +70,61 @@ int main(int argc, char **argv) {
         require(checkbox && !checkbox->isChecked() && check && check->isEnabled(),
                 "Legacy tool choice enabled machine or lost check action");
         checkbox->setChecked(true);
+        auto tang = tool_fixture::tangPair();
+        if (const auto path = qEnvironmentVariable("BENDING_PUNCH_CATALOG"); !path.isEmpty()) {
+            const auto loaded = project::readToolCatalog(path.toStdString());
+            require(std::holds_alternative<core::ToolCatalog>(loaded), "Private catalogue failed");
+            const auto &catalogue = std::get<core::ToolCatalog>(loaded);
+            const auto code = qEnvironmentVariable("BENDING_PUNCH_CODE");
+            const auto found = std::find_if(catalogue.begin(), catalogue.end(), [&](const auto &t) {
+                return t.kind == core::ToolKind::Punch && QString::fromStdString(t.code) == code;
+            });
+            require(found != catalogue.end(), "Private profile not found");
+            tang.punch = *found;
+            // Geometric fixture station only, not a claim about actual stock.
+            tang.punch.segments.reset();
+            tang.punch.lengthMm = 80;
+            if (const auto dieCode = qEnvironmentVariable("BENDING_DIE_CODE"); !dieCode.isEmpty()) {
+                const auto die =
+                    std::find_if(catalogue.begin(), catalogue.end(), [&](const auto &t) {
+                        return t.kind == core::ToolKind::Die &&
+                               QString::fromStdString(t.code) == dieCode;
+                    });
+                require(die != catalogue.end(), "Private die not found");
+                tang.die = *die;
+                tang.die.segments.reset();
+                tang.die.lengthMm = 80;
+                tang.groove = 0;
+            }
+        }
+        require(controller.setBendToolAssignment(0, tang), "Cannot set tang tool");
         check->click();
         wait(controller);
-        const auto preview = controller.bendPreview();
-        require(preview && preview->machineModel() == core::MachineModel::DemoPressV1,
+        auto preview = controller.bendPreview();
+        require(preview && preview->machineModel() == core::MachineModel::DemoPressV2,
                 "UI checkbox was not applied to the checked cycle");
+        require(preview->seatedPunchMount(), "UI cycle did not seat tang in holder");
+        auto *reverse = window.findChild<QToolButton *>("reversePunch");
+        auto *normal = window.findChild<QToolButton *>("normalPunch");
+        require(normal && normal->isChecked() && !normal->icon().isNull() && reverse &&
+                    !reverse->icon().isNull() && reverse->text().isEmpty(),
+                "Orientation choices are not two explicit icon states");
+        require(reverse && reverse->isEnabled() && !reverse->isChecked(),
+                "Punch reversal control missing");
+        reverse->click();
+        wait(controller);
+        require(controller.bendPreview() && controller.bendPreview() != preview &&
+                    controller.bendPreview()->toolSetup()->tools.punchReversed &&
+                    reverse->isChecked(),
+                "Punch reversal reused old geometry or failed to recheck");
+        preview = controller.bendPreview();
+        const auto orientationRevision = controller.session().editRevision();
+        reverse->click();
+        QApplication::processEvents();
+        require(!controller.hasWork() && controller.bendPreview() == preview &&
+                    controller.session().editRevision() == orientationRevision &&
+                    !normal->isChecked(),
+                "Already selected orientation reran CAD or changed inputs");
         auto *summary = window.findChild<QLabel *>("bendCheckSummary");
         require(summary && summary->text().contains("Демонстрационный станок"),
                 "Demo scope not visible beside result");
@@ -123,9 +177,11 @@ int main(int argc, char **argv) {
         window.openStep(projectPath);
         wait(controller);
         require(controller.session().bend(0)->tools->machineModel ==
-                        core::MachineModel::DemoPressV1 &&
+                        core::MachineModel::DemoPressV2 &&
                     checkbox->isChecked(),
                 "Saved machine not restored to UI");
+        require(controller.session().bend(0)->tools->punchReversed && reverse->isChecked(),
+                "Saved punch orientation not restored");
         checkbox->setChecked(false);
         check->click();
         wait(controller);

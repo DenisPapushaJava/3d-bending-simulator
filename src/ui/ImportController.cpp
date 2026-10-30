@@ -603,7 +603,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                  expectedDie = assignment && assignment->useDrawingGeometry &&
                                assignment->die.drawing.has_value(),
                  expectedMachine = tools ? tools->machineModel : core::MachineModel::None,
-                 result = std::move(result)] {
+                 expectedReversed = tools && tools->punchReversed, result = std::move(result)] {
                     state->running = false;
                     state->preparingPreview = false;
                     if (state->stopping) {
@@ -616,6 +616,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                             bool matchingMode =
                                 *preview && !(*preview)->unverifiedDraft() &&
                                 (*preview)->machineModel() == expectedMachine &&
+                                (!(*preview)->toolSetup() ||
+                                 (*preview)->toolSetup()->tools.punchReversed ==
+                                     expectedReversed) &&
                                 (*preview)->usesDrawingPunch() == expectedPunch &&
                                 (*preview)->usesDrawingDie() == expectedDie &&
                                 (mode == BendPreviewMode::ToolSetup
@@ -659,7 +662,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                      error.diagnostic->machineCollisionAtFrame(0));
                                 if (!collision || error.diagnostic->frameCount() != 1 ||
                                     !error.diagnostic->toolSetup() ||
-                                    error.diagnostic->machineModel() != expectedMachine)
+                                    error.diagnostic->machineModel() != expectedMachine ||
+                                    error.diagnostic->toolSetup()->tools.punchReversed !=
+                                        expectedReversed)
                                     state->previewError->diagnostic.reset();
                             }
                         }

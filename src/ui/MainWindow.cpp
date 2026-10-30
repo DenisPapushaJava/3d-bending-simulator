@@ -27,6 +27,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QListView>
 #include <QListWidget>
@@ -35,6 +36,9 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
@@ -62,6 +66,42 @@
 namespace bending::ui {
 namespace {
 using namespace application;
+QIcon punchOrientationIcon(bool reversed) {
+    QIcon icon;
+    for (int ratio : {1, 2}) {
+        QPixmap pixmap(32 * ratio, 32 * ratio);
+        pixmap.setDevicePixelRatio(ratio);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        if (reversed) {
+            painter.translate(32, 0);
+            painter.scale(-1, 1);
+        }
+        QPainterPath profile;
+        profile.moveTo(8, 3);
+        profile.lineTo(15, 3);
+        profile.lineTo(15, 8);
+        profile.lineTo(24, 8);
+        profile.lineTo(24, 13);
+        profile.lineTo(19, 15);
+        profile.lineTo(17, 23);
+        profile.lineTo(16, 29);
+        profile.lineTo(13, 27);
+        profile.lineTo(10, 21);
+        profile.quadTo(6, 15, 10, 13);
+        profile.lineTo(4, 12);
+        profile.lineTo(4, 8);
+        profile.lineTo(8, 8);
+        profile.closeSubpath();
+        painter.setPen(QPen(QColor("#334657"), 1));
+        painter.setBrush(QColor("#627787"));
+        painter.drawPath(profile);
+        painter.end();
+        icon.addPixmap(pixmap);
+    }
+    return icon;
+}
 
 QString text(std::string_view value) {
     return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -784,6 +824,53 @@ class MainWindow::Impl {
         const auto row = bendList->currentIndex().row();
         return row >= 0 ? std::optional{static_cast<std::size_t>(row)} : std::nullopt;
     }
+    void setPunchOrientation(bool reversed) {
+        const auto index = selectedOperationIndex();
+        if (!index || controller->hasWork())
+            return;
+        const auto &session = controller->session();
+        const bool multi = session.document()->metadata().bendAnalysis.bends.size() > 1;
+        const bool individual = multi && toolAssignmentScope->currentIndex() == 1;
+        const auto *entry = session.bend(*index);
+        if (!entry)
+            return;
+        auto tools = individual ? entry->tools : toolSelection->parameters();
+        auto assignment = individual ? entry->catalogTools : toolSelection->assignment();
+        if (!tools)
+            return;
+        if (tools->punchReversed == reversed)
+            return;
+        const int step = routePanel->selected();
+        stopPlayback();
+        // A per-step orientation must not turn every bend in a shared setup.
+        if (multi && !individual) {
+            const auto indices = session.orderedBends();
+            for (auto i : indices)
+                if (assignment ? !controller->setBendToolAssignment(i, *assignment)
+                               : !controller->setBendTools(i, *tools))
+                    return;
+            toolAssignmentScope->setCurrentIndex(1);
+        }
+        tools->punchReversed = reversed;
+        if (tools->machineModel == core::MachineModel::DemoPressV1)
+            tools->machineModel = core::MachineModel::DemoPressV2;
+        if (assignment) {
+            assignment->punchReversed = tools->punchReversed;
+            assignment->machineModel = tools->machineModel;
+        }
+        const bool applied = assignment ? controller->setBendToolAssignment(*index, *assignment)
+                                        : controller->setBendTools(*index, *tools);
+        if (!applied)
+            return;
+        bendList->setCurrentIndex(bendModel->index(static_cast<int>(*index), 0));
+        if (multi) {
+            routePanel->setWithTools(true, true);
+            routePanel->select(step); // Rebuild this prefix; never run automatic order search.
+        } else {
+            toolMode->setCurrentIndex(0);
+            checkTools();
+        }
+    }
     void refreshCheckResult() {
         const auto &session = controller->session();
         const auto preview = scenePreview();
@@ -853,10 +940,13 @@ class MainWindow::Impl {
                          ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                          : QStringLiteral("Деталь и инструмент выбраны. Можно проверить.");
         if (preview && !preparing) {
-            if (preview->machineModel() == core::MachineModel::DemoPressV1)
+            if (preview->machineModel() != core::MachineModel::None)
                 result += QStringLiteral(
                     "\nДемонстрационный станок: приближённые контуры, проверка по кадрам. "
                     "Ход, перенос и реальная машина не подтверждены.");
+            if (preview->machineModel() == core::MachineModel::DemoPressV2 &&
+                preview->usesDrawingPunch() && !preview->seatedPunchMount())
+                result += QStringLiteral("\nХвостовик не распознан; посадка условная.");
             if (preview->ignoresClosedCutouts())
                 result += QStringLiteral("\nПроверка по копии без вырезов.");
             if (preview->toolSetup() &&
@@ -884,6 +974,20 @@ class MainWindow::Impl {
                       "background:#F0F3F6;color:#1C2938;border-radius:4px;padding:10px;"));
         checkSummary->setMinimumHeight(0);
         const auto index = selectedOperationIndex();
+        const bool individual = toolAssignmentScope->currentIndex() == 1 && session.document() &&
+                                session.document()->metadata().bendAnalysis.bends.size() > 1;
+        const auto *selected = index ? session.bend(*index) : nullptr;
+        const auto selectedTools =
+            individual && selected ? selected->tools : toolSelection->parameters();
+        if (reversePunchButton) {
+            const QSignalBlocker block(reversePunchButton);
+            const QSignalBlocker normalBlock(normalPunchButton);
+            reversePunchButton->setEnabled(index && selected && included(selected->review) &&
+                                           selectedTools && !controller->hasWork());
+            normalPunchButton->setEnabled(reversePunchButton->isEnabled());
+            normalPunchButton->setChecked(!selectedTools || !selectedTools->punchReversed);
+            reversePunchButton->setChecked(selectedTools && selectedTools->punchReversed);
+        }
         operationSummary->clear();
         if (const auto &document = session.document(); document) {
             if (index && *index < document->metadata().bendAnalysis.bends.size()) {
@@ -1420,7 +1524,7 @@ class MainWindow::Impl {
              : entry && entry->catalogTools && entry->catalogTools->useDrawingGeometry
                  ? QStringLiteral("Выбрана форма DXF; результат её проверки ещё не подготовлен. ")
                  : QStringLiteral("Упрощённые рабочие профили. ")) +
-            (preview && preview->machineModel() == core::MachineModel::DemoPressV1
+            (preview && preview->machineModel() != core::MachineModel::None
                  ? QStringLiteral(
                        "Приближённые узлы учебного станка проверены по кадрам. "
                        "Непрерывный отвод пуансона проверен только против детали и матрицы. "
@@ -1995,6 +2099,8 @@ class MainWindow::Impl {
     std::optional<core::PressTools> shownTools;
     QSlider *bendFrame = nullptr;
     QPushButton *playBend = nullptr;
+    QToolButton *reversePunchButton = nullptr;
+    QToolButton *normalPunchButton = nullptr;
     QWidget *playbackSpeedControls = nullptr;
     QSlider *playbackSpeed = nullptr;
     QLabel *playbackSpeedValue = nullptr;
@@ -2812,6 +2918,44 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->returnToCad = new QPushButton(QStringLiteral("Деталь"), sequence);
     impl_->returnToCad->setObjectName(QStringLiteral("returnToCad"));
     playLayout->addWidget(impl_->playBend);
+    auto *orientationControl = new QWidget(sequence);
+    orientationControl->setObjectName("punchOrientationControl");
+    auto *orientationLayout = new QHBoxLayout(orientationControl);
+    orientationLayout->setContentsMargins(0, 0, 0, 0);
+    orientationLayout->setSpacing(2);
+    auto *orientations = new QButtonGroup(orientationControl);
+    orientations->setExclusive(true);
+    impl_->normalPunchButton = new QToolButton(orientationControl);
+    impl_->normalPunchButton->setObjectName("normalPunch");
+    impl_->normalPunchButton->setIcon(punchOrientationIcon(false));
+    impl_->normalPunchButton->setToolTip(QStringLiteral("Пуансон: обычная установка"));
+    impl_->normalPunchButton->setAccessibleName(QStringLiteral("Обычная установка пуансона"));
+    impl_->reversePunchButton = new QToolButton(orientationControl);
+    impl_->reversePunchButton->setObjectName("reversePunch");
+    impl_->reversePunchButton->setIcon(punchOrientationIcon(true));
+    impl_->reversePunchButton->setAccessibleName(
+        QStringLiteral("Развернуть пуансон на 180 градусов"));
+    impl_->reversePunchButton->setToolTip(
+        QStringLiteral("Развернуть пуансон выбранного гиба на 180° вокруг вертикали. "
+                       "Положение и столкновения пересчитываются; порядок не подбирается."));
+    for (auto *button : {impl_->normalPunchButton, impl_->reversePunchButton}) {
+        button->setCheckable(true);
+        button->setIconSize(QSize(28, 28));
+        button->setFixedSize(36, 34);
+        orientations->addButton(button);
+        orientationLayout->addWidget(button);
+    }
+    impl_->normalPunchButton->setChecked(true);
+    orientationControl->setStyleSheet(QStringLiteral(
+        "QToolButton{background:#F7F9FA;border:1px solid #C5CFD8;border-radius:4px;padding:1px;}"
+        "QToolButton:checked{background:#D8EEEE;border:2px solid #087F83;}"
+        "QToolButton:hover:!checked{background:#E8EEF2;}QToolButton:disabled{border-color:#DCE3E9;"
+        "}"));
+    playLayout->addWidget(orientationControl);
+    connect(impl_->reversePunchButton, &QToolButton::clicked, this,
+            [this] { impl_->setPunchOrientation(true); });
+    connect(impl_->normalPunchButton, &QToolButton::clicked, this,
+            [this] { impl_->setPunchOrientation(false); });
     playLayout->addWidget(impl_->previewControls, 1);
     impl_->showKinematics =
         new QPushButton(QStringLiteral("Подготовить движение без инструмента"), sequence);

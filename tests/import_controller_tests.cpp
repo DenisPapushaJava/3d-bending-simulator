@@ -383,6 +383,19 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     require(controller.bendPreview() && !controller.bendPreviewError() &&
                 controller.session().document() == source,
             "Preview replaced source document");
+    if (mode != BendPreviewMode::Kinematic) {
+        bending::core::PressTools flipped{48, 1.5, 1.4, 2, 100, 10};
+        flipped.punchReversed = true;
+        require(controller.setBendTools(0, flipped) &&
+                    controller.prepareBendPreview(0, false, builder, mode),
+                "Cannot request reversed punch");
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "Normal snapshot accepted for reversed punch request");
+        prepare();
+        waitUntil(finished);
+    }
     if (mode == BendPreviewMode::ToolMotion) {
         builder->omitRetraction = true;
         prepare();

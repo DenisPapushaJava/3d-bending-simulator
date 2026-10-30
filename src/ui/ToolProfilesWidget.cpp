@@ -97,6 +97,8 @@ void ToolProfilesWidget::paintEvent(QPaintEvent *) {
         if (dieDrawing_)
             die = path(*dieDrawing_);
     }
+    if (tools_->punchReversed)
+        punch = QTransform::fromScale(-1, 1).map(punch);
     const auto punchBounds = punch.boundingRect(), dieBounds = die.boundingRect();
     const double half = width() / 2.;
     const double drawingTop = 42, drawingBottom = height() - 49.;

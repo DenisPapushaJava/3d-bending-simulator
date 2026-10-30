@@ -30,6 +30,18 @@
 #include <stdexcept>
 #include <vector>
 namespace bending::cad {
+TopoDS_Shape orientPunch(const TopoDS_Shape &shape, const core::PressTools &tools) {
+    if (!tools.punchReversed || shape.IsNull())
+        return shape;
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(0, 0, tools.lengthMm / 2), gp_Dir(0, 1, 0)),
+                         std::numbers::pi);
+    return shape.Moved(TopLoc_Location(rotation));
+}
+void orientPunchSegments(std::vector<ToolDisplaySegment> &segments, const core::PressTools &tools) {
+    for (auto &segment : segments)
+        segment.shape = orientPunch(segment.shape, tools);
+}
 namespace {
 using namespace core;
 DrawingPoint shifted(DrawingPoint p, DrawingPoint origin, double y = 0) {

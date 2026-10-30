@@ -192,7 +192,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 11, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 12, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -525,7 +525,9 @@ void testMachineProfile() {
     QTemporaryDir folder;
     const auto destination = folder.path() + "/machine.bend";
     const auto path = nativePath(destination);
-    for (bool catalog : {false, true}) {
+    for (int variant = 0; variant < 4; ++variant) {
+        const bool catalog = variant % 2;
+        const bool modern = variant >= 2;
         DocumentSession session;
         session.complete(session.beginImport("source.step"),
                          files.load(nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
@@ -534,7 +536,9 @@ void testMachineProfile() {
         require(session.document() && session.bend(0), "Missing machine project fixture");
         require(session.setBendReview(0, BendReview::Confirmed), "Cannot confirm project fixture");
         auto assignment = tool_fixture::pair(16);
-        assignment.machineModel = bending::core::MachineModel::DemoPressV1;
+        assignment.machineModel = modern ? bending::core::MachineModel::DemoPressV2
+                                         : bending::core::MachineModel::DemoPressV1;
+        assignment.punchReversed = modern;
         const auto parameters = bending::core::toolParameters(assignment);
         require(parameters.has_value(), "Invalid machine fixture tools");
         const auto tools = *parameters;
@@ -546,8 +550,8 @@ void testMachineProfile() {
         const auto opened = files.load(path, {}, {});
         require(std::holds_alternative<OpenedProject>(opened), "Machine project rejected");
         const auto &b = std::get<OpenedProject>(opened).bends.at(0);
-        require(b.tools && b.tools->machineModel == bending::core::MachineModel::DemoPressV1 &&
-                    (!catalog || b.catalogTools == assignment),
+        require(b.tools && b.tools->machineModel == assignment.machineModel &&
+                    b.tools->punchReversed == modern && (!catalog || b.catalogTools == assignment),
                 "Lost saved machine profile");
         const auto root = QJsonDocument::fromJson(read(destination)).object();
         auto old = root;
@@ -555,6 +559,11 @@ void testMachineProfile() {
         write(destination, QJsonDocument(old).toJson());
         require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
                 "v10 accepted machine data");
+        old.insert("version", 11);
+        write(destination, QJsonDocument(old).toJson());
+        require(modern ? std::holds_alternative<ImportError>(files.load(path, {}, {}))
+                       : std::holds_alternative<OpenedProject>(files.load(path, {}, {})),
+                "v11 changed profile revision or accepted new orientation");
         for (const auto &badValue : {QJsonValue("unknown-machine"), QJsonValue(true)}) {
             auto bad = root;
             auto bends = bad.value("bends").toArray();
@@ -568,6 +577,17 @@ void testMachineProfile() {
             require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
                     "Unknown machine accepted");
         }
+        auto badOrientation = root;
+        auto orientationBends = badOrientation.value("bends").toArray();
+        auto orientationEntry = orientationBends[0].toObject();
+        auto orientationTools = orientationEntry.value("tools").toObject();
+        orientationTools.insert("punchReversed", "true");
+        orientationEntry.insert("tools", orientationTools);
+        orientationBends[0] = orientationEntry;
+        badOrientation.insert("bends", orientationBends);
+        write(destination, QJsonDocument(badOrientation).toJson());
+        require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                "Untyped punch orientation accepted");
     }
 }
 } // namespace

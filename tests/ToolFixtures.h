@@ -75,6 +75,21 @@ inline bending::core::ToolAssignment hook() {
          line(P{-w, 10}, nose.start)};
     return a;
 }
+inline bending::core::ToolAssignment tangPair() {
+    using namespace bending::core;
+    auto a = pair(16, 1, 30);
+    auto &edges = a.punch.drawing->edges;
+    const auto top = edges[3];
+    const auto line = [](DrawingPoint p, DrawingPoint q) { return DrawingEdge{p, q, {}, 0}; };
+    edges.erase(edges.begin() + 3);
+    const std::vector<DrawingEdge> neck{line(top.start, {7, 45}), line({7, 45}, {7, 75}),
+                                        line({7, 75}, {-5, 75}), line({-5, 75}, {-5, 45}),
+                                        line({-5, 45}, top.end)};
+    edges.insert(edges.begin() + 3, neck.begin(), neck.end());
+    a.punch.heightMm = 75;
+    a.machineModel = MachineModel::DemoPressV2;
+    return a;
+}
 } // namespace tool_fixture
 namespace tool_fixture {
 inline bending::core::ToolPreset fourWayDie() {

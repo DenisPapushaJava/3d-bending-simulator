@@ -8,12 +8,17 @@ namespace bending::cad {
 // profiles, not imported proprietary contours or certified machine dimensions.
 class MachineAssembly {
   public:
-    MachineAssembly(const core::PressTools &, const std::array<TopoDS_Shape, 2> &, std::stop_token);
+    MachineAssembly(const core::PressTools &, const std::array<TopoDS_Shape, 2> &, std::stop_token,
+                    const std::optional<core::ToolAssignment> & = {});
+    [[nodiscard]] bool seatedPunchMount() const {
+        return seated_;
+    }
     [[nodiscard]] std::vector<MachineDisplayComponent> at(double punchTranslationY) const;
     [[nodiscard]] static std::optional<application::MachineCollision>
     check(const PreviewFrame &, double toleranceMm, std::stop_token);
 
   private:
     std::vector<MachineDisplayComponent> components_;
+    bool seated_ = false;
 };
 } // namespace bending::cad

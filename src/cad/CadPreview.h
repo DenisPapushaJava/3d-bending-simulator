@@ -5,6 +5,10 @@ using namespace application;
 class CadPreview : public SingleBendPreview {
   public:
     bool draft = false;
+    bool seatedMount = false;
+    bool seatedPunchMount() const noexcept override {
+        return seatedMount;
+    }
     std::vector<std::optional<MachineCollision>> machineConflicts;
     core::MachineModel machineModel() const noexcept override {
         return setup ? setup->tools.machineModel : core::MachineModel::None;

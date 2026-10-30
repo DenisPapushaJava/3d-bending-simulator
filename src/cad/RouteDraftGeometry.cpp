@@ -200,7 +200,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         }
         visual->setup = simulation::FlatToolSetup{*active.tools, 0, 0, 0, 0, 0};
         if (active.tools->machineModel != core::MachineModel::None)
-            machineAssembly.emplace(*active.tools, tools, stop);
+            machineAssembly.emplace(*active.tools, tools, stop, active.assignment);
+        visual->seatedMount = machineAssembly && machineAssembly->seatedPunchMount();
         for (const auto &t : tools) {
             BRepMesh_IncrementalMesh mesh(t, .05, false, .35, false);
             require(mesh.IsDone(), "Draft tool meshing failed");

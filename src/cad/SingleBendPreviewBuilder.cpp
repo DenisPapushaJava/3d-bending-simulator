@@ -571,6 +571,8 @@ makeRouteDraftTools(const core::PressTools &tools,
         segments[0].push_back({result[0], tools.lengthMm});
         segments[1].push_back({result[1], core::punchLengthMm(tools)});
     }
+    result[1] = orientPunch(result[1], tools);
+    orientPunchSegments(segments[1], tools);
     return result;
 }
 const PreviewFrame &OcctPreviewAccess::frame(const application::SingleBendPreview &preview,
@@ -910,6 +912,8 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                 initialSegments[1].push_back(
                     {initialTools[1], core::punchLengthMm(*toolParameters)});
             }
+            initialTools[1] = orientPunch(initialTools[1], *toolParameters);
+            orientPunchSegments(initialSegments[1], *toolParameters);
         }
         const auto skin = multi && !displaySource.IsNull()
                               ? prepareWholePartSkin(displaySource, flanges, sourceSector,
@@ -919,7 +923,8 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             return cancelled();
         std::optional<MachineAssembly> machine;
         if (preview->setup && toolParameters->machineModel != core::MachineModel::None)
-            machine.emplace(*toolParameters, initialTools, stop);
+            machine.emplace(*toolParameters, initialTools, stop, realTools);
+        preview->seatedMount = machine && machine->seatedPunchMount();
         Bnd_Box envelope;
         bool returnSweepClear = true;
         constexpr std::size_t formingIntervals = 40;
@@ -998,6 +1003,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         preview->sweep, realTools->punch, realTools->punchAssembly,
                         (toolParameters->lengthMm - core::punchLengthMm(*toolParameters)) / 2,
                         stop);
+                preview->sweep = orientPunch(preview->sweep, *toolParameters);
                 if (stop.stop_requested())
                     return cancelled();
                 if (!BRepCheck_Analyzer(preview->sweep).IsValid() ||
@@ -1083,6 +1089,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         }
                         auto diagnostic = std::make_shared<CadPreview>();
                         diagnostic->geometry = model;
+                        diagnostic->seatedMount = preview->seatedMount;
                         diagnostic->setup = preview->setup;
                         diagnostic->realPunch = preview->realPunch;
                         diagnostic->realDie = preview->realDie;

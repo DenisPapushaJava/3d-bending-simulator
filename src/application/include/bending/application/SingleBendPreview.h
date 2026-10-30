@@ -28,6 +28,9 @@ struct MachineCollision {
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual bool seatedPunchMount() const noexcept {
+        return false;
+    }
     [[nodiscard]] virtual core::MachineModel machineModel() const noexcept {
         return core::MachineModel::None;
     }

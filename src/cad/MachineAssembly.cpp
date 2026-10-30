@@ -1,4 +1,5 @@
 #include "bending/cad/occt/MachineAssembly.h"
+#include "bending/core/ToolGeometry.h"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -74,10 +75,12 @@ TopoDS_Shape prism(const std::vector<std::array<double, 2>> &points, double from
 }
 } // namespace
 MachineAssembly::MachineAssembly(const core::PressTools &tools,
-                                 const std::array<TopoDS_Shape, 2> &bodies, std::stop_token stop) {
+                                 const std::array<TopoDS_Shape, 2> &bodies, std::stop_token stop,
+                                 const std::optional<core::ToolAssignment> &assignment) {
     if (tools.machineModel == core::MachineModel::None)
         return;
-    if (tools.machineModel != core::MachineModel::DemoPressV1)
+    if (tools.machineModel != core::MachineModel::DemoPressV1 &&
+        tools.machineModel != core::MachineModel::DemoPressV2)
         throw std::runtime_error("Unknown machine profile revision");
     checkStop(stop);
     const double centre = tools.lengthMm / 2;
@@ -85,7 +88,18 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
     // heights and punch profiles retain the same stack without bounding-box centring.
     const double dieSeat = bounds(bodies[0]).CornerMin().Y();
     const double punchSeat = bounds(bodies[1]).CornerMax().Y();
-    const double tableTop = dieSeat - 30, floor = tableTop - 900;
+    const auto mount = tools.machineModel == core::MachineModel::DemoPressV2 && assignment
+                           ? core::punchMountReference(*assignment)
+                           : std::nullopt;
+    seated_ = mount.has_value();
+    const double shoulder = mount ? punchSeat - mount->heightMm : punchSeat;
+    const double cx = mount ? mount->centreX : 0;
+    const bool pocketDie = tools.machineModel == core::MachineModel::DemoPressV2 && assignment &&
+                           assignment->useDrawingGeometry && assignment->die.drawing;
+    // A known die bottom seats on the pocket floor. An idealized working wedge
+    // has no known mounting foot: rest it on the lips without inventing a shank.
+    const double adapterTop = dieSeat + (pocketDie ? 10 : 0);
+    const double tableTop = adapterTop - 30, floor = tableTop - 900;
     const auto add = [&](std::string id, std::string name,
                          std::vector<std::array<double, 2>> points, double from, double to,
                          bool moving = false) {
@@ -94,8 +108,8 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
             {std::move(id), std::move(name), prism(points, centre + from, centre + to), moving});
     };
     add("table", "Стол", {{-45, floor}, {45, floor}, {45, tableTop}, {-45, tableTop}}, -1550, 1550);
-    // Simplified flat 80x30 adapter. Its real groove/mating shank is unknown;
-    // do not invent rails overlapping the full body of a selected die.
+    // Retain V1's flat adapter. V2 uses the measured nominal pocket below;
+    // its rails are checked against the full actual die, without pair exemptions.
     add("die-adapter", "Адаптер матрицы",
         {{-40, tableTop},
          {40, tableTop},
@@ -104,7 +118,29 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
          {-39, dieSeat},
          {-40, dieSeat - 1}},
         -1550, 1550);
-    const double holderTop = punchSeat + 120;
+    components_.back().allowDieContact = tools.machineModel == core::MachineModel::DemoPressV1;
+    if (tools.machineModel == core::MachineModel::DemoPressV2) {
+        // 9 mm is the straight inner wall; .8/.2 chamfers make 10 mm total depth.
+        const double bottom = tableTop, top = adapterTop, pocket = top - 10;
+        components_.back().shape = prism({{-39, bottom},
+                                          {39, bottom},
+                                          {40, bottom + 1},
+                                          {40, top - .8},
+                                          {39.2, top},
+                                          {31.05, top},
+                                          {30.25, top - .8},
+                                          {30.25, pocket + .2},
+                                          {30.05, pocket},
+                                          {-30.05, pocket},
+                                          {-30.25, pocket + .2},
+                                          {-30.25, top - .8},
+                                          {-31.05, top},
+                                          {-39.2, top},
+                                          {-40, top - .8},
+                                          {-40, bottom + 1}},
+                                         centre - 1550, centre + 1550);
+    }
+    const double holderTop = shoulder + 120;
     add("ram", "Верхняя траверса",
         {{-27.5, holderTop},
          {27.5, holderTop},
@@ -113,18 +149,28 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
         -1550, 1550, true);
     for (int i = -3; i <= 3; ++i) {
         const double z = i * 400.;
+        std::vector<std::array<double, 2>> profile{{-22, punchSeat},      {22, punchSeat},
+                                                   {22, punchSeat + 40},  {40, punchSeat + 40},
+                                                   {40, punchSeat + 100}, {18, punchSeat + 100},
+                                                   {18, holderTop},       {-18, holderTop},
+                                                   {-18, punchSeat + 70}, {-22, punchSeat + 60}};
+        if (tools.machineModel == core::MachineModel::DemoPressV2) {
+            profile = {{cx - 22, shoulder},
+                       {cx + 40, shoulder},
+                       {cx + 40, shoulder + 80},
+                       {cx + 18, holderTop},
+                       {cx - 18, holderTop}};
+            if (mount) {
+                const double left = mount->minX - .15, right = mount->maxX + .15;
+                profile = {{cx - 22, shoulder},      {left, shoulder},     {left, punchSeat + .15},
+                           {right, punchSeat + .15}, {right, shoulder},    {cx + 40, shoulder},
+                           {cx + 40, shoulder + 80}, {cx + 18, holderTop}, {cx - 18, holderTop}};
+            }
+        }
         add("holder-" + std::to_string(i + 4), "Держатель пуансона " + std::to_string(i + 4),
-            {{-22, punchSeat},
-             {22, punchSeat},
-             {22, punchSeat + 40},
-             {40, punchSeat + 40},
-             {40, punchSeat + 100},
-             {18, punchSeat + 100},
-             {18, holderTop},
-             {-18, holderTop},
-             {-18, punchSeat + 70},
-             {-22, punchSeat + 60}},
-            z - 50, z + 50, true);
+            profile, z - 50, z + 50, true);
+        components_.back().allowPunchContact =
+            tools.machineModel == core::MachineModel::DemoPressV1;
     }
     const std::vector<std::array<double, 2>> frame{
         {80, floor},           {1450, floor},      {1450, floor + 1950},
@@ -149,7 +195,7 @@ MachineAssembly::check(const PreviewFrame &frame, double tolerance, std::stop_to
             return application::MachineCollision{"sheet", "Деталь", c.id, c.name};
         for (std::size_t t = 0; t < 2; ++t) {
             // Only named mating pairs. The sheet has no corresponding exemption.
-            if ((t == 0 && c.id == "die-adapter") || (t == 1 && c.id.starts_with("holder-")))
+            if ((t == 0 && c.allowDieContact) || (t == 1 && c.allowPunchContact))
                 continue;
             if (intersects(frame.tools[t], c.shape, tolerance, stop))
                 return application::MachineCollision{t == 0 ? "die" : "punch",

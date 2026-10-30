@@ -6,6 +6,8 @@
 #include <vector>
 namespace bending::cad {
 struct ToolDisplaySegment;
+TopoDS_Shape orientPunch(const TopoDS_Shape &, const core::PressTools &);
+void orientPunchSegments(std::vector<ToolDisplaySegment> &, const core::PressTools &);
 TopoDS_Shape segmentToolBody(const TopoDS_Shape &, const core::ToolPreset &,
                              const std::optional<core::ToolAssembly> &, double startZ,
                              std::stop_token, std::vector<ToolDisplaySegment> *display = nullptr);

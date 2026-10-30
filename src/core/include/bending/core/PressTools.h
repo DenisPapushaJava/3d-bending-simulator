@@ -4,7 +4,7 @@
 
 namespace bending::core {
 // Stable built-in profile revision. None preserves the scope of legacy projects.
-enum class MachineModel { None, DemoPressV1 };
+enum class MachineModel { None, DemoPressV1, DemoPressV2 };
 // Standard V-tool working dimensions. Full body geometry belongs to ToolAssignment.
 struct PressTools {
     double openingMm;
@@ -15,6 +15,7 @@ struct PressTools {
     double clearanceMm; // Lowest point of the punch above the flat sheet.
     std::optional<double> punchLengthMm = std::nullopt; // Null keeps legacy equal lengths.
     MachineModel machineModel = MachineModel::None;
+    bool punchReversed = false; // Physical half-turn about Y through the working axis.
     bool operator==(const PressTools &) const = default;
 };
 [[nodiscard]] double punchLengthMm(const PressTools &tools) noexcept;

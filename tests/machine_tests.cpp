@@ -1,11 +1,16 @@
 #include "BendFixtures.h"
+#include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
+#include "bending/cad/occt/DrawingTools.h"
 #include "bending/cad/occt/MachineAssembly.h"
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <Bnd_Box.hxx>
+#include <GProp_GProps.hxx>
 #include <STEPControl_Writer.hxx>
 #include <chrono>
 #include <filesystem>
@@ -45,6 +50,79 @@ void test(const std::filesystem::path &path) {
             "Cannot write fixture");
     const auto d = application::resultDocument(cad::StepImporter{}.load(path, {}, {}));
     require(bool(d), "Cannot load machine fixture");
+    for (bool reversed : {false, true}) {
+        auto assignment = tool_fixture::tangPair();
+        assignment.punchReversed = reversed;
+        assignment.punch.segments = std::vector<core::ToolSegment>{{30, 1}, {50, 1}};
+        assignment.punchAssembly = core::ToolAssembly{{0, 1}};
+        const auto parameters = *core::toolParameters(assignment);
+        const auto geometry = *core::drawingToolGeometry(assignment);
+        auto bodies = cad::makeDrawingTools(assignment, geometry, 12);
+        std::vector<cad::ToolDisplaySegment> segments;
+        bodies[1] = cad::segmentToolBody(bodies[1], assignment.punch, assignment.punchAssembly, 0,
+                                         {}, &segments);
+        bodies[1] = cad::orientPunch(bodies[1], parameters);
+        const auto probeBody = BRepPrimAPI_MakeBox(gp_Pnt(20, 47, 40), 1, 1, 1).Shape();
+        BRepAlgoAPI_Common overlap(bodies[1], probeBody);
+        require(overlap.IsDone(), "Orientation probe Boolean failed");
+        GProp_GProps overlapVolume;
+        BRepGProp::VolumeProperties(overlap.Shape(), overlapVolume);
+        require(reversed ? std::abs(overlapVolume.Mass()) < 1.e-6
+                         : std::abs(overlapVolume.Mass()) > .9,
+                "Orientation did not change collision occupancy");
+        cad::orientPunchSegments(segments, parameters);
+        require(std::abs(box(segments[0].shape).CornerMin().Z() - (reversed ? 50 : 0)) < 1.e-6,
+                "Half-turn did not reverse longitudinal segment positions");
+        cad::MachineAssembly installed(parameters, bodies, {}, assignment);
+        require(installed.seatedPunchMount(), "V2 did not seat the punch tang");
+        cad::PreviewFrame assembly;
+        assembly.machine = installed.at(0);
+        assembly.tools = bodies;
+        assembly.shape = BRepPrimAPI_MakeBox(gp_Pnt(-1000, 2000, -1000), 1, 1, 1);
+        require(!cad::MachineAssembly::check(assembly, 1.e-6, {}),
+                "Seated punch intersects holder");
+        const auto adapter = find(assembly, "die-adapter");
+        const double top = box(adapter.shape).CornerMax().Y();
+        const double dieBottom = box(bodies[0]).CornerMin().Y();
+        require(std::abs(top - dieBottom - 10) < 1.e-6 && !adapter.allowDieContact,
+                "Die was not seated on pocket floor or adapter is exempt from collision");
+        auto adapterProbe = assembly;
+        adapterProbe.shape = BRepPrimAPI_MakeBox(gp_Pnt(-1, top - 5, 40), 2, 2, 2);
+        require(!cad::MachineAssembly::check(adapterProbe, 1.e-6, {}),
+                "Die adapter pocket was filled");
+        adapterProbe.shape = BRepPrimAPI_MakeBox(gp_Pnt(35, top - 5, 40), 2, 2, 2);
+        require(cad::MachineAssembly::check(adapterProbe, 1.e-6, {}).has_value(),
+                "Adapter side rail collision missed");
+        adapterProbe.shape = assembly.shape;
+        adapterProbe.tools[0] = BRepPrimAPI_MakeBox(gp_Pnt(-35, dieBottom, 0), 70, 25, 80);
+        const auto incompatible = cad::MachineAssembly::check(adapterProbe, 1.e-6, {});
+        require(incompatible && incompatible->firstId == "die" &&
+                    incompatible->secondId == "die-adapter",
+                "Wide die was accepted through adapter rails");
+        const auto holder = find(assembly, "holder-4");
+        const double base = box(holder.shape).CornerMin().Y();
+        require(std::abs(box(bodies[1]).CornerMax().Y() - base - 30) < 1.e-6,
+                "Holder was placed on top rather than at the shoulder");
+        require(!holder.allowPunchContact, "V2 still exempts whole punch/holder pair");
+        const auto mount = *core::punchMountReference(assignment);
+        assembly.shape = BRepPrimAPI_MakeBox(gp_Pnt(mount.centreX - 1, base + 5, 40), 2, 2, 2);
+        require(!cad::MachineAssembly::check(assembly, 1.e-6, {}), "Tang pocket was filled");
+        assembly.shape = BRepPrimAPI_MakeBox(gp_Pnt(mount.centreX - 20, base + 5, 40), 2, 2, 2);
+        require(cad::MachineAssembly::check(assembly, 1.e-6, {}).has_value(),
+                "Holder leg collision missed");
+        const auto &bend = d->metadata().bendAnalysis.bends[0];
+        const auto cycle = cad::SingleBendPreviewBuilder{}.buildAssignedToolMotion(
+            d, 0, {bend.angleRadians, bend.innerRadiusMm}, assignment, {});
+        if (const auto *e = std::get_if<application::BendPreviewError>(&cycle))
+            throw std::runtime_error("Tang cycle: " + e->detail);
+        const auto &preview = *std::get<application::BendPreviewPtr>(cycle);
+        require(preview.seatedPunchMount() && preview.toolSetup()->tools.punchReversed == reversed,
+                "Checked cycle dropped seating/orientation");
+        const auto &frame = cad::OcctPreviewAccess::frame(preview, 0);
+        require(reversed ? box(frame.tools[1]).CornerMin().X() < -30
+                         : box(frame.tools[1]).CornerMax().X() > 30,
+                "Asymmetric body was not reversed in the checked frame");
+    }
     const std::string source(d->sourceStep());
     core::PressTools t{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
     t.machineModel = core::MachineModel::DemoPressV1;
@@ -127,6 +205,12 @@ void test(const std::filesystem::path &path) {
     require(std::get<application::RouteDraftPtr>(builder.buildRouteDraft(d, request, {}))->visual ==
                 visual,
             "Same machine draft not reused");
+    auto reversedDraft = request;
+    reversedDraft.operations[0].tools->punchReversed = true;
+    const auto differentDraft = builder.buildRouteDraft(d, reversedDraft, {});
+    require(std::holds_alternative<application::RouteDraftPtr>(differentDraft) &&
+                std::get<application::RouteDraftPtr>(differentDraft)->visual != visual,
+            "Draft cache reused another punch orientation");
     application::BendRouteRequest route;
     route.operations = request.operations;
     route.withTools = true;
@@ -139,6 +223,12 @@ void test(const std::filesystem::path &path) {
     const auto warm = builder.buildRoute(d, route, {});
     require(std::get<application::BendRoutePtr>(warm)->statistics.reusedTransitions > 0,
             "Same machine route not reused");
+    route.operations[0].tools->punchReversed = true;
+    const auto reversedRoute = builder.buildRoute(d, route, {});
+    require(std::holds_alternative<application::BendRoutePtr>(reversedRoute) &&
+                std::get<application::BendRoutePtr>(reversedRoute)->statistics.reusedTransitions ==
+                    0,
+            "Transition cache reused another punch orientation");
     route.operations = none.operations;
     const auto plainRoute = builder.buildRoute(d, route, {});
     require(std::holds_alternative<application::BendRoutePtr>(plainRoute) &&

@@ -27,6 +27,8 @@ struct MachineDisplayComponent {
     std::string id, name;
     TopoDS_Shape shape;
     bool moving = false;
+    bool allowPunchContact = false; // Legacy V1 only; V2 models the open pocket explicitly.
+    bool allowDieContact = false;
 };
 struct PreviewFrame {
     std::vector<MachineDisplayComponent> machine;

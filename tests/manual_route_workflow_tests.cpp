@@ -139,6 +139,27 @@ int main(int argc, char **argv) {
                 "The shared report lost manual coverage or route details");
         report->click();
         auto *slider = window.findChild<QSlider *>("bendFrame");
+        mode->setCurrentIndex(1); // Shared setup before changing one operation's orientation.
+        step(1)->click();
+        wait([&] { return !controller.hasWork(); });
+        auto *reverse = window.findChild<QToolButton *>("reversePunch");
+        require(reverse && reverse->isEnabled(), "Manual punch orientation control missing");
+        const auto searchesBefore = builder->searches.load();
+        reverse->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && mode->currentIndex() == 2 &&
+                    builder->searches == searchesBefore,
+                "Per-step reversal launched order search or stayed shared");
+        for (std::size_t i = 0; i < controller.routeDraft()->request.operations.size(); ++i)
+            require(controller.routeDraft()->request.operations[i].tools->punchReversed == (i == 0),
+                    "Reversal changed an unrelated operation");
+        auto *normal = window.findChild<QToolButton *>("normalPunch");
+        require(normal && normal->isEnabled(), "Normal orientation choice missing");
+        normal->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() &&
+                    !controller.routeDraft()->request.operations[0].tools->punchReversed,
+                "Cannot restore manual punch orientation");
         step(4)->click();
         wait([&] { return !controller.hasWork(); });
         require(controller.routeDraft() && controller.routeDraft()->request.step == 4 &&

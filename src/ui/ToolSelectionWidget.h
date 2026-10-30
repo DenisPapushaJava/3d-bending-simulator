@@ -99,6 +99,8 @@ class ToolSelectionWidget final : public QWidget {
     std::array<QDoubleSpinBox *, 7> fields_{};
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;
+    bool punchReversed_ = false;
+    core::MachineModel machineModel_ = core::MachineModel::DemoPressV2;
     std::optional<core::ToolAssembly> punchAssembly_, dieAssembly_;
     ImportController *controller_ = nullptr;
     std::shared_ptr<const application::ToolProfileImporter> profileImporter_;

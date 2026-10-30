@@ -251,11 +251,14 @@ QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
                        {"clearanceMm", a->clearanceMm},
                        {"machineName", QString::fromStdString(a->machineName)},
                        {"machineModel", machineModelJson(a->machineModel)},
+                       {"punchReversed", a->punchReversed},
                        {"useDrawingGeometry", a->useDrawingGeometry},
                        {"punchAssembly", assembly(a->punchAssembly)},
                        {"dieAssembly", assembly(a->dieAssembly)}};
 }
 QString machineModelJson(core::MachineModel model) {
+    if (model == core::MachineModel::DemoPressV2)
+        return QStringLiteral("demo-press-v2");
     return model == core::MachineModel::DemoPressV1 ? QStringLiteral("demo-press-v1")
                                                     : QStringLiteral("none");
 }
@@ -266,6 +269,10 @@ bool readMachineModel(const QJsonValue &value, core::MachineModel &model) {
     }
     if (value.isString() && value.toString() == QStringLiteral("demo-press-v1")) {
         model = core::MachineModel::DemoPressV1;
+        return true;
+    }
+    if (value.isString() && value.toString() == QStringLiteral("demo-press-v2")) {
+        model = core::MachineModel::DemoPressV2;
         return true;
     }
     return false;
@@ -282,6 +289,9 @@ bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment>
     core::ToolAssignment a;
     if (!readMachineModel(o.value("machineModel"), a.machineModel))
         return false;
+    if (o.contains("punchReversed") && !o.value("punchReversed").isBool())
+        return false;
+    a.punchReversed = o.value("punchReversed").toBool(false);
     const auto readAssembly = [](const QJsonValue &v, std::optional<core::ToolAssembly> &out) {
         if (v.isNull() || v.isUndefined())
             return true;

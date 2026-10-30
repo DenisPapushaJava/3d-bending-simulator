@@ -221,7 +221,11 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         "Это учебная сборка, не точная модель SPEED BEND. Проверка по кадрам; ход и перенос не "
         "проверены."));
     layout->insertWidget(0, demoMachine_);
-    connect(demoMachine_, &QCheckBox::toggled, this, [this] { changed(); });
+    connect(demoMachine_, &QCheckBox::toggled, this, [this](bool checked) {
+        if (checked && !updating_)
+            machineModel_ = core::MachineModel::DemoPressV2;
+        changed();
+    });
     geometryScope_ = wrapped(this);
     geometryScope_->setObjectName(QStringLiteral("toolGeometryScope"));
     layout->addWidget(geometryScope_);
@@ -415,8 +419,8 @@ std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
                            realGeometry_->isChecked()};
     a.punchAssembly = punchAssembly_;
     a.dieAssembly = dieAssembly_;
-    a.machineModel =
-        demoMachine_->isChecked() ? core::MachineModel::DemoPressV1 : core::MachineModel::None;
+    a.machineModel = demoMachine_->isChecked() ? machineModel_ : core::MachineModel::None;
+    a.punchReversed = punchReversed_;
     return core::toolParameters(a) ? std::optional{a} : std::nullopt;
 }
 std::optional<core::PressTools> ToolSelectionWidget::parameters() const {
@@ -440,8 +444,8 @@ std::optional<core::PressTools> ToolSelectionWidget::rawParameters() const {
                        f[5]->value()};
     if (f[6]->value() != t.lengthMm)
         t.punchLengthMm = f[6]->value();
-    t.machineModel =
-        demoMachine_->isChecked() ? core::MachineModel::DemoPressV1 : core::MachineModel::None;
+    t.machineModel = demoMachine_->isChecked() ? machineModel_ : core::MachineModel::None;
+    t.punchReversed = punchReversed_;
     return core::validPressTools(t) ? std::optional{t} : std::nullopt;
 }
 QString ToolSelectionWidget::openingIssue() const {
@@ -489,7 +493,9 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
                                     const std::optional<core::ToolAssignment> &a) {
     updating_ = true;
     if (a) {
-        demoMachine_->setChecked(a->machineModel == core::MachineModel::DemoPressV1);
+        machineModel_ = a->machineModel;
+        punchReversed_ = a->punchReversed;
+        demoMachine_->setChecked(a->machineModel != core::MachineModel::None);
         punchAssembly_ = a->punchAssembly;
         dieAssembly_ = a->dieAssembly;
         selectPreset(punch_, a->punch);
@@ -500,7 +506,9 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         realGeometry_->setChecked(a->useDrawingGeometry);
         mode_->setCurrentIndex(0);
     } else if (tools) {
-        demoMachine_->setChecked(tools->machineModel == core::MachineModel::DemoPressV1);
+        machineModel_ = tools->machineModel;
+        punchReversed_ = tools->punchReversed;
+        demoMachine_->setChecked(tools->machineModel != core::MachineModel::None);
         punchAssembly_.reset();
         dieAssembly_.reset();
         const auto &t = *tools;
@@ -517,6 +525,8 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         mode_->setCurrentIndex(1);
     } else {
         // New/unassigned bend: use workshop stock, never a previous project's captured stock.
+        machineModel_ = core::MachineModel::DemoPressV2;
+        punchReversed_ = false;
         demoMachine_->setChecked(true);
         for (auto *combo : {punch_, die_}) {
             const auto *selected = preset(combo);
