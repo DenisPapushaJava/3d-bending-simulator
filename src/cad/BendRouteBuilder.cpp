@@ -104,6 +104,7 @@ struct CacheData {
 bool stableRejection(BendPreviewErrorCode code) {
     switch (code) {
     case BendPreviewErrorCode::ToolIntersection:
+    case BendPreviewErrorCode::MachineIntersection:
     case BendPreviewErrorCode::SheetIntersection:
     case BendPreviewErrorCode::MissingLeftSupport:
     case BendPreviewErrorCode::MissingRightSupport:
@@ -478,6 +479,8 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
         return BendRouteError{BendRouteErrorCode::Failed,
                               e.GetMessageString() ? e.GetMessageString() : "Draft CAD failure"};
     } catch (const std::exception &e) {
+        if (stop.stop_requested())
+            return BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
         return BendRouteError{BendRouteErrorCode::Failed, e.what()};
     }
 }

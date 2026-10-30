@@ -65,6 +65,7 @@ struct ToolAssignment {
     bool useDrawingGeometry = false; // Use each known drawing; preserve saved legacy choice.
     std::optional<ToolAssembly> punchAssembly = std::nullopt;
     std::optional<ToolAssembly> dieAssembly = std::nullopt;
+    MachineModel machineModel = MachineModel::None;
     bool operator==(const ToolAssignment &) const = default;
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);

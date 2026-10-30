@@ -1,3 +1,4 @@
+#include "ToolFixtures.h"
 #include "bending/application/DocumentSession.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/project/ToolCatalog.h"
@@ -191,7 +192,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 10, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 11, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -519,6 +520,56 @@ void testCatalogProject() {
             "Unbounded catalogue accepted");
 }
 
+void testMachineProfile() {
+    bending::project::ProjectFiles files;
+    QTemporaryDir folder;
+    const auto destination = folder.path() + "/machine.bend";
+    const auto path = nativePath(destination);
+    for (bool catalog : {false, true}) {
+        DocumentSession session;
+        session.complete(session.beginImport("source.step"),
+                         files.load(nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
+                                               "/trimmed-bend-2mm.step"),
+                                    {}, {}));
+        require(session.document() && session.bend(0), "Missing machine project fixture");
+        require(session.setBendReview(0, BendReview::Confirmed), "Cannot confirm project fixture");
+        auto assignment = tool_fixture::pair(16);
+        assignment.machineModel = bending::core::MachineModel::DemoPressV1;
+        const auto parameters = bending::core::toolParameters(assignment);
+        require(parameters.has_value(), "Invalid machine fixture tools");
+        const auto tools = *parameters;
+        require(catalog ? session.setBendToolAssignment(0, assignment)
+                        : session.setBendTools(0, tools),
+                "Cannot set machine profile");
+        require(!files.save(path, *session.document(), {}, session.bends(), {}),
+                "Cannot save machine");
+        const auto opened = files.load(path, {}, {});
+        require(std::holds_alternative<OpenedProject>(opened), "Machine project rejected");
+        const auto &b = std::get<OpenedProject>(opened).bends.at(0);
+        require(b.tools && b.tools->machineModel == bending::core::MachineModel::DemoPressV1 &&
+                    (!catalog || b.catalogTools == assignment),
+                "Lost saved machine profile");
+        const auto root = QJsonDocument::fromJson(read(destination)).object();
+        auto old = root;
+        old.insert("version", 10);
+        write(destination, QJsonDocument(old).toJson());
+        require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                "v10 accepted machine data");
+        for (const auto &badValue : {QJsonValue("unknown-machine"), QJsonValue(true)}) {
+            auto bad = root;
+            auto bends = bad.value("bends").toArray();
+            auto entry = bends[0].toObject();
+            auto values = entry.value("tools").toObject();
+            values.insert("machineModel", badValue);
+            entry.insert("tools", values);
+            bends[0] = entry;
+            bad.insert("bends", bends);
+            write(destination, QJsonDocument(bad).toJson());
+            require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                    "Unknown machine accepted");
+        }
+    }
+}
 } // namespace
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
@@ -527,6 +578,7 @@ int main(int argc, char **argv) {
         testBendProject();
         testCatalogProject();
         testPrivatePreparation();
+        testMachineProfile();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

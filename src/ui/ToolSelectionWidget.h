@@ -70,6 +70,7 @@ class ToolSelectionWidget final : public QWidget {
     core::ToolCatalog catalog_;
     std::size_t workshopSize_ = 0;
     QCheckBox *realGeometry_;
+    QCheckBox *demoMachine_;
     QLabel *geometryScope_;
     QComboBox *mode_;
     QComboBox *punch_;

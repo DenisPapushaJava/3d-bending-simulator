@@ -23,7 +23,13 @@ struct ToolDisplaySegment {
     TopoDS_Shape shape; // A subshape of the complete checked tool, at this frame's placement.
     double lengthMm;
 };
+struct MachineDisplayComponent {
+    std::string id, name;
+    TopoDS_Shape shape;
+    bool moving = false;
+};
 struct PreviewFrame {
+    std::vector<MachineDisplayComponent> machine;
     TopoDS_Shape shape;
     std::array<TopoDS_Shape, 2> tools; // Die, punch; null in the kinematic preview.
     std::array<std::vector<ToolDisplaySegment>, 2> toolSegments;

@@ -17,6 +17,12 @@ int main() {
     using namespace bending::core;
     try {
         const auto drawn = tool_fixture::pair();
+        auto machine = drawn;
+        machine.machineModel = MachineModel::DemoPressV1;
+        require(toolParameters(machine)->machineModel == MachineModel::DemoPressV1,
+                "Assignment lost machine scope");
+        machine.machineModel = static_cast<MachineModel>(999);
+        require(!toolParameters(machine), "Unknown machine model accepted");
         const auto multi = tool_fixture::fourWayDie();
         require(validToolPreset(multi) && multi.grooveSettings.size() == 4,
                 "Four-way die not recognized");

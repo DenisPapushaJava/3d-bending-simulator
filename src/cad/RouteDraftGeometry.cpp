@@ -2,6 +2,7 @@
 #include "CadPreview.h"
 #include "RouteGeometry.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/MachineAssembly.h"
 #include "bending/core/ToolGeometry.h"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
@@ -174,6 +175,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     std::array<TopoDS_Shape, 2> tools;
     std::array<std::vector<ToolDisplaySegment>, 2> segments;
     std::optional<simulation::DieShoulders> shoulders;
+    std::optional<MachineAssembly> machineAssembly;
     const bool withTools =
         request.withTools && active.tools && core::validPressTools(*active.tools);
     if (request.withTools && !withTools)
@@ -197,6 +199,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                     geometry->leftSupportWidthMm, geometry->rightSupportWidthMm};
         }
         visual->setup = simulation::FlatToolSetup{*active.tools, 0, 0, 0, 0, 0};
+        if (active.tools->machineModel != core::MachineModel::None)
+            machineAssembly.emplace(*active.tools, tools, stop);
         for (const auto &t : tools) {
             BRepMesh_IncrementalMesh mesh(t, .05, false, .35, false);
             require(mesh.IsDone(), "Draft tool meshing failed");
@@ -229,6 +233,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             frame.tools[1] = tools[1].Moved(TopLoc_Location(lift));
             for (auto &s : frame.toolSegments[1])
                 s.shape = s.shape.Moved(TopLoc_Location(lift));
+            if (machineAssembly)
+                frame.machine = machineAssembly->at(state->punchTipYmm - active.tools->clearanceMm);
         }
         std::vector<TopoDS_Shape> material;
         for (std::size_t w = 0; w < layout.walls.size(); ++w)
@@ -273,6 +279,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             ++result->checkedToolPositions;
         }
         visual->frameConflicts.push_back(collision);
+        visual->machineConflicts.push_back(
+            MachineAssembly::check(frame, analysis.lengthToleranceMm, stop));
         std::vector<std::function<gp_Pnt(gp_Pnt)>> maps;
         for (const auto &m : placement.walls)
             maps.push_back([m](gp_Pnt pnt) { return pnt.Transformed(m); });

@@ -714,8 +714,9 @@ class MainWindow::Impl {
         partPrimary->setText(
             !document ? QStringLiteral("Открыть деталь…")
             : preview ? (preview->unverifiedDraft() ? QStringLiteral("Показать ручной просмотр")
-                         : preview->collision() ? QStringLiteral("Показать столкновение")
-                                                : QStringLiteral("Показать результат"))
+                         : preview->collision() || preview->machineCollisionAtFrame(0)
+                             ? QStringLiteral("Показать столкновение")
+                             : QStringLiteral("Показать результат"))
             : !singleBendSupported || !matchingBendThickness ? QStringLiteral("Условия проверки")
             : chosen ? (document->metadata().bendAnalysis.bends.size() > 1
                             ? (lastRouteAutomatic ? QStringLiteral("Проверить все гибы")
@@ -788,8 +789,10 @@ class MainWindow::Impl {
         const auto preview = scenePreview();
         const auto route = controller->bendRoute();
         const auto frame = static_cast<std::size_t>(bendFrame->value());
-        const bool collision =
-            preview && (preview->collision() || preview->collisionAtFrame(frame));
+        const auto machineCollision =
+            preview ? preview->machineCollisionAtFrame(frame) : std::nullopt;
+        const bool collision = preview && (preview->collision() ||
+                                           preview->collisionAtFrame(frame) || machineCollision);
         const bool partial = viewingRoute && route && route->partialEndSupport;
         const bool preparing = controller->isPreparingDraft() || controller->isPreparingRoute() ||
                                controller->isPreparingPreview();
@@ -806,6 +809,10 @@ class MainWindow::Impl {
         else if (viewingDraft && controller->routeDraftError())
             result = QStringLiteral("Положение не проверено.\n%1")
                          .arg(text(controller->routeDraftError()->detail));
+        else if (machineCollision)
+            result =
+                QStringLiteral("Столкновение: %1 — %2.\nКонфликтующие тела выделены красным.")
+                    .arg(text(machineCollision->firstName), text(machineCollision->secondName));
         else if (preview && preview->unverifiedDraft()) {
             result = collision
                          ? QStringLiteral("Столкновение с инструментом.\nИзмените порядок или "
@@ -827,10 +834,12 @@ class MainWindow::Impl {
         else if (controller->bendPreviewError())
             result = operationFailureSummary;
         else if (preview && preview->pressMotion())
-            result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.\n")
-                                   : QStringLiteral("Геометрическая проверка пройдена.\n")) +
-                     QStringLiteral("Гибка — по кадрам, отвод — непрерывно.\n"
-                                    "Станок, держатели и перенос не проверены.");
+            result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.")
+                                   : QStringLiteral("Геометрическая проверка пройдена.")) +
+                     (preview->machineModel() == core::MachineModel::None
+                          ? QStringLiteral("\nГибка — по кадрам, отвод пуансона — непрерывно.\n"
+                                           "Станок, держатели и перенос не проверены.")
+                          : QString{});
         else if (preview && preview->toolSetup())
             result = QStringLiteral("Начальная установка проверена.\n"
                                     "Одно положение; движение не проверено.");
@@ -844,6 +853,10 @@ class MainWindow::Impl {
                          ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                          : QStringLiteral("Деталь и инструмент выбраны. Можно проверить.");
         if (preview && !preparing) {
+            if (preview->machineModel() == core::MachineModel::DemoPressV1)
+                result += QStringLiteral(
+                    "\nДемонстрационный станок: приближённые контуры, проверка по кадрам. "
+                    "Ход, перенос и реальная машина не подтверждены.");
             if (preview->ignoresClosedCutouts())
                 result += QStringLiteral("\nПроверка по копии без вырезов.");
             if (preview->toolSetup() &&
@@ -979,7 +992,8 @@ class MainWindow::Impl {
                                    : QString{};
         if (preview->unverifiedDraft()) {
             const auto draft = controller->routeDraft();
-            const bool collision = preview->collisionAtFrame(index).has_value();
+            const bool collision = preview->collisionAtFrame(index).has_value() ||
+                                   preview->machineCollisionAtFrame(index).has_value();
             const auto message =
                 collision ? QStringLiteral(
                                 "Столкновение детали и инструмента — положение выделено красным")
@@ -991,7 +1005,7 @@ class MainWindow::Impl {
                              .arg(message));
             return;
         }
-        if (preview->collision()) {
+        if (preview->collision() || preview->machineCollisionAtFrame(index)) {
             setFrameText(QStringLiteral("Обнаружено столкновение · диагностическое положение"));
             return;
         }
@@ -1172,7 +1186,9 @@ class MainWindow::Impl {
             }
             showPreviewFrame();
         }
-        const bool diagnostic = preview && preview->collision().has_value();
+        const bool diagnostic =
+            preview && (preview->collision().has_value() ||
+                        (!preview->unverifiedDraft() && preview->machineCollisionAtFrame(0)));
         const bool staticSetup =
             preview && (diagnostic || (!preview->unverifiedDraft() && preview->toolSetup() &&
                                        !preview->pressMotion()));
@@ -1233,6 +1249,9 @@ class MainWindow::Impl {
                           "Не удалось подтвердить сплошной участок опоры обеих полок: проверьте "
                           "отверстия/контур около сгиба и раскрытие V. Для движения участок "
                           "опоры проверяется на всём ходе.")
+                : failure->code == BendPreviewErrorCode::MachineIntersection
+                    ? QStringLiteral("Столкновение с узлом демонстрационного станка: %1")
+                          .arg(text(failure->detail))
                 : failure->code == BendPreviewErrorCode::ToolIntersection
                     ? QStringLiteral("Обнаружено столкновение с инструментом в положении %1. "
                                      "Конфликтующие тела выделены красным.")
@@ -1347,7 +1366,7 @@ class MainWindow::Impl {
             previewStatus->setText(
                 previewStatus->text() +
                 QStringLiteral("\n\nИнструмент из каталога. Охват формы указан в условиях "
-                               "проверки; держатели, станок и допустимая нагрузка не проверены."));
+                               "проверки; допустимая нагрузка не проверена."));
         }
         singleBendSupported = supported;
         matchingBendThickness = matchingThickness;
@@ -1401,7 +1420,12 @@ class MainWindow::Impl {
              : entry && entry->catalogTools && entry->catalogTools->useDrawingGeometry
                  ? QStringLiteral("Выбрана форма DXF; результат её проверки ещё не подготовлен. ")
                  : QStringLiteral("Упрощённые рабочие профили. ")) +
-            QStringLiteral("Станок, держатели, усилие и пружинение не проверяются.") +
+            (preview && preview->machineModel() == core::MachineModel::DemoPressV1
+                 ? QStringLiteral(
+                       "Приближённые узлы учебного станка проверены по кадрам. "
+                       "Непрерывный отвод пуансона проверен только против детали и матрицы. "
+                       "Ход, усилие и пружинение не проверены.")
+                 : QStringLiteral("Станок, держатели, усилие и пружинение не проверяются.")) +
             (preview && (preview->toolSegmentGaps()[0] > 0 || preview->toolSegmentGaps()[1] > 0)
                  ? QStringLiteral("\nЗазоры между секциями сохранены в 3D. Местная опора и "
                                   "качество гиба в промежутках не рассчитываются.")

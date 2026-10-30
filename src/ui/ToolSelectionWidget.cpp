@@ -208,11 +208,19 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     layout->addWidget(manualPanel_);
     realGeometry_ = new QCheckBox(QStringLiteral("Использовать известные формы DXF"), this);
     realGeometry_->setObjectName(QStringLiteral("useDrawingToolGeometry"));
-    realGeometry_->setToolTip(
-        QStringLiteral("Для каждого инструмента используется его известный контур. Недостающая "
-                       "форма отдельно отмечена как условная. При новом выборе формы DXF "
-                       "включаются автоматически. Держатели и станок не моделируются."));
+    realGeometry_->setToolTip(QStringLiteral(
+        "Для каждого инструмента используется его известный контур. Недостающая "
+        "форма отдельно отмечена как условная. При новом выборе формы DXF "
+        "включаются автоматически. Узлы станка включаются отдельным выбором учебной сборки."));
     layout->addWidget(realGeometry_);
+    demoMachine_ = new QCheckBox(QStringLiteral("Демонстрационный станок"), this);
+    demoMachine_->setObjectName(QStringLiteral("demoMachine"));
+    demoMachine_->setToolTip(QStringLiteral(
+        "Показывать и проверять приближённые стол, адаптер, держатели, траверсу и боковые рамы. "
+        "Это учебная сборка, не точная модель SPEED BEND. Проверка по кадрам; ход и перенос не "
+        "проверены."));
+    layout->insertWidget(0, demoMachine_);
+    connect(demoMachine_, &QCheckBox::toggled, this, [this] { changed(); });
     geometryScope_ = wrapped(this);
     geometryScope_->setObjectName(QStringLiteral("toolGeometryScope"));
     layout->addWidget(geometryScope_);
@@ -258,7 +266,8 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         note->setText(
             assignment() && assignment()->useDrawingGeometry
                 ? QStringLiteral("Полные сечения из DXF используются и в 3D-проверке. Масштаб "
-                                 "одинаковый. Держатели, станок и нагрузка не моделируются.")
+                                 "одинаковый. Учебная сборка станка выбирается отдельно; нагрузка "
+                                 "не рассчитывается.")
                 : QStringLiteral("Условные рабочие сечения. Высота клина зависит от V; полные "
                                  "корпуса не показаны."));
         note->setMinimumHeight(note->heightForWidth(400));
@@ -288,11 +297,12 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     machine_->setPlaceholderText(QStringLiteral("Название станка (необязательно)"));
     machine_->setMaxLength(256);
     machine_->setToolTip(
-        QStringLiteral("Название для проекта. Геометрия и крепления станка пока не проверяются."));
+        QStringLiteral("Название для проекта; оно не выбирает геометрическую модель станка."));
     setupLayout->addWidget(machine_);
     auto *scope = wrapped(this);
-    scope->setText(QStringLiteral("Источник формы каждого инструмента указан возле сечений. "
-                                  "Держатели, станок и допустимая нагрузка не проверяются."));
+    scope->setText(QStringLiteral(
+        "Источник формы каждого инструмента указан возле сечений. "
+        "Учебная сборка станка выбирается отдельно; допустимая нагрузка не проверяется."));
     setupLayout->addWidget(scope);
     const auto selected = [this] {
         if (!updating_) {
@@ -404,6 +414,8 @@ std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
                            realGeometry_->isChecked()};
     a.punchAssembly = punchAssembly_;
     a.dieAssembly = dieAssembly_;
+    a.machineModel =
+        demoMachine_->isChecked() ? core::MachineModel::DemoPressV1 : core::MachineModel::None;
     return core::toolParameters(a) ? std::optional{a} : std::nullopt;
 }
 std::optional<core::PressTools> ToolSelectionWidget::parameters() const {
@@ -427,6 +439,8 @@ std::optional<core::PressTools> ToolSelectionWidget::rawParameters() const {
                        f[5]->value()};
     if (f[6]->value() != t.lengthMm)
         t.punchLengthMm = f[6]->value();
+    t.machineModel =
+        demoMachine_->isChecked() ? core::MachineModel::DemoPressV1 : core::MachineModel::None;
     return core::validPressTools(t) ? std::optional{t} : std::nullopt;
 }
 QString ToolSelectionWidget::openingIssue() const {
@@ -474,6 +488,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
                                     const std::optional<core::ToolAssignment> &a) {
     updating_ = true;
     if (a) {
+        demoMachine_->setChecked(a->machineModel == core::MachineModel::DemoPressV1);
         punchAssembly_ = a->punchAssembly;
         dieAssembly_ = a->dieAssembly;
         selectPreset(punch_, a->punch);
@@ -484,6 +499,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         realGeometry_->setChecked(a->useDrawingGeometry);
         mode_->setCurrentIndex(0);
     } else if (tools) {
+        demoMachine_->setChecked(tools->machineModel == core::MachineModel::DemoPressV1);
         punchAssembly_.reset();
         dieAssembly_.reset();
         const auto &t = *tools;

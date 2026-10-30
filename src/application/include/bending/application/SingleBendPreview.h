@@ -22,9 +22,19 @@ struct PunchRetractionCheck {
     double finalClearanceMm;
 };
 enum class ToolCollisionPair { SheetDie, SheetPunch, DiePunch };
+struct MachineCollision {
+    std::string firstId, firstName, secondId, secondName;
+};
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual core::MachineModel machineModel() const noexcept {
+        return core::MachineModel::None;
+    }
+    [[nodiscard]] virtual std::optional<MachineCollision>
+    machineCollisionAtFrame(std::size_t) const {
+        return {};
+    }
     [[nodiscard]] virtual bool unverifiedDraft() const noexcept {
         return false;
     }
@@ -89,6 +99,7 @@ enum class BendPreviewErrorCode {
     NoseTooLarge,
     SupportNotProven,
     ToolIntersection,
+    MachineIntersection,
     ContactLost,
     SheetIntersection,
     RetractionNotProven,

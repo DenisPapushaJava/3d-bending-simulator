@@ -248,6 +248,7 @@ void ImportController::Impl::dispatchDraft() {
                                 if (tools)
                                     valid = valid && p->toolSetup() &&
                                             p->toolSetup()->tools == *op.tools &&
+                                            p->machineModel() == op.tools->machineModel &&
                                             p->usesDrawingPunch() ==
                                                 bool(op.assignment &&
                                                      op.assignment->useDrawingGeometry &&
@@ -601,6 +602,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                  assignment->punch.drawing.has_value(),
                  expectedDie = assignment && assignment->useDrawingGeometry &&
                                assignment->die.drawing.has_value(),
+                 expectedMachine = tools ? tools->machineModel : core::MachineModel::None,
                  result = std::move(result)] {
                     state->running = false;
                     state->preparingPreview = false;
@@ -611,8 +613,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         editRevision == state->session.editRevision() &&
                         !state->session.activeRequest()) {
                         if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
-                            const bool matchingMode =
+                            bool matchingMode =
                                 *preview && !(*preview)->unverifiedDraft() &&
+                                (*preview)->machineModel() == expectedMachine &&
                                 (*preview)->usesDrawingPunch() == expectedPunch &&
                                 (*preview)->usesDrawingDie() == expectedDie &&
                                 (mode == BendPreviewMode::ToolSetup
@@ -636,6 +639,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                            (*preview)->punchRetraction()->finalClearanceMm > 0
                                      : !(*preview)->toolSetup() && !(*preview)->pressMotion() &&
                                            (*preview)->frameCount() >= 2);
+                            if (*preview)
+                                for (std::size_t f = 0; f < (*preview)->frameCount(); ++f)
+                                    matchingMode &= !(*preview)->machineCollisionAtFrame(f);
                             if (matchingMode) {
                                 state->preview = *preview;
                             } else {
@@ -645,11 +651,17 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         } else if (const auto &error = std::get<BendPreviewError>(result);
                                    error.code != BendPreviewErrorCode::Cancelled) {
                             state->previewError = error;
-                            if (error.diagnostic &&
-                                (error.code != BendPreviewErrorCode::ToolIntersection ||
-                                 error.diagnostic->frameCount() != 1 ||
-                                 !error.diagnostic->collision() || !error.diagnostic->toolSetup()))
-                                state->previewError->diagnostic.reset();
+                            if (error.diagnostic) {
+                                const bool collision =
+                                    (error.code == BendPreviewErrorCode::ToolIntersection &&
+                                     error.diagnostic->collision()) ||
+                                    (error.code == BendPreviewErrorCode::MachineIntersection &&
+                                     error.diagnostic->machineCollisionAtFrame(0));
+                                if (!collision || error.diagnostic->frameCount() != 1 ||
+                                    !error.diagnostic->toolSetup() ||
+                                    error.diagnostic->machineModel() != expectedMachine)
+                                    state->previewError->diagnostic.reset();
+                            }
                         }
                     }
                     state->dispatch();
@@ -838,6 +850,11 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         valid &= p->usesDrawingPunch() == drawingPunch &&
                                                  p->usesDrawingDie() == drawingDie &&
                                                  p->otherFormedBends() == order.size();
+                                        valid &= p->machineModel() ==
+                                                 (request.withTools ? found->tools->machineModel
+                                                                    : core::MachineModel::None);
+                                        for (std::size_t f = 0; f < p->frameCount(); ++f)
+                                            valid &= !p->machineCollisionAtFrame(f);
                                         if (request.withTools) {
                                             const auto *ret = p->punchRetraction();
                                             valid &= p->frameCount() >= 2 && p->toolSetup() &&

@@ -5,6 +5,13 @@ using namespace application;
 class CadPreview : public SingleBendPreview {
   public:
     bool draft = false;
+    std::vector<std::optional<MachineCollision>> machineConflicts;
+    core::MachineModel machineModel() const noexcept override {
+        return setup ? setup->tools.machineModel : core::MachineModel::None;
+    }
+    std::optional<MachineCollision> machineCollisionAtFrame(std::size_t i) const override {
+        return i < machineConflicts.size() ? machineConflicts[i] : std::nullopt;
+    }
     bool unverifiedDraft() const noexcept override {
         return draft;
     }

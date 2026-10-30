@@ -3,6 +3,9 @@
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include <BRepBndLib.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
 
 #include <AIS_ColoredShape.hxx>
 #include <AIS_InteractiveContext.hxx>
@@ -137,6 +140,33 @@ class OcctCanvas final : public QWidget {
         fit->setShortcutContext(Qt::WidgetWithChildrenShortcut);
         addAction(fit);
         connect(fit, &QAction::triggered, this, [this] { fitAll(); });
+        machineVisibleAction_ = navigationMenu_->addAction(QStringLiteral("Показать станок"));
+        machineVisibleAction_->setObjectName(QStringLiteral("showMachine"));
+        machineVisibleAction_->setCheckable(true);
+        machineVisibleAction_->setChecked(true);
+        connect(machineVisibleAction_, &QAction::toggled, this, [this] {
+            if (preview_)
+                presentPreview(preview_, previewFrame_, revision_);
+        });
+        auto *fitMachine = navigationMenu_->addAction(QStringLiteral("Весь станок"));
+        fitMachineAction_ = fitMachine;
+        fitMachine->setObjectName(QStringLiteral("fitMachine"));
+        connect(fitMachine, &QAction::triggered, this, [this] {
+            if (!ready_ || !preview_)
+                return;
+            machineVisibleAction_->setChecked(true);
+            wholeMachine_ = true;
+            presentPreview(preview_, previewFrame_, revision_);
+            Bnd_Box b;
+            const auto &frame = cad::OcctPreviewAccess::frame(*preview_, previewFrame_);
+            BRepBndLib::Add(frame.displayShape.IsNull() ? frame.shape : frame.displayShape, b);
+            for (const auto &c : frame.machine)
+                BRepBndLib::Add(c.shape, b);
+            view_->FitAll(b, .1, false);
+            reserveTransportSpace();
+            view_->ZFitAll();
+            view_->Redraw();
+        });
         const auto icon = [](bool isHome) {
             QIcon result;
             for (int ratio : {1, 2}) {
@@ -340,11 +370,24 @@ class OcctCanvas final : public QWidget {
         }
         const auto &frame = cad::OcctPreviewAccess::frame(*preview, index);
         const bool entering = preview_ != preview;
+        const bool preserveDraftView = preview_ && preview_->unverifiedDraft() &&
+                                       preview->unverifiedDraft() &&
+                                       bool(preview_->toolSetup()) == bool(preview->toolSetup());
+        if (entering && (!preserveDraftView || preview_->machineModel() != preview->machineModel()))
+            wholeMachine_ = false;
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
-                candidate = new AIS_ColoredShape(frame.displayShape.IsNull() ? frame.shape
-                                                                             : frame.displayShape);
+                TopoDS_Compound display;
+                BRep_Builder builder;
+                builder.MakeCompound(display);
+                builder.Add(display,
+                            frame.displayShape.IsNull() ? frame.shape : frame.displayShape);
+                if (machineVisibleAction_->isChecked())
+                    for (const auto &c : frame.machine)
+                        if (wholeMachine_ || localMachineComponent(c, *preview, index))
+                            builder.Add(display, c.shape);
+                candidate = new AIS_ColoredShape(display);
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
                 const std::array<Quantity_Color, 3> colors{
@@ -358,6 +401,7 @@ class OcctCanvas final : public QWidget {
                     TopExp::MapShapes(regions[region], TopAbs_FACE, regionFaces);
                     for (int face = 1; face <= regionFaces.Extent(); ++face) {
                         candidate->SetCustomColor(regionFaces(face), colors[region]);
+                        candidate->SetCustomTransparency(regionFaces(face), 0);
                     }
                 }
                 if (hoverPreviewBend_ && *hoverPreviewBend_ < frame.bendZones.size()) {
@@ -382,6 +426,34 @@ class OcctCanvas final : public QWidget {
                         TopExp::MapShapes(segment.shape, TopAbs_FACE, faces);
                         for (int face = 1; face <= faces.Extent(); ++face)
                             candidate->SetCustomColor(faces(face), native);
+                    }
+                }
+                for (const auto &c : frame.machine) {
+                    const Quantity_Color color(c.moving ? .40 : .31, c.moving ? .47 : .40,
+                                               c.moving ? .55 : .48, Quantity_TOC_RGB);
+                    candidate->SetCustomColor(c.shape, color);
+                    candidate->SetCustomTransparency(c.shape, .55);
+                }
+                if (const auto conflict = preview->machineCollisionAtFrame(index)) {
+                    const Quantity_Color red(.95, .06, .04, Quantity_TOC_RGB);
+                    const auto highlight = [&](const TopoDS_Shape &s) {
+                        TopTools_IndexedMapOfShape faces;
+                        TopExp::MapShapes(s, TopAbs_FACE, faces);
+                        for (int f = 1; f <= faces.Extent(); ++f) {
+                            candidate->SetCustomColor(faces(f), red);
+                            candidate->SetCustomTransparency(faces(f), 0);
+                        }
+                    };
+                    for (const auto &id : {conflict->firstId, conflict->secondId}) {
+                        if (id == "sheet")
+                            for (const auto &r : regions)
+                                highlight(r);
+                        if (id == "die" || id == "punch")
+                            highlight(frame.tools[id == "die" ? 0 : 1]);
+                        if (machineVisibleAction_->isChecked())
+                            for (const auto &c : frame.machine)
+                                if (id == c.id)
+                                    highlight(c.shape);
                     }
                 }
                 if (const auto conflict = preview->collisionAtFrame(index)) {
@@ -417,9 +489,7 @@ class OcctCanvas final : public QWidget {
                     }
                 }
                 context_->ClearSelected(false);
-                if (entering &&
-                    !(preview_ && preview_->unverifiedDraft() && preview->unverifiedDraft() &&
-                      bool(preview_->toolSetup()) == bool(preview->toolSetup()))) {
+                if (entering && !preserveDraftView) {
                     if (preview->toolSetup()) {
                         view_->SetProj(1.0, 0.5, 3.0);
                         view_->SetUp(0.0, 1.0, 0.0);
@@ -670,6 +740,11 @@ class OcctCanvas final : public QWidget {
     void fitAll() {
         if (shape_.IsNull()) {
             return;
+        }
+        if (wholeMachine_) {
+            wholeMachine_ = false;
+            if (preview_)
+                presentPreview(preview_, previewFrame_, revision_);
         }
         guarded([&] {
             if (preview_) {
@@ -972,6 +1047,11 @@ class OcctCanvas final : public QWidget {
         for (auto *action : navigationMenu_->findChildren<QAction *>())
             action->setEnabled(hasGeometry);
         const bool press = preview_ && preview_->toolSetup();
+        const bool machine = press && preview_->machineModel() != core::MachineModel::None;
+        for (auto *action : {machineVisibleAction_, fitMachineAction_}) {
+            action->setVisible(machine);
+            action->setEnabled(hasGeometry && machine);
+        }
         if (orbitLockAction_) {
             orbitLockAction_->setEnabled(hasGeometry && press);
             orbitLockButton_->setVisible(press);
@@ -1050,6 +1130,10 @@ class OcctCanvas final : public QWidget {
         box.Add(gp_Pnt(bounds.minimum.x, bounds.minimum.y, bounds.minimum.z));
         box.Add(gp_Pnt(bounds.maximum.x, bounds.maximum.y, bounds.maximum.z));
         view_->FitAll(box, dimensionsVisible_ ? 0.3 : 0.1, false);
+        reserveTransportSpace();
+        view_->ZFitAll();
+    }
+    void reserveTransportSpace() {
         if (bottomOverlay_ && bottomOverlay_->isVisible()) {
             const auto size = physicalSize();
             const int inset = qRound((bottomOverlay_->height() + 24) * devicePixelRatioF());
@@ -1059,7 +1143,20 @@ class OcctCanvas final : public QWidget {
             const auto camera = view_->Camera();
             camera->SetScale(camera->Scale() * size.height() / available);
         }
-        view_->ZFitAll();
+    }
+
+    bool localMachineComponent(const cad::MachineDisplayComponent &c,
+                               const application::SingleBendPreview &preview,
+                               std::size_t index) const {
+        if (const auto collision = preview.machineCollisionAtFrame(index);
+            collision && (c.id == collision->firstId || c.id == collision->secondId))
+            return true;
+        Bnd_Box b;
+        BRepBndLib::AddOptimal(c.shape, b, false, false);
+        const auto bounds = preview.bounds();
+        const double margin = std::max(50., (bounds.maximum.z - bounds.minimum.z) / 4);
+        return b.CornerMax().Z() >= bounds.minimum.z - margin &&
+               b.CornerMin().Z() <= bounds.maximum.z + margin;
     }
 
     QPoint physicalPoint(QPointF point) const {
@@ -1195,6 +1292,9 @@ class OcctCanvas final : public QWidget {
     QToolButton *dimensionsButton_ = nullptr;
     QAction *dimensionsAction_ = nullptr;
     QMenu *navigationMenu_ = nullptr;
+    QAction *machineVisibleAction_ = nullptr;
+    QAction *fitMachineAction_ = nullptr;
+    bool wholeMachine_ = false;
     QAction *orbitLockAction_ = nullptr;
     QPointer<QWidget> bottomOverlay_;
     QToolButton *orbitLockButton_ = nullptr;

@@ -141,7 +141,8 @@ std::optional<PressTools> toolParameters(const ToolAssignment &a) {
                       *a.punch.noseRadiusMm,
                       *dieLength,
                       a.clearanceMm,
-                      *punchLength};
+                      *punchLength,
+                      a.machineModel};
     return validPressTools(result) ? std::optional{result} : std::nullopt;
 }
 std::optional<double> toolLength(const ToolPreset &tool,

@@ -250,9 +250,25 @@ QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
                        {"groove", static_cast<int>(a->groove)},
                        {"clearanceMm", a->clearanceMm},
                        {"machineName", QString::fromStdString(a->machineName)},
+                       {"machineModel", machineModelJson(a->machineModel)},
                        {"useDrawingGeometry", a->useDrawingGeometry},
                        {"punchAssembly", assembly(a->punchAssembly)},
                        {"dieAssembly", assembly(a->dieAssembly)}};
+}
+QString machineModelJson(core::MachineModel model) {
+    return model == core::MachineModel::DemoPressV1 ? QStringLiteral("demo-press-v1")
+                                                    : QStringLiteral("none");
+}
+bool readMachineModel(const QJsonValue &value, core::MachineModel &model) {
+    if (value.isUndefined() || (value.isString() && value.toString() == QStringLiteral("none"))) {
+        model = core::MachineModel::None;
+        return true;
+    }
+    if (value.isString() && value.toString() == QStringLiteral("demo-press-v1")) {
+        model = core::MachineModel::DemoPressV1;
+        return true;
+    }
+    return false;
 }
 bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment> &assignment) {
     if (value.isNull()) {
@@ -264,6 +280,8 @@ bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment>
     }
     const auto o = value.toObject();
     core::ToolAssignment a;
+    if (!readMachineModel(o.value("machineModel"), a.machineModel))
+        return false;
     const auto readAssembly = [](const QJsonValue &v, std::optional<core::ToolAssembly> &out) {
         if (v.isNull() || v.isUndefined())
             return true;

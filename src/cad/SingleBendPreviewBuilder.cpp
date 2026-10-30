@@ -4,6 +4,7 @@
 #include "RouteGeometry.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/DrawingTools.h"
+#include "bending/cad/occt/MachineAssembly.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include "bending/simulation/ToolProfiles.h"
 
@@ -916,6 +917,9 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                               : WholePartSkin{};
         if (stop.stop_requested())
             return cancelled();
+        std::optional<MachineAssembly> machine;
+        if (preview->setup && toolParameters->machineModel != core::MachineModel::None)
+            machine.emplace(*toolParameters, initialTools, stop);
         Bnd_Box envelope;
         bool returnSweepClear = true;
         constexpr std::size_t formingIntervals = 40;
@@ -1031,16 +1035,30 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                     for (auto &segment : frame.toolSegments[1])
                         segment.shape = segment.shape.Moved(location);
                 }
+                if (machine) {
+                    const double lift = withMotion
+                                            ? preview->states.back().punchTipYmm -
+                                                  model.thicknessMm - toolParameters->clearanceMm
+                                            : 0;
+                    frame.machine = machine->at(lift);
+                }
+                const auto machineConflict =
+                    MachineAssembly::check(frame, analysis.lengthToleranceMm, stop);
                 const std::array<std::pair<TopoDS_Shape, TopoDS_Shape>, 3> pairs{
                     {{frame.shape, frame.tools[0]},
                      {frame.shape, frame.tools[1]},
                      {frame.tools[0], frame.tools[1]}}};
-                for (std::size_t pair = 0; pair < pairs.size(); ++pair) {
+                for (std::size_t pair = 0; pair < pairs.size() + 1; ++pair) {
                     if (stop.stop_requested())
                         return cancelled();
-                    bool completed = false;
-                    if (!disjointVolumes(pairs[pair].first, pairs[pair].second,
-                                         analysis.lengthToleranceMm, collisionBudget, &completed)) {
+                    bool completed = pair == pairs.size();
+                    const bool conflict =
+                        pair == pairs.size()
+                            ? machineConflict.has_value()
+                            : !disjointVolumes(pairs[pair].first, pairs[pair].second,
+                                               analysis.lengthToleranceMm, collisionBudget,
+                                               &completed);
+                    if (conflict) {
                         if (!completed)
                             return BendPreviewError{BendPreviewErrorCode::Failed,
                                                     "Tool collision Boolean failed", i};
@@ -1071,7 +1089,9 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         diagnostic->filledCutouts = preview->filledCutouts;
                         diagnostic->gaps = preview->gaps;
                         diagnostic->otherBends = preview->otherBends;
-                        diagnostic->conflict = static_cast<ToolCollisionPair>(pair);
+                        if (pair < pairs.size())
+                            diagnostic->conflict = static_cast<ToolCollisionPair>(pair);
+                        diagnostic->machineConflicts.push_back(machineConflict);
                         if (withMotion) {
                             diagnostic->motion = preview->motion;
                             diagnostic->states.push_back(preview->states.back());
@@ -1082,9 +1102,13 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                 diagnostic->envelope.minimum.z, diagnostic->envelope.maximum.x,
                                 diagnostic->envelope.maximum.y, diagnostic->envelope.maximum.z);
                         diagnostic->frames.push_back(std::move(frame));
-                        return BendPreviewError{BendPreviewErrorCode::ToolIntersection,
-                                                "Tool and material volumes intersect", i,
-                                                BendPreviewPtr(diagnostic)};
+                        return BendPreviewError{
+                            pair == pairs.size() ? BendPreviewErrorCode::MachineIntersection
+                                                 : BendPreviewErrorCode::ToolIntersection,
+                            pair == pairs.size()
+                                ? machineConflict->firstName + " — " + machineConflict->secondName
+                                : "Tool and material volumes intersect",
+                            i, BendPreviewPtr(diagnostic)};
                     }
                 }
                 if (withMotion) {
@@ -1154,6 +1178,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                     makeDisplay(frame, displaySource, model, sourceBasis, basis, section, stop);
             }
             BRepBndLib::Add(frame.shape, envelope);
+            preview->machineConflicts.push_back({});
             preview->frames.push_back(std::move(frame));
         }
         if (stop.stop_requested()) {
@@ -1172,6 +1197,8 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                                                   ? error.GetMessageString()
                                                                   : "OCCT preview failure"};
     } catch (const std::exception &error) {
+        if (stop.stop_requested())
+            return cancelled();
         return BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
     }
 }

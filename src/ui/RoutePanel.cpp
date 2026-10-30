@@ -518,6 +518,10 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             case Code::ToolIntersection:
                 message += QStringLiteral(" Обнаружено столкновение с инструментом.");
                 break;
+            case Code::MachineIntersection:
+                message += QStringLiteral(" Столкновение с узлом демонстрационного станка: %1.")
+                               .arg(QString::fromStdString(error->detail));
+                break;
             case Code::SheetIntersection:
                 message += QStringLiteral(" Стенки детали пересекаются при движении.");
                 break;
@@ -589,7 +593,14 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                                               "переналадка не проверена. ");
             }
         }
-        message += QStringLiteral("Извлечение, перенос и станок не проверены.");
+        const bool demoMachine =
+            std::any_of(route_->steps.begin(), route_->steps.end(), [](const auto &s) {
+                return s.preview && s.preview->machineModel() == core::MachineModel::DemoPressV1;
+            });
+        message += demoMachine
+                       ? QStringLiteral("Учебный станок проверен по кадрам. Реальные габариты, "
+                                        "ход, извлечение и перенос не подтверждены.")
+                       : QStringLiteral("Извлечение, перенос и станок не проверены.");
     } else if (draft) {
         message = selected_ ? QStringLiteral("Ручной порядок · шаг %1/%2 · B%3. ")
                                   .arg(selected_)
