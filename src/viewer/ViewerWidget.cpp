@@ -17,6 +17,7 @@
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
 #include <Font_NameOfFont.hxx>
+#include <Graphic3d_Camera.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -75,6 +76,7 @@ struct FaceHighlights {
 
 class OcctCanvas final : public QWidget {
     enum class DisplayStyle { Edges, Shaded, Wireframe };
+    enum class SceneSpace { Cad, Flat, Kinematic, Press };
 
   public:
     explicit OcctCanvas(QWidget *parent) : QWidget(parent) {
@@ -140,6 +142,13 @@ class OcctCanvas final : public QWidget {
         fit->setShortcutContext(Qt::WidgetWithChildrenShortcut);
         addAction(fit);
         connect(fit, &QAction::triggered, this, [this] { fitAll(); });
+        auto *refresh = navigationMenu_->addAction(QStringLiteral("Обновить вид"));
+        refresh->setObjectName(QStringLiteral("refreshScene"));
+        refresh->setShortcut(QKeySequence(Qt::Key_F5));
+        refresh->setShortcutContext(Qt::WindowShortcut);
+        refresh->setToolTip(QStringLiteral("Перерисовать сцену и панели без пересчёта гибки · F5"));
+        addAction(refresh);
+        connect(refresh, &QAction::triggered, this, [this] { refreshScene(); });
         machineVisibleAction_ = navigationMenu_->addAction(QStringLiteral("Показать станок"));
         machineVisibleAction_->setObjectName(QStringLiteral("showMachine"));
         machineVisibleAction_->setCheckable(true);
@@ -167,7 +176,8 @@ class OcctCanvas final : public QWidget {
             view_->ZFitAll();
             view_->Redraw();
         });
-        const auto icon = [](bool isHome) {
+        enum class NavigationIcon { Home, Fit, Refresh };
+        const auto icon = [](NavigationIcon type) {
             QIcon result;
             for (int ratio : {1, 2}) {
                 QPixmap pixels(24 * ratio, 24 * ratio);
@@ -176,7 +186,7 @@ class OcctCanvas final : public QWidget {
                 QPainter painter(&pixels);
                 painter.setRenderHint(QPainter::Antialiasing);
                 painter.setPen(QPen(QColor("#1C2938"), 1.6));
-                if (isHome) {
+                if (type == NavigationIcon::Home) {
                     painter.drawPolyline(QPolygonF{{3, 11}, {12, 3}, {21, 11}});
                     painter.drawPolyline(QPolygonF{{6, 10},
                                                    {6, 21},
@@ -186,6 +196,9 @@ class OcctCanvas final : public QWidget {
                                                    {14, 21},
                                                    {18, 21},
                                                    {18, 10}});
+                } else if (type == NavigationIcon::Refresh) {
+                    painter.drawArc(QRectF(4, 4, 16, 16), 45 * 16, 270 * 16);
+                    painter.drawPolyline(QPolygonF{{13, 18}, {19, 18}, {19, 23}});
                 } else {
                     for (int x : {0, 1})
                         for (int y : {0, 1}) {
@@ -200,8 +213,9 @@ class OcctCanvas final : public QWidget {
             }
             return result;
         };
-        home->setIcon(icon(true));
-        fit->setIcon(icon(false));
+        home->setIcon(icon(NavigationIcon::Home));
+        fit->setIcon(icon(NavigationIcon::Fit));
+        refresh->setIcon(icon(NavigationIcon::Refresh));
         const auto button = [&](QAction *action, const char *name) {
             auto *result = new QToolButton(controls_);
             result->setObjectName(QString::fromLatin1(name));
@@ -215,6 +229,7 @@ class OcctCanvas final : public QWidget {
         };
         button(home, "homeView");
         button(fit, "fitView");
+        button(refresh, "refreshView")->setToolTip(refresh->toolTip());
         auto *menuButton = new QToolButton(controls_);
         menuButton->setObjectName(QStringLiteral("viewOptions"));
         menuButton->setText(QStringLiteral("Вид"));
@@ -291,6 +306,7 @@ class OcctCanvas final : public QWidget {
     std::function<void(const QString &)> onError;
     std::function<void()> onReady;
     std::function<void(quint64, int)> onSelection;
+    std::function<void()> onSurfaceChanged;
 
     QMenu *navigationMenu() const {
         return navigationMenu_;
@@ -301,6 +317,29 @@ class OcctCanvas final : public QWidget {
 
     bool ready() const {
         return ready_;
+    }
+
+    void refreshScene() {
+        guarded([&] {
+            // Rebuild only GPU presentations from existing immutable shapes/meshes.
+            // Keep selection, camera, machine filtering and the current simulation frame.
+            for (const auto &object :
+                 {Handle(AIS_InteractiveObject)(presentation_),
+                  Handle(AIS_InteractiveObject)(evidence_), Handle(AIS_InteractiveObject)(support_),
+                  Handle(AIS_InteractiveObject)(navigationCube_)}) {
+                if (!object.IsNull())
+                    context_->RecomputePrsOnly(object, false, true);
+            }
+            for (const auto &object : dimensions_.objects)
+                context_->RecomputePrsOnly(object, false, true);
+            view_->MustBeResized();
+            view_->ZFitAll();
+            view_->Invalidate();
+            view_->Redraw();
+        });
+        positionControls();
+        if (onSurfaceChanged)
+            onSurfaceChanged();
     }
 
     QString present(const TopoDS_Shape &shape, application::DocumentPtr document, quint64 revision,
@@ -844,8 +883,15 @@ class OcctCanvas final : public QWidget {
     bool event(QEvent *event) override {
         const bool handled = QWidget::event(event);
         if (event->type() == QEvent::WinIdChange && ready_) {
+            restoreCamera_ = new Graphic3d_Camera(view_->Camera());
+            restoreRevision_ = revision_;
+            restoreSpace_ = sceneSpace();
             release();
             attempted_ = false;
+            update();
+        } else if (event->type() == QEvent::WindowActivate) {
+            guarded([&] { view_->Invalidate(); });
+            positionControls();
             update();
         }
         return handled;
@@ -863,18 +909,22 @@ class OcctCanvas final : public QWidget {
     }
 
     void resizeEvent(QResizeEvent *) override {
-        controls_->adjustSize();
-        controls_->move(qMax(12, width() - controls_->width() - 12), 12);
-        positionOrbitLock();
+        positionControls();
         updateNavigationCube();
         refreshDimensions();
         guarded([&] { view_->Redraw(); });
+        if (onSurfaceChanged)
+            onSurfaceChanged();
     }
 
     void showEvent(QShowEvent *) override {
         if (!window_.IsNull()) {
             window_->Map();
         }
+        guarded([&] { view_->Invalidate(); });
+        positionControls();
+        if (onSurfaceChanged)
+            onSurfaceChanged();
         update();
     }
 
@@ -1184,6 +1234,8 @@ class OcctCanvas final : public QWidget {
     void initialize() {
         attempted_ = true;
         try {
+            if (restoreRevision_ != revision_ || restoreSpace_ != sceneSpace())
+                restoreCamera_.Nullify();
             // app configures runtime resources before starting any CAD worker.
             display_ = new Aspect_DisplayConnection();
             driver_ = new OpenGl_GraphicDriver(display_);
@@ -1220,7 +1272,8 @@ class OcctCanvas final : public QWidget {
             updateDimensionButton();
             if (flat_) {
                 const auto flat = flat_;
-                flat_.reset();
+                if (restoreCamera_.IsNull())
+                    flat_.reset();
                 const auto error = presentFlat(flat, revision_);
                 if (!error.isEmpty())
                     throw std::runtime_error(error.toStdString());
@@ -1228,7 +1281,8 @@ class OcctCanvas final : public QWidget {
                 // Rebuild native resources from the same immutable worker snapshot.
                 const auto preview = preview_;
                 const auto index = previewFrame_;
-                preview_.reset();
+                if (restoreCamera_.IsNull())
+                    preview_.reset();
                 const auto error = presentPreview(preview, index, revision_);
                 if (!error.isEmpty()) {
                     throw std::runtime_error(error.toStdString());
@@ -1239,6 +1293,16 @@ class OcctCanvas final : public QWidget {
                     throw std::runtime_error(error.toStdString());
                 }
             }
+            if (!restoreCamera_.IsNull()) {
+                restoreCamera_->SetAspect(static_cast<double>(size.width()) / size.height());
+                view_->SetCamera(restoreCamera_);
+                restoreCamera_.Nullify();
+                view_->ZFitAll();
+                view_->Invalidate();
+            }
+            positionControls();
+            if (onSurfaceChanged)
+                onSurfaceChanged();
             if (ready_ && onReady) {
                 onReady();
             }
@@ -1358,12 +1422,32 @@ class OcctCanvas final : public QWidget {
     Handle(AIS_InteractiveContext) context_;
     Handle(V3d_View) view_;
     Handle(Aspect_NeutralWindow) window_;
+    Handle(Graphic3d_Camera) restoreCamera_;
+    quint64 restoreRevision_ = 0;
+    SceneSpace restoreSpace_ = SceneSpace::Cad;
+
+    SceneSpace sceneSpace() const {
+        return flat_      ? SceneSpace::Flat
+               : preview_ ? (preview_->toolSetup() ? SceneSpace::Press : SceneSpace::Kinematic)
+                          : SceneSpace::Cad;
+    }
+
+    void positionControls() {
+        controls_->adjustSize();
+        controls_->move(qMax(12, width() - controls_->width() - 12), 12);
+        controls_->raise();
+        controls_->update();
+        positionOrbitLock();
+        orbitLockButton_->raise();
+        orbitLockButton_->update();
+    }
 };
 
 } // namespace
 
 class ViewerWidget::Impl {
   public:
+    bool overlayLayoutQueued = false;
     QPointer<QWidget> bottomOverlay;
     OcctCanvas *canvas = nullptr; // Qt parent owns the canvas and its native resources.
     QLabel *errorPage = nullptr;
@@ -1406,6 +1490,7 @@ ViewerWidget::ViewerWidget(QWidget *parent) : QWidget(parent), impl_(std::make_u
     impl_->canvas->onSelection = [this](quint64 revision, int face) {
         emit selectionChanged(revision, face);
     };
+    impl_->canvas->onSurfaceChanged = [this] { queueOverlayLayout(); };
     impl_->canvas->onError = [this, reportError](const QString &message) {
         // Switch pages after the native paint/input event has completed.
         QTimer::singleShot(0, this, [reportError, message] { reportError(message); });
@@ -1450,20 +1535,41 @@ void ViewerWidget::setBottomOverlay(QWidget *widget) {
     host->installEventFilter(this);
     widget->installEventFilter(this);
     widget->hide();
+    queueOverlayLayout();
+}
+void ViewerWidget::queueOverlayLayout() {
+    if (impl_->overlayLayoutQueued)
+        return;
+    impl_->overlayLayoutQueued = true;
+    // LayoutRequest/Show filters run before Qt has finished arranging child widgets.
+    QTimer::singleShot(0, this, [this] {
+        impl_->overlayLayoutQueued = false;
+        layoutBottomOverlay();
+    });
+}
+void ViewerWidget::layoutBottomOverlay() {
+    auto *widget = impl_->bottomOverlay.data();
+    if (!widget || !widget->parentWidget())
+        return;
+    widget->ensurePolished();
+    if (widget->layout())
+        widget->layout()->activate();
+    const auto size = widget->parentWidget()->size();
+    const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
+    const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
+    const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
+    if (widget->geometry() != target)
+        widget->setGeometry(target);
+    widget->raise();
+    widget->update();
 }
 bool ViewerWidget::eventFilter(QObject *watched, QEvent *event) {
     auto *widget = impl_->bottomOverlay.data();
     if (widget && (watched == widget || watched == widget->parentWidget()) &&
         (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
-         event->type() == QEvent::LayoutRequest)) {
-        const auto size = widget->parentWidget()->size();
-        const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
-        const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
-        const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
-        if (widget->geometry() != target)
-            widget->setGeometry(target);
-        widget->raise();
-    }
+         event->type() == QEvent::LayoutRequest || event->type() == QEvent::WinIdChange ||
+         event->type() == QEvent::WindowActivate))
+        queueOverlayLayout();
     return QWidget::eventFilter(watched, event);
 }
 
@@ -1475,6 +1581,11 @@ void ViewerWidget::fitAll() {
     if (impl_->canvas) {
         impl_->canvas->fitAll();
     }
+}
+void ViewerWidget::refreshScene() {
+    if (impl_->canvas)
+        impl_->canvas->refreshScene();
+    queueOverlayLayout();
 }
 void ViewerWidget::setToolSegmentColors(ToolSegmentColors colors) {
     if (impl_->canvas)

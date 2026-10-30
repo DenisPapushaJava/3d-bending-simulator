@@ -344,6 +344,26 @@ x.XCloseDisplay(d)
         step(2)->click();
         wait([&] { return !controller.hasWork(); });
         slider->setValue(10);
+        const auto refreshedDraft = controller.routeDraft();
+        const auto refreshedRevision = controller.session().editRevision();
+        const auto draftsBeforeRefresh = builder->drafts.load();
+        const auto searchesBeforeRefresh = builder->searches.load();
+        if (viewer->isReady()) {
+            auto *refresh = viewer->findChild<QAction *>("refreshScene");
+            require(refresh && refresh->isEnabled(), "Manual scene refresh is unavailable");
+            const auto beforeRefresh = viewer->captureImage(false);
+            refresh->trigger();
+            QApplication::processEvents();
+            require(viewer->captureImage(false) == beforeRefresh && slider->value() == 10 &&
+                        controller.routeDraft() == refreshedDraft && !controller.hasWork() &&
+                        builder->drafts == draftsBeforeRefresh &&
+                        builder->searches == searchesBeforeRefresh &&
+                        controller.session().editRevision() == refreshedRevision,
+                    "Scene refresh changed the manual step or reran its checker");
+            require(overlay->isVisible() && overlay->height() >= overlay->sizeHint().height() &&
+                        overlay->geometry().bottom() < overlay->parentWidget()->height(),
+                    "Manual step strip is hidden or clipped after refresh");
+        }
         if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
             auto shot = window.grab().toImage();
             auto *viewer = window.findChild<viewer::ViewerWidget *>();

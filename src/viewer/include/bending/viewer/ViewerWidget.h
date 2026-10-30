@@ -38,6 +38,8 @@ class ViewerWidget final : public QWidget {
     // Qt-only HUD attachment. The viewer owns positioning above its native canvas.
     void setBottomOverlay(QWidget *);
     void setToolSegmentColors(ToolSegmentColors);
+    // Redraws the current presentations/HUD without changing the camera or CAD inputs.
+    void refreshScene();
     void fitAll();
     void setCutoutsVisible(bool visible);
     void setDimensionsVisible(bool visible);
@@ -69,6 +71,8 @@ class ViewerWidget final : public QWidget {
   private:
     class Impl;
     std::unique_ptr<Impl> impl_;
+    void queueOverlayLayout();
+    void layoutBottomOverlay();
 
   protected:
     bool eventFilter(QObject *, QEvent *) override;

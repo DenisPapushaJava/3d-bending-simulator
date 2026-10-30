@@ -125,6 +125,34 @@ int main(int argc, char **argv) {
             viewer->findChild<QAction *>("fitMachine")->trigger();
         }
         const auto originalScene = viewer->captureImage(false);
+        const auto refreshRevision = controller.session().editRevision();
+        if (viewer->isReady()) {
+            auto *refresh = viewer->findChild<QAction *>("refreshScene");
+            require(refresh && refresh->isEnabled(), "Scene refresh is missing");
+            refresh->trigger();
+            QApplication::processEvents();
+            require(viewer->captureImage(false) == originalScene && frame->value() == 30 &&
+                        controller.bendPreview() == preview && !controller.hasWork() &&
+                        controller.session().editRevision() == refreshRevision,
+                    "Refresh changed the machine camera/frame or restarted CAD");
+            auto *canvas = viewer->findChild<QWidget *>("cadCanvas");
+            require(canvas, "Machine canvas is missing");
+            QEvent nativeChange(QEvent::WinIdChange);
+            QApplication::sendEvent(canvas, &nativeChange);
+            QElapsedTimer redraw;
+            redraw.start();
+            while (!viewer->isReady() && viewer->errorString().isEmpty() &&
+                   redraw.elapsed() < 10000)
+                QApplication::processEvents();
+            // Native recreation also queues the HUD layout; let it settle before
+            // recording a baseline used by later asynchronous tool changes.
+            QApplication::processEvents();
+            require(viewer->isReady() && viewer->captureImage(false) == originalScene &&
+                        frame->value() == 30 && controller.bendPreview() == preview &&
+                        !controller.hasWork() &&
+                        controller.session().editRevision() == refreshRevision,
+                    "Native recreation lost the press frame, camera or whole-machine view");
+        }
         auto *reverse = window.findChild<QToolButton *>("reversePunch");
         require(reverse && !reverse->icon().isNull() && reverse->text().isEmpty() &&
                     !window.findChild<QToolButton *>("normalPunch"),
@@ -151,8 +179,12 @@ int main(int argc, char **argv) {
                     !controller.bendPreview()->toolSetup()->tools.punchReversed &&
                     reverse->icon().cacheKey() == normalIcon,
                 "Second toggle click did not restore normal orientation");
-        require(frame->value() == 30 &&
-                    (originalScene.isNull() || viewer->captureImage(false) == originalScene),
+        const auto roundTripScene = viewer->captureImage(false);
+        if (!originalScene.isNull() && roundTripScene != originalScene && argc > 1) {
+            originalScene.save(QString::fromLocal8Bit(argv[1]) + "-before.png");
+            roundTripScene.save(QString::fromLocal8Bit(argv[1]) + "-round-trip.png");
+        }
+        require(frame->value() == 30 && (originalScene.isNull() || roundTripScene == originalScene),
                 "Round-trip reversal lost frame, camera, anchor or whole-machine view");
         reverse->click();
         wait(controller);
