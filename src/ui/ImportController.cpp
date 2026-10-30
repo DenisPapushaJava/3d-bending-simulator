@@ -740,7 +740,14 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
             return false;
     }
     request.manualThicknessMm = session.manualThicknessMm();
-    if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
+    const auto previous = s->routeBuilder.lock();
+    // Reselecting the current immutable, checked draft needs no worker round-trip.
+    if (previous == builder && s->draft && s->draft->source == session.document() &&
+        s->draft->request == request) {
+        emit stateChanged();
+        return true;
+    }
+    if (previous && previous != builder)
         previous->discardRouteCache();
     s->routeBuilder = builder;
     s->invalidateDraft();

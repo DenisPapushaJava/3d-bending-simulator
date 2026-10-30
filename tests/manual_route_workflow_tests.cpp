@@ -5,6 +5,7 @@
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <QAction>
 #include <QApplication>
 #include <QComboBox>
 #include <QElapsedTimer>
@@ -41,7 +42,7 @@ class Builder final : public application::SingleBendPreviewBuilder {
   public:
     mutable cad::SingleBendPreviewBuilder implementation;
     mutable std::atomic<unsigned> searches = 0, drafts = 0;
-    mutable std::atomic<bool> delay = false, entered = false;
+    mutable std::atomic<bool> delay = false, entered = false, fail = false;
     application::BendRouteResult buildRoute(application::DocumentPtr d,
                                             application::BendRouteRequest r,
                                             std::stop_token s) const override {
@@ -52,6 +53,9 @@ class Builder final : public application::SingleBendPreviewBuilder {
                                                   application::RouteDraftRequest r,
                                                   std::stop_token s) const override {
         ++drafts;
+        if (fail.exchange(false))
+            return application::BendRouteError{application::BendRouteErrorCode::Failed,
+                                               "Injected preparation failure"};
         if (delay.exchange(false)) {
             entered = true;
             QThread::msleep(200);
@@ -142,14 +146,36 @@ int main(int argc, char **argv) {
         mode->setCurrentIndex(1); // Shared setup before changing one operation's orientation.
         step(1)->click();
         wait([&] { return !controller.hasWork(); });
+        auto *viewer = window.findChild<viewer::ViewerWidget *>();
+        require(viewer, "Viewer missing");
+        if (viewer->isReady())
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
+        slider->setValue(10);
+        const auto originalScene = viewer->captureImage(false);
+        const auto draftsBefore = builder->drafts.load();
+        step(1)->click();
+        require(!controller.hasWork() && builder->drafts == draftsBefore &&
+                    slider->value() == slider->maximum(),
+                "Reselecting a ready step queued a redundant CAD job or lost its endpoint");
+        unsigned presentations = 0;
+        const auto connection = QObject::connect(viewer, &viewer::ViewerWidget::selectionChanged,
+                                                 viewer, [&](quint64, int) { ++presentations; });
+        step(1)->click();
+        QObject::disconnect(connection);
+        require(presentations == 0 && builder->drafts == draftsBefore,
+                "Reselecting the displayed endpoint rebuilt CAD or its presentation");
+        slider->setValue(10);
         auto *reverse = window.findChild<QToolButton *>("reversePunch");
         require(reverse && reverse->isEnabled(), "Manual punch orientation control missing");
         const auto searchesBefore = builder->searches.load();
         reverse->click();
+        require(originalScene.isNull() || viewer->captureImage(false) == originalScene,
+                "Manual reversal displayed the source part during invalidation");
         wait([&] { return !controller.hasWork(); });
         require(controller.routeDraft() && mode->currentIndex() == 2 &&
                     builder->searches == searchesBefore,
                 "Per-step reversal launched order search or stayed shared");
+        require(slider->value() == 10, "Manual reversal reset the forming position");
         for (std::size_t i = 0; i < controller.routeDraft()->request.operations.size(); ++i)
             require(controller.routeDraft()->request.operations[i].tools->punchReversed == (i == 0),
                     "Reversal changed an unrelated operation");
@@ -158,11 +184,36 @@ int main(int argc, char **argv) {
         require(controller.routeDraft() &&
                     !controller.routeDraft()->request.operations[0].tools->punchReversed,
                 "Cannot restore manual punch orientation");
+        require(slider->value() == 10 &&
+                    (originalScene.isNull() || viewer->captureImage(false) == originalScene),
+                "Manual reversal lost its camera or forming position");
+        const auto beforeStepChange = viewer->captureImage(false);
         step(4)->click();
+        require(beforeStepChange.isNull() || viewer->captureImage(false) == beforeStepChange,
+                "Step selection flashed the source part while preparing the new state");
         wait([&] { return !controller.hasWork(); });
         require(controller.routeDraft() && controller.routeDraft()->request.step == 4 &&
                     slider->value() == slider->maximum(),
                 "Step does not show the formed prefix endpoint");
+        const auto beforeFailure = viewer->captureImage(false);
+        builder->fail = true;
+        step(3)->click();
+        wait([&] { return !controller.hasWork(); });
+        require(!controller.routeDraft() && controller.routeDraftError() &&
+                    !window.findChild<QPushButton *>("playBend")->isEnabled() &&
+                    window.findChild<QLabel *>("bendCheckSummary")
+                        ->text()
+                        .contains(QStringLiteral("Положение не проверено")) &&
+                    (beforeFailure.isNull() || viewer->captureImage(false) == beforeFailure),
+                "Failed replacement lost the scene or reused a positive result");
+        auto *source = window.findChild<QPushButton *>("returnToCad");
+        require(source && source->isEnabled(), "Cannot leave a failed replacement");
+        source->click();
+        window.findChild<QToolButton *>("processStage2")->click();
+        step(4)->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && controller.routeDraft()->request.step == 4,
+                "Cannot recover from a failed replacement");
         const auto original = order(controller);
         auto expected = original;
         const auto id = expected.back();
@@ -272,6 +323,16 @@ x.XCloseDisplay(d)
                     !controller.bendRoute()->steps[0].preview->unverifiedDraft(),
                 "Explicit checking lost the manual route");
         step(2)->click();
+        if (viewer->isReady())
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
+        const auto checkedStep = viewer->captureImage(false);
+        const auto readyDrafts = builder->drafts.load();
+        step(3)->click();
+        step(2)->click();
+        require(!controller.hasWork() && builder->drafts == readyDrafts && builder->searches == 1 &&
+                    slider->value() == slider->maximum() &&
+                    (checkedStep.isNull() || viewer->captureImage(false) == checkedStep),
+                "Ready route steps rebuilt CAD or reset the scene camera");
         window.findChild<QPushButton *>("routeMoveEarlier")->click();
         require(!controller.bendRoute(), "Reordering retained an old positive report");
         wait([&] { return !controller.hasWork(); });

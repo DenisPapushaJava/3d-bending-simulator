@@ -370,10 +370,11 @@ class OcctCanvas final : public QWidget {
         }
         const auto &frame = cad::OcctPreviewAccess::frame(*preview, index);
         const bool entering = preview_ != preview;
-        const bool preserveDraftView = preview_ && preview_->unverifiedDraft() &&
-                                       preview->unverifiedDraft() &&
-                                       bool(preview_->toolSetup()) == bool(preview->toolSetup());
-        if (entering && (!preserveDraftView || preview_->machineModel() != preview->machineModel()))
+        // A new immutable result is still the same workspace. Reframe only when entering
+        // from CAD or changing between the machine (Y-up) and kinematic (Z-up) spaces.
+        const bool preserveView =
+            preview_ && bool(preview_->toolSetup()) == bool(preview->toolSetup());
+        if (entering && !preserveView)
             wholeMachine_ = false;
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
@@ -489,7 +490,7 @@ class OcctCanvas final : public QWidget {
                     }
                 }
                 context_->ClearSelected(false);
-                if (entering && !preserveDraftView) {
+                if (entering && !preserveView) {
                     if (preview->toolSetup()) {
                         view_->SetProj(1.0, 0.5, 3.0);
                         view_->SetUp(0.0, 1.0, 0.0);
@@ -1336,6 +1337,8 @@ class OcctCanvas final : public QWidget {
 
   public:
     void highlightPreviewBend(std::optional<std::size_t> i) {
+        if (hoverPreviewBend_ == i)
+            return;
         hoverPreviewBend_ = i;
         if (preview_)
             presentPreview(preview_, previewFrame_, revision_);

@@ -528,6 +528,7 @@ class MainWindow::Impl {
                                           : perBend  ? entry->catalogTools
                                                      : assignment});
         }
+        beginPreviewReplacement();
         stopPlayback();
         viewingDraft = false;
         draftAutoPlay = false;
@@ -568,6 +569,7 @@ class MainWindow::Impl {
             return;
         }
         const auto assignment = toolSelection->assignment();
+        beginPreviewReplacement();
         toolDraftChanged = false;
         const bool applied =
             assignment
@@ -587,6 +589,7 @@ class MainWindow::Impl {
 
     void showSource() {
         stopPlayback();
+        previewReplacement.reset();
         viewingDraft = false;
         draftAutoPlay = false;
         viewingSource = true;
@@ -642,6 +645,7 @@ class MainWindow::Impl {
             return;
         }
         stopPlayback();
+        previewReplacement.reset();
         viewingSource = true;
         wantFlat = true;
         if (displayedPreview) {
@@ -804,8 +808,9 @@ class MainWindow::Impl {
             : !chosen ? QStringLiteral("Нужен инструмент")
                       : QStringLiteral("Нужна проверка"));
         const bool checking = propertyTabs->currentIndex() == 2 && !viewingSource;
-        const bool transport = checking && (preview || controller->isPreparingPreview() ||
-                                            controller->isPreparingDraft());
+        const bool transport =
+            checking && (preview || previewReplacement || controller->isPreparingPreview() ||
+                         controller->isPreparingDraft());
         playbackControls->setVisible(transport);
         operationOverlay->setVisible(checking && (transport || (document && bendCount > 1)));
     }
@@ -832,6 +837,15 @@ class MainWindow::Impl {
         const auto row = bendList->currentIndex().row();
         return row >= 0 ? std::optional{static_cast<std::size_t>(row)} : std::nullopt;
     }
+    void beginPreviewReplacement(bool preserveFrame = false) {
+        if (!viewingSource && displayedPreview && !previewReplacement) {
+            previewReplacement = PreviewReplacement{
+                controller->session().document(), controller->session().revision(),
+                displayedPreview, static_cast<std::size_t>(bendFrame->value()), preserveFrame};
+            stopPlayback();
+            setFrameText({});
+        }
+    }
     void setPunchOrientation(bool reversed) {
         const auto index = selectedOperationIndex();
         if (!index || controller->hasWork())
@@ -848,6 +862,7 @@ class MainWindow::Impl {
             return;
         if (tools->punchReversed == reversed)
             return;
+        beginPreviewReplacement(true);
         const int step = routePanel->selected();
         stopPlayback();
         // A per-step orientation must not turn every bend in a shared setup.
@@ -1037,10 +1052,12 @@ class MainWindow::Impl {
             const auto draft = controller->routeDraft();
             return draft ? draft->visual : nullptr;
         }
-        if (viewingRoute)
+        if (viewingRoute) {
             if (const auto route = controller->bendRoute(); route && !route->steps.empty())
                 return route->steps[std::min(routePanel->operation(), route->steps.size() - 1)]
                     .preview;
+            return nullptr;
+        }
         if (const auto p = controller->bendPreview())
             return p;
         const auto &e = controller->bendPreviewError();
@@ -1050,6 +1067,7 @@ class MainWindow::Impl {
         const auto &session = controller->session();
         if (!session.document() || !previewBuilder)
             return;
+        beginPreviewReplacement();
         lastRouteAutomatic = false;
         viewer->highlightPreviewBend(std::nullopt);
         application::RouteDraftRequest request;
@@ -1087,16 +1105,22 @@ class MainWindow::Impl {
         wantFlat = false;
         displayedFlat.reset();
         const auto index = static_cast<std::size_t>(bendFrame->value());
-        const auto failure =
-            viewer->presentBendPreview(preview, index, controller->session().revision());
-        if (!failure.isEmpty()) {
-            previewDisplayError = failure;
-            stopPlayback();
-            previewStatus->setText(
-                QStringLiteral("Не удалось показать состояние: %1").arg(failure));
-            return;
+        if (displayedPreview != preview || displayedPreviewFrame != index ||
+            displayedPreviewRevision != controller->session().revision()) {
+            const auto failure =
+                viewer->presentBendPreview(preview, index, controller->session().revision());
+            if (!failure.isEmpty()) {
+                previewDisplayError = failure;
+                stopPlayback();
+                previewStatus->setText(
+                    QStringLiteral("Не удалось показать состояние: %1").arg(failure));
+                return;
+            }
+            displayedPreview = preview;
+            displayedPreviewFrame = index;
+            displayedPreviewRevision = controller->session().revision();
         }
-        displayedPreview = preview;
+        previewReplacement.reset();
         previewDisplayError.clear();
         refreshCheckResult();
         const double progressValue =
@@ -1153,6 +1177,10 @@ class MainWindow::Impl {
     void refreshPreview() {
         const auto &session = controller->session();
         const auto &document = session.document();
+        if (previewReplacement &&
+            (previewReplacement->document != document ||
+             previewReplacement->revision != session.revision() || viewingSource))
+            previewReplacement.reset();
         const bool multiple = document && document->metadata().bendAnalysis.bends.size() > 1;
         if (document && toolScopeRevision != session.revision()) {
             toolScopeRevision = session.revision();
@@ -1285,7 +1313,8 @@ class MainWindow::Impl {
             previewDisplayError.clear();
             positionedPreview.reset();
         }
-        if (!preview && displayedPreview && !(viewingDraft && controller->isPreparingDraft())) {
+        if (!preview && displayedPreview && !previewReplacement &&
+            !(viewingDraft && controller->isPreparingDraft())) {
             stopPlayback();
             displayedPreview.reset();
             const auto failure = viewer->endBendPreview();
@@ -1293,12 +1322,20 @@ class MainWindow::Impl {
                 previewStatus->setToolTip(failure);
             }
         }
-        if (preview && displayedPreview != preview && !viewingSource) {
+        if (preview && (displayedPreview != preview || positionedPreview != preview) &&
+            !viewingSource) {
             if (positionedPreview != preview) {
                 const QSignalBlocker block(bendFrame);
                 bendFrame->setRange(0, static_cast<int>(preview->frameCount() - 1));
-                bendFrame->setValue((viewingDraft || viewingRoute) && routePanel->selected() > 0 &&
-                                            !draftAutoPlay
+                const bool restoreFrame =
+                    previewReplacement && previewReplacement->preserveFrame &&
+                    previewReplacement->previous->frameCount() == preview->frameCount() &&
+                    previewReplacement->previous->unverifiedDraft() == preview->unverifiedDraft() &&
+                    bool(previewReplacement->previous->pressMotion()) ==
+                        bool(preview->pressMotion());
+                bendFrame->setValue(restoreFrame ? static_cast<int>(previewReplacement->frame)
+                                    : (viewingDraft || viewingRoute) &&
+                                            routePanel->selected() > 0 && !draftAutoPlay
                                         ? bendFrame->maximum()
                                         : 0);
                 positionedPreview = preview;
@@ -1324,13 +1361,14 @@ class MainWindow::Impl {
         playBend->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
                              previewDisplayError.isEmpty());
         playbackSpeedControls->setEnabled(playBend->isEnabled());
-        returnToCad->setEnabled(preview || controller->isPreparingPreview() ||
+        returnToCad->setEnabled(preview || previewReplacement || controller->isPreparingPreview() ||
                                 controller->isPreparingDraft());
         if (!preview || viewingSource || staticSetup || controller->hasWork()) {
             stopPlayback();
         }
         if (controller->isPreparingDraft()) {
-            setFrameText(QStringLiteral("Готовим выбранный шаг и проверяем столкновения…"));
+            if (!previewReplacement)
+                setFrameText(QStringLiteral("Готовим выбранный шаг и проверяем столкновения…"));
             previewStatus->setText(QStringLiteral(
                 "Ручной порядок: проверяется выбранный переход без поиска последовательности."));
         } else if (preview && preview->unverifiedDraft()) {
@@ -1341,7 +1379,8 @@ class MainWindow::Impl {
                                "не подтверждены. "
                                "Для полной проверки нажмите «Проверить мой порядок»."));
         } else if (controller->isPreparingPreview()) {
-            setFrameText(QStringLiteral("Подготовка просмотра…"));
+            if (!previewReplacement)
+                setFrameText(QStringLiteral("Подготовка просмотра…"));
             previewStatus->setText(
                 QStringLiteral("Проверяем восстановление всей детали и готовим геометрию…"));
         } else if (const auto &failure = controller->bendPreviewError()) {
@@ -2075,6 +2114,8 @@ class MainWindow::Impl {
     std::optional<std::size_t> drawingBase;
     std::uint64_t drawingBaseRevision = 0;
     application::BendPreviewPtr displayedPreview;
+    std::size_t displayedPreviewFrame = 0;
+    std::uint64_t displayedPreviewRevision = 0;
     QString previewDisplayError;
     QString operationFailureSummary;
     QComboBox *fixedSide = nullptr;
@@ -2102,6 +2143,14 @@ class MainWindow::Impl {
     CheckAction checkAction = CheckAction::Part;
     bool viewingSource = false;
     application::BendPreviewPtr positionedPreview;
+    struct PreviewReplacement {
+        application::DocumentPtr document;
+        std::uint64_t revision;
+        application::BendPreviewPtr previous;
+        std::size_t frame;
+        bool preserveFrame;
+    };
+    std::optional<PreviewReplacement> previewReplacement;
     QWidget *measurements = nullptr;
     QToolButton *measurementsToggle = nullptr;
     std::optional<core::ToolAssignment> shownAssignment;
@@ -3065,6 +3114,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->viewer->setBottomOverlay(impl_->operationOverlay);
     impl_->operationOverlay->hide();
     impl_->routePanel->onSelect = [this](int) {
+        impl_->beginPreviewReplacement();
         impl_->stopPlayback();
         impl_->draftAutoPlay = false;
         if (impl_->controller->bendRoute()) {
@@ -3074,7 +3124,6 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->viewingSource = false;
             impl_->wantFlat = false;
             impl_->positionedPreview.reset();
-            impl_->displayedPreview.reset();
         } else {
             impl_->prepareManualDraft();
             return;
@@ -3102,6 +3151,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->prepareRoute(impl_->lastRouteAutomatic, impl_->routePanel->withTools(), true);
     };
     impl_->routePanel->onReorder = [this](std::vector<std::string> ids) {
+        impl_->beginPreviewReplacement();
         impl_->stopPlayback();
         impl_->draftAutoPlay = false;
         if (!impl_->controller->setBendOrder(ids))

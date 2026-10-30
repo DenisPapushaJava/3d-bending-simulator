@@ -104,6 +104,16 @@ int main(int argc, char **argv) {
         require(preview && preview->machineModel() == core::MachineModel::DemoPressV2,
                 "UI checkbox was not applied to the checked cycle");
         require(preview->seatedPunchMount(), "UI cycle did not seat tang in holder");
+        auto *viewer = window.findChild<viewer::ViewerWidget *>();
+        auto *frame = window.findChild<QSlider *>("bendFrame");
+        require(viewer && frame && frame->maximum() >= 40, "Scene transport missing");
+        frame->setValue(30);
+        if (viewer->isReady()) {
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
+            viewer->findChild<QAction *>("lockPressVertical")->setChecked(true);
+            viewer->findChild<QAction *>("fitMachine")->trigger();
+        }
+        const auto originalScene = viewer->captureImage(false);
         auto *reverse = window.findChild<QToolButton *>("reversePunch");
         require(reverse && !reverse->icon().isNull() && reverse->text().isEmpty() &&
                     !window.findChild<QToolButton *>("normalPunch"),
@@ -112,11 +122,17 @@ int main(int argc, char **argv) {
                 "Punch reversal control missing");
         const auto normalIcon = reverse->icon().cacheKey();
         reverse->click();
+        require(!window.findChild<QPushButton *>("playBend")->isEnabled() &&
+                    !controller.bendPreview(),
+                "Old checked cycle remained available while replacing the installation");
+        require(originalScene.isNull() || viewer->captureImage(false) == originalScene,
+                "Reversal flashed the source part before the new cycle was ready");
         wait(controller);
         require(controller.bendPreview() && controller.bendPreview() != preview &&
                     controller.bendPreview()->toolSetup()->tools.punchReversed &&
                     reverse->isChecked() && reverse->icon().cacheKey() != normalIcon,
                 "Punch reversal reused old geometry or failed to recheck");
+        require(frame->value() == 30, "Reversal reset the current forming position");
         preview = controller.bendPreview();
         reverse->click();
         wait(controller);
@@ -124,6 +140,9 @@ int main(int argc, char **argv) {
                     !controller.bendPreview()->toolSetup()->tools.punchReversed &&
                     reverse->icon().cacheKey() == normalIcon,
                 "Second toggle click did not restore normal orientation");
+        require(frame->value() == 30 &&
+                    (originalScene.isNull() || viewer->captureImage(false) == originalScene),
+                "Round-trip reversal lost frame, camera, anchor or whole-machine view");
         reverse->click();
         wait(controller);
         require(controller.bendPreview() && reverse->isChecked() &&
@@ -133,8 +152,6 @@ int main(int argc, char **argv) {
         auto *summary = window.findChild<QLabel *>("bendCheckSummary");
         require(summary && summary->text().contains("Демонстрационный станок"),
                 "Demo scope not visible beside result");
-        auto *viewer = window.findChild<viewer::ViewerWidget *>();
-        require(viewer, "Viewer missing");
         auto *visible = viewer->navigationMenu()
                             ? viewer->navigationMenu()->findChild<QAction *>("showMachine")
                             : nullptr;
@@ -164,8 +181,7 @@ int main(int argc, char **argv) {
             painter.end();
             require(image.save(QString::fromLocal8Bit(argv[1]) + suffix), "Cannot save screenshot");
         };
-        auto *frame = window.findChild<QSlider *>("bendFrame");
-        require(frame && frame->maximum() >= 40, "Frame transport missing");
+        viewer->fitAll();
         frame->setValue(40);
         require(controller.bendPreview() == preview && !controller.hasWork(),
                 "Frame change reran machine check");
