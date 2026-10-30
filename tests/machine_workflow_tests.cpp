@@ -58,9 +58,10 @@ int main(int argc, char **argv) {
         auto &controller = window.importController();
         wait(controller);
         require(bool(controller.session().document()), "Import failed");
+        auto *checkbox = window.findChild<QCheckBox *>("demoMachine");
+        require(checkbox && checkbox->isChecked(), "New part did not enable machine by default");
         core::PressTools tools{48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
         require(controller.setBendTools(0, tools), "Cannot set tools");
-        auto *checkbox = window.findChild<QCheckBox *>("demoMachine");
         auto *check = window.findChild<QPushButton *>("checkBend");
         require(checkbox && !checkbox->isChecked() && check && check->isEnabled(),
                 "Legacy tool choice enabled machine or lost check action");

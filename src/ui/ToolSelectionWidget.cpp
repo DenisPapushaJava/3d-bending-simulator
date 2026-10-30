@@ -215,6 +215,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     layout->addWidget(realGeometry_);
     demoMachine_ = new QCheckBox(QStringLiteral("Демонстрационный станок"), this);
     demoMachine_->setObjectName(QStringLiteral("demoMachine"));
+    demoMachine_->setChecked(true);
     demoMachine_->setToolTip(QStringLiteral(
         "Показывать и проверять приближённые стол, адаптер, держатели, траверсу и боковые рамы. "
         "Это учебная сборка, не точная модель SPEED BEND. Проверка по кадрам; ход и перенос не "
@@ -516,6 +517,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         mode_->setCurrentIndex(1);
     } else {
         // New/unassigned bend: use workshop stock, never a previous project's captured stock.
+        demoMachine_->setChecked(true);
         for (auto *combo : {punch_, die_}) {
             const auto *selected = preset(combo);
             const auto id = selected ? selected->id : std::string{};
