@@ -78,6 +78,7 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] const core::ToolPreset *preset(const QComboBox *combo) const;
     [[nodiscard]] Pair currentPair() const;
     void selectPair(const Pair &pair);
+    void resetPunchOrientation();
     void refreshFavorites();
     void recommend();
     void fitAssemblies();

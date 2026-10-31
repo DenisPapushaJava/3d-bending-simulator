@@ -97,6 +97,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(stock_, &QPushButton::clicked, this, [this] {
         const auto originalCatalog = catalog_;
         const auto previous = currentPair();
+        const bool previousOrientation = punchReversed_;
         const auto previousMode = mode_->currentIndex();
         ToolStockDialog dialog(
             core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_),
@@ -110,6 +111,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
             return;
         updating_ = true;
         selectPair(previous);
+        punchReversed_ = previousOrientation;
         mode_->setCurrentIndex(previousMode);
         updating_ = false;
         fitAssemblies();
@@ -294,7 +296,11 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         changed();
     };
     connect(mode_, &QComboBox::currentIndexChanged, this, selected);
-    connect(punch_, &QComboBox::currentIndexChanged, this, selected);
+    connect(punch_, &QComboBox::currentIndexChanged, this, [this, selected] {
+        if (!updating_)
+            resetPunchOrientation();
+        selected();
+    });
     connect(die_, &QComboBox::currentIndexChanged, this, [this] {
         populateGrooves();
         if (!updating_) {
@@ -312,7 +318,10 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(machine_, &QLineEdit::textEdited, this, [this] { changed(); });
     connect(favorites_, &QComboBox::activated, this, [this](int i) {
         if (i > 0 && static_cast<std::size_t>(i - 1) < favoritePairs_.size()) {
+            const auto previous = selectedTool(core::ToolKind::Punch);
             selectPair(favoritePairs_[static_cast<std::size_t>(i - 1)]);
+            if (previous != selectedTool(core::ToolKind::Punch))
+                resetPunchOrientation();
             chooseDrawingGeometry();
             changed();
         }
@@ -353,6 +362,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     selectPair({settings->value(QStringLiteral("tools/lastPunch")).toString(),
                 settings->value(QStringLiteral("tools/lastDie")).toString(),
                 settings->value(QStringLiteral("tools/lastGroove")).toInt()});
+    resetPunchOrientation();
     realGeometry_->setChecked(true);
     updateDetails();
 }
@@ -542,8 +552,7 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
     realGeometry_->setChecked(true);
     fitAssemblies();
     if (newPunch)
-        if (const auto a = assignment())
-            punchReversed_ = core::operatorFacingPunchOrientation(*a).value_or(false);
+        resetPunchOrientation();
     updating_ = false;
     changed();
     return true;
@@ -613,8 +622,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         }
         fitAssemblies();
         chooseDrawingGeometry();
-        if (const auto a = assignment())
-            punchReversed_ = core::operatorFacingPunchOrientation(*a).value_or(false);
+        resetPunchOrientation();
     }
     updating_ = false;
     updateDetails();
@@ -623,6 +631,10 @@ ToolSelectionWidget::Pair ToolSelectionWidget::currentPair() const {
     const auto *p = preset(punch_);
     const auto *d = preset(die_);
     return {p ? text(p->id) : QString{}, d ? text(d->id) : QString{}, groove_->currentIndex()};
+}
+void ToolSelectionWidget::resetPunchOrientation() {
+    const auto *punch = preset(punch_);
+    punchReversed_ = punch && core::defaultPunchOrientation(*punch).value_or(false);
 }
 void ToolSelectionWidget::selectPair(const Pair &pair) {
     const bool wasUpdating = updating_;
@@ -850,8 +862,7 @@ void ToolSelectionWidget::recommend() {
         dieAssembly_ = c.dieAssembly ? std::optional{*c.dieAssembly} : std::nullopt;
         chooseDrawingGeometry();
         if (newPunch)
-            if (const auto a = assignment())
-                punchReversed_ = core::operatorFacingPunchOrientation(*a).value_or(false);
+            resetPunchOrientation();
         changed();
         message = QStringLiteral("Предварительно: %1 / %2 · V %3 мм (%4 толщин). Вариантов: %5. "
                                  "Далее — проверка опор и пересечений.")
@@ -961,6 +972,7 @@ void ToolSelectionWidget::importCatalog() {
         return;
     }
     const auto pair = currentPair();
+    const auto previousPunch = selectedTool(core::ToolKind::Punch);
     updating_ = true;
     catalog_ = std::move(merged);
     workshopSize_ = catalog_.size();
@@ -972,6 +984,8 @@ void ToolSelectionWidget::importCatalog() {
         (catalog_[i].kind == core::ToolKind::Punch ? punch_ : die_)
             ->addItem(title(catalog_[i]), static_cast<int>(i));
     selectPair(pair);
+    if (previousPunch != selectedTool(core::ToolKind::Punch))
+        resetPunchOrientation();
     updating_ = false;
     auto settings = preferences();
     settings->setValue(QStringLiteral("tools/catalogPath"), path);
@@ -1021,6 +1035,7 @@ QString ToolSelectionWidget::saveImportedTool(core::ToolPreset tool) {
         return text(*error);
     const core::ToolCatalog projectOnly(catalog_.begin() + workshopSize_, catalog_.end());
     auto pair = currentPair();
+    const auto previousPunch = selectedTool(core::ToolKind::Punch);
     if (tool.kind == core::ToolKind::Punch)
         pair.punchId = text(tool.id);
     else {
@@ -1042,6 +1057,8 @@ QString ToolSelectionWidget::saveImportedTool(core::ToolPreset tool) {
         (catalog_[i].kind == core::ToolKind::Punch ? punch_ : die_)
             ->addItem(title(catalog_[i]), static_cast<int>(i));
     selectPair(pair);
+    if (previousPunch != selectedTool(core::ToolKind::Punch))
+        resetPunchOrientation();
     mode_->setCurrentIndex(0);
     updating_ = false;
     chooseDrawingGeometry();

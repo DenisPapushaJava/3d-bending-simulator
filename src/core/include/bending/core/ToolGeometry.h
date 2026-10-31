@@ -23,9 +23,10 @@ struct PunchMount {
 // Bounded recognition of a narrow top tang and a wider horizontal shoulder.
 // No mechanical clamp/retention certification; ambiguous profiles return null.
 [[nodiscard]] std::optional<PunchMount> punchMountReference(const ToolAssignment &);
-// Initial preference for a clearly offset working body; unknown/symmetric -> null.
-// Operator is -X in the press frame. Does not override saved/manual assignments.
-[[nodiscard]] std::optional<bool> operatorFacingPunchOrientation(const ToolAssignment &);
+// Initial preference: clearly offset working body toward the operator (-X), relief
+// toward the rear. Unknown/symmetric -> null. Independent of the die and assemblies;
+// does not override saved/manual assignments or certify clamp compatibility.
+[[nodiscard]] std::optional<bool> defaultPunchOrientation(const ToolPreset &);
 struct DetectedDieGroove {
     double openingMm;
     DieGroove settings;

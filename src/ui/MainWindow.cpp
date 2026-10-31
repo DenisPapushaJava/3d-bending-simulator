@@ -1267,14 +1267,14 @@ class MainWindow::Impl {
                 const auto &assigned = *selected->catalogTools;
                 if (!facingPunch || *facingPunch != assigned.punch) {
                     facingPunch = assigned.punch;
-                    facingPreference = core::operatorFacingPunchOrientation(assigned);
+                    facingPreference = core::defaultPunchOrientation(assigned.punch);
                 }
                 frontPreference = facingPreference;
             }
             const auto facing =
                 frontPreference
-                    ? (reversed == *frontPreference ? QStringLiteral("Углубление к оператору.")
-                                                    : QStringLiteral("Углубление от оператора."))
+                    ? (reversed == *frontPreference ? QStringLiteral("Корпус к оператору.")
+                                                    : QStringLiteral("Корпус от оператора."))
                     : (reversed ? QStringLiteral("Пуансон: положение 2.")
                                 : QStringLiteral("Пуансон: положение 1."));
             reversePunchButton->setToolTip(

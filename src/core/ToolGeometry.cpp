@@ -50,6 +50,33 @@ bool tangentNeighbours(const ToolDrawing &d, std::size_t i) {
     }
     return true;
 }
+std::optional<ToolGeometry> punchGeometry(const ToolPreset &punch) {
+    if (!validToolPreset(punch) || !punch.parametersConfirmed || punch.kind != ToolKind::Punch ||
+        !punch.drawing)
+        return {};
+    ToolGeometry geometry{};
+    const auto &p = *punch.drawing;
+    if (!p.millimeters)
+        return {};
+    const auto pb = bounds(p);
+    std::vector<std::size_t> noses;
+    for (std::size_t i = 0; i < p.edges.size(); ++i) {
+        const auto &e = p.edges[i];
+        if (e.center && e.sweepRadians * pb.area > 0 && contains(e, -pi / 2) &&
+            std::abs(radius(e) - *punch.noseRadiusMm) <= tolerance &&
+            std::abs(e.center->y - radius(e) - pb.minY) <= tolerance &&
+            std::abs(std::abs(e.sweepRadians) - (pi - punch.angleRadians)) < 1.e-6 &&
+            tangentNeighbours(p, i))
+            noses.push_back(i);
+    }
+    if (noses.size() != 1)
+        return {};
+    const auto &nose = p.edges[noses[0]];
+    geometry.punchTip = {nose.center->x, nose.center->y - radius(nose)};
+    geometry.noseEdge = noses[0];
+    geometry.hasPunch = true;
+    return geometry;
+}
 std::optional<std::array<double, 2>> horizontalInterval(const ToolDrawing &drawing, double y,
                                                         bool single = true) {
     std::vector<double> xs;
@@ -143,26 +170,10 @@ std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
         return {};
     ToolGeometry geometry{};
     if (a.punch.drawing) {
-        const auto &p = *a.punch.drawing;
-        if (!p.millimeters)
+        const auto punch = punchGeometry(a.punch);
+        if (!punch)
             return {};
-        const auto pb = bounds(p);
-        std::vector<std::size_t> noses;
-        for (std::size_t i = 0; i < p.edges.size(); ++i) {
-            const auto &e = p.edges[i];
-            if (e.center && e.sweepRadians * pb.area > 0 && contains(e, -pi / 2) &&
-                std::abs(radius(e) - *a.punch.noseRadiusMm) <= tolerance &&
-                std::abs(e.center->y - radius(e) - pb.minY) <= tolerance &&
-                std::abs(std::abs(e.sweepRadians) - (pi - a.punch.angleRadians)) < 1.e-6 &&
-                tangentNeighbours(p, i))
-                noses.push_back(i);
-        }
-        if (noses.size() != 1)
-            return {};
-        const auto &nose = p.edges[noses[0]];
-        geometry.punchTip = {nose.center->x, nose.center->y - radius(nose)};
-        geometry.noseEdge = noses[0];
-        geometry.hasPunch = true;
+        geometry = *punch;
     }
     if (!a.die.drawing)
         return geometry.hasPunch ? std::optional{geometry} : std::nullopt;
@@ -190,13 +201,8 @@ bool hasCompleteDrawingToolGeometry(const ToolAssignment &assignment) {
     const auto geometry = drawingToolGeometry(assignment);
     return geometry && geometry->hasPunch && geometry->hasDie;
 }
-std::optional<PunchMount> punchMountReference(const ToolAssignment &assignment) {
-    if (!assignment.useDrawingGeometry || !assignment.punch.drawing)
-        return {};
-    const auto geometry = drawingToolGeometry(assignment);
-    if (!geometry || !geometry->hasPunch)
-        return {};
-    const auto &drawing = *assignment.punch.drawing;
+namespace {
+std::optional<PunchMount> punchMount(const ToolDrawing &drawing, DrawingPoint tip, bool reversed) {
     const auto pb = bounds(drawing);
     const auto interval = [&](double y, bool single = true) {
         return horizontalInterval(drawing, y, single);
@@ -244,33 +250,38 @@ std::optional<PunchMount> punchMountReference(const ToolAssignment &assignment) 
             }
         if (!connected)
             continue;
-        minX -= geometry->punchTip.x;
-        maxX -= geometry->punchTip.x;
-        if (assignment.punchReversed) {
+        minX -= tip.x;
+        maxX -= tip.x;
+        if (reversed) {
             const double oldMin = minX;
             minX = -maxX;
             maxX = -oldMin;
         }
-        return PunchMount{(minX + maxX) / 2, y - geometry->punchTip.y, pb.maxY - y, minX, maxX};
+        return PunchMount{(minX + maxX) / 2, y - tip.y, pb.maxY - y, minX, maxX};
     }
     return {};
 }
-std::optional<bool> operatorFacingPunchOrientation(const ToolAssignment &assignment) {
-    auto references = assignment;
-    references.die.drawing.reset(); // The die contour does not define the punch's open side.
-    const auto geometry = drawingToolGeometry(references);
-    if (!geometry || !geometry->hasPunch || !assignment.punch.drawing)
+} // namespace
+std::optional<PunchMount> punchMountReference(const ToolAssignment &assignment) {
+    if (!assignment.useDrawingGeometry || !assignment.punch.drawing)
         return {};
-    auto normal = references;
-    normal.punchReversed = false;
-    const auto mount = punchMountReference(normal);
-    const auto &drawing = *assignment.punch.drawing;
+    const auto geometry = drawingToolGeometry(assignment);
+    if (!geometry || !geometry->hasPunch)
+        return {};
+    return punchMount(*assignment.punch.drawing, geometry->punchTip, assignment.punchReversed);
+}
+std::optional<bool> defaultPunchOrientation(const ToolPreset &punch) {
+    const auto geometry = punchGeometry(punch);
+    if (!geometry)
+        return {};
+    const auto &drawing = *punch.drawing;
     const auto tip = geometry->punchTip;
+    const auto mount = punchMount(drawing, tip, false);
     const double height = mount ? mount->shoulderY : bounds(drawing).maxY - tip.y;
     if (height <= 0)
         return {};
     int negative = 0, positive = 0;
-    const double margin = std::max(1., 2 * assignment.punch.noseRadiusMm.value_or(0.));
+    const double margin = std::max(1., 2 * punch.noseRadiusMm.value_or(0.));
     for (const double fraction : {.25, .4, .55}) {
         const auto section = horizontalInterval(drawing, tip.y + height * fraction);
         if (!section)
@@ -278,12 +289,12 @@ std::optional<bool> operatorFacingPunchOrientation(const ToolAssignment &assignm
         negative += (*section)[1] - tip.x < -margin ? 1 : 0;
         positive += (*section)[0] - tip.x > margin ? 1 : 0;
     }
-    // Put a clearly offset body behind the tip (+X), leaving the relief toward
-    // the operator (-X). This is an initial preference, never a collision proof.
+    // Body toward -X (operator), relief toward +X. This is an initial workshop
+    // preference, never a collision or clamping proof.
     if (negative >= 2 && !positive)
-        return true;
-    if (positive >= 2 && !negative)
         return false;
+    if (positive >= 2 && !negative)
+        return true;
     return {};
 }
 std::vector<DetectedDieGroove> detectDieGrooves(const ToolDrawing &drawing) {

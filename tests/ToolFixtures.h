@@ -57,6 +57,25 @@ inline bending::core::ToolAssignment pair(double opening = 12., double radius = 
     a.useDrawingGeometry = true;
     return a;
 }
+inline bending::core::ToolPreset offsetPunch(bool mirrored = false) {
+    auto punch = pair().punch;
+    punch.id = mirrored ? "offset-mirrored" : "offset";
+    punch.code = mirrored ? "Offset mirrored" : "Offset";
+    auto &e = punch.drawing->edges;
+    e[2].end.x = -30;
+    e[3].start.x = -30;
+    e[3].end.x = -50;
+    e[4].start.x = -50;
+    if (mirrored)
+        for (auto &edge : e) {
+            edge.start.x = -edge.start.x;
+            edge.end.x = -edge.end.x;
+            if (edge.center)
+                edge.center->x = -edge.center->x;
+            edge.sweepRadians = -edge.sweepRadians;
+        }
+    return punch;
+}
 inline bending::core::ToolAssignment hook() {
     auto a = pair();
     auto &e = a.punch.drawing->edges;

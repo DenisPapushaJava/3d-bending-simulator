@@ -68,10 +68,12 @@ int main(int argc, char **argv) {
         auto hook = tool_fixture::hook().punch;
         hook.id = "hook";
         hook.code = "Hook";
+        const auto offset = tool_fixture::offsetPunch();
+        const auto mirrored = tool_fixture::offsetPunch(true);
         auto files = std::make_shared<project::ProjectFiles>();
         auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
         ui::MainWindow window({"test", "test"}, files, files, builder,
-                              {pair.punch, hook, die, missing, teaching});
+                              {pair.punch, hook, offset, mirrored, die, missing, teaching});
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
         window.show();
@@ -179,6 +181,8 @@ int main(int argc, char **argv) {
         };
         select(punch, pair.punch.id, 0);
         require(punch->accessibleName().contains("P60"), "Independent punch selection failed");
+        // Punch-side preference must work before a die or valid assembly exists.
+        select(punch, mirrored.id, 0);
         select(matrix, die.id, 3);
         auto *groove = window.findChild<QComboBox *>("dieGroove");
         require(groove->currentIndex() == 3, "Graphical variant changed the saved groove index");
@@ -223,8 +227,28 @@ int main(int argc, char **argv) {
         require(entry && entry->catalogTools && entry->catalogTools->die.id == die.id &&
                     entry->catalogTools->groove == 3 &&
                     entry->catalogTools->die.segments == die.segments &&
+                    entry->catalogTools->punch.id == mirrored.id &&
+                    entry->catalogTools->punchReversed && entry->tools->punchReversed &&
                     core::hasCompleteDrawingToolGeometry(*entry->catalogTools),
-                "Graphical choice lost physical stock or the working groove");
+                "Graphical choice lost stock, groove or the new punch's default side");
+        window.findChild<QToolButton *>("processStage1")->click();
+        select(punch, offset.id, 0);
+        window.findChild<QPushButton *>("applyToolSetup")->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.bendPreview() && !controller.bendPreviewError() &&
+                    !controller.session().bend(0)->catalogTools->punchReversed &&
+                    !controller.session().bend(0)->tools->punchReversed,
+                "Changing punch kept the previous profile's default side");
+        // Saved/manual orientation has priority over the new-selection preference.
+        auto manual = *controller.session().bend(0)->catalogTools;
+        manual.punchReversed = true;
+        require(controller.setBendToolAssignment(0, manual), "Cannot set a manual side");
+        window.findChild<QToolButton *>("processStage1")->click();
+        window.findChild<QPushButton *>("applyToolSetup")->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.bendPreview() && !controller.bendPreviewError() &&
+                    controller.session().bend(0)->catalogTools->punchReversed,
+                "Applying a captured assignment overwrote its manual side");
         const auto path = folder.path() + "/selected.bend";
         controller.saveProject(native(path), files);
         wait([&] { return !controller.isSaving(); });
@@ -233,8 +257,9 @@ int main(int argc, char **argv) {
         window.openStep(path);
         wait([&] { return !controller.hasWork(); });
         require(controller.session().bend(0)->catalogTools->groove == 3 &&
-                    controller.session().bend(0)->catalogTools->die.segments == die.segments,
-                "Reload changed the groove or duplicated inventory");
+                    controller.session().bend(0)->catalogTools->die.segments == die.segments &&
+                    controller.session().bend(0)->catalogTools->punchReversed,
+                "Reload changed groove, inventory or the saved manual side");
         auto legacy = *core::toolParameters(pair);
         require(controller.setBendTools(0, legacy), "Cannot prepare a legacy assignment");
         const auto before = calculations;
@@ -246,8 +271,30 @@ int main(int argc, char **argv) {
         const auto shot = qEnvironmentVariable("BENDING_TOOL_PICKER_SNAPSHOT");
         if (!shot.isEmpty())
             require(window.grab().save(shot + "-legacy.png"), "Cannot save legacy state");
+        controller.closeDocument();
+        window.hide();
+        // A fresh window restores article IDs, not a captured project orientation.
+        ui::preferences()->setValue("tools/lastPunch", QString::fromStdString(mirrored.id));
+        ui::MainWindow restored({"test", "test"}, files, files, builder,
+                                {pair.punch, offset, mirrored, die});
+        restored.setAutomaticPartInputPrompt(false);
+        restored.resize(1280, 850);
+        restored.show();
+        restored.raise();
+        restored.activateWindow();
+        restored.openStep(file);
+        auto &restarted = restored.importController();
+        wait([&] { return !restarted.hasWork(); });
+        restored.findChild<QToolButton *>("processStage1")->click();
+        restored.findChild<QCheckBox *>("demoMachine")->setChecked(false);
+        restored.findChild<QPushButton *>("applyToolSetup")->click();
+        wait([&] { return !restarted.hasWork(); });
+        require(restarted.bendPreview() && !restarted.bendPreviewError() &&
+                    restarted.session().bend(0)->catalogTools->punch.id == mirrored.id &&
+                    restarted.session().bend(0)->catalogTools->punchReversed,
+                "Restoring the last article IDs lost their initial punch side");
         std::cout << "Graphical profiles, working grooves, keyboard/cancel, real-only policy and "
-                     "persistence passed\n";
+                     "default/manual orientations and persistence passed\n";
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;
