@@ -106,6 +106,14 @@ ToolImportDialog::ToolImportDialog(ImportController &controller,
         "Длина самого инструмента, например 835 или 415 мм. В поперечном сечении DXF она "
         "направлена вглубь изображения. Секции настраиваются в библиотеке."));
     basic->addRow(QStringLiteral("Длина инструмента:"), length_);
+    keepSections_ =
+        new QCheckBox(QStringLiteral("Использовать прежние секции этого инструмента"), form_);
+    keepSections_->setObjectName("keepToolSections");
+    keepSections_->setToolTip(
+        QStringLiteral("Включайте, если новый DXF описывает тот же физический инструмент. Иначе "
+                       "наличие будет не указано."));
+    keepSections_->hide();
+    basic->addRow(keepSections_);
     left->addLayout(basic);
     advancedToggle_ = new QToolButton(form_);
     advancedToggle_->setObjectName("toolImportAdvancedToggle");
@@ -246,6 +254,31 @@ void ToolImportDialog::setBusy(bool value) {
     chooseButton_->setEnabled(!value);
     saveButton_->setEnabled(!value && preset().has_value());
 }
+void ToolImportDialog::embed(std::optional<std::string> replaceId) {
+    setWindowFlags(Qt::Widget);
+    setMinimumSize(0, 0);
+    if (replaceId) {
+        for (std::size_t i = 0; i < targets_.size(); ++i)
+            if (targets_[i].id == *replaceId) {
+                target_->setCurrentIndex(static_cast<int>(i + 1));
+                auto *before = new QWidget(this);
+                auto *row = new QHBoxLayout(before);
+                row->addWidget(label(QStringLiteral("Было: %1 · L %2 мм")
+                                         .arg(QString::fromStdString(targets_[i].code))
+                                         .arg(targets_[i].lengthMm),
+                                     before));
+                if (targets_[i].drawing) {
+                    auto *old = new ToolDrawingWidget(*targets_[i].drawing, before, false);
+                    old->setMinimumSize(100, 100);
+                    old->setFixedHeight(110);
+                    row->addWidget(old);
+                }
+                static_cast<QVBoxLayout *>(layout())->insertWidget(0, before);
+                break;
+            }
+    }
+    target_->setEnabled(false);
+}
 void ToolImportDialog::loadFile(const QString &path) {
     if (busy_)
         return;
@@ -331,6 +364,8 @@ std::optional<core::ToolPreset> ToolImportDialog::preset() const {
     core::ToolPreset t;
     if (target_->currentIndex() > 0)
         t = targets_[static_cast<std::size_t>(target_->currentIndex() - 1)];
+    if (!keepSections_->isChecked())
+        t.segments.reset();
     t.code = code_->text().trimmed().toStdString();
     t.manufacturer = manufacturer_->text().trimmed().toStdString();
     t.kind = kind_->currentIndex() == 0 ? core::ToolKind::Punch : core::ToolKind::Die;
@@ -361,6 +396,8 @@ std::optional<core::ToolPreset> ToolImportDialog::preset() const {
 void ToolImportDialog::selectTarget() {
     measuredDrawing_.reset();
     measuredKind_ = -1;
+    keepSections_->setChecked(false);
+    keepSections_->setVisible(target_->currentIndex() > 0);
     if (target_->currentIndex() <= 0) {
         kind_->setEnabled(true);
         setWindowTitle(QStringLiteral("Добавить инструмент"));

@@ -1,8 +1,12 @@
 #include "bending/project/ToolCatalog.h"
 #include "ToolJson.h"
+#include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLockFile>
 #include <QSaveFile>
 #include <cmath>
 #include <limits>
@@ -23,7 +27,7 @@ bool readNumber(const QJsonValue &value, std::optional<double> &out) {
     out = value.toDouble();
     return true;
 }
-ToolCatalogResult readFile(QFile &file) {
+ToolCatalogResult readFile(QFile &file, QByteArray *captured = nullptr) {
     constexpr qint64 limit = 4 * 1024 * 1024;
     if (!file.open(QIODevice::ReadOnly) || file.size() <= 0 || file.size() > limit) {
         return std::string("Cannot read catalogue or size exceeds 4 MiB");
@@ -32,6 +36,8 @@ ToolCatalogResult readFile(QFile &file) {
     if (file.error() != QFileDevice::NoError || bytes.size() > limit) {
         return std::string("Cannot read catalogue");
     }
+    if (captured)
+        *captured = bytes;
     QJsonParseError error;
     const auto json = QJsonDocument::fromJson(bytes, &error);
     if (error.error != QJsonParseError::NoError || !json.isObject()) {
@@ -40,7 +46,8 @@ ToolCatalogResult readFile(QFile &file) {
     const auto root = json.object();
     if (root.value("format") != QStringLiteral("bending-tool-catalog") ||
         (root.value("version").toDouble(-1) != 1 && root.value("version").toDouble(-1) != 2 &&
-         root.value("version").toDouble(-1) != 3 && root.value("version").toDouble(-1) != 4) ||
+         root.value("version").toDouble(-1) != 3 && root.value("version").toDouble(-1) != 4 &&
+         root.value("version").toDouble(-1) != 5) ||
         !root.value("tools").isArray() || root.value("tools").toArray().size() > 512) {
         return std::string("Unsupported catalogue format/version");
     }
@@ -58,6 +65,21 @@ ToolCatalogResult readFile(QFile &file) {
     }
     if (!core::validToolCatalog(tools)) {
         return std::string("Invalid catalogue or duplicate tool IDs");
+    }
+    if (root.value("version").toInt() == 5) {
+        if (!root.value("archived").isArray() || root.value("archived").toArray().size() > 512)
+            return std::string("Invalid library archive");
+        application::ToolLibraryData data{tools, {}};
+        for (const auto &item : root.value("archived").toArray()) {
+            core::ToolPreset preset;
+            if (!item.isObject() || !readPreset(item.toObject(), preset))
+                return std::string("Invalid archived tool definition");
+            data.archived.push_back(std::move(preset));
+        }
+        if (!application::validToolLibrary(data))
+            return std::string("Invalid library archive or duplicate IDs");
+    } else if (root.contains("archived")) {
+        return std::string("Tool archive requires library version 5");
     }
     return tools;
 }
@@ -364,5 +386,90 @@ std::optional<std::string> writeToolCatalog(const std::filesystem::path &path,
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return "Не удалось сохранить библиотеку. Проверьте доступ к папке настроек.";
     return {};
+}
+application::ToolLibraryResult readToolLibrary(const std::filesystem::path &path) {
+#ifdef _WIN32
+    const auto name = QString::fromStdWString(path.wstring());
+#else
+    const auto name = QString::fromUtf8(path.string().c_str());
+#endif
+    if (!QFileInfo::exists(name))
+        return application::ToolLibrarySnapshot{{}, "missing"};
+    QFile file(name);
+    QByteArray bytes;
+    auto parsed = readFile(file, &bytes);
+    if (const auto *error = std::get_if<std::string>(&parsed))
+        return *error;
+    application::ToolLibrarySnapshot result;
+    result.data.tools = std::get<core::ToolCatalog>(std::move(parsed));
+    const auto root = QJsonDocument::fromJson(bytes).object();
+    for (const auto &item : root.value("archived").toArray()) {
+        core::ToolPreset tool;
+        if (!readPreset(item.toObject(), tool))
+            return std::string("Некорректная запись архива.");
+        result.data.archived.push_back(std::move(tool));
+    }
+    result.revision =
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex().toStdString();
+    return result;
+}
+application::ToolLibraryResult writeToolLibrary(const std::filesystem::path &path,
+                                                const application::ToolLibraryData &data,
+                                                const std::string &expectedRevision) {
+    if (!application::validToolLibrary(data))
+        return std::string("Некорректные данные библиотеки.");
+#ifdef _WIN32
+    const auto name = QString::fromStdWString(path.wstring());
+#else
+    const auto name = QString::fromUtf8(path.string().c_str());
+#endif
+    if (!QDir().mkpath(QFileInfo(name).absolutePath()))
+        return std::string("Не удалось создать папку библиотеки.");
+    QLockFile lock(name + QStringLiteral(".lock"));
+    if (!lock.tryLock(0))
+        return std::string("Библиотека занята другим процессом. Повторите сохранение.");
+    const auto current = readToolLibrary(path);
+    if (const auto *error = std::get_if<std::string>(&current))
+        return *error;
+    if (std::get<application::ToolLibrarySnapshot>(current).revision != expectedRevision)
+        return std::string("Библиотека изменена другим окном или процессом. Закройте и откройте "
+                           "программу, чтобы загрузить актуальную версию. Изменения не записаны.");
+    if (expectedRevision != "missing") {
+        QFile previous(name);
+        if (!previous.open(QIODevice::ReadOnly))
+            return std::string("Не удалось прочитать прежнюю библиотеку.");
+        const auto original = previous.read(4 * 1024 * 1024 + 1);
+        if (previous.error() != QFileDevice::NoError || original.size() > 4 * 1024 * 1024 ||
+            QCryptographicHash::hash(original, QCryptographicHash::Sha256).toHex().toStdString() !=
+                expectedRevision)
+            return std::string("Библиотека изменилась во время сохранения. Изменения не записаны.");
+        previous.close();
+        if (QJsonDocument::fromJson(original).object().value("version").toInt() < 5) {
+            QSaveFile backup(name + QStringLiteral(".pre-v5.json"));
+            backup.setDirectWriteFallback(false);
+            if (!backup.open(QIODevice::WriteOnly) || backup.write(original) != original.size() ||
+                !backup.commit())
+                return std::string("Не удалось сохранить резервную копию старого формата. "
+                                   "Библиотека не изменена.");
+        }
+    }
+    QJsonArray tools, archived;
+    for (const auto &tool : data.tools)
+        tools.append(presetJson(tool));
+    for (const auto &tool : data.archived)
+        archived.append(presetJson(tool));
+    const auto bytes = QJsonDocument(QJsonObject{{"format", "bending-tool-catalog"},
+                                                 {"version", 5},
+                                                 {"tools", tools},
+                                                 {"archived", archived}})
+                           .toJson();
+    if (bytes.size() > 4 * 1024 * 1024)
+        return std::string("Библиотека вместе с удалёнными инструментами превышает 4 МиБ.");
+    QSaveFile file(name);
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+        return std::string("Не удалось сохранить библиотеку. Прежние данные сохранены.");
+    return application::ToolLibrarySnapshot{
+        data, QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex().toStdString()};
 }
 } // namespace bending::project

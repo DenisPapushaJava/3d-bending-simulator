@@ -26,6 +26,7 @@ class ToolImportDialog final : public QDialog {
     ToolImportDialog(ImportController &, std::shared_ptr<const application::ToolProfileImporter>,
                      core::ToolCatalog, std::function<QString(core::ToolPreset)>, QWidget *,
                      std::optional<core::ToolKind> initialKind = {});
+    void embed(std::optional<std::string> replaceId = {});
   public slots:
     void loadFile(const QString &);
     void accept() override;
@@ -52,7 +53,7 @@ class ToolImportDialog final : public QDialog {
     QComboBox *target_, *kind_, *contour_, *units_;
     QLineEdit *code_, *manufacturer_;
     QDoubleSpinBox *length_, *rotation_;
-    QCheckBox *mirror_;
+    QCheckBox *mirror_, *keepSections_;
     QLabel *status_, *notices_, *source_, *sizeLabel_;
     QWidget *form_, *previewHost_, *advanced_, *grooveHost_;
     QToolButton *advancedToggle_;

@@ -23,6 +23,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QListWidget>
 #include <QPainter>
 #include <QPushButton>
 #include <QSpinBox>
@@ -79,7 +80,7 @@ int main(int argc, char **argv) {
                               {pair.punch, pair.die});
         window.setAutomaticPartInputPrompt(false);
         window.setToolProfileImport(std::make_shared<project::DxfToolImporter>(),
-                                    project::writeToolCatalog);
+                                    {project::readToolLibrary, project::writeToolLibrary});
         window.resize(1280, 850);
         window.show();
         const auto file = folder.path() + "/stock.step";
@@ -99,15 +100,16 @@ int main(int argc, char **argv) {
         if (app.arguments().contains("--sets-only")) {
             QTimer::singleShot(0, [&] {
                 try {
-                    auto *dialog = window.findChild<QDialog *>("toolStockDialog");
+                    auto *dialog = window.findChild<QDialog *>("toolLibraryDialog");
                     require(dialog, "No set library");
                     auto *rows = dialog->findChild<QTableWidget *>("stockRows");
                     auto *sets = dialog->findChild<QComboBox *>("stockSetPreset");
                     auto *copies = dialog->findChild<QSpinBox *>("stockSetCount");
                     auto *add = dialog->findChild<QPushButton *>("stockAddSet");
-                    require(rows->rowCount() == 12 &&
+                    require(rows->rowCount() == 1 &&
                                 !dialog->findChild<QCheckBox *>("stockEnabled")->isChecked(),
                             "Reference lengths missing or stock silently enabled");
+                    dialog->findChild<QPushButton *>("stockTemplate")->click();
                     for (int i = 0; i < rows->rowCount(); ++i)
                         require(static_cast<QSpinBox *>(rows->cellWidget(i, 1))->value() == 0,
                                 "Reference picture invented stock");
@@ -184,8 +186,14 @@ int main(int argc, char **argv) {
                                 ->text()
                                 .contains(QStringLiteral("сохранено")),
                             "Set inventory not saved");
-                    auto *tools = dialog->findChild<QComboBox *>("stockTool");
-                    tools->setCurrentIndex(1);
+                    QApplication::processEvents();
+                    auto *tools = dialog->findChild<QListWidget *>("libraryTools");
+                    tools->setCurrentRow(1);
+                    dialog->findChild<QPushButton *>("stockTemplate")->click();
+                    rows = dialog->findChild<QTableWidget *>("stockRows");
+                    sets = dialog->findChild<QComboBox *>("stockSetPreset");
+                    copies = dialog->findChild<QSpinBox *>("stockSetCount");
+                    add = dialog->findChild<QPushButton *>("stockAddSet");
                     require(rows->rowCount() == 10 && amount(370) == 0 && amount(270) == -1 &&
                                 amount(100, 1) == -1 && copies->value() == 0 &&
                                 sets->findData("punch-805") == -1 &&
@@ -204,14 +212,16 @@ int main(int argc, char **argv) {
                                 ->text()
                                 .contains(QStringLiteral("сохранено")),
                             "Die set inventory not saved");
-                    tools->setCurrentIndex(0);
+                    QApplication::processEvents();
+                    tools->setCurrentRow(0);
+                    rows = dialog->findChild<QTableWidget *>("stockRows");
                     require(amount(100, 1) == 3 && amount(100, 2) == 3 && ordinaryTotal() == 2460 &&
                                 amount(370) == -1,
                             "Switching profiles lost or mixed the saved inventory");
                     dialog->reject();
                 } catch (const std::exception &e) {
                     dialogError = QString::fromUtf8(e.what());
-                    if (auto *dialog = window.findChild<QDialog *>("toolStockDialog"))
+                    if (auto *dialog = window.findChild<QDialog *>("toolLibraryDialog"))
                         dialog->reject();
                 }
             });
@@ -225,11 +235,12 @@ int main(int argc, char **argv) {
         }
         QTimer::singleShot(0, [&] {
             try {
-                auto *dialog = window.findChild<QDialog *>("toolStockDialog");
+                auto *dialog = window.findChild<QDialog *>("toolLibraryDialog");
                 require(dialog, "No stock editor");
-                auto *tool = dialog->findChild<QComboBox *>("stockTool");
+                auto *tool = dialog->findChild<QListWidget *>("libraryTools");
                 for (int index = 0; index < 2; ++index) {
-                    tool->setCurrentIndex(index);
+                    QApplication::processEvents();
+                    tool->setCurrentRow(index);
                     dialog->findChild<QPushButton *>("stockTemplate")->click();
                     auto *rows = dialog->findChild<QTableWidget *>("stockRows");
                     for (int i = 0; i < rows->rowCount(); ++i) {
@@ -251,12 +262,16 @@ int main(int argc, char **argv) {
                 dialog->reject();
             } catch (const std::exception &e) {
                 dialogError = QString::fromUtf8(e.what());
-                if (auto *dialog = window.findChild<QDialog *>("toolStockDialog"))
+                if (auto *dialog = window.findChild<QDialog *>("toolLibraryDialog"))
                     dialog->reject();
             }
         });
         window.findChild<QPushButton *>("toolStock")->click();
         require(dialogError.isEmpty(), qPrintable(dialogError));
+        // Explicitly adopt the edited workshop versions; the library no longer
+        // replaces a captured selection merely because inventory was saved.
+        window.findChild<QComboBox *>("punchPreset")->setCurrentIndex(1);
+        window.findChild<QComboBox *>("diePreset")->setCurrentIndex(1);
         window.findChild<QAction *>("recommendToolsQuick")->trigger();
         require(!window.findChild<QPushButton *>("checkBend")->isEnabled(),
                 "Insufficient stock was assigned");
@@ -323,10 +338,11 @@ int main(int argc, char **argv) {
         require(std::holds_alternative<application::ImportError>(rejected),
                 "Segment assembly accepted under a legacy project version");
         QTimer::singleShot(0, [&] {
-            auto *dialog = window.findChild<QDialog *>("toolStockDialog");
-            auto *tool = dialog->findChild<QComboBox *>("stockTool");
+            auto *dialog = window.findChild<QDialog *>("toolLibraryDialog");
+            auto *tool = dialog->findChild<QListWidget *>("libraryTools");
             for (int index = 0; index < 2; ++index) {
-                tool->setCurrentIndex(index);
+                QApplication::processEvents();
+                tool->setCurrentRow(index);
                 auto *rows = dialog->findChild<QTableWidget *>("stockRows");
                 for (int i = 0; i < rows->rowCount(); ++i)
                     if (static_cast<QDoubleSpinBox *>(rows->cellWidget(i, 0))->value() == 100)

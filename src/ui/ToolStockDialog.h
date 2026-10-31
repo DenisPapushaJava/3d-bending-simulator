@@ -12,8 +12,17 @@ namespace bending::ui {
 class ToolStockDialog final : public QDialog {
     Q_OBJECT
   public:
-    ToolStockDialog(core::ToolCatalog, std::function<QString(core::ToolPreset)>, QWidget *);
+    ToolStockDialog(core::ToolCatalog, std::function<QString(core::ToolPreset)>, QWidget *,
+                    bool embedded = false);
     std::function<void()> onColorsChanged;
+    void selectTool(const std::string &id);
+    void markDirty() {
+        inventoryEdited_ = true;
+    }
+    bool apply() {
+        save();
+        return !inventoryEdited_;
+    }
 
   private:
     void load();
@@ -21,6 +30,7 @@ class ToolStockDialog final : public QDialog {
     void addSet(bool available);
     void updateSet();
     void updateColors();
+    void updateHornNotice();
     void updateEditing();
     void chooseColor(double);
     void resetColor(double);
@@ -36,7 +46,9 @@ class ToolStockDialog final : public QDialog {
     QCheckBox *enabled_;
     QTableWidget *rows_;
     QLabel *status_;
+    QLabel *hornNotice_;
     bool loading_ = false;
     bool inventoryEdited_ = false;
+    bool embedded_ = false;
 };
 } // namespace bending::ui

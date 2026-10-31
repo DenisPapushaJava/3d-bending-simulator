@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/ToolLibrary.h"
 #include "bending/application/ToolProfileImport.h"
 #include "bending/core/ToolCatalog.h"
 #include "bending/core/ToolSelection.h"
@@ -61,7 +62,7 @@ class ToolSelectionWidget final : public QWidget {
     void setCheckedSearchState(bool busy, const QString &status = {}, bool resumable = false);
     void setToolProfileImport(ImportController &,
                               std::shared_ptr<const application::ToolProfileImporter>,
-                              application::ToolLibraryWriter);
+                              application::ToolLibraryStorage);
     std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
         loadCatalog;
     std::function<void()> onChanged;
@@ -91,10 +92,11 @@ class ToolSelectionWidget final : public QWidget {
     void recommend();
     void fitSelectedAssemblies();
     std::array<core::SegmentPlan, 2> fitAssemblies();
-    void showDrawings();
     void importCatalog();
     void importDxf(std::optional<core::ToolKind> initialKind = {});
-    QString saveImportedTool(core::ToolPreset);
+    void showLibrary(std::optional<core::ToolKind> kind = {}, bool add = false);
+    void refreshWorkshop();
+    std::unique_ptr<application::ToolLibrary> library_;
     core::ToolCatalog catalog_;
     std::size_t workshopSize_ = 0;
     QCheckBox *realGeometry_;
@@ -113,14 +115,12 @@ class ToolSelectionWidget final : public QWidget {
     QWidget *catalogPanel_;
     QWidget *catalogDetails_;
     QToolButton *detailsToggle_;
-    QPushButton *drawings_;
     QPushButton *recommend_;
     QAction *quickRecommend_;
     QPushButton *fitSections_;
     QPushButton *stock_;
     QDoubleSpinBox *segmentGap_;
     QLabel *assemblySummary_;
-    QPushButton *importDxf_;
     QLabel *recommendation_;
     std::optional<core::ToolSelectionRequest> selectionRequest_;
     bool allBends_ = false;
@@ -134,6 +134,6 @@ class ToolSelectionWidget final : public QWidget {
     std::optional<core::ToolAssembly> punchAssembly_, dieAssembly_;
     ImportController *controller_ = nullptr;
     std::shared_ptr<const application::ToolProfileImporter> profileImporter_;
-    application::ToolLibraryWriter libraryWriter_;
+    application::ToolLibraryStorage libraryStorage_;
 };
 } // namespace bending::ui

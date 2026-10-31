@@ -20,6 +20,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QLabel>
+#include <QListWidget>
 #include <QMenu>
 #include <QPainter>
 #include <QPushButton>
@@ -85,7 +86,7 @@ void pick(QPushButton *button, QColor color, bool accept) {
 void editStock(ui::MainWindow &window, const std::function<void(QDialog &)> &edit) {
     QString error;
     QTimer::singleShot(0, [&] {
-        auto *dialog = window.findChild<QDialog *>("toolStockDialog");
+        auto *dialog = window.findChild<QDialog *>("toolLibraryDialog");
         try {
             require(dialog, "No stock dialog");
             edit(*dialog);
@@ -116,10 +117,11 @@ int main(int argc, char **argv) {
         window.setAutomaticPartInputPrompt(false);
         int libraryWrites = 0;
         window.setToolProfileImport(std::make_shared<project::DxfToolImporter>(),
-                                    [&](const auto &path, const auto &catalog) {
-                                        ++libraryWrites;
-                                        return project::writeToolCatalog(path, catalog);
-                                    });
+                                    {project::readToolLibrary,
+                                     [&](const auto &path, const auto &data, const auto &revision) {
+                                         ++libraryWrites;
+                                         return project::writeToolLibrary(path, data, revision);
+                                     }});
         window.resize(1280, 850);
         window.show();
         const auto file = folder.path() + "/colors.step";
@@ -174,7 +176,7 @@ int main(int argc, char **argv) {
             pick(colorButton(dialog, 60), QColor("#A284A7"), false);
             require(colorButton(dialog, 60)->property("segmentColor") == default60,
                     "Cancelled picker changed the color");
-            dialog.findChild<QComboBox *>("stockTool")->setCurrentIndex(1);
+            dialog.findChild<QListWidget *>("libraryTools")->setCurrentRow(1);
             require(colorButton(dialog, 100)->property("segmentColor").toString() == chosen.name(),
                     "Die and punch colors disagree for one length");
             dialog.findChild<QPushButton *>("stockSave")->click();
@@ -224,6 +226,9 @@ int main(int argc, char **argv) {
             dialog.findChild<QCheckBox *>("stockEnabled")->setChecked(false);
             require(colorButton(dialog, 100)->isEnabled(), "Color editing requires enabling stock");
             pick(colorButton(dialog, 100), chosen, true);
+            // This is a color-only edit; return the temporary accounting change
+            // before the unified editor saves the card on close.
+            dialog.findChild<QCheckBox *>("stockEnabled")->setChecked(true);
         });
         require(controller.bendPreview() == preview &&
                     controller.session().editRevision() == revision && !controller.hasWork() &&

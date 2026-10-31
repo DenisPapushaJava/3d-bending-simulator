@@ -2,6 +2,7 @@ add_library(bending_ui STATIC MainWindow.cpp ImportController.cpp RoutePanel.cpp
     include/bending/ui/MainWindow.h include/bending/ui/ImportController.h)
 add_library(Bending::Ui ALIAS bending_ui)
 target_sources(bending_ui PRIVATE ToolSearchDialog.cpp ToolSearchDialog.h)
+target_sources(bending_ui PRIVATE ToolLibraryDialog.cpp ToolLibraryDialog.h)
 set_target_properties(bending_ui PROPERTIES AUTOMOC ON)
 target_include_directories(bending_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(bending_ui PUBLIC Qt6::Widgets Bending::Application PRIVATE Bending::Viewer Bending::Simulation Bending::Update bending_options)

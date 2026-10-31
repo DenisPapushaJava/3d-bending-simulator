@@ -1865,6 +1865,7 @@ void testGuidedWorkflow(bool graphics) {
     }
     ui::MainWindow window({"test", cad::kernelVersion()}, files, files, builder,
                           std::get<core::ToolCatalog>(catalog));
+    window.setToolProfileImport({}, {project::readToolLibrary, project::writeToolLibrary});
     window.setAutomaticPartInputPrompt(false);
     window.resize(1366, 768);
     window.show();
@@ -1990,7 +1991,7 @@ void testGuidedWorkflow(bool graphics) {
             "Suggestion is missing, teaching, or prematurely committed");
     punch->setCurrentIndex(punch->findText(QStringLiteral("ST1405S"), Qt::MatchContains));
     die->setCurrentIndex(die->findText(QStringLiteral("ST3412S"), Qt::MatchContains));
-    auto *drawings = window.findChild<QPushButton *>(QStringLiteral("showToolDrawings"));
+    auto *drawings = window.findChild<QPushButton *>(QStringLiteral("toolStock"));
     require(drawings && !drawings->isHidden(), "Source drawings are inaccessible");
     bool drawingDialogOkay = false;
     QTimer::singleShot(50, &window, [&] {
@@ -1998,7 +1999,7 @@ void testGuidedWorkflow(bool graphics) {
         if (!dialog)
             return;
         const auto views = dialog->findChildren<QWidget *>(QStringLiteral("toolDrawingCanvas"));
-        drawingDialogOkay = views.size() == 2 && views[0]->width() > 100 &&
+        drawingDialogOkay = views.size() == 1 && views[0]->width() > 100 &&
                             views[0]->height() > 100 && !views[0]->grab().isNull();
         const auto output = qEnvironmentVariable("BENDING_DRAWING_SNAPSHOT");
         if (!output.isEmpty())

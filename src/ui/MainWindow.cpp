@@ -3962,7 +3962,7 @@ void MainWindow::setDrawingBuilder(
 }
 void MainWindow::setToolProfileImport(
     std::shared_ptr<const application::ToolProfileImporter> importer,
-    application::ToolLibraryWriter writer) {
+    application::ToolLibraryStorage writer) {
     impl_->toolSelection->setToolProfileImport(*impl_->controller, std::move(importer),
                                                std::move(writer));
 }

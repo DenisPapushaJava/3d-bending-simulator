@@ -16,6 +16,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <array>
 #include <iterator>
 namespace bending::ui {
 namespace {
@@ -72,8 +73,12 @@ std::vector<core::ToolSegment> referenceSections(core::ToolKind kind, int index)
 }
 } // namespace
 ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
-                                 std::function<QString(core::ToolPreset)> writer, QWidget *parent)
-    : QDialog(parent), catalog_(std::move(catalog)), writer_(std::move(writer)) {
+                                 std::function<QString(core::ToolPreset)> writer, QWidget *parent,
+                                 bool embedded)
+    : QDialog(parent), catalog_(std::move(catalog)), writer_(std::move(writer)),
+      embedded_(embedded) {
+    if (embedded_)
+        setWindowFlags(Qt::Widget);
     setObjectName("toolStockDialog");
     setWindowTitle(QStringLiteral("Библиотека секций инструмента"));
     resize(720, 740);
@@ -85,6 +90,7 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
                                                         : QStringLiteral("Матрица · ")) +
                        QString::fromStdString(t.code));
     layout->addWidget(tool_);
+    tool_->setVisible(!embedded_);
     auto *help = new QLabel(
         QStringLiteral(
             "Укажите доступное количество секций одного профиля. "
@@ -93,6 +99,7 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
         this);
     help->setWordWrap(true);
     layout->addWidget(help);
+    help->setVisible(!embedded_);
     auto *setRow = new QHBoxLayout;
     set_ = new QComboBox(this);
     set_->setObjectName("stockSetPreset");
@@ -111,8 +118,22 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     setDescription_->setObjectName("stockSetDescription");
     setDescription_->setWordWrap(true);
     layout->addWidget(setDescription_);
+    if (embedded_) {
+        auto *setsToggle = new QPushButton(QStringLiteral("Добавить комплект секций…"), this);
+        setsToggle->setObjectName("stockSetsToggle");
+        setsToggle->setCheckable(true);
+        layout->insertWidget(layout->count() - 2, setsToggle, 0, Qt::AlignLeft);
+        for (auto *w : std::array<QWidget *, 4>{set_, copies_, addSet_, setDescription_})
+            w->hide();
+        connect(setsToggle, &QPushButton::toggled, this, [this](bool visible) {
+            for (auto *w : std::array<QWidget *, 4>{set_, copies_, addSet_, setDescription_})
+                w->setVisible(visible);
+        });
+    }
     enabled_ = new QCheckBox(QStringLiteral("Подбирать из указанного наличия секций"), this);
     enabled_->setObjectName("stockEnabled");
+    if (embedded_)
+        enabled_->setText(QStringLiteral("Указать наличие секций"));
     layout->addWidget(enabled_);
     rows_ = new QTableWidget(0, 4, this);
     rows_->setObjectName("stockRows");
@@ -124,18 +145,30 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     rows_->setColumnWidth(3, 64);
     rows_->setSelectionBehavior(QAbstractItemView::SelectRows);
     layout->addWidget(rows_);
+    hornNotice_ = new QLabel(QStringLiteral("Сапожки пока доступны только для учёта наличия. Их "
+                                            "точная форма и симуляция — следующий этап."),
+                             this);
+    hornNotice_->setObjectName("stockHornNotice");
+    hornNotice_->setWordWrap(true);
+    hornNotice_->hide();
+    layout->addWidget(hornNotice_);
     auto *colorHelp = new QLabel(
         QStringLiteral("Цвета общие для одной длины у всех инструментов и сохраняются сразу. "
                        "Нажмите цвет для выбора; правой кнопкой — возврат к стандартному."),
         this);
     colorHelp->setWordWrap(true);
     layout->addWidget(colorHelp);
+    colorHelp->setVisible(!embedded_);
     auto *actions = new QHBoxLayout;
     auto *addRow = new QPushButton(QStringLiteral("Добавить"), this);
     addRow->setObjectName("stockAdd");
+    if (embedded_)
+        addRow->setText(QStringLiteral("Добавить секцию"));
     auto *remove = new QPushButton(QStringLiteral("Удалить строку"), this);
     auto *standard = new QPushButton(QStringLiteral("Добавить размеры без наличия"), this);
     standard->setObjectName("stockTemplate");
+    if (embedded_)
+        standard->setText(QStringLiteral("Типовые длины"));
     actions->addWidget(addRow);
     actions->addWidget(remove);
     actions->addWidget(standard);
@@ -148,6 +181,7 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     buttons->button(QDialogButtonBox::Save)->setObjectName("stockSave");
     buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("Сохранить"));
     buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("Закрыть"));
+    buttons->button(QDialogButtonBox::Close)->setVisible(!embedded_);
     layout->addWidget(buttons);
     connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked, this,
             [this] { save(); });
@@ -166,6 +200,7 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
         if (rows_->currentRow() >= 0) {
             rows_->removeRow(rows_->currentRow());
             inventoryEdited_ = true;
+            updateHornNotice();
         }
     });
     connect(standard, &QPushButton::clicked, this, [this] { addSet(false); });
@@ -191,9 +226,14 @@ void ToolStockDialog::add(core::ToolSegment s) {
     auto *quantity = new QSpinBox(rows_);
     quantity->setRange(0, 1000);
     quantity->setValue(static_cast<int>(s.quantity));
+    quantity->setAccessibleName(QStringLiteral("Количество секций %1 мм").arg(s.lengthMm));
+    if (embedded_)
+        quantity->setButtonSymbols(QAbstractSpinBox::PlusMinus);
     auto *shape = new QComboBox(rows_);
-    shape->addItems(
-        {QStringLiteral("Обычная"), QStringLiteral("Левый рог"), QStringLiteral("Правый рог")});
+    shape->addItems({QStringLiteral("Прямая"), QStringLiteral("Левый сапожок"),
+                     QStringLiteral("Правый сапожок")});
+    shape->setToolTip(QStringLiteral(
+        "Сапожки учитываются отдельно. Их точная форма и расчёт пока не поддержаны."));
     shape->setCurrentIndex(static_cast<int>(s.shape));
     rows_->setCellWidget(row, 0, length);
     rows_->setCellWidget(row, 1, quantity);
@@ -218,10 +258,12 @@ void ToolStockDialog::add(core::ToolSegment s) {
     connect(quantity, &QSpinBox::valueChanged, this, [this] {
         if (!loading_)
             inventoryEdited_ = true;
+        updateHornNotice();
     });
     connect(shape, &QComboBox::currentIndexChanged, this, [this] {
         if (!loading_)
             inventoryEdited_ = true;
+        updateHornNotice();
     });
     if (!loading_) {
         inventoryEdited_ = true;
@@ -258,6 +300,11 @@ void ToolStockDialog::load() {
             return r.lengthMm == nominalLength && r.shape == core::SegmentShape::Straight;
         }))
         references.insert(references.begin(), {nominalLength, 0});
+    if (embedded_ && !s)
+        references = nominalLength > 0 ? std::vector<core::ToolSegment>{{nominalLength, 0}}
+                                       : std::vector<core::ToolSegment>{};
+    if (embedded_ && s)
+        references.clear();
     for (const auto &r : references) {
         bool exists = false;
         for (int i = 0; i < rows_->rowCount(); ++i)
@@ -268,18 +315,40 @@ void ToolStockDialog::load() {
         if (!exists)
             add(r);
     }
-    status_->setText(s ? QStringLiteral("Изменения применяются к библиотеке после сохранения.")
-                       : QStringLiteral("Типовые размеры уже заполнены. Наличие ещё не указано; "
-                                        "сохраняется прежний выбор цельного инструмента."));
+    status_->setText(
+        embedded_
+            ? (s ? QStringLiteral(
+                       "Сохраняется кнопкой ниже или при переходе к другому профилю/закрытии.")
+                 : QStringLiteral("Наличие не указано. Включите учёт, чтобы заполнить количество."))
+        : s ? QStringLiteral("Изменения применяются к библиотеке после сохранения.")
+            : QStringLiteral("Наличие ещё не указано; сохраняется номинальная цельная длина."));
     loading_ = false;
     inventoryEdited_ = false;
     updateEditing();
     updateColors();
 }
 void ToolStockDialog::updateEditing() {
+    updateHornNotice();
     for (int row = 0; row < rows_->rowCount(); ++row)
         for (int column = 0; column < 3; ++column)
             rows_->cellWidget(row, column)->setEnabled(enabled_->isChecked());
+    for (int row = 0; row < rows_->rowCount(); ++row)
+        static_cast<QSpinBox *>(rows_->cellWidget(row, 1))
+            ->setSpecialValueText(enabled_->isChecked() ? QString{} : QStringLiteral("—"));
+}
+void ToolStockDialog::updateHornNotice() {
+    bool horns = false;
+    for (int row = 0; row < rows_->rowCount(); ++row)
+        if (auto *shape = qobject_cast<QComboBox *>(rows_->cellWidget(row, 2)))
+            horns |= shape->currentIndex() > 0;
+    hornNotice_->setVisible(embedded_ && horns);
+}
+void ToolStockDialog::selectTool(const std::string &id) {
+    for (std::size_t i = 0; i < catalog_.size(); ++i)
+        if (catalog_[i].id == id) {
+            tool_->setCurrentIndex(static_cast<int>(i));
+            return;
+        }
 }
 void ToolStockDialog::updateColors() {
     const auto colors = toolSegmentColors();

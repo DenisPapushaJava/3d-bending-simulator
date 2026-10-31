@@ -1,8 +1,6 @@
 #include "ToolSelectionWidget.h"
-#include "ToolDrawingWidget.h"
-#include "ToolImportDialog.h"
+#include "ToolLibraryDialog.h"
 #include "ToolPickerPopup.h"
-#include "ToolStockDialog.h"
 #include "bending/application/BendRoute.h"
 #include "bending/core/ToolGeometry.h"
 #include <QAction>
@@ -12,16 +10,13 @@
 #include "bending/ui/Preferences.h"
 #include <QComboBox>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
-#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -99,7 +94,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         "при переходе к гибке."));
     layout->addWidget(fitSections_);
     connect(fitSections_, &QPushButton::clicked, this, [this] { fitSelectedAssemblies(); });
-    stock_ = new QPushButton(QStringLiteral("Секции и наличие…"), this);
+    stock_ = new QPushButton(QStringLiteral("Библиотека инструмента…"), this);
     stock_->setObjectName("toolStock");
     stock_->setEnabled(false);
     layout->addWidget(stock_);
@@ -124,29 +119,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
             changed();
         }
     });
-    connect(stock_, &QPushButton::clicked, this, [this] {
-        const auto originalCatalog = catalog_;
-        const auto previous = currentPair();
-        const bool previousOrientation = punchReversed_;
-        const auto previousMode = mode_->currentIndex();
-        ToolStockDialog dialog(
-            core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_),
-            [this](core::ToolPreset tool) { return saveImportedTool(std::move(tool)); }, this);
-        dialog.onColorsChanged = [this] {
-            if (onAppearanceChanged)
-                onAppearanceChanged();
-        };
-        dialog.exec();
-        if (catalog_ == originalCatalog)
-            return;
-        updating_ = true;
-        selectPair(previous);
-        punchReversed_ = previousOrientation;
-        mode_->setCurrentIndex(previousMode);
-        updating_ = false;
-        fitAssemblies();
-        changed();
-    });
+    connect(stock_, &QPushButton::clicked, this, [this] { showLibrary(); });
     recommendation_ = wrapped(this);
     recommendation_->setObjectName(QStringLiteral("toolRecommendation"));
     recommendation_->hide();
@@ -160,11 +133,6 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     catalogPanel_ = new QWidget(this);
     auto *catalogLayout = new QVBoxLayout(catalogPanel_);
     catalogLayout->setContentsMargins(0, 0, 0, 0);
-    importDxf_ = new QPushButton(QStringLiteral("Добавить инструмент из DXF…"), catalogPanel_);
-    importDxf_->setObjectName(QStringLiteral("importToolDxf"));
-    importDxf_->setEnabled(false);
-    catalogLayout->addWidget(importDxf_);
-    connect(importDxf_, &QPushButton::clicked, this, [this] { importDxf(); });
     auto *form = new QFormLayout;
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
@@ -215,10 +183,6 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(sourcesGroup, &QToolButton::toggled, sources_, &QWidget::setVisible);
     detailsLayout->addWidget(sourcesGroup);
     detailsLayout->addWidget(sources_);
-    auto *import = new QPushButton(QStringLiteral("Добавить каталог мастерской…"), catalogDetails_);
-    import->setObjectName(QStringLiteral("importToolCatalog"));
-    detailsLayout->addWidget(import);
-    connect(import, &QPushButton::clicked, this, [this] { importCatalog(); });
     layout->addWidget(catalogPanel_);
     clearance_ = new QDoubleSpinBox(this);
     clearance_->setObjectName(QStringLiteral("toolClearance"));
@@ -285,10 +249,6 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     geometryScope_->setObjectName(QStringLiteral("toolGeometryScope"));
     layout->addWidget(geometryScope_);
     connect(realGeometry_, &QCheckBox::toggled, this, [this] { changed(); });
-    drawings_ = new QPushButton(QStringLiteral("Профили из чертежей…"), this);
-    drawings_->setObjectName(QStringLiteral("showToolDrawings"));
-    layout->addWidget(drawings_);
-    connect(drawings_, &QPushButton::clicked, this, [this] { showDrawings(); });
     detailsToggle_ = new QToolButton(this);
     detailsToggle_->setObjectName(QStringLiteral("toolDetailsToggle"));
     detailsToggle_->setText(QStringLiteral("Избранное и данные инструмента ▸"));
@@ -577,7 +537,12 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
     if (selectedTool(tool.kind) == tool && usesCatalog() && realGeometry_->isChecked() &&
         (tool.kind == core::ToolKind::Punch || selectedGroove() == groove))
         return true;
-    const bool newPunch = tool.kind == core::ToolKind::Punch && selectedTool(tool.kind) != tool;
+    const auto previous = selectedTool(tool.kind);
+    const bool sameProfile = previous && previous->id == tool.id && previous->drawing &&
+                             tool.drawing &&
+                             previous->drawing->millimeters == tool.drawing->millimeters &&
+                             previous->drawing->edges == tool.drawing->edges;
+    const bool newPunch = tool.kind == core::ToolKind::Punch && !sameProfile;
     updating_ = true;
     mode_->setCurrentIndex(0);
     auto *combo = tool.kind == core::ToolKind::Punch ? punch_ : die_;
@@ -598,7 +563,7 @@ void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
     ToolPickerPopup dialog(
         catalog_, kind, selectedTool(kind), selectedGroove(),
         [this](const auto &tool, auto groove) { return optionIssue(tool, groove); },
-        profileImporter_ && libraryWriter_, anchor, punchReversed_);
+        profileImporter_ && static_cast<bool>(libraryStorage_), anchor, punchReversed_);
     picker_ = &dialog;
     const auto result = dialog.exec();
     picker_.clear();
@@ -752,10 +717,6 @@ void ToolSelectionWidget::updateDetails() {
     recommend_->setEnabled(checkedBusy_ || (usesCatalog() && selectionRequest_.has_value()));
     quickRecommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
     fitSections_->setEnabled(usesCatalog() && selectionRequest_ && stockPunch && stockDie);
-    const auto *selectedPunch = preset(punch_);
-    const auto *selectedDie = preset(die_);
-    drawings_->setVisible(usesCatalog() && ((selectedPunch && selectedPunch->drawing) ||
-                                            (selectedDie && selectedDie->drawing)));
     realGeometry_->hide();
     geometryScope_->setText(geometryIssue());
     geometryScope_->setVisible(!geometryScope_->text().isEmpty());
@@ -774,7 +735,7 @@ void ToolSelectionWidget::updateDetails() {
                            : QStringLiteral("Убрать из избранного"));
     if (!a) {
         QString missing;
-        for (const auto *tool : {selectedPunch, selectedDie})
+        for (const auto *tool : {stockPunch, stockDie})
             if (tool && !tool->parametersConfirmed)
                 missing +=
                     title(*tool) + QStringLiteral(": ") + text(tool->notes) + QLatin1Char('\n');
@@ -1067,37 +1028,6 @@ std::array<core::SegmentPlan, 2> ToolSelectionWidget::fitAssemblies() {
     plans[1] = fit(preset(die_), dieAssembly_);
     return plans;
 }
-void ToolSelectionWidget::showDrawings() {
-    QDialog dialog(this);
-    dialog.setObjectName(QStringLiteral("toolDrawingsDialog"));
-    dialog.setWindowTitle(QStringLiteral("Профили из чертежей"));
-    dialog.resize(740, 580);
-    auto *layout = new QVBoxLayout(&dialog);
-    auto *row = new QHBoxLayout;
-    for (const auto *tool : {preset(punch_), preset(die_)}) {
-        if (!tool || !tool->drawing)
-            continue;
-        auto *column = new QVBoxLayout;
-        auto *caption = wrapped(&dialog);
-        caption->setText(title(*tool) + QLatin1Char('\n') + text(tool->drawing->sourceFile));
-        column->addWidget(caption);
-        column->addWidget(new ToolDrawingWidget(*tool->drawing, &dialog), 1);
-        row->addLayout(column, 1);
-    }
-    layout->addLayout(row, 1);
-    auto *scope = wrapped(&dialog);
-    scope->setText(QStringLiteral("Исходные контуры из локальных файлов. Каждый вписан в своё "
-                                  "окно; масштаб окон может отличаться. Выбранный режим формы "
-                                  "каждого инструмента указан в основной панели. Крепления и "
-                                  "допустимая нагрузка не проверяются."));
-    scope->setMinimumHeight(scope->heightForWidth(650));
-    layout->addWidget(scope);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("Закрыть"));
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
-    dialog.exec();
-}
 void ToolSelectionWidget::importCatalog() {
     if (!loadCatalog) {
         QMessageBox::information(this, QStringLiteral("Каталог"),
@@ -1138,111 +1068,97 @@ void ToolSelectionWidget::importCatalog() {
                              QStringLiteral("Слишком много инструментов или некорректные данные."));
         return;
     }
-    const auto pair = currentPair();
-    const auto previousPunch = selectedTool(core::ToolKind::Punch);
-    updating_ = true;
-    catalog_ = std::move(merged);
-    workshopSize_ = catalog_.size();
-    punch_->clear();
-    die_->clear();
-    punch_->addItem(QStringLiteral("Выберите пуансон…"), -1);
-    die_->addItem(QStringLiteral("Выберите матрицу…"), -1);
-    for (std::size_t i = 0; i < catalog_.size(); ++i)
-        (catalog_[i].kind == core::ToolKind::Punch ? punch_ : die_)
-            ->addItem(title(catalog_[i]), static_cast<int>(i));
-    selectPair(pair);
-    if (previousPunch != selectedTool(core::ToolKind::Punch))
-        resetPunchOrientation();
-    updating_ = false;
-    auto settings = preferences();
-    settings->setValue(QStringLiteral("tools/catalogPath"), path);
-    refreshFavorites();
-    changed();
+    if (!library_)
+        return;
+    if (const auto error = library_->replace(std::move(merged)); !error.empty()) {
+        QMessageBox::warning(this, QStringLiteral("Каталог не добавлен"), text(error));
+        return;
+    }
+    refreshWorkshop();
     if (skipped)
-        setCheckedSearchState(
-            false,
-            QStringLiteral("Пропущено записей без DXF-сечения: %1. Добавьте инструмент из DXF.")
-                .arg(skipped));
+        recommendation_->setText(QStringLiteral("Пропущено записей без DXF: %1").arg(skipped));
 }
+
 void ToolSelectionWidget::setToolProfileImport(
     ImportController &controller, std::shared_ptr<const application::ToolProfileImporter> importer,
-    application::ToolLibraryWriter writer) {
+    application::ToolLibraryStorage writer) {
     controller_ = &controller;
     profileImporter_ = std::move(importer);
-    libraryWriter_ = std::move(writer);
-    importDxf_->setEnabled(profileImporter_ && libraryWriter_);
-    stock_->setEnabled(static_cast<bool>(libraryWriter_));
-}
-void ToolSelectionWidget::importDxf(std::optional<core::ToolKind> initialKind) {
-    if (!controller_ || !profileImporter_ || !libraryWriter_)
-        return;
-    ToolImportDialog dialog(
-        *controller_, profileImporter_,
-        core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_),
-        [this](core::ToolPreset tool) { return saveImportedTool(std::move(tool)); }, this,
-        initialKind);
-    dialog.exec();
-}
-QString ToolSelectionWidget::saveImportedTool(core::ToolPreset tool) {
-    if (!core::hasLibraryProfile(tool))
-        return QStringLiteral("Для библиотеки нужен контур из DXF с подтверждёнными единицами.");
-    auto merged = core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_);
-    const auto found =
-        std::find_if(merged.begin(), merged.end(), [&](const auto &t) { return t.id == tool.id; });
-    if (found == merged.end())
-        merged.push_back(tool);
-    else
-        *found = tool;
-    if (!core::validToolCatalog(merged))
-        return QStringLiteral("Каталог переполнен или данные инструмента некорректны.");
-    auto settings = preferences();
-    // A separate writable copy beside settings: portable data/ on Windows, user config on Linux.
-    const auto folder = QDir(toolLibraryDirectory());
-    if (!QDir().mkpath(folder.filePath(QStringLiteral("tools"))))
-        return QStringLiteral("Не удалось создать папку локальной библиотеки.");
-    const auto path = folder.filePath(QStringLiteral("tools/tool-catalog.json"));
+    libraryStorage_ = std::move(writer);
+    const auto path =
+        QDir(toolLibraryDirectory()).filePath(QStringLiteral("tools/tool-catalog.json"));
 #ifdef _WIN32
     const auto native = std::filesystem::path(path.toStdWString());
 #else
     const auto native = std::filesystem::path(path.toUtf8().constData());
 #endif
-    if (const auto error = libraryWriter_(native, merged))
-        return text(*error);
-    const core::ToolCatalog projectOnly(catalog_.begin() + workshopSize_, catalog_.end());
-    auto pair = currentPair();
-    const auto previousPunch = selectedTool(core::ToolKind::Punch);
-    if (tool.kind == core::ToolKind::Punch)
-        pair.punchId = text(tool.id);
-    else {
-        pair.dieId = text(tool.id);
-        pair.groove = 0;
-    }
+    library_ = std::make_unique<application::ToolLibrary>(
+        core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_), native,
+        libraryStorage_);
+    stock_->setEnabled(static_cast<bool>(libraryStorage_));
+}
+void ToolSelectionWidget::importDxf(std::optional<core::ToolKind> initialKind) {
+    showLibrary(initialKind, true);
+}
+void ToolSelectionWidget::showLibrary(std::optional<core::ToolKind> kind, bool add) {
+    if (!library_ || !controller_ || !libraryStorage_)
+        return;
+    const auto current = kind ? selectedTool(*kind) : selectedTool(core::ToolKind::Punch);
+    ToolLibraryDialog dialog(
+        *library_, *controller_, profileImporter_,
+        [this](const auto &tool, auto groove) { return optionIssue(tool, groove); }, this, kind,
+        current ? current->id : std::string{},
+        current && current->kind == core::ToolKind::Die ? selectedGroove() : 0);
+    dialog.onLibraryChanged = [this] { refreshWorkshop(); };
+    dialog.onColorsChanged = [this] {
+        if (onAppearanceChanged)
+            onAppearanceChanged();
+    };
+    dialog.onImportCatalog = [this] { importCatalog(); };
+    if (add)
+        dialog.startImport();
+    dialog.exec();
+    if (dialog.choice())
+        chooseTool(dialog.choice()->first, dialog.choice()->second);
+}
+void ToolSelectionWidget::refreshWorkshop() {
+    if (!library_)
+        return;
+    const auto &active = library_->data().tools;
+    const bool different = active.size() != workshopSize_ ||
+                           !std::equal(active.begin(), active.end(), catalog_.begin());
+    if (different && onCancelChecked)
+        onCancelChecked();
+    const auto punch = selectedTool(core::ToolKind::Punch), die = selectedTool(core::ToolKind::Die);
+    const auto groove = selectedGroove();
+    const core::ToolCatalog captured(catalog_.begin() + workshopSize_, catalog_.end());
     updating_ = true;
-    catalog_ = std::move(merged);
+    catalog_ = library_->data().tools;
     workshopSize_ = catalog_.size();
-    for (const auto &entry : projectOnly)
-        if (std::none_of(catalog_.begin(), catalog_.end(),
-                         [&](const auto &t) { return t.id == entry.id; }))
-            catalog_.push_back(entry);
+    for (const auto &tool : captured)
+        if (std::find(catalog_.begin(), catalog_.end(), tool) == catalog_.end())
+            catalog_.push_back(tool);
     punch_->clear();
     die_->clear();
     punch_->addItem(QStringLiteral("Выберите пуансон…"), -1);
     die_->addItem(QStringLiteral("Выберите матрицу…"), -1);
     for (std::size_t i = 0; i < catalog_.size(); ++i)
         (catalog_[i].kind == core::ToolKind::Punch ? punch_ : die_)
-            ->addItem(title(catalog_[i]), static_cast<int>(i));
-    selectPair(pair);
-    if (previousPunch != selectedTool(core::ToolKind::Punch))
-        resetPunchOrientation();
-    mode_->setCurrentIndex(0);
+            ->addItem(title(catalog_[i]) +
+                          (i >= workshopSize_ ? QStringLiteral(" · снимок проекта") : QString{}),
+                      static_cast<int>(i));
+    if (punch)
+        selectPreset(punch_, *punch);
+    if (die)
+        selectPreset(die_, *die);
+    populateGrooves(groove);
     updating_ = false;
-    chooseDrawingGeometry();
+    auto settings = preferences();
     settings->setValue(QStringLiteral("tools/catalogPath"),
                        QStringLiteral("tools/tool-catalog.json"));
     settings->sync();
     refreshFavorites();
-    fitAssemblies();
-    changed();
-    return {};
+    updateDetails();
+    // Deliberately no changed()/fitAssemblies(): editing the workshop is not an assignment.
 }
 } // namespace bending::ui

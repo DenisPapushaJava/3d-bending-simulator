@@ -22,6 +22,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMimeData>
 #include <QPointer>
 #include <QPushButton>
@@ -211,13 +212,13 @@ int main(int argc, char **argv) {
         ui::MainWindow window({"test", "test"}, files, files, {},
                               core::ToolCatalog{tools.punch, tools.die});
         window.setAutomaticPartInputPrompt(false);
-        window.setToolProfileImport(service, project::writeToolCatalog);
+        window.setToolProfileImport(service, {project::readToolLibrary, project::writeToolLibrary});
         window.show();
         auto &controller = window.importController();
         window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) +
                         QStringLiteral("/bend-90-6mm.step"));
         wait([&] { return !controller.hasWork(); });
-        auto *button = window.findChild<QPushButton *>("importToolDxf");
+        auto *button = window.findChild<QPushButton *>("toolStock");
         require(button && button->isEnabled(), "DXF entry unavailable");
         write(path, wrap(poly(*tools.punch.drawing), 0));
         bool completed = false;
@@ -288,6 +289,8 @@ int main(int argc, char **argv) {
             }
             save->click();
             wait([&] { return !controller.hasWork(); });
+            QApplication::processEvents();
+            dialog->findChild<QPushButton *>("libraryUse")->click();
             completed = true;
         });
         button->click();
@@ -348,11 +351,14 @@ int main(int argc, char **argv) {
         write(path, wrap(poly(*replacement.punch.drawing)));
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = QApplication::activeModalWidget();
-            dialog->findChild<QComboBox *>("importToolTarget")->setCurrentIndex(1);
+            dialog->findChild<QListWidget *>("libraryTools")->setCurrentRow(0);
+            dialog->findChild<QPushButton *>("libraryReplaceDxf")->click();
             QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path));
             wait([&] { return !controller.hasWork(); });
             dialog->findChild<QPushButton *>("saveImportedTool")->click();
             wait([&] { return !controller.hasWork(); });
+            QApplication::processEvents();
+            QMetaObject::invokeMethod(dialog, "reject");
         });
         button->click();
         catalog = std::get<core::ToolCatalog>(project::readToolCatalog(native(library)));
@@ -369,6 +375,8 @@ int main(int argc, char **argv) {
                 ->setText(QStringLiteral("Только контур"));
             dialog->findChild<QPushButton *>("saveImportedTool")->click();
             wait([&] { return !controller.hasWork(); });
+            QApplication::processEvents();
+            QMetaObject::invokeMethod(dialog, "reject");
         });
         button->click();
         catalog = std::get<core::ToolCatalog>(project::readToolCatalog(native(library)));
@@ -422,6 +430,8 @@ int main(int argc, char **argv) {
                 require(dialog->grab().save(snapshot + "-die.png"), "Die snapshot failed");
             dialog->findChild<QPushButton *>("saveImportedTool")->click();
             wait([&] { return !controller.hasWork(); });
+            QApplication::processEvents();
+            QMetaObject::invokeMethod(dialog, "reject");
         });
         button->click();
         catalog = std::get<core::ToolCatalog>(project::readToolCatalog(native(library)));
@@ -432,7 +442,7 @@ int main(int argc, char **argv) {
         require(libraryFile.open(QIODevice::ReadOnly), "Read catalogue version");
         auto legacyRoot = QJsonDocument::fromJson(libraryFile.readAll()).object();
         libraryFile.close();
-        require(legacyRoot.value("version").toInt() == 4, "Catalogue version not advanced");
+        require(legacyRoot.value("version").toInt() == 5, "Catalogue version not advanced");
         legacyRoot.insert("version", 2);
         const auto legacyPath = dir.path() + QStringLiteral("/legacy.json");
         write(legacyPath, QJsonDocument(legacyRoot).toJson());

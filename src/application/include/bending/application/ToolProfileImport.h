@@ -1,7 +1,6 @@
 #pragma once
 #include "bending/core/ToolCatalog.h"
 #include <filesystem>
-#include <functional>
 #include <stop_token>
 #include <variant>
 
@@ -21,8 +20,6 @@ struct ToolProfileError {
 };
 using ToolProfileInput = std::variant<std::filesystem::path, core::ToolDrawing>;
 using ToolProfileResult = std::variant<ToolProfileFile, CheckedToolProfile, ToolProfileError>;
-using ToolLibraryWriter = std::function<std::optional<std::string>(const std::filesystem::path &,
-                                                                   const core::ToolCatalog &)>;
 // File decoding and final solid validation run on the shared CAD worker.
 // Validation proves a constant section, not supported contact or load capacity.
 class ToolProfileImporter {

@@ -208,8 +208,9 @@ int main(int argc, char *argv[]) {
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
     window.setToolCatalogLoader(bending::project::readToolCatalog);
-    window.setToolProfileImport(std::make_shared<bending::project::DxfToolImporter>(),
-                                bending::project::writeToolCatalog);
+    window.setToolProfileImport(
+        std::make_shared<bending::project::DxfToolImporter>(),
+        {bending::project::readToolLibrary, bending::project::writeToolLibrary});
     window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
     window.setFlatPatternBuilder(std::make_shared<bending::cad::FlatPatternBuilder>());
     window.setUpdateClient(&updates);
