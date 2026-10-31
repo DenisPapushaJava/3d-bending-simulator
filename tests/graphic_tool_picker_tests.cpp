@@ -68,7 +68,8 @@ int main(int argc, char **argv) {
         auto hook = tool_fixture::hook().punch;
         hook.id = "hook";
         hook.code = "Hook";
-        const auto offset = tool_fixture::offsetPunch();
+        auto offset = tool_fixture::offsetPunch();
+        offset.segments = std::vector<core::ToolSegment>{{20, 4}, {40, 2}};
         const auto mirrored = tool_fixture::offsetPunch(true);
         auto files = std::make_shared<project::ProjectFiles>();
         auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
@@ -90,6 +91,9 @@ int main(int argc, char **argv) {
         QApplication::processEvents();
         auto *punch = window.findChild<QToolButton *>("punchProfile");
         auto *matrix = window.findChild<QToolButton *>("dieProfile");
+        auto *fitSections = window.findChild<QPushButton *>("fitSelectedToolSections");
+        require(fitSections && fitSections->isVisible() && !fitSections->isEnabled(),
+                "Section fitting must be visible but unavailable without a part");
         require(punch && matrix && punch->isVisible() && matrix->isVisible(),
                 "Clickable profiles missing");
         for (auto name : {"punchPreset", "diePreset", "dieGroove", "toolSourceMode"})
@@ -242,13 +246,42 @@ int main(int argc, char **argv) {
         // Saved/manual orientation has priority over the new-selection preference.
         auto manual = *controller.session().bend(0)->catalogTools;
         manual.punchReversed = false;
+        manual.clearanceMm = 7;
+        manual.punchAssembly = core::ToolAssembly{{0, 0, 0}, 0};
+        manual.dieAssembly = core::ToolAssembly{{0, 0, 0}, 0};
         require(controller.setBendToolAssignment(0, manual), "Cannot set a manual side");
         window.findChild<QToolButton *>("processStage1")->click();
+        require(fitSections->isEnabled(), "Section-only fitting is unavailable for chosen tools");
+        const auto beforeFit = controller.session().editRevision();
+        const auto beforeFitCalculations = calculations;
+        fitSections->click();
+        require(!controller.hasWork() && calculations == beforeFitCalculations &&
+                    controller.session().editRevision() == beforeFit &&
+                    controller.session().bend(0)->catalogTools == manual &&
+                    !controller.bendPreview() &&
+                    window.findChild<QToolButton *>("processStage2")
+                        ->accessibleName()
+                        .contains("Нужна проверка"),
+                "Section fitting applied the draft or started CAD work");
         window.findChild<QPushButton *>("applyToolSetup")->click();
         wait([&] { return !controller.hasWork(); });
+        auto fitted = manual;
+        fitted.punchAssembly = core::ToolAssembly{{1}, 0};
+        fitted.dieAssembly = core::ToolAssembly{{1}, 0};
         require(controller.bendPreview() && !controller.bendPreviewError() &&
-                    !controller.session().bend(0)->catalogTools->punchReversed,
-                "Applying a captured assignment overwrote its manual side");
+                    controller.session().bend(0)->catalogTools == fitted,
+                "Section-only fitting changed a chosen profile, groove, side or setup parameter");
+        window.findChild<QToolButton *>("processStage1")->click();
+        const auto ready = controller.bendPreview();
+        const auto unchangedRevision = controller.session().editRevision();
+        fitSections->click();
+        require(controller.bendPreview() == ready && !controller.hasWork() &&
+                    controller.session().editRevision() == unchangedRevision,
+                "Fitting the same sections discarded an already checked cycle");
+        QApplication::processEvents();
+        if (const auto shot = qEnvironmentVariable("BENDING_TOOL_PICKER_SNAPSHOT"); !shot.isEmpty())
+            require(window.grab().save(shot + "-fitted-sections.png"),
+                    "Cannot save selected section fitting");
         const auto path = folder.path() + "/selected.bend";
         controller.saveProject(native(path), files);
         wait([&] { return !controller.isSaving(); });
@@ -258,8 +291,30 @@ int main(int argc, char **argv) {
         wait([&] { return !controller.hasWork(); });
         require(controller.session().bend(0)->catalogTools->groove == 3 &&
                     controller.session().bend(0)->catalogTools->die.segments == die.segments &&
-                    !controller.session().bend(0)->catalogTools->punchReversed,
+                    controller.session().bend(0)->catalogTools == fitted,
                 "Reload changed groove, inventory or the saved manual side");
+        auto insufficient = fitted;
+        insufficient.punch.segments = std::vector<core::ToolSegment>{{20, 1}};
+        insufficient.punchAssembly = core::ToolAssembly{{0}, 0};
+        require(controller.setBendToolAssignment(0, insufficient), "Cannot set short stock");
+        window.findChild<QToolButton *>("processStage1")->click();
+        const auto failedRevision = controller.session().editRevision();
+        const auto failedCalculations = calculations;
+        const auto previousPieces =
+            window.findChild<QLabel *>("toolWorkspacePunchSegments")->text();
+        fitSections->click();
+        require(controller.session().bend(0)->catalogTools == insufficient &&
+                    controller.session().editRevision() == failedRevision &&
+                    calculations == failedCalculations && !controller.hasWork() &&
+                    !controller.bendPreview() &&
+                    window.findChild<QLabel *>("toolWorkspacePunchSegments")->text() ==
+                        previousPieces &&
+                    window.findChild<QLabel *>("toolRecommendation")->text().contains("не хватает"),
+                "Insufficient sections silently substituted a tool or lost the old composition");
+        QApplication::processEvents();
+        if (const auto shot = qEnvironmentVariable("BENDING_TOOL_PICKER_SNAPSHOT"); !shot.isEmpty())
+            require(window.grab().save(shot + "-missing-sections.png"),
+                    "Cannot save insufficient section fitting");
         auto legacy = *core::toolParameters(pair);
         require(controller.setBendTools(0, legacy), "Cannot prepare a legacy assignment");
         const auto before = calculations;

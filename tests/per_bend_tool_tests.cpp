@@ -9,6 +9,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
@@ -133,6 +134,8 @@ int main(int argc, char **argv) {
             } else {
                 window.findChild<QComboBox *>("punchPreset")->setCurrentIndex(index == 0 ? 1 : 2);
                 window.findChild<QComboBox *>("diePreset")->setCurrentIndex(index == 0 ? 1 : 2);
+                // These short synthetic profiles test per-bend tools, not a machine mount.
+                window.findChild<QCheckBox *>("demoMachine")->setChecked(false);
             }
             require(assign->isEnabled(), "Cannot assign the selected tool");
             assign->click();
@@ -255,6 +258,56 @@ int main(int argc, char **argv) {
             require(controller.session().bend(i)->tools == expected[i] &&
                         controller.session().bend(i)->catalogTools == assignments[i],
                     "Portable project lost individual assignments");
+        if (!sample) {
+            window.findChild<QToolButton *>("processStage1")->click();
+            auto *fitSections = window.findChild<QPushButton *>("fitSelectedToolSections");
+            auto *punch = window.findChild<QComboBox *>("punchPreset");
+            auto *die = window.findChild<QComboBox *>("diePreset");
+            scope->setCurrentIndex(0);
+            punch->setCurrentIndex(1);
+            die->setCurrentIndex(1);
+            const auto revision = controller.session().editRevision();
+            require(fitSections && fitSections->isEnabled(), "No shared section fitting");
+            fitSections->click();
+            const auto maximum = std::max_element(bends.begin(), bends.end(), [](auto &a, auto &b) {
+                                     return a.lengthMm < b.lengthMm;
+                                 })->lengthMm;
+            require(!controller.hasWork() && controller.session().editRevision() == revision &&
+                        window.findChild<QLabel *>("toolRecommendation")
+                            ->text()
+                            .contains(QStringLiteral("всех включённых гибов")) &&
+                        window.findChild<QLabel *>("toolAssemblySummary")
+                            ->text()
+                            .contains(QString::number(maximum, 'f', 2)),
+                    "Shared fitting did not use the longest included bend");
+            for (std::size_t i = 0; i < assignments.size(); ++i)
+                require(controller.session().bend(i)->catalogTools == assignments[i],
+                        "Planning a shared draft rewrote independent assignments");
+            scope->setCurrentIndex(1);
+            const auto shortest = static_cast<std::size_t>(
+                std::min_element(bends.begin(), bends.end(),
+                                 [](auto &a, auto &b) { return a.lengthMm < b.lengthMm; }) -
+                bends.begin());
+            selection->setCurrentIndex(selection->findData(static_cast<int>(shortest)));
+            punch->setCurrentIndex(1);
+            die->setCurrentIndex(1);
+            fitSections->click();
+            require(window.findChild<QLabel *>("toolRecommendation")
+                        ->text()
+                        .contains(QStringLiteral("длиной %1 мм").arg(bends[shortest].lengthMm)),
+                    "Individual section fitting used another bend's length");
+            assign->click();
+            const auto &assigned = *controller.session().bend(shortest)->catalogTools;
+            require(assigned.punch.id == pair.punch.id && assigned.die.id == pair.die.id &&
+                        core::toolLength(assigned.punch, assigned.punchAssembly) ==
+                            bends[shortest].lengthMm &&
+                        !controller.hasWork(),
+                    "Individual fitting changed profiles or did not fit the selected length");
+            for (std::size_t i = 0; i < assignments.size(); ++i)
+                if (i != shortest)
+                    require(controller.session().bend(i)->catalogTools == assignments[i],
+                            "Fitting one bend changed another bend's tool/sections");
+        }
         controller.shutdown();
         if (!sample) {
             auto builder = std::make_shared<LimitedBuilder>();

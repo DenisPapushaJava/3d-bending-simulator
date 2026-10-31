@@ -62,13 +62,23 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     mode_->addItem(QStringLiteral("Библиотека инструмента"));
     layout->addWidget(mode_);
     mode_->hide();
-    recommend_ = new QPushButton(QStringLiteral("Подобрать по детали"), this);
+    recommend_ = new QPushButton(QStringLiteral("Подобрать инструмент"), this);
     recommend_->setObjectName(QStringLiteral("recommendTools"));
     recommend_->setToolTip(QStringLiteral(
+        "Выбирает пуансон, матрицу и ручей из библиотеки. "
         "V около 8t — ориентир подбора, а не минимальный размер. Можно вручную выбрать другой "
         "ручей в пределах текущего режима V/t ≥ 5. Материал, угол, паспорт и нагрузка могут "
         "задавать более строгие ограничения; нагрузка пока не проверяется."));
     layout->addWidget(recommend_);
+    fitSections_ = new QPushButton(QStringLiteral("Подобрать секции"), this);
+    fitSections_->setObjectName(QStringLiteral("fitSelectedToolSections"));
+    fitSections_->setToolTip(QStringLiteral(
+        "Рассчитать состав выбранных пуансона и матрицы по длине гиба, наличию и пределу зазора. "
+        "Артикулы, ручей и ориентация сохраняются. В общей установке — по самому длинному "
+        "включённому гибу; в индивидуальной — по выбранному. Проверка столкновений выполняется "
+        "при переходе к гибке."));
+    layout->addWidget(fitSections_);
+    connect(fitSections_, &QPushButton::clicked, this, [this] { fitSelectedAssemblies(); });
     stock_ = new QPushButton(QStringLiteral("Секции и наличие…"), this);
     stock_->setObjectName("toolStock");
     stock_->setEnabled(false);
@@ -715,6 +725,7 @@ void ToolSelectionWidget::updateDetails() {
     assemblySummary_->setVisible(usesCatalog() && (stockConfigured || allBends_));
     segmentGap_->setVisible(usesCatalog() && stockConfigured);
     recommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
+    fitSections_->setEnabled(usesCatalog() && selectionRequest_ && stockPunch && stockDie);
     const auto *selectedPunch = preset(punch_);
     const auto *selectedDie = preset(die_);
     drawings_->setVisible(usesCatalog() && ((selectedPunch && selectedPunch->drawing) ||
@@ -886,22 +897,84 @@ void ToolSelectionWidget::recommend() {
     recommendation_->setMinimumHeight(recommendation_->heightForWidth(240));
     recommendation_->show();
 }
-void ToolSelectionWidget::fitAssemblies() {
+void ToolSelectionWidget::fitSelectedAssemblies() {
+    if (updating_ || !isEnabled() || !usesCatalog() || !selectionRequest_ || !preset(punch_) ||
+        !preset(die_))
+        return;
+    const auto previousPunch = punchAssembly_, previousDie = dieAssembly_;
+    const auto plans = fitAssemblies();
+    QStringList issues;
+    const std::array names{QStringLiteral("Пуансон"), QStringLiteral("Матрица")};
+    for (std::size_t i = 0; i < plans.size(); ++i) {
+        switch (plans[i].status) {
+        case core::SegmentPlanStatus::Complete:
+            break;
+        case core::SegmentPlanStatus::InsufficientStock:
+            if (const auto *tool = preset(i == 0 ? punch_ : die_); tool && !tool->segments)
+                issues << names[i] + QStringLiteral(": цельная длина %1 мм меньше нужной.")
+                                         .arg(tool->lengthMm);
+            else
+                issues << names[i] + QStringLiteral(": не хватает секций из указанного наличия.");
+            break;
+        case core::SegmentPlanStatus::SearchLimit:
+            issues << names[i] + QStringLiteral(": достигнут предел поиска секций.");
+            break;
+        case core::SegmentPlanStatus::InvalidInput:
+            issues << names[i] + QStringLiteral(": уточните данные секций и длину.");
+            break;
+        }
+    }
+    const double length = selectionRequest_->bendLengthMm;
+    QString message;
+    if (!issues.isEmpty()) {
+        punchAssembly_ = previousPunch;
+        dieAssembly_ = previousDie;
+        updateDetails();
+        message = QStringLiteral("Для длины гиба %1 мм: ").arg(length) +
+                  issues.join(QLatin1Char(' ')) + QStringLiteral(" Прежний состав сохранён.");
+    } else {
+        const bool different = punchAssembly_ != previousPunch || dieAssembly_ != previousDie;
+        if (different)
+            changed();
+        else
+            updateDetails();
+        message =
+            allBends_
+                ? QStringLiteral("Состав для всех включённых гибов · длина до %1 мм.").arg(length)
+                : QStringLiteral("Состав для гиба длиной %1 мм.").arg(length);
+        message += different ? QStringLiteral(" Инструмент и ручей сохранены.")
+                             : QStringLiteral(" Состав уже подобран; изменений нет.");
+    }
+    recommendation_->setText(message);
+    recommendation_->setToolTip(fitSections_->toolTip());
+    recommendation_->setMinimumHeight(recommendation_->heightForWidth(240));
+    recommendation_->show();
+}
+std::array<core::SegmentPlan, 2> ToolSelectionWidget::fitAssemblies() {
     punchAssembly_.reset();
     dieAssembly_.reset();
+    std::array<core::SegmentPlan, 2> plans;
     if (!selectionRequest_)
-        return;
+        return plans;
     const auto fit = [&](const core::ToolPreset *tool,
-                         std::optional<core::ToolAssembly> &assembly) {
-        if (!tool || !tool->segments)
-            return;
-        const auto plan = core::planToolSegments(*tool->segments, selectionRequest_->bendLengthMm,
-                                                 200000, segmentGap_->value());
+                         std::optional<core::ToolAssembly> &assembly) -> core::SegmentPlan {
+        if (!tool)
+            return {};
+        if (!tool->segments)
+            return {tool->lengthMm + 1e-5 >= selectionRequest_->bendLengthMm
+                        ? core::SegmentPlanStatus::Complete
+                        : core::SegmentPlanStatus::InsufficientStock,
+                    {},
+                    tool->lengthMm};
+        auto plan = core::planToolSegments(*tool->segments, selectionRequest_->bendLengthMm, 200000,
+                                           segmentGap_->value());
         if (plan.status == core::SegmentPlanStatus::Complete)
             assembly = plan.assembly;
+        return plan;
     };
-    fit(preset(punch_), punchAssembly_);
-    fit(preset(die_), dieAssembly_);
+    plans[0] = fit(preset(punch_), punchAssembly_);
+    plans[1] = fit(preset(die_), dieAssembly_);
+    return plans;
 }
 void ToolSelectionWidget::showDrawings() {
     QDialog dialog(this);

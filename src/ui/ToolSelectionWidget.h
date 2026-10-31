@@ -5,6 +5,7 @@
 #include "bending/core/ToolSelection.h"
 #include <QPointer>
 #include <QWidget>
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -81,7 +82,8 @@ class ToolSelectionWidget final : public QWidget {
     void resetPunchOrientation();
     void refreshFavorites();
     void recommend();
-    void fitAssemblies();
+    void fitSelectedAssemblies();
+    std::array<core::SegmentPlan, 2> fitAssemblies();
     void showDrawings();
     void importCatalog();
     void importDxf();
@@ -106,6 +108,7 @@ class ToolSelectionWidget final : public QWidget {
     QToolButton *detailsToggle_;
     QPushButton *drawings_;
     QPushButton *recommend_;
+    QPushButton *fitSections_;
     QPushButton *stock_;
     QDoubleSpinBox *segmentGap_;
     QLabel *assemblySummary_;
