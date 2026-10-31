@@ -1273,8 +1273,8 @@ class MainWindow::Impl {
             }
             const auto facing =
                 frontPreference
-                    ? (reversed == *frontPreference ? QStringLiteral("Корпус к оператору.")
-                                                    : QStringLiteral("Корпус от оператора."))
+                    ? (reversed == *frontPreference ? QStringLiteral("Выемка к открытому зеву.")
+                                                    : QStringLiteral("Выемка к задней раме."))
                     : (reversed ? QStringLiteral("Пуансон: положение 2.")
                                 : QStringLiteral("Пуансон: положение 1."));
             reversePunchButton->setToolTip(

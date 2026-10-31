@@ -289,12 +289,12 @@ std::optional<bool> defaultPunchOrientation(const ToolPreset &punch) {
         negative += (*section)[1] - tip.x < -margin ? 1 : 0;
         positive += (*section)[0] - tip.x > margin ? 1 : 0;
     }
-    // Body toward -X (operator), relief toward +X. This is an initial workshop
+    // Relief toward -X (operator), body toward +X. This is an initial workshop
     // preference, never a collision or clamping proof.
     if (negative >= 2 && !positive)
-        return false;
-    if (positive >= 2 && !negative)
         return true;
+    if (positive >= 2 && !negative)
+        return false;
     return {};
 }
 std::vector<DetectedDieGroove> detectDieGrooves(const ToolDrawing &drawing) {

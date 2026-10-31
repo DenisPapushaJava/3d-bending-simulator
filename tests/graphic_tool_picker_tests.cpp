@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
                     entry->catalogTools->groove == 3 &&
                     entry->catalogTools->die.segments == die.segments &&
                     entry->catalogTools->punch.id == mirrored.id &&
-                    entry->catalogTools->punchReversed && entry->tools->punchReversed &&
+                    !entry->catalogTools->punchReversed && !entry->tools->punchReversed &&
                     core::hasCompleteDrawingToolGeometry(*entry->catalogTools),
                 "Graphical choice lost stock, groove or the new punch's default side");
         window.findChild<QToolButton *>("processStage1")->click();
@@ -236,18 +236,18 @@ int main(int argc, char **argv) {
         window.findChild<QPushButton *>("applyToolSetup")->click();
         wait([&] { return !controller.hasWork(); });
         require(controller.bendPreview() && !controller.bendPreviewError() &&
-                    !controller.session().bend(0)->catalogTools->punchReversed &&
-                    !controller.session().bend(0)->tools->punchReversed,
+                    controller.session().bend(0)->catalogTools->punchReversed &&
+                    controller.session().bend(0)->tools->punchReversed,
                 "Changing punch kept the previous profile's default side");
         // Saved/manual orientation has priority over the new-selection preference.
         auto manual = *controller.session().bend(0)->catalogTools;
-        manual.punchReversed = true;
+        manual.punchReversed = false;
         require(controller.setBendToolAssignment(0, manual), "Cannot set a manual side");
         window.findChild<QToolButton *>("processStage1")->click();
         window.findChild<QPushButton *>("applyToolSetup")->click();
         wait([&] { return !controller.hasWork(); });
         require(controller.bendPreview() && !controller.bendPreviewError() &&
-                    controller.session().bend(0)->catalogTools->punchReversed,
+                    !controller.session().bend(0)->catalogTools->punchReversed,
                 "Applying a captured assignment overwrote its manual side");
         const auto path = folder.path() + "/selected.bend";
         controller.saveProject(native(path), files);
@@ -258,7 +258,7 @@ int main(int argc, char **argv) {
         wait([&] { return !controller.hasWork(); });
         require(controller.session().bend(0)->catalogTools->groove == 3 &&
                     controller.session().bend(0)->catalogTools->die.segments == die.segments &&
-                    controller.session().bend(0)->catalogTools->punchReversed,
+                    !controller.session().bend(0)->catalogTools->punchReversed,
                 "Reload changed groove, inventory or the saved manual side");
         auto legacy = *core::toolParameters(pair);
         require(controller.setBendTools(0, legacy), "Cannot prepare a legacy assignment");
@@ -291,7 +291,7 @@ int main(int argc, char **argv) {
         wait([&] { return !restarted.hasWork(); });
         require(restarted.bendPreview() && !restarted.bendPreviewError() &&
                     restarted.session().bend(0)->catalogTools->punch.id == mirrored.id &&
-                    restarted.session().bend(0)->catalogTools->punchReversed,
+                    !restarted.session().bend(0)->catalogTools->punchReversed,
                 "Restoring the last article IDs lost their initial punch side");
         std::cout << "Graphical profiles, working grooves, keyboard/cancel, real-only policy and "
                      "default/manual orientations and persistence passed\n";

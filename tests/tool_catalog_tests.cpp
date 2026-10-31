@@ -32,9 +32,9 @@ int main() {
                 "Teaching profile passed real-body policy");
         require(!defaultPunchOrientation(drawn.punch).has_value(),
                 "Symmetric punch invented an operator-side preference");
-        require(defaultPunchOrientation(tool_fixture::offsetPunch()) == false,
-                "Default offset body is not toward the operator");
-        require(defaultPunchOrientation(tool_fixture::offsetPunch(true)) == true,
+        require(defaultPunchOrientation(tool_fixture::offsetPunch()) == true,
+                "Default punch relief is not toward the operator/open throat");
+        require(defaultPunchOrientation(tool_fixture::offsetPunch(true)) == false,
                 "Mirrored DXF lost the same physical default");
         require(!defaultPunchOrientation(drawn.die), "A die invented a punch orientation");
         auto tang = tool_fixture::tangPair();
