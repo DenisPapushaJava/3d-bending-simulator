@@ -18,6 +18,38 @@ int main() {
     try {
         const auto drawn = tool_fixture::pair();
         require(hasCompleteDrawingToolGeometry(drawn), "Explicit tool bodies were rejected");
+        require(hasLibraryProfile(drawn.punch), "Captured DXF missing from workshop policy");
+        auto missingProfile = drawn.punch;
+        missingProfile.drawing.reset();
+        require(!hasLibraryProfile(missingProfile), "Parameter-only record admitted to workshop");
+        const auto measured = detectPunchProfile(*drawn.punch.drawing);
+        const auto size = toolProfileSize(*drawn.punch.drawing);
+        require(measured && size &&
+                    std::abs(measured->angleRadians - drawn.punch.angleRadians) < 1.e-8 &&
+                    std::abs(measured->noseRadiusMm - *drawn.punch.noseRadiusMm) < 1.e-8 &&
+                    std::abs(size->heightMm - 45) < 1.e-8,
+                "DXF nose/dimensions differ from simulation references");
+        for (double degrees : {26., 60., 90., 120.}) {
+            const auto profile =
+                tool_fixture::explicitPair(
+                    {48, std::numbers::pi / 2, degrees * std::numbers::pi / 180, 2.5, 80, 10})
+                    .punch;
+            const auto m = detectPunchProfile(*profile.drawing);
+            require(m && std::abs(m->angleRadians - profile.angleRadians) < 1.e-8 &&
+                        std::abs(m->noseRadiusMm - 2.5) < 1.e-8,
+                    "Nose detection depends on a particular angle or radius");
+        }
+        auto unsupported = *drawn.punch.drawing;
+        for (auto &edge : unsupported.edges) {
+            edge.center.reset();
+            edge.sweepRadians = 0;
+        }
+        require(validToolDrawing(unsupported) && toolProfileSize(unsupported) &&
+                    !detectPunchProfile(unsupported),
+                "Sharp/unsupported profile invented a rounded nose");
+        require(!detectPunchProfile(rotateToolDrawing(*drawn.punch.drawing, std::numbers::pi)) &&
+                    !hasLibraryProfile(missingProfile),
+                "Upside-down DXF invented an upright nose");
         auto incomplete = drawn;
         incomplete.useDrawingGeometry = false;
         require(!hasCompleteDrawingToolGeometry(incomplete),
@@ -144,8 +176,8 @@ int main() {
                              835, 60,     {},   {10, 16, 22, 35}, "own fixture",
                              "",  false};
         require(validToolCatalog({punch, die}), "Valid catalogue rejected");
-        require(!validToolCatalog({}) && !validToolCatalog({punch, punch}),
-                "Empty/duplicate catalogue accepted");
+        require(validToolCatalog({}) && !validToolCatalog({punch, punch}),
+                "Empty workshop rejected or duplicate catalogue accepted");
         for (std::size_t i = 0; i < die.openingsMm.size(); ++i) {
             const auto t = toolParameters({punch, die, i, 10, "Test machine"});
             require(t && t->openingMm == die.openingsMm[i] && t->lengthMm == 835 &&

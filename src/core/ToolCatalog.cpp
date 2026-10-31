@@ -114,13 +114,17 @@ std::optional<ToolDrawing> activeDieDrawing(const ToolPreset &t, std::size_t g) 
     return rotateToolDrawing(*t.drawing, settings->rotationRadians);
 }
 bool validToolCatalog(const ToolCatalog &catalog) {
-    if (catalog.empty() || catalog.size() > 512) {
+    if (catalog.size() > 512) {
         return false;
     }
     std::set<std::string> ids;
     return std::all_of(catalog.begin(), catalog.end(), [&](const auto &tool) {
         return validToolPreset(tool) && ids.insert(tool.id).second;
     });
+}
+bool hasLibraryProfile(const ToolPreset &tool) {
+    return !tool.teaching && tool.drawing && tool.drawing->millimeters &&
+           validToolDrawing(*tool.drawing);
 }
 std::optional<PressTools> toolParameters(const ToolAssignment &a) {
     if (!validToolPreset(a.punch) || !validToolPreset(a.die) || !a.punch.parametersConfirmed ||

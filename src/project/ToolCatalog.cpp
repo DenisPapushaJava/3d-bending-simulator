@@ -3,14 +3,10 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QResource>
 #include <QSaveFile>
 #include <cmath>
 #include <limits>
 
-static void initializeToolCatalog() {
-    Q_INIT_RESOURCE(tool_catalog);
-}
 namespace bending::project {
 namespace {
 QJsonValue number(const std::optional<double> &value) {
@@ -345,15 +341,6 @@ ToolCatalogResult readToolCatalog(const std::filesystem::path &path) {
 #else
     QFile file(QString::fromUtf8(path.native().c_str()));
 #endif
-    return readFile(file);
-}
-ToolCatalogResult builtInToolCatalog() {
-    static const bool initialized = [] {
-        initializeToolCatalog();
-        return true;
-    }();
-    (void)initialized;
-    QFile file(QStringLiteral(":/bending/tool-catalog.json"));
     return readFile(file);
 }
 std::optional<std::string> writeToolCatalog(const std::filesystem::path &path,

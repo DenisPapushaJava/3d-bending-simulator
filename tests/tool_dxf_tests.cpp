@@ -12,6 +12,9 @@
 #include <QDialog>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -19,12 +22,15 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMimeData>
 #include <QPointer>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
+#include <QToolButton>
+#include <QUrl>
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
@@ -218,8 +224,22 @@ int main(int argc, char **argv) {
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = QApplication::activeModalWidget();
             require(dialog, "No import dialog");
-            require(QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path)),
-                    "No load command");
+            QMimeData mime;
+            mime.setUrls({QUrl::fromLocalFile(path)});
+            QDragEnterEvent enter(QPoint(20, 20), Qt::CopyAction | Qt::MoveAction, &mime,
+                                  Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(dialog, &enter);
+            require(enter.isAccepted(), "DXF drop rejected by the tool dialog");
+            QDragMoveEvent move(QPoint(20, 20), Qt::CopyAction | Qt::MoveAction, &mime,
+                                Qt::LeftButton, Qt::ShiftModifier);
+            QApplication::sendEvent(dialog, &move);
+            require(move.isAccepted() && move.dropAction() == Qt::CopyAction,
+                    "DXF dragging requested moving the original file");
+            QDropEvent drop(QPointF(20, 20), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                            Qt::ShiftModifier);
+            QApplication::sendEvent(dialog, &drop);
+            require(drop.isAccepted() && drop.dropAction() == Qt::CopyAction,
+                    "DXF drop did not load a section safely");
             wait([&] { return !controller.hasWork(); });
             auto *save = dialog->findChild<QPushButton *>("saveImportedTool");
             require(!save->isEnabled(), "Unknown units silently treated as mm");
@@ -227,8 +247,33 @@ int main(int argc, char **argv) {
             dialog->findChild<QLineEdit *>("importToolCode")
                 ->setText(QStringLiteral("Мой пуансон"));
             dialog->findChild<QDoubleSpinBox *>("importToolLength")->setValue(80);
-            dialog->findChild<QDoubleSpinBox *>("importToolAngle")->setValue(60);
-            dialog->findChild<QDoubleSpinBox *>("importToolRadius")->setValue(.8);
+            auto *measurements = dialog->findChild<QLabel *>("importToolProfileSize");
+            require(!dialog->findChild<QDoubleSpinBox *>("importToolAngle") &&
+                        !dialog->findChild<QDoubleSpinBox *>("importToolRadius") &&
+                        !dialog->findChild<QLineEdit *>("importToolOpenings") &&
+                        measurements->text().contains("R 0.8") &&
+                        measurements->text().contains("45.000"),
+                    "DXF dimensions became editable or were not measured");
+            require(dialog->findChild<QToolButton *>("toolImportAdvancedToggle")->isChecked(),
+                    "Unknown units were hidden in collapsed settings");
+            dialog->findChild<QComboBox *>("importToolUnits")->setCurrentIndex(2);
+            require(measurements->text().contains("R 20.32"),
+                    "DXF unit change retained a stale nose radius");
+            dialog->findChild<QComboBox *>("importToolUnits")->setCurrentIndex(1);
+            QMimeData foreign;
+            foreign.setUrls({QUrl::fromLocalFile(dir.path() + "/part.step")});
+            QDragEnterEvent foreignEnter(QPoint(20, 20), Qt::CopyAction, &foreign, Qt::LeftButton,
+                                         Qt::NoModifier);
+            QApplication::sendEvent(dialog, &foreignEnter);
+            require(!foreignEnter.isAccepted() && !controller.hasWork(),
+                    "Tool dialog accepted a non-DXF drop");
+            dialog->findChild<QToolButton *>("toolImportAdvancedToggle")->setChecked(false);
+            require(!dialog->findChild<QWidget *>("toolImportAdvanced")->isVisible(),
+                    "Advanced import settings remain permanently visible");
+            dialog->findChild<QToolButton *>("rotateToolProfileRight")->click();
+            require(dialog->findChild<QDoubleSpinBox *>("importToolRotation")->value() == 90,
+                    "Profile rotation button did not update its source placement");
+            dialog->findChild<QToolButton *>("rotateToolProfileLeft")->click();
             auto *mirror = dialog->findChild<QCheckBox *>("importToolMirror");
             mirror->setChecked(true);
             mirror->setChecked(false);
@@ -253,7 +298,10 @@ int main(int argc, char **argv) {
         require(std::holds_alternative<core::ToolCatalog>(saved), "Library unreadable");
         auto catalog = std::get<core::ToolCatalog>(saved);
         require(catalog.size() == 3 && catalog.back().parametersConfirmed &&
-                    catalog.back().drawing && catalog.back().code == "Мой пуансон",
+                    catalog.back().drawing && catalog.back().code == "Мой пуансон" &&
+                    std::abs(*catalog.back().heightMm - 45) < 1.e-6 &&
+                    std::abs(catalog.back().angleRadians - std::numbers::pi / 3) < 1.e-6 &&
+                    std::abs(*catalog.back().noseRadiusMm - .8) < 1.e-6,
                 "New tool not persisted");
         require(core::drawingToolGeometry({catalog.back(), tools.die, 0, 3, "", true}).has_value(),
                 "Imported analytic nose no longer supports existing contact");
@@ -295,7 +343,9 @@ int main(int argc, char **argv) {
         require(std::get<core::ToolCatalog>(project::readToolCatalog(native(library))) == before,
                 "Bad section modified catalogue");
         // Updating an existing record retains its identity, other grooves and neighbouring tools.
-        write(path, wrap(poly(*tools.punch.drawing)));
+        const auto replacement = tool_fixture::explicitPair(
+            {12, std::numbers::pi / 3, 26 * std::numbers::pi / 180, 1.6, 80, 10});
+        write(path, wrap(poly(*replacement.punch.drawing)));
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = QApplication::activeModalWidget();
             dialog->findChild<QComboBox *>("importToolTarget")->setCurrentIndex(1);
@@ -307,8 +357,9 @@ int main(int argc, char **argv) {
         button->click();
         catalog = std::get<core::ToolCatalog>(project::readToolCatalog(native(library)));
         require(catalog.size() == before.size() && catalog[0].id == before[0].id &&
-                    catalog[1] == before[1],
-                "Profile update duplicated a tool or lost neighbour");
+                    catalog[1] == before[1] && std::abs(*catalog[0].noseRadiusMm - 1.6) < 1.e-6 &&
+                    std::abs(catalog[0].angleRadians - 26 * std::numbers::pi / 180) < 1.e-6,
+                "DXF replacement retained stale dimensions, duplicated a tool or lost neighbour");
         // Unknown parameters remain inventory data, rather than an assignable machine tool.
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = QApplication::activeModalWidget();
@@ -324,20 +375,51 @@ int main(int argc, char **argv) {
         require(catalog.size() == 4 && !catalog.back().parametersConfirmed &&
                     catalog.back().drawing,
                 "Incomplete tool became assignable or was lost");
+        // Ambiguous multi-contour files must ask, rather than import the first body.
+        write(path, wrap(poly(*tools.punch.drawing) + poly(*tools.die.drawing, "OTHER")));
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = QApplication::activeModalWidget();
+            QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path));
+            wait([&] { return !controller.hasWork(); });
+            auto *contours = dialog->findChild<QComboBox *>("importToolContour");
+            require(contours->count() == 2 && contours->currentIndex() == -1 &&
+                        !dialog->findChild<QPushButton *>("saveImportedTool")->isEnabled() &&
+                        dialog->findChild<QToolButton *>("toolImportAdvancedToggle")->isChecked(),
+                    "Multi-contour DXF silently selected an arbitrary body");
+            contours->setCurrentIndex(0);
+            require(dialog->findChild<QPushButton *>("saveImportedTool")->isEnabled(),
+                    "Explicit contour selection remained unavailable");
+            QMetaObject::invokeMethod(dialog, "reject");
+        });
+        button->click();
         write(path, wrap(poly(*tool_fixture::fourWayDie().drawing)));
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = QApplication::activeModalWidget();
-            dialog->findChild<QComboBox *>("importToolKind")->setCurrentIndex(1);
             QMetaObject::invokeMethod(dialog, "loadFile", Q_ARG(QString, path));
             wait([&] { return !controller.hasWork(); });
-            dialog->findChild<QPushButton *>("recognizeToolGrooves")->click();
             auto *table = dialog->findChild<QTableWidget *>("importToolGrooves");
             require(table->rowCount() == 4 && table->item(3, 1)->text() == QStringLiteral("90"),
                     "Four-way import table missing");
             table->setCurrentCell(3, 0);
             dialog->findChild<QDoubleSpinBox *>("importToolLength")->setValue(80);
-            require(!dialog->findChild<QDoubleSpinBox *>("importToolAngle")->isEnabled(),
-                    "Common angle overrides recognized grooves");
+            require(dialog->findChild<QComboBox *>("importToolKind")->currentIndex() == 1 &&
+                        !dialog->findChild<QDoubleSpinBox *>("importToolAngle") &&
+                        !dialog->findChild<QLineEdit *>("importToolOpenings") &&
+                        !dialog->findChild<QPushButton *>("recognizeToolGrooves"),
+                    "Type was not inferred or manual dimensions can override DXF");
+            auto *groove = dialog->findChild<QToolButton *>("importToolGroove3");
+            require(groove && groove->isVisible(), "Interactive groove choices are missing");
+            const auto *canvas = dialog->findChild<QWidget *>("toolDrawingCanvas");
+            groove->click();
+            require(canvas == dialog->findChild<QWidget *>("toolDrawingCanvas"),
+                    "Working-side change recreated the preview canvas");
+            require(
+                table->currentRow() == 3 && groove->isChecked() &&
+                    dialog->findChild<QLabel *>("importToolProfileSize")->text().contains("V 30"),
+                "Groove click did not update the working profile");
+            if (const auto snapshot = qEnvironmentVariable("BENDING_DXF_SNAPSHOT");
+                !snapshot.isEmpty())
+                require(dialog->grab().save(snapshot + "-die.png"), "Die snapshot failed");
             dialog->findChild<QPushButton *>("saveImportedTool")->click();
             wait([&] { return !controller.hasWork(); });
         });

@@ -16,15 +16,21 @@ bool contains(const DrawingEdge &e, double angle) {
     return distance <= std::abs(e.sweepRadians) + 1.e-8 || 2 * pi - distance < 1.e-8;
 }
 struct Bounds {
-    double minY, maxY, area;
+    double minY, maxY, area, minX, maxX;
 };
 Bounds bounds(const ToolDrawing &d) {
-    Bounds b{1.e100, -1.e100, 0};
+    Bounds b{1.e100, -1.e100, 0, 1.e100, -1.e100};
     for (const auto &e : d.edges) {
         b.minY = std::min({b.minY, e.start.y, e.end.y});
         b.maxY = std::max({b.maxY, e.start.y, e.end.y});
+        b.minX = std::min({b.minX, e.start.x, e.end.x});
+        b.maxX = std::max({b.maxX, e.start.x, e.end.x});
         if (e.center) {
             const double r = radius(e);
+            if (contains(e, 0))
+                b.maxX = std::max(b.maxX, e.center->x + r);
+            if (contains(e, pi))
+                b.minX = std::min(b.minX, e.center->x - r);
             if (contains(e, -pi / 2))
                 b.minY = std::min(b.minY, e.center->y - r);
             if (contains(e, pi / 2))
@@ -50,30 +56,38 @@ bool tangentNeighbours(const ToolDrawing &d, std::size_t i) {
     }
     return true;
 }
-std::optional<ToolGeometry> punchGeometry(const ToolPreset &punch) {
-    if (!validToolPreset(punch) || !punch.parametersConfirmed || punch.kind != ToolKind::Punch ||
-        !punch.drawing)
-        return {};
-    ToolGeometry geometry{};
-    const auto &p = *punch.drawing;
-    if (!p.millimeters)
+std::optional<std::size_t> punchNose(const ToolDrawing &p,
+                                     std::optional<DetectedPunchProfile> expected = {}) {
+    if (!p.millimeters || !validToolDrawing(p))
         return {};
     const auto pb = bounds(p);
     std::vector<std::size_t> noses;
     for (std::size_t i = 0; i < p.edges.size(); ++i) {
         const auto &e = p.edges[i];
+        const double angle = pi - std::abs(e.sweepRadians);
         if (e.center && e.sweepRadians * pb.area > 0 && contains(e, -pi / 2) &&
-            std::abs(radius(e) - *punch.noseRadiusMm) <= tolerance &&
-            std::abs(e.center->y - radius(e) - pb.minY) <= tolerance &&
-            std::abs(std::abs(e.sweepRadians) - (pi - punch.angleRadians)) < 1.e-6 &&
-            tangentNeighbours(p, i))
+            (expected
+                 ? std::abs(radius(e) - expected->noseRadiusMm) <= tolerance &&
+                       std::abs(std::abs(e.sweepRadians) - (pi - expected->angleRadians)) < 1.e-6
+                 : radius(e) >= .1 && radius(e) <= 250 && angle >= pi / 18 - 1.e-9 &&
+                       angle <= 2 * pi / 3 + 1.e-9) &&
+            std::abs(e.center->y - radius(e) - pb.minY) <= tolerance && tangentNeighbours(p, i))
             noses.push_back(i);
     }
-    if (noses.size() != 1)
+    return noses.size() == 1 ? std::optional{noses.front()} : std::nullopt;
+}
+std::optional<ToolGeometry> punchGeometry(const ToolPreset &punch) {
+    if (!validToolPreset(punch) || !punch.parametersConfirmed || punch.kind != ToolKind::Punch ||
+        !punch.drawing)
         return {};
-    const auto &nose = p.edges[noses[0]];
+    const auto index =
+        punchNose(*punch.drawing, DetectedPunchProfile{punch.angleRadians, *punch.noseRadiusMm});
+    if (!index)
+        return {};
+    const auto &nose = punch.drawing->edges[*index];
+    ToolGeometry geometry{};
     geometry.punchTip = {nose.center->x, nose.center->y - radius(nose)};
-    geometry.noseEdge = noses[0];
+    geometry.noseEdge = *index;
     geometry.hasPunch = true;
     return geometry;
 }
@@ -163,6 +177,19 @@ std::vector<DieFeature> dieFeatures(const ToolDrawing &d) {
     return candidates;
 }
 } // namespace
+std::optional<ToolProfileSize> toolProfileSize(const ToolDrawing &drawing) {
+    if (!drawing.millimeters || !validToolDrawing(drawing))
+        return {};
+    const auto b = bounds(drawing);
+    return ToolProfileSize{b.maxX - b.minX, b.maxY - b.minY};
+}
+std::optional<DetectedPunchProfile> detectPunchProfile(const ToolDrawing &drawing) {
+    const auto index = punchNose(drawing);
+    if (!index)
+        return {};
+    const auto &nose = drawing.edges[*index];
+    return DetectedPunchProfile{pi - std::abs(nose.sweepRadians), radius(nose)};
+}
 std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
     if (!validToolPreset(a.punch) || !validToolPreset(a.die) || !a.punch.parametersConfirmed ||
         !a.die.parametersConfirmed || a.punch.kind != ToolKind::Punch ||

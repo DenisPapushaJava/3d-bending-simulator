@@ -1851,8 +1851,7 @@ void testGuidedWorkflow(bool graphics) {
     using namespace application;
     const auto files = std::make_shared<project::ProjectFiles>();
     const auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
-    auto catalog = project::builtInToolCatalog();
-    require(std::holds_alternative<core::ToolCatalog>(catalog), "Missing bundled catalogue");
+    project::ToolCatalogResult catalog = tool_fixture::guidedCatalog();
     const auto privateCatalog = qEnvironmentVariable("BENDING_TEST_TOOL_CATALOG");
     if (!privateCatalog.isEmpty()) {
 #ifdef _WIN32
@@ -1863,31 +1862,6 @@ void testGuidedWorkflow(bool graphics) {
         catalog = project::readToolCatalog(catalogPath);
         require(std::holds_alternative<core::ToolCatalog>(catalog),
                 "Private test catalogue failed");
-    } else {
-        // Owned explicit contours only; no manufacturer's private drawing is bundled.
-        for (auto &tool : std::get<core::ToolCatalog>(catalog)) {
-            if (!tool.parametersConfirmed)
-                continue;
-            if (tool.kind == core::ToolKind::Punch) {
-                const auto fixture =
-                    tool_fixture::explicitPair({48, std::numbers::pi / 2, tool.angleRadians,
-                                                *tool.noseRadiusMm, tool.lengthMm, 10});
-                tool.drawing = fixture.punch.drawing;
-                tool.heightMm = fixture.punch.heightMm;
-            } else if (tool.openingsMm.size() == 4) {
-                const auto fixture = tool_fixture::fourWayDie(tool.openingsMm);
-                tool.drawing = fixture.drawing;
-                tool.grooveSettings = fixture.grooveSettings;
-                tool.heightMm = fixture.heightMm;
-            } else if (tool.openingsMm.size() == 1) {
-                const auto fixture =
-                    tool_fixture::explicitPair({tool.openingsMm[0], tool.angleRadians,
-                                                std::numbers::pi / 3, .8, tool.lengthMm, 10});
-                tool.drawing = fixture.die.drawing;
-                tool.heightMm = fixture.die.heightMm;
-            }
-            tool.source = "Owned test contour; not a manufacturer's profile";
-        }
     }
     ui::MainWindow window({"test", cad::kernelVersion()}, files, files, builder,
                           std::get<core::ToolCatalog>(catalog));

@@ -53,7 +53,7 @@ QLabel *wrapped(QWidget *parent) {
 } // namespace
 ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *parent)
     : QWidget(parent), catalog_(std::move(catalog)), workshopSize_(catalog_.size()) {
-    std::erase_if(catalog_, [](const auto &tool) { return tool.teaching; });
+    std::erase_if(catalog_, [](const auto &tool) { return !core::hasLibraryProfile(tool); });
     workshopSize_ = catalog_.size();
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -607,7 +607,7 @@ void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
     if (!isEnabled())
         return;
     if (result == ToolPickerPopup::ImportDxf)
-        importDxf();
+        importDxf(kind);
     else if (result == QDialog::Accepted && dialog.choice())
         chooseTool(dialog.choice()->first, dialog.choice()->second);
 }
@@ -1120,9 +1120,12 @@ void ToolSelectionWidget::importCatalog() {
     }
     auto merged = catalog_;
     merged.resize(workshopSize_);
+    std::size_t skipped = 0;
     for (const auto &tool : std::get<core::ToolCatalog>(loaded)) {
-        if (tool.teaching)
+        if (!core::hasLibraryProfile(tool)) {
+            ++skipped;
             continue;
+        }
         auto found = std::find_if(merged.begin(), merged.end(),
                                   [&](const auto &t) { return t.id == tool.id; });
         if (found == merged.end())
@@ -1155,6 +1158,11 @@ void ToolSelectionWidget::importCatalog() {
     settings->setValue(QStringLiteral("tools/catalogPath"), path);
     refreshFavorites();
     changed();
+    if (skipped)
+        setCheckedSearchState(
+            false,
+            QStringLiteral("Пропущено записей без DXF-сечения: %1. Добавьте инструмент из DXF.")
+                .arg(skipped));
 }
 void ToolSelectionWidget::setToolProfileImport(
     ImportController &controller, std::shared_ptr<const application::ToolProfileImporter> importer,
@@ -1165,16 +1173,19 @@ void ToolSelectionWidget::setToolProfileImport(
     importDxf_->setEnabled(profileImporter_ && libraryWriter_);
     stock_->setEnabled(static_cast<bool>(libraryWriter_));
 }
-void ToolSelectionWidget::importDxf() {
+void ToolSelectionWidget::importDxf(std::optional<core::ToolKind> initialKind) {
     if (!controller_ || !profileImporter_ || !libraryWriter_)
         return;
     ToolImportDialog dialog(
         *controller_, profileImporter_,
         core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_),
-        [this](core::ToolPreset tool) { return saveImportedTool(std::move(tool)); }, this);
+        [this](core::ToolPreset tool) { return saveImportedTool(std::move(tool)); }, this,
+        initialKind);
     dialog.exec();
 }
 QString ToolSelectionWidget::saveImportedTool(core::ToolPreset tool) {
+    if (!core::hasLibraryProfile(tool))
+        return QStringLiteral("Для библиотеки нужен контур из DXF с подтверждёнными единицами.");
     auto merged = core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_);
     const auto found =
         std::find_if(merged.begin(), merged.end(), [&](const auto &t) { return t.id == tool.id; });

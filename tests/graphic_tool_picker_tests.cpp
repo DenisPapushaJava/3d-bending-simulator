@@ -142,9 +142,9 @@ int main(int argc, char **argv) {
                             "Popup exceeds the available screen");
                     require(!popup->findChild<QToolButton *>("toolOption_teaching_0"),
                             "Teaching tool leaked into palette");
-                    if (auto *unavailable =
-                            popup->findChild<QToolButton *>("toolOption_missing-profile_0"))
-                        require(!unavailable->isEnabled(), "A missing drawing is selectable");
+                    require(!popup->findChild<QToolButton *>("toolOption_missing-profile_0") &&
+                                !popup->findChild<QLabel *>("toolNeedsData_missing-profile"),
+                            "A parameter-only record leaked into the DXF library");
                     if (cancel) {
                         auto *search = popup->findChild<QLineEdit *>("toolPickerSearch");
                         search->setText("no-such-tool");

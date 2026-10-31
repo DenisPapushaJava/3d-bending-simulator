@@ -1,6 +1,17 @@
 #pragma once
 #include "bending/core/ToolCatalog.h"
 namespace bending::core {
+struct ToolProfileSize {
+    double widthMm, heightMm;
+};
+// Analytic bounds of the captured millimetre contour, including circular extrema.
+[[nodiscard]] std::optional<ToolProfileSize> toolProfileSize(const ToolDrawing &);
+struct DetectedPunchProfile {
+    double angleRadians, noseRadiusMm;
+};
+// The same upright circular nose and tangent neighbours used by the simulation checker.
+// Does not infer a working profile for sharp, ambiguous or unsupported noses.
+[[nodiscard]] std::optional<DetectedPunchProfile> detectPunchProfile(const ToolDrawing &);
 // Strict upright, circular-nose punch and/or symmetric, single rounded V groove.
 // A missing drawing leaves its references unused; an unsupported present one fails.
 // These are working references, not a proof of compatibility with machine clamps.

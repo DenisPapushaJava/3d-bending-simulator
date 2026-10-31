@@ -148,7 +148,16 @@ int main(int argc, char **argv) {
         require(json.open(QIODevice::ReadOnly), "Read saved");
         auto root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();
-        require(root.value("version").toInt() == 13, "Wrong version");
+        require(root.value("version").toInt() == 14, "Wrong version");
+        {
+            auto legacyBends = root["bends"].toArray();
+            for (qsizetype i = 0; i < legacyBends.size(); ++i) {
+                auto legacyBend = legacyBends[i].toObject();
+                legacyBend.remove("workpieceReversed");
+                legacyBends[i] = legacyBend;
+            }
+            root["bends"] = legacyBends;
+        }
         root.insert("version", 7);
         require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Write full v7");
         json.write(QJsonDocument(root).toJson());
@@ -263,6 +272,15 @@ int main(int argc, char **argv) {
         require(json.open(QIODevice::ReadOnly), "Read mixed project");
         root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();
+        {
+            auto legacyBends = root["bends"].toArray();
+            for (qsizetype i = 0; i < legacyBends.size(); ++i) {
+                auto legacyBend = legacyBends[i].toObject();
+                legacyBend.remove("workpieceReversed");
+                legacyBends[i] = legacyBend;
+            }
+            root["bends"] = legacyBends;
+        }
         root.insert("version", 7);
         require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Retag mixed legacy");
         json.write(QJsonDocument(root).toJson());

@@ -200,7 +200,8 @@ def import_profiles(catalog, directory, millimeters=()):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
-    parser.add_argument('--catalog', type=Path, default=Path(__file__).resolve().parents[1] / 'src/project/data/tool-catalog.json')
+    parser.add_argument('--catalog', type=Path, required=True,
+                        help='Existing private catalogue; new tools are added in the application from DXF')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--replace', action='store_true')
     parser.add_argument('--millimeters', action='append', default=[], metavar='CODE',

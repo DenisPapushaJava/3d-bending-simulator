@@ -382,20 +382,15 @@ void testPrivatePreparation() {
 }
 void testCatalogProject() {
     using namespace bending;
-    const auto bundled = project::builtInToolCatalog();
-    require(std::holds_alternative<core::ToolCatalog>(bundled), "Bundled catalogue unreadable");
-    const auto &catalog = std::get<core::ToolCatalog>(bundled);
-    require(catalog.size() == 15 && std::none_of(catalog.begin(), catalog.end(),
-                                                 [](const auto &t) { return t.teaching; }),
-            "Wrong catalogue contents");
-    const auto find = [&](const std::string &id) -> const core::ToolPreset & {
-        const auto it =
-            std::find_if(catalog.begin(), catalog.end(), [&](const auto &t) { return t.id == id; });
-        require(it != catalog.end(), "Missing preset");
-        return *it;
-    };
-    core::ToolAssignment assignment{find("s-tool-st1801m"), find("s-tool-st2401s"), 3, 10,
-                                    "Test machine"};
+    auto assignment = tool_fixture::pair();
+    assignment.punch.lengthMm = 525;
+    assignment.die = tool_fixture::fourWayDie({10, 16, 22, 35});
+    assignment.die.lengthMm = 835;
+    assignment.groove = 3;
+    // Version 4 has one common angle: keep it equal to the selected modern groove.
+    assignment.die.angleRadians = core::dieGroove(assignment.die, assignment.groove)->angleRadians;
+    assignment.useDrawingGeometry = false; // Exercise legacy snapshot semantics too.
+    assignment.machineName = "Test machine";
     assignment.punch.drawing =
         core::ToolDrawing{"own.dxf",
                           std::string(64, 'a'),
@@ -436,6 +431,8 @@ void testCatalogProject() {
             auto tool = pair.value(key).toObject();
             tool.remove(QStringLiteral("drawing"));
             tool.remove(QStringLiteral("parametersConfirmed"));
+            tool.remove(QStringLiteral("grooveSettings"));
+            tool.remove(QStringLiteral("segments"));
             pair.insert(key, tool);
         }
         legacyBend.insert(QStringLiteral("catalogTools"), pair);
@@ -494,10 +491,10 @@ void testCatalogProject() {
     reject(altered);
     // External catalogue input is data only, bounded and independently validated.
     const auto catalogPath = temp.path() + QStringLiteral("/tools.json");
-    QFile resource(QStringLiteral(":/bending/tool-catalog.json"));
-    require(resource.open(QIODevice::ReadOnly), "No bundled JSON");
-    const auto catalogBytes = resource.readAll();
-    write(catalogPath, catalogBytes);
+    const core::ToolCatalog catalog{assignment.punch, assignment.die};
+    require(!project::writeToolCatalog(nativePath(catalogPath), catalog),
+            "Cannot write own catalogue");
+    const auto catalogBytes = read(catalogPath);
     require(std::get<core::ToolCatalog>(project::readToolCatalog(nativePath(catalogPath))) ==
                 catalog,
             "External catalogue differs");
@@ -513,6 +510,8 @@ void testCatalogProject() {
                 continue;
             tool.remove(QStringLiteral("drawing"));
             tool.remove(QStringLiteral("parametersConfirmed"));
+            tool.remove(QStringLiteral("grooveSettings"));
+            tool.remove(QStringLiteral("segments"));
             legacyTools.append(tool);
         }
         legacyCatalog.insert(QStringLiteral("tools"), legacyTools);

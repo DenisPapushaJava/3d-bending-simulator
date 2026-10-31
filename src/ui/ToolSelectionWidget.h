@@ -93,7 +93,7 @@ class ToolSelectionWidget final : public QWidget {
     std::array<core::SegmentPlan, 2> fitAssemblies();
     void showDrawings();
     void importCatalog();
-    void importDxf();
+    void importDxf(std::optional<core::ToolKind> initialKind = {});
     QString saveImportedTool(core::ToolPreset);
     core::ToolCatalog catalog_;
     std::size_t workshopSize_ = 0;

@@ -70,6 +70,8 @@ struct ToolAssignment {
     bool operator==(const ToolAssignment &) const = default;
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);
+// Workshop entries require a captured millimetre DXF contour. Legacy project data is separate.
+[[nodiscard]] bool hasLibraryProfile(const ToolPreset &tool);
 [[nodiscard]] bool validToolCatalog(const ToolCatalog &catalog);
 [[nodiscard]] std::optional<DieGroove> dieGroove(const ToolPreset &, std::size_t);
 [[nodiscard]] ToolDrawing rotateToolDrawing(const ToolDrawing &, double radians);

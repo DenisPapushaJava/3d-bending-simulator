@@ -9,16 +9,21 @@
 namespace bending::ui {
 class ToolDrawingWidget final : public QWidget {
   public:
-    ToolDrawingWidget(core::ToolDrawing drawing, QWidget *parent)
-        : QWidget(parent), drawing_(std::move(drawing)) {
+    ToolDrawingWidget(core::ToolDrawing drawing, QWidget *parent, bool showSize = true)
+        : QWidget(parent), showSize_(showSize) {
         setMinimumSize(160, 260);
         setObjectName(QStringLiteral("toolDrawingCanvas"));
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setAccessibleName(QStringLiteral("Контур из исходного чертежа инструмента"));
+        setDrawing(std::move(drawing));
+    }
+    void setDrawing(core::ToolDrawing drawing) {
+        drawing_ = std::move(drawing);
         path_ = toolDrawingPath(drawing_);
         setToolTip(QStringLiteral("%1\nSHA-256: %2")
                        .arg(QString::fromStdString(drawing_.sourceFile),
                             QString::fromStdString(drawing_.sha256)));
+        update();
     }
 
   protected:
@@ -29,7 +34,7 @@ class ToolDrawingWidget final : public QWidget {
         const auto bounds = path_.boundingRect();
         if (bounds.width() <= 0 || bounds.height() <= 0)
             return;
-        const auto target = QRectF(rect()).adjusted(20, 20, -20, -55);
+        const auto target = QRectF(rect()).adjusted(20, 20, -20, showSize_ ? -55 : -20);
         const double scale =
             std::min(target.width() / bounds.width(), target.height() / bounds.height());
         p.save();
@@ -42,6 +47,8 @@ class ToolDrawingWidget final : public QWidget {
         p.setBrush(QColor("#D8E8EA"));
         p.drawPath(path_);
         p.restore();
+        if (!showSize_)
+            return;
         p.setPen(QColor("#1C2938"));
         p.drawText(rect().adjusted(8, height() - 48, -8, -8), Qt::AlignCenter | Qt::TextWordWrap,
                    QStringLiteral("%1 × %2 %3")
@@ -55,5 +62,6 @@ class ToolDrawingWidget final : public QWidget {
   private:
     core::ToolDrawing drawing_;
     QPainterPath path_;
+    bool showSize_;
 };
 } // namespace bending::ui

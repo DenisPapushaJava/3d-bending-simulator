@@ -50,7 +50,7 @@ ToolPickerPopup::ToolPickerPopup(
     int punches = 0;
     for (std::size_t i = 0; i < tools_.size(); ++i) {
         const auto &tool = tools_[i];
-        if (tool.teaching || tool.kind != kind)
+        if (!core::hasLibraryProfile(tool) || tool.kind != kind)
             continue;
         QString terms = QString::fromStdString(tool.code + " " + tool.manufacturer);
         for (double v : tool.openingsMm)

@@ -229,4 +229,23 @@ inline bending::core::ToolAssignment explicitPair(const bending::core::PressTool
     a.useDrawingGeometry = true;
     return a;
 }
+// Owned contours for the guided UI regression, independent of product catalogues.
+inline bending::core::ToolCatalog guidedCatalog() {
+    using namespace bending::core;
+    const double pi = std::numbers::pi;
+    auto wide = explicitPair({48, pi / 3, 26 * pi / 180, .8, 835, 10});
+    wide.punch.id = "fixture-punch-long";
+    wide.punch.code = "ST1801M";
+    wide.punch.lengthMm = 525;
+    wide.die = fourWayDie({10, 16, 22, 35});
+    wide.die.id = "fixture-four-way";
+    wide.die.code = "ST2401S";
+    wide.die.lengthMm = 835;
+    auto narrow = explicitPair({12, pi / 3, pi / 3, .8, 835, 10});
+    narrow.punch.id = "fixture-punch";
+    narrow.punch.code = "ST1405S";
+    narrow.die.id = "fixture-die";
+    narrow.die.code = "ST3412S";
+    return {wide.die, wide.punch, narrow.die, narrow.punch};
+}
 } // namespace tool_fixture

@@ -169,12 +169,7 @@ int main(int argc, char *argv[]) {
             std::make_shared<bending::project::GeometryCacheFiles>(cachePath));
     }
     const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>(toolCache);
-    auto catalogue = bending::project::builtInToolCatalog();
-    if (const auto *error = std::get_if<std::string>(&catalogue)) {
-        qCritical() << "Tool catalogue failed:" << QString::fromStdString(*error);
-        return 1;
-    }
-    auto tools = std::get<bending::core::ToolCatalog>(std::move(catalogue));
+    bending::core::ToolCatalog tools;
     const auto savedCatalog = (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
                                   ? QString{}
                                   : bending::ui::toolCatalogPath();
