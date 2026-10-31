@@ -188,8 +188,9 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     actions->addWidget(mode_);
     expandSearch_ = new QPushButton(QStringLiteral("Расширить поиск"), this);
     expandSearch_->setObjectName("expandBendRouteSearch");
-    expandSearch_->setToolTip(QStringLiteral("Повторить расчёт с начала: до 120 секунд поиска "
-                                             "и 512 попыток. Это не обещание найти маршрут."));
+    expandSearch_->setToolTip(QStringLiteral("Продолжить с использованием готовых проверок: "
+                                             "до 120 секунд и 512 попыток на запуск. "
+                                             "Это не обещание найти маршрут."));
     expandSearch_->hide();
     layout->addWidget(automatic_);
     layout->addWidget(expandSearch_);
@@ -472,8 +473,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     automatic_->setEnabled(ready);
     manual_->setEnabled(ready);
     mode_->setEnabled(!busy);
-    const bool canExpand =
-        error && error->code == application::BendRouteErrorCode::SearchLimit && !expandedSearch_;
+    const bool canExpand = error && error->code == application::BendRouteErrorCode::SearchLimit;
+    expandSearch_->setText(expandedSearch_ ? QStringLiteral("Продолжить поиск")
+                                           : QStringLiteral("Расширить поиск"));
     expandSearch_->setVisible(canExpand);
     expandSearch_->setEnabled(canExpand && !busy);
     earlier_->setEnabled(!busy && selected_ > 1);

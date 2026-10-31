@@ -1,4 +1,5 @@
 #include "bending/cad/occt/MachineAssembly.h"
+#include "CollisionReuse.h"
 #include "FloorGeometry.h"
 #include "GeometryCacheInternal.h"
 #include "bending/core/ToolGeometry.h"
@@ -202,7 +203,8 @@ std::vector<MachineDisplayComponent> MachineAssembly::at(double lift) const {
 }
 namespace {
 std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &frame, double tolerance,
-                                                        std::stop_token stop, bool firstOnly) {
+                                                        std::stop_token stop, bool firstOnly,
+                                                        RigidClearanceCache *cache = nullptr) {
     std::vector<MachineCollisionEvidence> result;
     std::optional<Bnd_Box> sheetBounds;
     if (frame.floor) {
@@ -229,10 +231,17 @@ std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &fram
         b.Enlarge(tolerance);
         boxes.push_back(b);
     }
-    const auto test = [&](std::size_t a, std::size_t b, application::MachineCollision pair) {
-        TopoDS_Shape overlap;
-        if (!intersects(shapes[a], shapes[b], boxes[a], boxes[b], tolerance, stop, &overlap))
+    const auto test = [&](std::size_t a, std::size_t b, application::MachineCollision pair,
+                          bool rigidPair = false) {
+        checkStop(stop);
+        if (rigidPair && cache && cache->contains(shapes[a], shapes[b], tolerance))
             return false;
+        TopoDS_Shape overlap;
+        if (!intersects(shapes[a], shapes[b], boxes[a], boxes[b], tolerance, stop, &overlap)) {
+            if (rigidPair && cache)
+                cache->remember(shapes[a], shapes[b], tolerance);
+            return false;
+        }
         result.push_back({std::move(pair), std::move(overlap)});
         return firstOnly;
     };
@@ -244,7 +253,8 @@ std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &fram
             if ((t == 0 && c.allowDieContact) || (t == 1 && c.allowPunchContact))
                 continue;
             if (test(t + 1, i + 3,
-                     {t == 0 ? "die" : "punch", t == 0 ? "Матрица" : "Пуансон", c.id, c.name}))
+                     {t == 0 ? "die" : "punch", t == 0 ? "Матрица" : "Пуансон", c.id, c.name},
+                     (t == 1) == c.moving))
                 return result;
         }
     }
@@ -267,8 +277,10 @@ std::optional<application::MachineCollision> MachineAssembly::check(const Previe
         *overlap = hits.empty() ? TopoDS_Shape{} : hits.front().overlap;
     return hits.empty() ? std::nullopt : std::optional{hits.front().pair};
 }
-std::vector<MachineCollisionEvidence>
-MachineAssembly::collisions(const PreviewFrame &frame, double tolerance, std::stop_token stop) {
-    return collectCollisions(frame, tolerance, stop, false);
+std::vector<MachineCollisionEvidence> MachineAssembly::collisions(const PreviewFrame &frame,
+                                                                  double tolerance,
+                                                                  std::stop_token stop,
+                                                                  RigidClearanceCache *cache) {
+    return collectCollisions(frame, tolerance, stop, false, cache);
 }
 } // namespace bending::cad

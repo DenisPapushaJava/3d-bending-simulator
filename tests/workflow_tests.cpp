@@ -2004,10 +2004,10 @@ void testGuidedWorkflow(bool graphics) {
     }
     click(stage(1), stage(1)->rect().center());
     require(tabs->currentIndex() == 3 && stage(1)->isChecked(), "Tool stage did not open");
-    auto *recommend = window.findChild<QPushButton *>(QStringLiteral("recommendTools"));
+    auto *recommend = window.findChild<QAction *>(QStringLiteral("recommendToolsQuick"));
     require(recommend && recommend->isEnabled(), "No tool selection for recognized bend");
     const auto beforeSelection = controller.session().editRevision();
-    recommend->click();
+    recommend->trigger();
     auto *recommendation = window.findChild<QLabel *>(QStringLiteral("toolRecommendation"));
     require(recommendation && recommendation->text().contains(QStringLiteral("Предварительно")) &&
                 !punch->currentText().contains(QStringLiteral("учебный")) &&

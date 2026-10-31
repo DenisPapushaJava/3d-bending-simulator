@@ -4,6 +4,7 @@
 #include "bending/core/BendTarget.h"
 #include "bending/core/ToolCatalog.h"
 #include <cmath>
+#include <functional>
 #include <optional>
 #include <stop_token>
 #include <variant>
@@ -20,6 +21,17 @@ struct RouteOperation {
     bool workpieceReversed = false;
     bool operator==(const RouteOperation &) const = default;
 };
+struct RouteToolVariant {
+    core::ToolAssignment assignment;
+    // Null: common pair for the whole part; otherwise replace only this bend's tooling.
+    std::optional<std::size_t> bendIndex;
+};
+enum class BendRoutePhase { Preparing, ToolCandidate, Checking };
+struct BendRouteProgress {
+    BendRoutePhase phase = BendRoutePhase::Preparing;
+    std::size_t variant = 0, variants = 0, checkedOperations = 0;
+    std::optional<std::size_t> bendIndex;
+};
 struct BendRouteRequest {
     // Complete list in the requested forward order; Automatic may reorder it.
     std::vector<RouteOperation> operations;
@@ -35,7 +47,13 @@ struct BendRouteRequest {
     bool reuseCalculations = true;
     std::optional<double> maximumEndSupportLossMm =
         std::nullopt; // Null: legacy explicitly unbounded preview.
+    // Explicit checked tool-selection command only. Empty preserves ordinary route behaviour.
+    std::vector<RouteToolVariant> toolVariants;
+    // Informational callback on the CAD worker. Not part of a geometric cache key.
+    std::function<void(BendRouteProgress)> onProgress;
 };
+// Apply one input snapshot without changing IDs, targets, order or workpiece orientations.
+[[nodiscard]] bool applyRouteToolVariant(BendRouteRequest &, std::size_t variant);
 struct BendRouteStatistics {
     std::size_t builtStates = 0, reusedStates = 0;
     std::size_t builtTransitions = 0, reusedTransitions = 0;
@@ -44,6 +62,7 @@ struct BendRouteStatistics {
     bool reusedFlatPattern = false;
     std::size_t reorderedStates = 0;
     bool usedProfilePriority = false;
+    std::size_t testedToolVariants = 0;
 };
 struct BendRouteStep {
     std::string id;
@@ -58,6 +77,7 @@ struct BendRoute {
     bool withTools = false;
     bool partialEndSupport = false;
     BendRouteStatistics statistics = {};
+    std::optional<std::size_t> selectedToolVariant;
     // The first route is geometric K=0.5; material BA remains a separate flat pattern.
     // Tool mode checks each cycle; extraction/repositioning/machine are NOT certified.
 };

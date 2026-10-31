@@ -61,6 +61,7 @@ class ImportController final : public QObject {
     [[nodiscard]] application::BendRoutePtr bendRoute() const;
     [[nodiscard]] std::optional<application::BendRouteError> bendRouteError() const;
     [[nodiscard]] bool isPreparingRoute() const;
+    [[nodiscard]] std::optional<application::BendRouteProgress> bendRouteProgress() const;
     bool prepareRouteDraft(application::RouteDraftRequest,
                            std::shared_ptr<const application::SingleBendPreviewBuilder>);
     void discardRouteDraft();

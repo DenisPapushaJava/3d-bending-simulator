@@ -3,6 +3,7 @@
 #include <stop_token>
 
 namespace bending::cad {
+class RigidClearanceCache;
 struct MachineCollisionEvidence {
     application::MachineCollision pair;
     TopoDS_Shape overlap;
@@ -25,7 +26,8 @@ class MachineAssembly {
     check(const PreviewFrame &, double toleranceMm, std::stop_token,
           TopoDS_Shape *confirmedOverlap = nullptr);
     [[nodiscard]] static std::vector<MachineCollisionEvidence>
-    collisions(const PreviewFrame &, double toleranceMm, std::stop_token);
+    collisions(const PreviewFrame &, double toleranceMm, std::stop_token,
+               RigidClearanceCache * = nullptr);
 
   private:
     std::vector<MachineDisplayComponent> components_;

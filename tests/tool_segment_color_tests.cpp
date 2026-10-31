@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
         window.openStep(file);
         auto &controller = window.importController();
         wait([&] { return !controller.hasWork(); });
-        window.findChild<QPushButton *>("recommendTools")->click();
+        window.findChild<QAction *>("recommendToolsQuick")->trigger();
         window.findChild<QPushButton *>("checkBend")->click();
         wait([&] { return !controller.hasWork(); });
         if (const auto error = controller.bendPreviewError())

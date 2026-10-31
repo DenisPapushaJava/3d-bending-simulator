@@ -7,6 +7,7 @@
 #include "bending/ui/MainWindow.h"
 #include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -223,7 +224,7 @@ int main(int argc, char **argv) {
                 c.bendPreviewError()->code == application::BendPreviewErrorCode::NarrowDieOpening,
             "Controller bypassed V/thickness guard");
         real->setChecked(false);
-        window.findChild<QPushButton *>("recommendTools")->click();
+        window.findChild<QAction *>("recommendToolsQuick")->trigger();
         require(d->currentData().toInt() == 2 && check->isEnabled(),
                 "6 mm UI advice did not select available V50");
         require(real->isChecked(), "Advice kept known punch as an idealized wedge");

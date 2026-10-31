@@ -2,6 +2,7 @@
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
+#include "CollisionReuse.h"
 #include "GeometryCacheInternal.h"
 #include "RouteGeometry.h"
 #include "TrimmedBend.h"
@@ -181,10 +182,11 @@ void assemble(PreviewFrame &frame, bool rigidFlangesVerified = false) {
 // The original cutouts then remain in the separate display surface.
 // Every frame owns fresh geometry and copied meshes. The isolated source flanges
 // were checked/meshed once; a direct isometry preserves their geometry and mesh accuracy.
-void placeFlanges(PreviewFrame &frame, const std::array<TopoDS_Shape, 2> &flanges,
+bool placeFlanges(PreviewFrame &frame, const std::array<TopoDS_Shape, 2> &flanges,
                   const FrameBasis &sourceBasis, const simulation::BendSection &sourceSection,
                   const FrameBasis &targetBasis, const simulation::BendSection &targetSection) {
     bool rigid = true;
+    bool volumePreserved = true;
     for (std::size_t i = 0; i < flanges.size(); ++i) {
         gp_Trsf placement;
         placement.SetDisplacement(flangeAxes(sourceBasis, sourceSection, i == 1),
@@ -193,6 +195,7 @@ void placeFlanges(PreviewFrame &frame, const std::array<TopoDS_Shape, 2> &flange
         const bool isometry =
             !placement.IsNegative() && std::abs(placement.ScaleFactor() - 1) <= 1.e-12;
         rigid &= isometry;
+        volumePreserved &= !placement.IsNegative() && placement.ScaleFactor() == 1;
         frame.regions[i * 2] = isometry
                                    ? BRepBuilderAPI_Copy(flanges[i], true, true)
                                          .Shape()
@@ -200,6 +203,7 @@ void placeFlanges(PreviewFrame &frame, const std::array<TopoDS_Shape, 2> &flange
                                    : BRepBuilderAPI_Transform(flanges[i], placement, true).Shape();
     }
     assemble(frame, rigid);
+    return volumePreserved;
 }
 std::optional<TopoDS_Shape> extractFlange(const TopoDS_Shape &source, const TopoDS_Shape &envelope,
                                           double tolerance) {
@@ -410,7 +414,7 @@ TopoDS_Shape prism(const std::vector<gp_Pnt> &points, const gp_Vec &extrusion) {
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), extrusion).Shape();
 }
 PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBasis &basis,
-                              const simulation::BendSection &state) {
+                              const simulation::BendSection &state, bool withEnvelopes = true) {
     const auto position = [&](simulation::Point2Mm p) {
         return basis.origin.Translated(basis.x * p.x + basis.y * p.y);
     };
@@ -429,8 +433,10 @@ PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBa
                                             extrusion,
                                             state.angleRadians,
                                             state.innerRadiusMm};
-    frame.regions[0] = flange(state.fixed);
-    frame.regions[2] = flange(state.moving);
+    if (withEnvelopes) {
+        frame.regions[0] = flange(state.fixed);
+        frame.regions[2] = flange(state.moving);
+    }
     if (state.angleRadians == 0.0) {
         frame.regions[1] = prism({position(state.innerArc[0]), position(state.outerArc[0]),
                                   position(state.outerArc[2]), position(state.innerArc[2])},
@@ -453,7 +459,8 @@ PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBa
         frame.regions[1] =
             BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), extrusion).Shape();
     }
-    assemble(frame);
+    if (withEnvelopes)
+        assemble(frame);
     return frame;
 }
 PreviewFrame makeFrame(const simulation::SingleBend &model, const FrameBasis &basis,
@@ -528,6 +535,13 @@ std::array<TopoDS_Shape, 2> makeTools(const simulation::FlatToolSetup &setup, do
 }
 bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
                      bool *completed = nullptr, TopoDS_Shape *overlap = nullptr) {
+    if (boundedDisjoint(a, b, tolerance)) {
+        if (completed)
+            *completed = true;
+        if (overlap)
+            *overlap = {};
+        return 0 <= budget;
+    }
     BRepAlgoAPI_Common common;
     TopTools_ListOfShape arguments, tools;
     arguments.Append(a);
@@ -638,11 +652,13 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
         }
     return gp_Dir(axis);
 }
-application::BendPreviewResult buildBendOperation(
-    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
-    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
-    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis) {
+application::BendPreviewResult
+buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
+                   bool fixedSecond, std::stop_token stop,
+                   std::optional<core::PressTools> toolParameters, bool withMotion,
+                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+                   std::optional<double> maximumEndSupportLossMm,
+                   std::optional<gp_Dir> referenceAxis, bool prepareDiagnostic) {
     const bool requestedReversed = fixedSecond;
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
@@ -797,6 +813,7 @@ application::BendPreviewResult buildBendOperation(
                 return BendPreviewError{BendPreviewErrorCode::Failed,
                                         "Cannot prepare the rigid material mesh"};
         }
+        const double rigidVolume = volume(flanges[0]) + volume(flanges[1]);
         auto preview = std::make_shared<CadPreview>();
         preview->reversed = requestedReversed;
         preview->components = flanges;
@@ -1026,6 +1043,7 @@ application::BendPreviewResult buildBendOperation(
             machine.emplace(*toolParameters, initialTools, stop, realTools);
         preview->seatedMount = machine && machine->seatedPunchMount();
         Bnd_Box envelope;
+        RigidClearanceCache rigidClearances;
         bool returnSweepClear = true;
         constexpr std::size_t formingIntervals = 40;
         const std::size_t intervals = withMotion ? formingIntervals + 20 : toolParameters ? 0 : 20;
@@ -1045,7 +1063,9 @@ application::BendPreviewResult buildBendOperation(
             }
             const auto section = withMotion ? preview->states.back().section
                                             : *simulation::singleBendSection(model, progress);
-            auto frame = makeSectionFrame(model, basis, section);
+            // The actual isolated components replace these envelopes. Do not construct
+            // two throwaway prisms or validate their artificial caps for every position.
+            auto frame = makeSectionFrame(model, basis, section, false);
             if (bend.trimmedEnds)
                 frame.regions[1] = mapTrimmedBend(
                     sourceSector,
@@ -1060,7 +1080,8 @@ application::BendPreviewResult buildBendOperation(
                     },
                     section.angleRadians / model.angleRadians, analysis.lengthToleranceMm, nullptr,
                     stop);
-            placeFlanges(frame, flanges, sourceBasis, sourceSection, basis, section);
+            const bool rigidVolumePreserved =
+                placeFlanges(frame, flanges, sourceBasis, sourceSection, basis, section);
             if (multi)
                 for (const auto &pair : {std::pair{0U, 1U}, std::pair{0U, 2U}, std::pair{1U, 2U}}) {
                     bool completed = false;
@@ -1074,7 +1095,10 @@ application::BendPreviewResult buildBendOperation(
                                                 i};
                 }
             const auto materialShape = frame.shape;
-            const double materialVolume = volume(frame.shape);
+            // Direct isometries preserve the independently measured rigid components.
+            // Always measure the freshly deformed sector; retain the full fallback.
+            const double materialVolume =
+                rigidVolumePreserved ? rigidVolume + volume(frame.regions[1]) : volume(frame.shape);
             if (!std::isfinite(materialVolume) ||
                 std::abs(materialVolume - expectedVolume) > budget) {
                 return BendPreviewError{BendPreviewErrorCode::Failed,
@@ -1164,8 +1188,8 @@ application::BendPreviewResult buildBendOperation(
                     frame.machine = machine->at(lift);
                     frame.floor = machine->floor();
                 }
-                const auto machineHits =
-                    MachineAssembly::collisions(frame, analysis.lengthToleranceMm, stop);
+                const auto machineHits = MachineAssembly::collisions(
+                    frame, analysis.lengthToleranceMm, stop, &rigidClearances);
                 const auto machineConflict = machineHits.empty()
                                                  ? std::optional<MachineCollision>{}
                                                  : std::optional{machineHits.front().pair};
@@ -1196,6 +1220,19 @@ application::BendPreviewResult buildBendOperation(
                     const bool conflict =
                         pair == pairs.size() ? machineConflict.has_value() : toolHits[pair];
                     if (conflict) {
+                        const auto failure = [&](BendPreviewPtr diagnostic = {}) {
+                            return BendPreviewError{
+                                pair == pairs.size() ? BendPreviewErrorCode::MachineIntersection
+                                                     : BendPreviewErrorCode::ToolIntersection,
+                                pair == pairs.size() ? machineConflict->firstName + " — " +
+                                                           machineConflict->secondName
+                                                     : "Tool and material volumes intersect",
+                                i, std::move(diagnostic)};
+                        };
+                        // Full-route search consumes a compact rejection, never this unused
+                        // visual. Manual/isolated cycles retain every contact overlay/prefix.
+                        if (!prepareDiagnostic)
+                            return failure();
                         BRep_Builder builder;
                         TopoDS_Compound assembly;
                         builder.MakeCompound(assembly);
@@ -1248,13 +1285,7 @@ application::BendPreviewResult buildBendOperation(
                                 diagnostic->envelope.minimum.z, diagnostic->envelope.maximum.x,
                                 diagnostic->envelope.maximum.y, diagnostic->envelope.maximum.z);
                         diagnostic->frames.push_back(std::move(frame));
-                        return BendPreviewError{
-                            pair == pairs.size() ? BendPreviewErrorCode::MachineIntersection
-                                                 : BendPreviewErrorCode::ToolIntersection,
-                            pair == pairs.size()
-                                ? machineConflict->firstName + " — " + machineConflict->secondName
-                                : "Tool and material volumes intersect",
-                            i, BendPreviewPtr(diagnostic)};
+                        return failure(BendPreviewPtr(diagnostic));
                     }
                 }
                 if (withMotion) {

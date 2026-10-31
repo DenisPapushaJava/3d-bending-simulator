@@ -19,6 +19,7 @@ class QLineEdit;
 class QPushButton;
 class QToolButton;
 class QDialog;
+class QAction;
 
 namespace bending::ui {
 // UI drafts and local preferences; only MainWindow commits a choice to DocumentSession.
@@ -55,6 +56,9 @@ class ToolSelectionWidget final : public QWidget {
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
                              bool allBends = false);
+    [[nodiscard]] std::vector<core::ToolAssignment> checkedCandidates() const;
+    void suggestForNewPart();
+    void setCheckedSearchState(bool busy, const QString &status = {}, bool resumable = false);
     void setToolProfileImport(ImportController &,
                               std::shared_ptr<const application::ToolProfileImporter>,
                               application::ToolLibraryWriter);
@@ -62,8 +66,11 @@ class ToolSelectionWidget final : public QWidget {
         loadCatalog;
     std::function<void()> onChanged;
     std::function<void()> onAppearanceChanged;
+    std::function<void()> onCheckedRecommend;
+    std::function<void()> onCancelChecked;
 
   private:
+    bool checkedBusy_ = false;
     struct Pair {
         QString punchId;
         QString dieId;
@@ -108,6 +115,7 @@ class ToolSelectionWidget final : public QWidget {
     QToolButton *detailsToggle_;
     QPushButton *drawings_;
     QPushButton *recommend_;
+    QAction *quickRecommend_;
     QPushButton *fitSections_;
     QPushButton *stock_;
     QDoubleSpinBox *segmentGap_;

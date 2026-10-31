@@ -5,7 +5,9 @@
 #include "ToolStockDialog.h"
 #include "bending/application/BendRoute.h"
 #include "bending/core/ToolGeometry.h"
+#include <QAction>
 #include <QCheckBox>
+#include <QMenu>
 
 #include "bending/ui/Preferences.h"
 #include <QComboBox>
@@ -65,11 +67,29 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     recommend_ = new QPushButton(QStringLiteral("Подобрать инструмент"), this);
     recommend_->setObjectName(QStringLiteral("recommendTools"));
     recommend_->setToolTip(QStringLiteral(
-        "Выбирает пуансон, матрицу и ручей из библиотеки. "
+        "Ищет пару и проверенный порядок в фоне. Стрелка рядом — быстрый подбор без поиска. "
         "V около 8t — ориентир подбора, а не минимальный размер. Можно вручную выбрать другой "
         "ручей в пределах текущего режима V/t ≥ 5. Материал, угол, паспорт и нагрузка могут "
         "задавать более строгие ограничения; нагрузка пока не проверяется."));
-    layout->addWidget(recommend_);
+    auto *recommendRow = new QHBoxLayout;
+    recommendRow->addWidget(recommend_, 1);
+    auto *recommendMore = new QToolButton(this);
+    recommendMore->setObjectName("recommendToolsOptions");
+    recommendMore->setArrowType(Qt::DownArrow);
+    recommendMore->setToolTip(QStringLiteral("Быстрый подбор без поиска порядка"));
+    recommendMore->setPopupMode(QToolButton::InstantPopup);
+    auto *recommendMenu = new QMenu(recommendMore);
+    auto *quick = quickRecommend_ =
+        recommendMenu->addAction(QStringLiteral("Быстро по параметрам"));
+    quick->setObjectName("recommendToolsQuick");
+    connect(quick, &QAction::triggered, this, [this] {
+        if (onCancelChecked)
+            onCancelChecked();
+        recommend();
+    });
+    recommendMore->setMenu(recommendMenu);
+    recommendRow->addWidget(recommendMore);
+    layout->addLayout(recommendRow);
     fitSections_ = new QPushButton(QStringLiteral("Подобрать секции"), this);
     fitSections_->setObjectName(QStringLiteral("fitSelectedToolSections"));
     fitSections_->setToolTip(QStringLiteral(
@@ -131,7 +151,12 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     recommendation_->setObjectName(QStringLiteral("toolRecommendation"));
     recommendation_->hide();
     layout->addWidget(recommendation_);
-    connect(recommend_, &QPushButton::clicked, this, [this] { recommend(); });
+    connect(recommend_, &QPushButton::clicked, this, [this] {
+        if (onCheckedRecommend)
+            onCheckedRecommend();
+        else
+            recommend();
+    });
     catalogPanel_ = new QWidget(this);
     auto *catalogLayout = new QVBoxLayout(catalogPanel_);
     catalogLayout->setContentsMargins(0, 0, 0, 0);
@@ -724,7 +749,8 @@ void ToolSelectionWidget::updateDetails() {
         (stockPunch && stockPunch->segments) || (stockDie && stockDie->segments);
     assemblySummary_->setVisible(usesCatalog() && (stockConfigured || allBends_));
     segmentGap_->setVisible(usesCatalog() && stockConfigured);
-    recommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
+    recommend_->setEnabled(checkedBusy_ || (usesCatalog() && selectionRequest_.has_value()));
+    quickRecommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
     fitSections_->setEnabled(usesCatalog() && selectionRequest_ && stockPunch && stockDie);
     const auto *selectedPunch = preset(punch_);
     const auto *selectedDie = preset(die_);
@@ -837,6 +863,71 @@ void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionR
         updateDetails();
     }
     recommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
+}
+void ToolSelectionWidget::setCheckedSearchState(bool busy, const QString &status, bool resumable) {
+    checkedBusy_ = busy;
+    recommend_->setText(busy        ? QStringLiteral("Отменить подбор")
+                        : resumable ? QStringLiteral("Продолжить подбор")
+                                    : QStringLiteral("Подобрать инструмент"));
+    if (!status.isEmpty()) {
+        recommendation_->setText(status);
+        recommendation_->show();
+    }
+    recommend_->setEnabled(busy || (usesCatalog() && selectionRequest_.has_value()));
+}
+std::vector<core::ToolAssignment> ToolSelectionWidget::checkedCandidates() const {
+    std::vector<core::ToolAssignment> candidates;
+    if (!selectionRequest_)
+        return candidates;
+    const core::ToolCatalog workshop(catalog_.begin(), catalog_.begin() + workshopSize_);
+    auto request = *selectionRequest_;
+    request.maximumSegmentGapMm = segmentGap_->value();
+    const auto result = core::selectTools(workshop, request);
+    const auto current = selectedTool(core::ToolKind::Punch);
+    for (const auto &c : result.candidates) {
+        core::ToolAssignment a{workshop[c.punch],
+                               workshop[c.die],
+                               c.groove,
+                               clearance_->value(),
+                               machine_->text().toStdString(),
+                               true};
+        a.punchAssembly = c.punchAssembly ? std::optional{*c.punchAssembly} : std::nullopt;
+        a.dieAssembly = c.dieAssembly ? std::optional{*c.dieAssembly} : std::nullopt;
+        a.machineModel = demoMachine_->isChecked() ? machineModel_ : core::MachineModel::None;
+        a.punchReversed = current && current->id == a.punch.id
+                              ? punchReversed_
+                              : core::defaultPunchOrientation(a.punch).value_or(false);
+        if (!core::hasCompleteDrawingToolGeometry(a))
+            continue;
+        candidates.push_back(a);
+        a.punchReversed = !a.punchReversed;
+        candidates.push_back(std::move(a));
+        if (candidates.size() >= 64)
+            break;
+    }
+    return candidates;
+}
+void ToolSelectionWidget::suggestForNewPart() {
+    auto candidates = checkedCandidates();
+    if (!candidates.empty()) {
+        auto a = std::move(candidates.front());
+        a.punchReversed = core::defaultPunchOrientation(a.punch).value_or(false);
+        setChoice(core::toolParameters(a), a);
+        changed();
+        setCheckedSearchState(false, QStringLiteral("Предварительный подбор"));
+        return;
+    }
+    updating_ = true;
+    punch_->setCurrentIndex(0);
+    die_->setCurrentIndex(0);
+    populateGrooves();
+    punchAssembly_.reset();
+    dieAssembly_.reset();
+    updating_ = false;
+    changed();
+    setCheckedSearchState(
+        false,
+        QStringLiteral("В библиотеке нет подходящей пары. Выберите или добавьте инструмент."));
 }
 void ToolSelectionWidget::recommend() {
     if (!selectionRequest_)

@@ -110,8 +110,9 @@ int main(int argc, char **argv) {
         const auto select = [&](QToolButton *anchor, const std::string &id, std::size_t groove,
                                 bool cancel = false) {
             std::string failure;
-            QTimer::singleShot(50, &window, [&] {
-                auto *popup = window.findChild<QDialog *>("toolPickerPopup");
+            auto *owner = anchor->window();
+            QTimer::singleShot(50, owner, [&] {
+                auto *popup = owner->findChild<QDialog *>("toolPickerPopup");
                 if (!popup) {
                     failure = "Picker did not open";
                     if (auto *active = QApplication::activePopupWidget())
@@ -218,6 +219,8 @@ int main(int argc, char **argv) {
                     "Narrow V is active in the workspace");
         require(window.findChild<QToolButton *>("activeGroove3")->isEnabled(),
                 "Allowed V was disabled with the whole body");
+        // Loading a new part offers a preliminary pair; the operator can override it.
+        select(punch, mirrored.id, 0);
         select(matrix, die.id, 3);
         window.findChild<QCheckBox *>("demoMachine")->setChecked(false);
         // Applying a selection must preserve the physical stock instead of copying it per V.
@@ -337,10 +340,16 @@ int main(int argc, char **argv) {
         restored.show();
         restored.raise();
         restored.activateWindow();
+        require(restored.findChild<QToolButton *>("punchProfile")
+                    ->accessibleName()
+                    .contains(QString::fromStdString(mirrored.code)),
+                "Last article IDs were not restored before loading a new part");
         restored.openStep(file);
         auto &restarted = restored.importController();
         wait([&] { return !restarted.hasWork(); });
         restored.findChild<QToolButton *>("processStage1")->click();
+        select(restored.findChild<QToolButton *>("punchProfile"), mirrored.id, 0);
+        select(restored.findChild<QToolButton *>("dieProfile"), die.id, 3);
         restored.findChild<QCheckBox *>("demoMachine")->setChecked(false);
         restored.findChild<QPushButton *>("applyToolSetup")->click();
         wait([&] { return !restarted.hasWork(); });

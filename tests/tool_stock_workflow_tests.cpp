@@ -12,6 +12,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -91,7 +92,7 @@ int main(int argc, char **argv) {
         auto &c = window.importController();
         wait([&] { return !c.hasWork(); });
         require(bool(c.session().document()), "No document");
-        window.findChild<QPushButton *>("recommendTools")->click();
+        window.findChild<QAction *>("recommendToolsQuick")->trigger();
         require(window.findChild<QLabel *>("toolAssemblySummary")->text().contains("835"),
                 "Longer legacy tool not offered");
         QString dialogError;
@@ -256,11 +257,11 @@ int main(int argc, char **argv) {
         });
         window.findChild<QPushButton *>("toolStock")->click();
         require(dialogError.isEmpty(), qPrintable(dialogError));
-        window.findChild<QPushButton *>("recommendTools")->click();
+        window.findChild<QAction *>("recommendToolsQuick")->trigger();
         require(!window.findChild<QPushButton *>("checkBend")->isEnabled(),
                 "Insufficient stock was assigned");
         window.findChild<QDoubleSpinBox *>("segmentGapLimit")->setValue(10);
-        window.findChild<QPushButton *>("recommendTools")->click();
+        window.findChild<QAction *>("recommendToolsQuick")->trigger();
         auto *check = window.findChild<QPushButton *>("checkBend");
         require(check->isEnabled(), "Custom gap not usable");
         check->click();
@@ -312,7 +313,7 @@ int main(int argc, char **argv) {
         require(saved.open(QIODevice::ReadOnly), "Cannot read saved assembly");
         auto older = QJsonDocument::fromJson(saved.readAll()).object();
         saved.close();
-        require(older.value("version").toInt() == 13, "Wrong project schema for assembly");
+        require(older.value("version").toInt() == 14, "Wrong project schema for assembly");
         older.insert("version", 9);
         QFile forged(folder.path() + "/forged-v9.bend");
         require(forged.open(QIODevice::WriteOnly), "Cannot create version test");
@@ -344,7 +345,7 @@ int main(int argc, char **argv) {
                 "Project did not keep its captured inventory");
         window.openStep(file);
         wait([&] { return !c.hasWork(); });
-        window.findChild<QPushButton *>("recommendTools")->click();
+        window.findChild<QAction *>("recommendToolsQuick")->trigger();
         require(!window.findChild<QPushButton *>("checkBend")->isEnabled(),
                 "An unrelated part inherited the previous project's stock snapshot");
         if (app.arguments().contains("--sample")) {

@@ -444,7 +444,7 @@ class RouteSearch {
             after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
             request.withTools ? op.tools : std::nullopt, request.withTools,
             request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
-            request.maximumEndSupportLossMm, reference);
+            request.maximumEndSupportLossMm, reference, false);
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
             if (stableRejection(failure->code))
                 remember(wanted, preview);
@@ -543,8 +543,14 @@ class RouteSearch {
                                          "Route search budget reached; " + lastFailure, failedBend,
                                          attempts};
                 ++attempts;
+                if (request.onProgress)
+                    request.onProgress(
+                        {BendRoutePhase::Checking, 0, 0, attempts - 1, op.bendIndex});
                 try {
                     auto preview = transition(mask, op, fixedSecond);
+                    if (request.onProgress)
+                        request.onProgress(
+                            {BendRoutePhase::Checking, 0, 0, attempts, op.bendIndex});
                     if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
                         if (failure->code == BendPreviewErrorCode::Cancelled)
                             cancelled(stop);
@@ -742,6 +748,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         check(native != nullptr, "Unsupported document type");
         const auto &analysis = OcctDocumentAccess::simulationBends(*native);
         const auto n = analysis.bends.size();
+        if (request.onProgress)
+            request.onProgress({BendRoutePhase::Preparing});
         if ((request.allowPartialEndSupport && !request.withTools) ||
             (request.maximumEndSupportLossMm &&
              (!request.allowPartialEndSupport ||
@@ -755,6 +763,81 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
              (!std::isfinite(*request.manualThicknessMm) || *request.manualThicknessMm <= 0)))
             return BendRouteError{BendRouteErrorCode::InvalidInput,
                                   "Requires every recognized bend, up to 32 zones"};
+        if (!request.toolVariants.empty()) {
+            if (!request.automatic || !request.withTools || request.toolVariants.size() > 64)
+                return BendRouteError{
+                    BendRouteErrorCode::InvalidInput,
+                    "Checked tooling requires an automatic tool route and up to 64 variants"};
+            const auto started = std::chrono::steady_clock::now();
+            BendRouteStatistics totals;
+            std::size_t attempts = 0;
+            BendRouteError last{BendRouteErrorCode::NoRoute, "No checked tooling variant passed"};
+            const auto add = [&](const BendRouteStatistics &s) {
+                totals.builtStates += s.builtStates;
+                totals.reusedStates += s.reusedStates;
+                totals.builtTransitions += s.builtTransitions;
+                totals.reusedTransitions += s.reusedTransitions;
+                totals.reusedRejections += s.reusedRejections;
+                totals.reorderedStates += s.reorderedStates;
+                totals.reusedFlatPattern |= s.reusedFlatPattern;
+                totals.usedProfilePriority |= s.usedProfilePriority;
+            };
+            for (std::size_t choice = 0; choice < request.toolVariants.size(); ++choice) {
+                cancelled(stop);
+                const auto spent = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - started)
+                                       .count();
+                if (attempts >= request.maximumChecks || spent >= request.maximumTimeMs) {
+                    last.code = BendRouteErrorCode::SearchLimit;
+                    last.detail = "Shared checked-tooling search budget reached; " + last.detail;
+                    break;
+                }
+                auto trial = request;
+                if (!applyRouteToolVariant(trial, choice))
+                    return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                          "Invalid checked-tooling snapshot"};
+                for (const auto &op : trial.operations)
+                    if (!op.tools || op.bendIndex >= n ||
+                        !core::standardAirBendOpening(request.manualThicknessMm.value_or(
+                                                          analysis.bends[op.bendIndex].thicknessMm),
+                                                      op.tools->openingMm))
+                        return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                              "Checked tooling violates the minimum opening rule"};
+                trial.toolVariants.clear();
+                if (request.onProgress)
+                    trial.onProgress = [report = request.onProgress, choice,
+                                        count = request.toolVariants.size(),
+                                        attempts](BendRouteProgress p) {
+                        p.variant = choice;
+                        p.variants = count;
+                        p.checkedOperations += attempts;
+                        report(std::move(p));
+                    };
+                trial.maximumChecks = request.maximumChecks - attempts;
+                trial.maximumTimeMs = request.maximumTimeMs - static_cast<unsigned>(spent);
+                ++totals.testedToolVariants;
+                auto result = buildRoute(document, std::move(trial), stop);
+                if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
+                    attempts += (*route)->evaluatedOperations;
+                    add((*route)->statistics);
+                    auto accepted = std::make_shared<BendRoute>(**route);
+                    accepted->selectedToolVariant = choice;
+                    accepted->evaluatedOperations = attempts;
+                    accepted->statistics = totals;
+                    return BendRoutePtr(std::move(accepted));
+                }
+                last = std::get<BendRouteError>(std::move(result));
+                attempts += last.evaluatedOperations;
+                add(last.statistics);
+                // An incomplete trial is never a rejected tool. Keep its exact cached
+                // work for an explicit continuation instead of trying all pairs indefinitely.
+                if (last.code != BendRouteErrorCode::NoRoute)
+                    break;
+            }
+            last.evaluatedOperations = attempts;
+            last.statistics = totals;
+            return last;
+        }
         std::set<std::size_t> indices;
         std::set<std::string> ids;
         for (const auto &op : request.operations) {
@@ -906,6 +989,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             }
         }
         bool found = false;
+        if (search.request.onProgress)
+            search.request.onProgress({BendRoutePhase::ToolCandidate});
         try {
             found = search.search((Mask{1} << n) - 1);
         } catch (BendRouteError &e) {

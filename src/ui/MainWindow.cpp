@@ -2,6 +2,7 @@
 #include "DrawingDialog.h"
 #include "PartInputDialog.h"
 #include "ProcessStepButton.h"
+#include "ToolSearchDialog.h"
 #include "ToolSelectionWidget.h"
 #include "ToolWorkspace.h"
 #include "UpdateDialog.h"
@@ -541,7 +542,8 @@ class MainWindow::Impl {
         refreshPreview();
         return false;
     }
-    void prepareRoute(bool automatic, bool withTools, bool expanded = false) {
+    void prepareRoute(bool automatic, bool withTools, bool expanded = false,
+                      std::vector<application::RouteToolVariant> variants = {}) {
         const auto &session = controller->session();
         if (!session.document() || controller->hasWork())
             return;
@@ -551,22 +553,29 @@ class MainWindow::Impl {
         request.automatic = automatic;
         request.allowWorkpieceRotation = automatic;
         request.withTools = withTools;
+        request.toolVariants = std::move(variants);
+        const bool checkedTooling = !request.toolVariants.empty();
         request.allowPartialEndSupport = withTools;
         if (withTools)
             request.maximumEndSupportLossMm = toolSelection->maximumEndSupportLossMm();
-        if (expanded) {
+        if (expanded || checkedTooling) {
             request.maximumChecks = 512;
             request.maximumTimeMs = 120000;
         }
         const bool perBend = withTools && toolAssignmentScope->currentIndex() == 1;
-        if (perBend && toolDraftChanged && !assignSelectedTool()) {
+        if (!checkedTooling && perBend && toolDraftChanged && !assignSelectedTool()) {
             propertyTabs->setCurrentIndex(3);
             return;
         }
-        const auto tools = toolSelection->parameters();
-        const auto assignment = toolSelection->assignment();
+        auto tools = toolSelection->parameters();
+        auto assignment = toolSelection->assignment();
+        if (checkedTooling && !perBend) {
+            assignment = request.toolVariants.front().assignment;
+            tools = core::toolParameters(*assignment);
+        }
         routePanel->setWithTools(withTools, perBend);
-        propertyTabs->setCurrentIndex(2);
+        if (!checkedTooling)
+            propertyTabs->setCurrentIndex(2);
         if (withTools && !perBend && !tools) {
             refreshPreview();
             return;
@@ -578,37 +587,119 @@ class MainWindow::Impl {
                 refreshPreview();
                 return;
             }
-            if (perBend && !entry->tools) {
+            const bool replacing =
+                checkedTooling && (!request.toolVariants.front().bendIndex ||
+                                   request.toolVariants.front().bendIndex == index);
+            const auto operationAssignment =
+                replacing ? std::optional{request.toolVariants.front().assignment}
+                : perBend ? entry->catalogTools
+                          : assignment;
+            const auto operationTools = replacing ? core::toolParameters(*operationAssignment)
+                                        : perBend ? entry->tools
+                                                  : tools;
+            if (perBend && !operationTools) {
                 editRouteTool(index);
                 return;
             }
-            if (withTools && !requireRealTool(perBend ? entry->catalogTools : assignment, index))
+            if (withTools && !requireRealTool(operationAssignment, index))
                 return;
-            request.operations.push_back({entry->id, index, *target,
-                                          !withTools ? std::nullopt
-                                          : perBend  ? entry->tools
-                                                     : tools,
-                                          !withTools ? std::nullopt
-                                          : perBend  ? entry->catalogTools
-                                                     : assignment,
-                                          entry->workpieceReversed});
+            request.operations.push_back(
+                {entry->id, index, *target, !withTools ? std::nullopt : operationTools,
+                 !withTools ? std::nullopt : operationAssignment, entry->workpieceReversed});
         }
-        beginPreviewReplacement();
-        stopPlayback();
-        viewingDraft = false;
-        draftAutoPlay = false;
-        viewingRoute = true;
-        viewingSource = false;
-        wantFlat = false;
+        if (!checkedTooling) {
+            beginPreviewReplacement();
+            stopPlayback();
+            viewingDraft = false;
+            draftAutoPlay = false;
+            viewingRoute = true;
+            viewingSource = false;
+            wantFlat = false;
+        } else {
+            checkedToolVariants = request.toolVariants;
+            checkedToolJob = true;
+            checkedToolCancelled = checkedToolManualOverride = false;
+            checkedToolDocument = session.revision();
+            checkedToolEdit = session.editRevision();
+            checkedToolDialog->begin();
+            toolSelection->setCheckedSearchState(true,
+                                                 QStringLiteral("Проверяем инструмент и порядок…"));
+        }
         lastRouteAutomatic = automatic;
         routePanel->setExpandedSearch(expanded);
         if (controller->prepareBendRoute(std::move(request), previewBuilder)) {
-            if (withTools) {
+            if (withTools && !checkedTooling) {
                 toolDraftChanged = false;
                 toolSelection->rememberChoice();
             }
-            showPlaybackPanel();
+            if (!checkedTooling)
+                showPlaybackPanel();
+        } else if (checkedTooling) {
+            checkedToolJob = false;
+            checkedToolVariants.clear();
+            checkedToolDialog->finish(false);
+            toolSelection->setCheckedSearchState(
+                false, QStringLiteral(
+                           "Полная проверка недоступна. Используйте быстрый или ручной выбор."));
         }
+    }
+    void cancelCheckedToolSelection(bool editing = false) {
+        if (!checkedToolJob && checkedToolVariants.empty())
+            return;
+        checkedToolVariants.clear();
+        checkedToolCancelled = true;
+        checkedToolManualOverride |= editing;
+        if (checkedToolDialog)
+            checkedToolDialog->hide();
+        if (checkedToolJob && controller->hasWork())
+            controller->cancel();
+        else
+            toolSelection->setCheckedSearchState(false, editing ? QString{}
+                                                                : QStringLiteral("Подбор отменён"));
+    }
+    void prepareCheckedToolSelection() {
+        if (checkedToolJob && controller->hasWork()) {
+            cancelCheckedToolSelection();
+            return;
+        }
+        const auto &session = controller->session();
+        if (controller->hasWork() || !session.document())
+            return;
+        const bool perBend = toolAssignmentScope->currentIndex() == 1;
+        const auto row = bendList->currentIndex().row();
+        if (perBend && row < 0)
+            return;
+        const auto target = perBend ? std::optional{static_cast<std::size_t>(row)} : std::nullopt;
+        if (!checkedToolVariants.empty() && checkedToolDocument == session.revision() &&
+            checkedToolEdit == session.editRevision() &&
+            checkedToolVariants.front().bendIndex == target) {
+            prepareRoute(true, true, true, checkedToolVariants);
+            return;
+        }
+        std::vector<application::RouteToolVariant> variants;
+        for (auto &a : toolSelection->checkedCandidates())
+            variants.push_back({std::move(a), perBend ? std::optional{static_cast<std::size_t>(row)}
+                                                      : std::nullopt});
+        if (variants.empty()) {
+            toolSelection->setCheckedSearchState(
+                false, QStringLiteral("Нет подходящих DXF-профилей. Доступен ручной выбор."));
+            return;
+        }
+        prepareRoute(true, true, true, std::move(variants));
+    }
+    void suggestInitialTools() {
+        const auto &session = controller->session();
+        if (!session.document() || controller->hasWork() ||
+            initialToolSuggestion == session.revision())
+            return;
+        initialToolSuggestion = session.revision();
+        const auto order = session.orderedBends();
+        if (toolDraftChanged || std::any_of(order.begin(), order.end(), [&](auto index) {
+                return session.bend(index)->tools.has_value();
+            }))
+            return;
+        refresh();
+        toolSelection->suggestForNewPart();
     }
 
     void checkTools() {
@@ -954,11 +1045,11 @@ class MainWindow::Impl {
             controller->isPreparingDraft() ? QStringLiteral("Проверяем столкновения…")
             : viewingDraft && controller->routeDraft() ? QStringLiteral("Ручной порядок")
             : controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
-            : viewingRoute && controller->bendRoute() && controller->bendRoute()->partialEndSupport
+            : controller->bendRoute() && controller->bendRoute()->partialEndSupport
                 ? QStringLiteral("Просмотр: неполная опора")
             : scenePreview() && scenePreview()->partialEndSupport()
                 ? QStringLiteral("Просмотр: неполная опора")
-            : viewingRoute && controller->bendRoute()
+            : controller->bendRoute()
                 ? QStringLiteral("Порядок: %1 шагов").arg(controller->bendRoute()->steps.size())
             : controller->isPreparingPreview() ? QStringLiteral("Проверяем…")
             : !document                        ? QStringLiteral("Нужна деталь")
@@ -1599,8 +1690,24 @@ class MainWindow::Impl {
             }
         }
         toolSelection->setSelectionRequest(selectionRequest, allBends);
-        toolSelection->setEnabled(!controller->hasWork());
-        toolWorkspace->setEnabled(!controller->hasWork());
+        if (checkedToolJob && controller->hasWork() && !controller->isPreparingRoute()) {
+            // Toolbar cancellation or another command can stop the worker too.
+            checkedToolCancelled = true;
+            checkedToolVariants.clear();
+            checkedToolDialog->hide();
+        }
+        if (checkedToolDocument != session.revision() &&
+            (checkedToolJob || !checkedToolVariants.empty())) {
+            checkedToolVariants.clear();
+            checkedToolCancelled = true;
+            checkedToolDialog->hide();
+            if (!controller->isPreparingRoute()) {
+                checkedToolJob = false;
+                toolSelection->setCheckedSearchState(false);
+            }
+        }
+        toolSelection->setEnabled(!controller->hasWork() || checkedToolJob);
+        toolWorkspace->setEnabled(!controller->hasWork() || checkedToolJob);
         applyTools->setEnabled(toolEditable && previewBuilder && supported && matchingThickness &&
                                session.bendTarget(static_cast<std::size_t>(row)).has_value());
         checkBend->setEnabled(applyTools->isEnabled());
@@ -1618,6 +1725,46 @@ class MainWindow::Impl {
             shownAssignment = savedAssignment;
             toolDraftChanged = false;
             toolSelection->setChoice(savedTools, savedAssignment);
+        }
+        if (checkedToolJob && !controller->hasWork()) {
+            checkedToolJob = false;
+            QString status;
+            bool resumable = false;
+            if (checkedToolCancelled) {
+                checkedToolDialog->hide();
+                if (!checkedToolManualOverride)
+                    status = QStringLiteral("Подбор отменён");
+            } else if (const auto route = controller->bendRoute();
+                       route && route->selectedToolVariant) {
+                checkedToolDialog->hide();
+                checkedToolVariants.clear();
+                toolSelection->rememberChoice();
+                status = QStringLiteral("Проверенный порядок · %1 гибов").arg(route->steps.size());
+            } else {
+                const auto error = controller->bendRouteError();
+                resumable = error && error->code == application::BendRouteErrorCode::SearchLimit;
+                if (!resumable)
+                    checkedToolVariants.clear();
+                status =
+                    resumable
+                        ? QStringLiteral("Проверка не завершена. Продолжите подбор или выберите "
+                                         "инструмент вручную.")
+                        : QStringLiteral(
+                              "Проверенный вариант не найден. Доступен быстрый и ручной выбор.");
+                checkedToolDialog->finish(resumable);
+            }
+            toolSelection->setCheckedSearchState(false, status, resumable);
+        } else if (checkedToolJob) {
+            if (const auto progress = controller->bendRouteProgress()) {
+                QString tool;
+                if (progress->variant < checkedToolVariants.size()) {
+                    const auto &a = checkedToolVariants[progress->variant].assignment;
+                    tool = QString::fromStdString(a.punch.code + " / " + a.die.code);
+                    if (a.groove < a.die.openingsMm.size())
+                        tool += QStringLiteral(" · V %1 мм").arg(a.die.openingsMm[a.groove]);
+                }
+                checkedToolDialog->progress(*progress, tool);
+            }
         }
         assignBendTool->setEnabled(toolEditable && supported && matchingThickness &&
                                    toolSelection->parameters().has_value());
@@ -2418,6 +2565,11 @@ class MainWindow::Impl {
     bool viewingRoute = false;
     bool viewingDraft = false, draftAutoPlay = false;
     bool lastRouteAutomatic = true;
+    bool checkedToolJob = false, checkedToolCancelled = false, checkedToolManualOverride = false;
+    std::uint64_t checkedToolDocument = 0, checkedToolEdit = 0;
+    std::uint64_t initialToolSuggestion = 0;
+    std::vector<application::RouteToolVariant> checkedToolVariants;
+    ToolSearchDialog *checkedToolDialog = nullptr;
     viewer::ViewerWidget *viewer = nullptr;
     QStackedWidget *workspaceStack = nullptr;
     ToolWorkspace *toolWorkspace = nullptr;
@@ -3269,6 +3421,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                 impl_->bendModel->index(impl_->toolBendSelection->itemData(index).toInt(), 0));
     });
     connect(impl_->toolAssignmentScope, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (!impl_->checkedToolJob)
+            impl_->cancelCheckedToolSelection(true);
         impl_->setupAttempt.reset();
         impl_->routePanel->setWithTools(true, index == 1);
         impl_->controller->discardBendRoute();
@@ -3279,6 +3433,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->checkTools();
     });
     impl_->toolSelection->onChanged = [this] {
+        impl_->cancelCheckedToolSelection(true);
         impl_->beginPreviewReplacement(true);
         impl_->setupAttempt.reset();
         impl_->toolDraftChanged = true;
@@ -3288,6 +3443,22 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->controller->discardBendPreview();
         impl_->refreshPreview();
     };
+    impl_->checkedToolDialog = new ToolSearchDialog(this);
+    impl_->checkedToolDialog->onCancel = [this] { impl_->cancelCheckedToolSelection(); };
+    impl_->checkedToolDialog->onContinue = [this] { impl_->prepareCheckedToolSelection(); };
+    impl_->checkedToolDialog->onQuick = [this] {
+        impl_->checkedToolDialog->hide();
+        findChild<QAction *>("recommendToolsQuick")->trigger();
+        impl_->propertyTabs->setCurrentIndex(3);
+    };
+    impl_->checkedToolDialog->onManual = [this] {
+        impl_->cancelCheckedToolSelection(true);
+        impl_->checkedToolDialog->hide();
+        impl_->propertyTabs->setCurrentIndex(3);
+        impl_->toolWorkspace->setFocus();
+    };
+    impl_->toolSelection->onCheckedRecommend = [this] { impl_->prepareCheckedToolSelection(); };
+    impl_->toolSelection->onCancelChecked = [this] { impl_->cancelCheckedToolSelection(true); };
     connect(impl_->clearTools, &QPushButton::clicked, this, [this] {
         const auto row = impl_->bendList->currentIndex().row();
         if (row >= 0) {
@@ -3548,7 +3719,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     };
     impl_->routePanel->onEditTool = [this](std::size_t index) { impl_->editRouteTool(index); };
     impl_->routePanel->onExpandSearch = [this] {
-        impl_->prepareRoute(impl_->lastRouteAutomatic, impl_->routePanel->withTools(), true);
+        if (!impl_->checkedToolVariants.empty())
+            impl_->prepareCheckedToolSelection();
+        else
+            impl_->prepareRoute(impl_->lastRouteAutomatic, impl_->routePanel->withTools(), true);
     };
     impl_->routePanel->onReorder = [this](std::vector<std::string> ids) {
         impl_->beginPreviewReplacement();
@@ -3628,6 +3802,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         if (stage == 0)
             impl_->showSource();
         impl_->refreshWorkflow();
+        if (page == 3)
+            impl_->suggestInitialTools();
     });
     processBar->addWidget(processPanel);
 

@@ -1,9 +1,11 @@
 #include "bending/ui/ImportController.h"
 #include "bending/core/ToolSelection.h"
 
+#include <QPointer>
 #include <QThread>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <optional>
 #include <set>
@@ -122,6 +124,7 @@ class ImportController::Impl {
     bool preparingPreview = false;
     BendRoutePtr route;
     std::optional<BendRouteError> routeError;
+    std::optional<BendRouteProgress> routeProgress;
     std::uint64_t routeId = 0, routeRevision = 0, routeEditRevision = 0;
     bool preparingRoute = false;
     RouteDraftPtr draft;
@@ -154,6 +157,7 @@ class ImportController::Impl {
         ++routeId;
         route.reset();
         routeError.reset();
+        routeProgress.reset();
         if (preparingRoute) {
             stop.request_stop();
             preparingRoute = false;
@@ -820,6 +824,9 @@ std::optional<BendRouteError> ImportController::bendRouteError() const {
 bool ImportController::isPreparingRoute() const {
     return impl_->preparingRoute;
 }
+std::optional<BendRouteProgress> ImportController::bendRouteProgress() const {
+    return impl_->routeProgress;
+}
 bool ImportController::isPreparingDraft() const {
     return impl_->runningDraft || impl_->pendingDraft.has_value();
 }
@@ -891,6 +898,15 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
             return false;
     }
     request.manualThicknessMm = session.manualThicknessMm();
+    if (!request.toolVariants.empty()) {
+        if (request.toolVariants.size() > 64)
+            return false;
+        for (std::size_t i = 0; i < request.toolVariants.size(); ++i) {
+            auto candidate = request;
+            if (!applyRouteToolVariant(candidate, i))
+                return false;
+        }
+    }
     auto *s = impl_.get();
     if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
         previous->discardRouteCache();
@@ -902,6 +918,37 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     s->stop = std::stop_source{};
     const auto stop = s->stop.get_token();
     s->running = s->preparingRoute = true;
+    s->routeProgress = BendRouteProgress{};
+    struct ProgressGate {
+        std::chrono::steady_clock::time_point sent = {};
+        std::optional<BendRouteProgress> previous;
+    };
+    request.onProgress = [owner = QPointer<ImportController>(this), id, revision, edit, stop,
+                          gate = std::make_shared<ProgressGate>()](BendRouteProgress progress) {
+        if (!owner || stop.stop_requested())
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        if (gate->previous && gate->previous->phase == progress.phase &&
+            gate->previous->variant == progress.variant &&
+            now - gate->sent < std::chrono::milliseconds(100))
+            return;
+        gate->previous = progress;
+        gate->sent = now;
+        QMetaObject::invokeMethod(
+            owner,
+            [owner, id, revision, edit, stop, progress] {
+                if (!owner)
+                    return;
+                auto *state = owner->impl_.get();
+                if (state->preparingRoute && state->routeId == id &&
+                    state->session.revision() == revision &&
+                    state->session.editRevision() == edit && !stop.stop_requested()) {
+                    state->routeProgress = progress;
+                    emit owner->stateChanged();
+                }
+            },
+            Qt::QueuedConnection);
+    };
     QMetaObject::invokeMethod(
         s->worker,
         [s, id, revision, edit, document, stop, request = std::move(request), builder]() mutable {
@@ -917,7 +964,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
             QMetaObject::invokeMethod(
                 s->owner,
                 [s, id, revision, edit, document, stop, request = std::move(request),
-                 result = std::move(result)] {
+                 result = std::move(result)]() mutable {
                     s->running = s->preparingRoute = false;
                     if (s->stopping)
                         return;
@@ -925,7 +972,13 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                         edit == s->session.editRevision() && !stop.stop_requested() &&
                         !s->session.activeRequest()) {
                         if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
-                            bool valid = *route && (*route)->source == document &&
+                            bool selectedInput =
+                                *route && (request.toolVariants.empty()
+                                               ? !(*route)->selectedToolVariant
+                                               : (*route)->selectedToolVariant &&
+                                                     applyRouteToolVariant(
+                                                         request, *(*route)->selectedToolVariant));
+                            bool valid = selectedInput && *route && (*route)->source == document &&
                                          (*route)->withTools == request.withTools &&
                                          (*route)->steps.size() == request.operations.size();
                             std::set<std::string> ids;

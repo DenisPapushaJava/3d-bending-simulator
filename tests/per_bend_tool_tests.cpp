@@ -55,10 +55,12 @@ class LimitedBuilder final : public application::SingleBendPreviewBuilder {
         ++discards;
     }
     mutable std::optional<application::BendRouteRequest> last;
+    mutable unsigned calls = 0;
     application::BendRouteResult buildRoute(application::DocumentPtr,
                                             application::BendRouteRequest request,
                                             std::stop_token) const override {
         last = std::move(request);
+        ++calls;
         return application::BendRouteError{application::BendRouteErrorCode::SearchLimit,
                                            "Test budget limit"};
     }
@@ -332,8 +334,15 @@ int main(int argc, char **argv) {
             wait([&] { return !budgetController.hasWork(); });
             require(builder->last->maximumChecks == 512 && builder->last->maximumTimeMs == 120000 &&
                         !builder->last->automatic && !builder->last->withTools &&
-                        expand->isHidden() && !expand->isEnabled(),
-                    "Explicit retry changed the mode or kept offering an identical retry");
+                        expand->isVisible() && expand->isEnabled() &&
+                        expand->text().contains(QStringLiteral("Продолжить")),
+                    "Expanded limit hid the continuation or changed its scope");
+            expand->click();
+            wait([&] { return !budgetController.hasWork(); });
+            require(builder->calls == 3 && builder->last->maximumChecks == 512 &&
+                        builder->last->maximumTimeMs == 120000 && !builder->last->automatic &&
+                        !builder->last->withTools,
+                    "Continuing lost its bounded budget or manual scope");
             const auto discards = builder->discards.load();
             budgetController.closeDocument();
             require(builder->discards > discards, "Closing a document retained cached route work");

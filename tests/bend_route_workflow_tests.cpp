@@ -9,6 +9,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -152,7 +153,7 @@ int main(int argc, char **argv) {
                 window.findChild<QComboBox *>("punchPreset")->setCurrentIndex(1);
                 window.findChild<QComboBox *>("diePreset")->setCurrentIndex(1);
             } else {
-                window.findChild<QPushButton *>("recommendTools")->click();
+                window.findChild<QAction *>("recommendToolsQuick")->trigger();
                 if (sample)
                     std::cout
                         << window.findChild<QLabel *>("toolAssemblySummary")->text().toStdString()
