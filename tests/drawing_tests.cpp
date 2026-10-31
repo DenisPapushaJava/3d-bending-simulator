@@ -1020,6 +1020,84 @@ void classicalDrawing(const QString &folder) {
     require(ui::DrawingSheet::writePdf(folder + "/classical-shallow-top.pdf", *tall, {}).isEmpty(),
             "A shallow projection has no room for its outside dimension number");
 }
+void perforatedAngleDrawing(const QString &folder) {
+    // Own geometry: long angle, a fractional regular row and separate end fasteners.
+    const auto shape = [](bool irregular) {
+        auto angle = fixtures::bentStrip(3, 3, std::numbers::pi / 2, 1600, true, 40);
+        for (int i = -1; i <= 32; ++i) {
+            const double z = i < 0     ? 20
+                             : i == 32 ? 1580
+                                       : 90 + 1401. * i / 31 + (irregular && i == 16 ? .02 : 0);
+            const double x = i < 0 || i == 32 ? -18 : -18.5;
+            angle = BRepAlgoAPI_Cut(angle, BRepPrimAPI_MakeCylinder(
+                                               gp_Ax2(gp_Pnt(x, 2, z), gp_Dir(0, 1, 0)), 2, 5))
+                        .Shape();
+        }
+        return angle;
+    };
+    const auto document = load(shape(false), folder + "/perforated-angle.step");
+    const std::string bytes(document->sourceStep());
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+    const auto drawing = build(document, request);
+    const auto preservesCoordinates = [](const auto &d) {
+        require(d.classicalViews.has_value(), "Perforation lost its classical views");
+        for (std::size_t projection = 0; projection < 3; ++projection) {
+            const auto &compact = (*d.classicalViews)[projection];
+            const auto &source = d.views[projection];
+            require(compact.reverseProjection == source.reverseProjection,
+                    "Fixture unexpectedly needs an opposite auxiliary view");
+            for (bool horizontal : {true, false}) {
+                std::vector<double> expected, actual;
+                for (const auto &dimension : source.holeDimensions)
+                    if ((std::abs(dimension.end.y - dimension.start.y) < 1e-7) == horizontal)
+                        expected.push_back(dimension.valueMm);
+                for (const auto &dimension : compact.holeDimensions) {
+                    if ((std::abs(dimension.end.y - dimension.start.y) < 1e-7) != horizontal)
+                        continue;
+                    if (!dimension.pitchIntervals)
+                        actual.push_back(dimension.valueMm);
+                    else {
+                        const double start = horizontal ? dimension.start.x - compact.minimum.x
+                                                        : dimension.start.y - compact.minimum.y;
+                        for (std::size_t i = 1; i <= dimension.pitchIntervals; ++i)
+                            actual.push_back(start + i * dimension.pitchMm);
+                    }
+                }
+                std::sort(expected.begin(), expected.end());
+                std::sort(actual.begin(), actual.end());
+                require(expected.size() == actual.size(), "A hole coordinate was lost/repeated");
+                for (std::size_t i = 0; i < expected.size(); ++i)
+                    require(std::abs(expected[i] - actual[i]) < 1e-5,
+                            "A pitch changed an actual hole coordinate");
+            }
+        }
+    };
+    preservesCoordinates(*drawing);
+    const auto hasWholePattern = [](const auto &d) {
+        for (const auto &v : *d.classicalViews)
+            for (const auto &dimension : v.holeDimensions)
+                if (dimension.pitchIntervals == 31 && std::abs(dimension.valueMm - 1401) < 1e-5)
+                    return true;
+        return false;
+    };
+    require(hasWholePattern(*drawing) && drawing->flatPattern && drawing->sections.size() == 1 &&
+                ui::DrawingSheet::coverage(*drawing).dimensioned == 1,
+            "End fasteners prevented grouping or lost the angle's section/flat pattern");
+    for (int page = 0; page < ui::DrawingSheet::pageCount(*drawing); ++page)
+        requireCompactOrientation(ui::DrawingSheet::preview(*drawing, {}, page, 1680));
+    require(ui::DrawingSheet::writePdf(folder + "/perforated-angle.pdf", *drawing, {}).isEmpty(),
+            "A perforated angle still produces a blank first page/export failure");
+    request.quarterTurns = 1;
+    const auto turned = build(document, request);
+    preservesCoordinates(*turned);
+    require(hasWholePattern(*turned), "A quarter turn lost the regular row");
+    const auto changed = build(load(shape(true), folder + "/irregular-perforation.step"));
+    preservesCoordinates(*changed);
+    require(!hasWholePattern(*changed),
+            "An irregular hole was silently folded into an equal pitch");
+    require(document->sourceStep() == bytes, "Pitch grouping modified the imported STEP");
+}
 void flatDrawing(const QString &folder) {
     const auto doc = load(fixtures::channel(), folder + "/unfold-channel.step");
     application::DrawingRequest request;
@@ -1660,6 +1738,7 @@ int main(int argc, char **argv) {
         geometry(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
+        perforatedAngleDrawing(temp.path());
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";
     } catch (const std::exception &e) {

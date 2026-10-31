@@ -186,26 +186,34 @@ void compactCoordinates(DrawingView &view) {
         for (const auto &d : view.holeDimensions)
             if ((std::abs(d.end.y - d.start.y) < 1e-7) == horizontal)
                 group.push_back(d);
-        bool regular = group.size() >= 4;
-        const double step = regular ? group[1].valueMm - group[0].valueMm : 0;
-        for (std::size_t i = 1; i < group.size(); ++i)
-            regular = regular && step > 1e-5 &&
-                      std::abs(group[i].valueMm - group[0].valueMm - step * i) < 1e-5;
-        if (!regular) {
-            result.insert(result.end(), group.begin(), group.end());
-            continue;
+        for (std::size_t first = 0; first < group.size();) {
+            std::size_t end = first + 1;
+            const double step = end < group.size() ? group[end].valueMm - group[first].valueMm : 0;
+            if (step > 1e-5)
+                while (end < group.size() && std::abs(group[end].valueMm - group[first].valueMm -
+                                                      step * (end - first)) < 1e-5)
+                    ++end;
+            // A row may have independent fastening holes before/after its regular
+            // perforation. Keep every outlier; only replace a verified run of >=4 axes.
+            if (end - first < 4) {
+                result.push_back(group[first++]);
+                continue;
+            }
+            result.push_back(group[first]);
+            DrawingDimension pitch{group[first].end,
+                                   group[end - 1].end,
+                                   group[end - 1].valueMm - group[first].valueMm,
+                                   {}};
+            if (horizontal)
+                pitch.end.y = pitch.start.y;
+            else
+                pitch.end.x = pitch.start.x;
+            pitch.witnesses = std::array{group[first].end, group[end - 1].end};
+            pitch.pitchIntervals = end - first - 1;
+            pitch.pitchMm = step;
+            result.push_back(std::move(pitch));
+            first = end;
         }
-        result.push_back(group.front());
-        DrawingDimension pitch{
-            group.front().end, group.back().end, group.back().valueMm - group.front().valueMm, {}};
-        if (horizontal)
-            pitch.end.y = pitch.start.y;
-        else
-            pitch.end.x = pitch.start.x;
-        pitch.witnesses = std::array{group.front().end, group.back().end};
-        pitch.pitchIntervals = group.size() - 1;
-        pitch.pitchMm = step;
-        result.push_back(std::move(pitch));
     }
     view.holeDimensions = std::move(result);
 }

@@ -59,10 +59,10 @@ void text(QPainter &p, QRectF area, const QString &value, double height = 3.5,
     p.drawText(QRectF(0, 0, area.width() / factor, area.height() / factor), flags, value);
     p.restore();
 }
-QString number(double value) {
-    if (std::abs(value) < .0005)
+QString number(double value, int decimals = 2) {
+    if (std::abs(value) < std::min(.0005, .5 * std::pow(10., -decimals)))
         value = 0;
-    QString result = QString::number(value, 'f', 2);
+    QString result = QString::number(value, 'f', decimals);
     while (result.endsWith(QLatin1Char('0')))
         result.chop(1);
     if (result.endsWith(QLatin1Char('.')))
@@ -141,10 +141,18 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
         normal = -normal;
     if (holePosition)
         normal = std::abs(vector.x()) > std::abs(vector.y()) ? QPointF(0, -1) : QPointF(1, 0);
+    int pitchDecimals = 2;
+    // The displayed pitch must still reproduce the displayed total span after
+    // multiplication; rounding a long fractional pattern to 0.01 can change it.
+    for (double factor = 100; d.pitchIntervals && pitchDecimals < 6 &&
+                              std::abs(std::round(d.pitchMm * factor) / factor * d.pitchIntervals -
+                                       std::round(d.valueMm * 100) / 100) > .005;
+         ++pitchDecimals, factor *= 10) {
+    }
     const QString value = d.pitchIntervals
                               ? QStringLiteral("%1×%2=%3")
                                     .arg(d.pitchIntervals)
-                                    .arg(number(d.pitchMm), number(d.valueMm))
+                                    .arg(number(d.pitchMm, pitchDecimals), number(d.valueMm))
                               : (d.label.empty() || d.label.starts_with("H")
                                      ? QString{}
                                      : QString::fromStdString(d.label) + QLatin1Char('=')) +
