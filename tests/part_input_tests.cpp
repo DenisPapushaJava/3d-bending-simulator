@@ -9,6 +9,7 @@
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -18,7 +19,9 @@
 #include <QTemporaryDir>
 #include <QThread>
 #include <QToolButton>
+#include <cmath>
 #include <iostream>
+#include <source_location>
 #include <stdexcept>
 
 using namespace bending;
@@ -32,14 +35,16 @@ void pump() {
     QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     QApplication::processEvents();
 }
-void wait(const std::function<bool()> &condition) {
+void wait(const std::function<bool()> &condition,
+          const std::source_location where = std::source_location::current()) {
     QElapsedTimer timer;
     timer.start();
     while (!condition() && timer.elapsed() < 15000) {
         pump();
         QThread::msleep(2);
     }
-    check(condition(), "Timed out");
+    if (!condition())
+        throw std::runtime_error("Timed out at line " + std::to_string(where.line()));
     pump();
 }
 std::filesystem::path native(const QString &path) {
@@ -246,6 +251,14 @@ void workflowTests(const QString &snapshot) {
     auto root = QJsonDocument::fromJson(file.readAll()).object();
     file.close();
     root.insert("version", 5);
+    root.remove("unfold");
+    auto legacyBends = root.value("bends").toArray();
+    for (qsizetype i = 0; i < legacyBends.size(); ++i) {
+        auto bend = legacyBends[i].toObject();
+        bend.remove("workpieceReversed"); // Introduced in v14; not a valid v5 input.
+        legacyBends[i] = bend;
+    }
+    root.insert("bends", legacyBends);
     check(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "Cannot write legacy fixture");
     file.write(QJsonDocument(root).toJson());
     file.close();
@@ -275,6 +288,36 @@ void workflowTests(const QString &snapshot) {
     c.cancel();
     wait([&] { return !c.hasWork(); });
     check(!dialog(), "Cancelled import opened a form");
+    c.open(std::filesystem::path(BENDING_EXAMPLE_DIR) / "wall-panel-2700mm.step");
+    wait([&] { return !c.hasWork() && dialog(); });
+    check(std::abs(dialog()->findChild<QDoubleSpinBox *>("partThickness")->value() - 1.5) < 1e-6 &&
+              !c.session().manualThicknessMm() &&
+              dialog()
+                  ->findChild<QLabel *>("partThicknessOrigin")
+                  ->text()
+                  .contains(QStringLiteral("радиусам гибов")),
+          "Sixteen-bend panel did not receive an automatic local thickness proposal");
+    if (!snapshot.isEmpty())
+        check(dialog()->grab().save(snapshot + "-panel.png"), "Cannot save panel form");
+    dialog()->findChild<QComboBox *>("sheetMaterial")->setCurrentIndex(1);
+    button(dialog(), "partInputContinue")->click();
+    pump();
+    check(c.session().hasPartInputs() && !c.session().manualThicknessMm(),
+          "Automatic proposal was saved as an invented manual thickness");
+    const auto panelProject = native(dir.path()) / "panel.bend";
+    c.saveProject(panelProject, files);
+    wait([&] { return !c.hasWork(); });
+    check(c.saveError().isEmpty() && c.session().projectPath() == panelProject,
+          "Cannot save panel inputs");
+    c.closeDocument();
+    c.open(panelProject);
+    wait([&] { return !c.hasWork(); });
+    const auto panelThickness =
+        application::suggestThickness(c.session().document()->metadata().thickness);
+    check(!dialog() && !c.session().manualThicknessMm() && c.session().hasPartInputs() &&
+              c.session().projectPath() == panelProject && panelThickness &&
+              std::abs(*panelThickness - 1.5) < 1e-6,
+          "Panel project lost its recomputed automatic thickness");
     c.shutdown();
 }
 } // namespace

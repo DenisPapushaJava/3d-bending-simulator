@@ -257,12 +257,23 @@ void PartInputDialog::refreshDraft() {
     const auto thickness = manual_ ? manual_ : automatic_;
     const auto validation =
         thickness ? validateThickness(*thickness, analysis) : ThicknessValidation::Invalid;
+    const bool bendEvidence =
+        std::any_of(analysis.evidence.begin(), analysis.evidence.end(),
+                    [](const auto &pair) { return pair.kind == ThicknessEvidenceKind::BendRadii; });
+    const bool planarEvidence =
+        std::any_of(analysis.evidence.begin(), analysis.evidence.end(), [](const auto &pair) {
+            return pair.kind == ThicknessEvidenceKind::PlanarWalls;
+        });
+    const auto localOrigin = bendEvidence
+                                 ? (planarEvidence ? QStringLiteral("По стенкам и радиусам гибов")
+                                                   : QStringLiteral("По радиусам гибов"))
+                                 : QStringLiteral("Предварительное локальное измерение");
     origin_->setText(manual_ ? QStringLiteral("Ручное значение. CAD-геометрия не изменяется.")
                      : analysis.status == ThicknessStatus::Detected && automatic_
                          ? QStringLiteral("Из геометрии · постоянная толщина подтверждена.")
                      : automatic_
-                         ? QStringLiteral("Предварительное локальное измерение · постоянство "
-                                          "толщины всей детали не подтверждено.")
+                         ? QStringLiteral("%1 · постоянство толщины всей детали не подтверждено.")
+                               .arg(localOrigin)
                          : QStringLiteral("Достоверное значение не найдено. Укажите толщину "
                                           "вручную или перейдите к просмотру."));
     if (manual_ && automatic_ && analysis.status != ThicknessStatus::Detected &&

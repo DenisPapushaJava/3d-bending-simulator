@@ -124,6 +124,13 @@ void testProjectState() {
     analysis.evidence.push_back({5, 6, 4.0});
     require(!suggestThickness(analysis), "Conflicting distances were silently resolved");
     analysis.evidence.pop_back();
+    analysis.evidence.push_back({5, 6, 6., ThicknessEvidenceKind::BendRadii});
+    require(suggestThickness(analysis) == 6.0 &&
+                validateThickness(6.0, analysis) == ThicknessValidation::LocalMatch,
+            "Bend evidence was lost or promoted to a constant-thickness proof");
+    analysis.evidence.push_back({7, 8, 3., ThicknessEvidenceKind::BendRadii});
+    require(!suggestThickness(analysis), "A minority thickness was silently ignored");
+    analysis.evidence.pop_back();
     for (const auto status :
          {ThicknessStatus::Ambiguous, ThicknessStatus::LimitReached, ThicknessStatus::Failed}) {
         analysis.status = status;

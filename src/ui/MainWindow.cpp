@@ -405,8 +405,7 @@ class MainWindow::Impl {
                               "Автоопределение: геометрический анализ завершился ошибкой.")
                     : analysis.status == ThicknessStatus::Ambiguous
                         ? QStringLiteral("Толщина определена неоднозначно.")
-                        : QStringLiteral("Толщина автоматически не определена. Поддерживаются "
-                                         "плоские детали постоянной толщины.");
+                        : QStringLiteral("Согласованная толщина по стенкам и гибам не найдена.");
                 description += QStringLiteral("\nМожно задать толщину вручную; это не подтверждает "
                                               "пригодность детали для гибки.");
             }
@@ -2048,7 +2047,9 @@ class MainWindow::Impl {
         }
         for (std::size_t i = 0; i < analysis.evidence.size(); ++i) {
             const auto &pair = analysis.evidence[i];
-            pairs->addItem(QStringLiteral("Грани %1 и %2 · %3 мм")
+            pairs->addItem((pair.kind == ThicknessEvidenceKind::BendRadii
+                                ? QStringLiteral("Радиусы гиба · грани %1 и %2 · %3 мм")
+                                : QStringLiteral("Стенки · грани %1 и %2 · %3 мм"))
                                .arg(pair.firstFace)
                                .arg(pair.secondFace)
                                .arg(number(pair.distanceMm)),

@@ -452,7 +452,6 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before thickness analysis");
         }
-        data->metadata.thickness = recognizeThickness(data->shape, tolerance, stop);
         data->metadata.bendAnalysis = recognizeBends(data->shape, tolerance, stop);
         auto filled =
             fillClosedCutouts(data->shape, data->metadata.bendAnalysis.lengthToleranceMm, stop);
@@ -497,6 +496,8 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
                 data->metadata.closedCutouts.addedVolumeMm3 = 0;
             }
         }
+        data->metadata.thickness =
+            recognizeThickness(data->shape, tolerance, stop, &data->metadata.bendAnalysis);
         if (report(application::ImportPhase::Preparing)) {
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before presentation preparation");
