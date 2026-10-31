@@ -565,8 +565,11 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
 void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
     if (!isEnabled() || picker_)
         return;
+    // The tail holds immutable project/previous-choice snapshots, not workshop stock.
+    // Showing it alongside the workshop makes each edited profile look duplicated.
+    const core::ToolCatalog workshop(catalog_.begin(), catalog_.begin() + workshopSize_);
     ToolPickerPopup dialog(
-        catalog_, kind, selectedTool(kind), selectedGroove(),
+        workshop, kind, selectedTool(kind), selectedGroove(),
         [this](const auto &tool, auto groove) { return optionIssue(tool, groove); },
         profileImporter_ && static_cast<bool>(libraryStorage_), anchor, punchReversed_);
     picker_ = &dialog;

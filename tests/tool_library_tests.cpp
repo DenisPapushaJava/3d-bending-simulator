@@ -14,6 +14,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QLockFile>
@@ -22,6 +23,7 @@
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QToolButton>
 #include <iostream>
 #include <stdexcept>
 using namespace bending;
@@ -286,6 +288,77 @@ int main(int argc, char **argv) {
                     nominal.findChild<QPushButton *>("libraryUse")->isEnabled(),
                 "editing nominal length left confirmation stale");
         nominal.reject();
+
+        // The selector internally keeps project snapshots so library edits cannot
+        // mutate assignments. They must not become duplicate workshop options.
+        const auto inspectPalette = [](ui::ToolSelectionWidget &widget, core::ToolKind kind,
+                                       const std::vector<std::string> &ids, bool captured,
+                                       bool choose = false) {
+            QToolButton anchor(&widget);
+            widget.show();
+            anchor.show();
+            QString failure;
+            QTimer::singleShot(0, &widget, [&] {
+                auto *popup = anchor.findChild<QDialog *>("toolPickerPopup");
+                try {
+                    require(popup, "palette did not open");
+                    auto options = popup->findChildren<QToolButton *>();
+                    std::vector<std::string> actual;
+                    QToolButton *first = nullptr;
+                    for (auto *option : options)
+                        if (option->objectName().startsWith("toolOption_")) {
+                            actual.push_back(option->property("toolId").toString().toStdString());
+                            if (!first)
+                                first = option;
+                        }
+                    require(actual == ids, "project snapshots appeared as workshop duplicates");
+                    require((popup->findChild<QLabel *>("toolPickerCapturedChoice") != nullptr) ==
+                                captured,
+                            "captured choice not distinguished from workshop stock");
+                    if (choose) {
+                        require(first && first->isEnabled(), "workshop replacement unavailable");
+                        first->click();
+                        return;
+                    }
+                } catch (const std::exception &e) {
+                    failure = QString::fromUtf8(e.what());
+                }
+                if (popup)
+                    popup->reject();
+            });
+            widget.showPicker(kind, &anchor);
+            require(failure.isEmpty(), qPrintable(failure));
+        };
+        auto workshopPunch = pair.punch;
+        workshopPunch.code = "1063";
+        ui::ToolSelectionWidget palette({workshopPunch, pair.die}, nullptr);
+        auto captured = pair;
+        captured.punch = workshopPunch;
+        captured.punch.lengthMm = 415; // Same ID, older saved version.
+        captured.die.lengthMm = 415;
+        palette.setChoice(core::toolParameters(captured), captured);
+        const auto capturedAssignment = palette.assignment();
+        inspectPalette(palette, core::ToolKind::Punch, {workshopPunch.id}, true);
+        inspectPalette(palette, core::ToolKind::Die, {pair.die.id}, true);
+        require(palette.assignment() == capturedAssignment, "opening palette changed the part");
+        captured.punch.id = "old-import-id"; // Deleted and imported again with the same article.
+        palette.setChoice(core::toolParameters(captured), captured);
+        const auto reimportAssignment = palette.assignment();
+        inspectPalette(palette, core::ToolKind::Punch, {workshopPunch.id}, true);
+        require(palette.assignment() == reimportAssignment, "cancel replaced archived snapshot");
+        inspectPalette(palette, core::ToolKind::Punch, {workshopPunch.id}, true, true);
+        require(palette.selectedTool(core::ToolKind::Punch) == workshopPunch,
+                "explicit choice did not select the workshop version");
+        inspectPalette(palette, core::ToolKind::Punch, {workshopPunch.id}, false);
+        ui::ToolSelectionWidget projectOnly({}, nullptr);
+        projectOnly.setChoice(core::toolParameters(captured), captured);
+        inspectPalette(projectOnly, core::ToolKind::Punch, {}, true);
+        require(projectOnly.selectedTool(core::ToolKind::Punch) == captured.punch,
+                "empty workshop lost its project-only tool");
+        auto otherStock = workshopPunch;
+        otherStock.id = "distinct-workshop-entry";
+        ui::ToolSelectionWidget sameNames({workshopPunch, otherStock, pair.die}, nullptr);
+        inspectPalette(sameNames, core::ToolKind::Punch, {workshopPunch.id, otherStock.id}, false);
         controller.shutdown();
         return 0;
     } catch (const std::exception &e) {

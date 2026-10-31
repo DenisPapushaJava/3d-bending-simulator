@@ -33,6 +33,16 @@ ToolPickerPopup::ToolPickerPopup(
     search->setPlaceholderText(QStringLiteral("Артикул или V"));
     search->setAccessibleName(QStringLiteral("Поиск инструмента"));
     layout->addWidget(search);
+    if (current && std::find(tools_.begin(), tools_.end(), *current) == tools_.end()) {
+        auto *saved = new QLabel(
+            QStringLiteral("В детали выбран %1 из сохранённых данных. Ниже — библиотека.")
+                .arg(QString::fromStdString(current->code)),
+            this);
+        saved->setObjectName("toolPickerCapturedChoice");
+        saved->setTextFormat(Qt::PlainText);
+        saved->setWordWrap(true);
+        layout->addWidget(saved);
+    }
     auto *scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
