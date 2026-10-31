@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <numbers>
 #include <stdexcept>
 
@@ -82,6 +83,7 @@ application::BendPreviewPtr preview(application::DocumentPtr document, bool fixe
 void check(const application::BendPreviewPtr &result, double sourceVolume) {
     require(result && result->frameCount() == 21, "Missing preview states");
     double fixedVolume = 0;
+    std::map<const Poly_Triangulation *, std::size_t> frameMeshes;
     for (std::size_t i = 0; i < result->frameCount(); ++i) {
         const auto &frame = cad::OcctPreviewAccess::frame(*result, i);
         require(frame.dimensions &&
@@ -108,6 +110,9 @@ void check(const application::BendPreviewPtr &result, double sourceVolume) {
             TopLoc_Location location;
             const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces(j)), location);
             require(!mesh.IsNull() && mesh->NbTriangles() > 0, "Unmeshed preview face");
+            const auto [owner, inserted] = frameMeshes.emplace(mesh.get(), i);
+            require(inserted || owner->second == i,
+                    "Independent material frames share a mutable triangulation");
         }
     }
 }

@@ -238,6 +238,9 @@ int main(int argc, char **argv) {
         if (branch)
             require(route->statistics.reorderedStates > 0,
                     "Topology did not change candidate order");
+        if (!sample)
+            require(!route->statistics.usedProfilePriority,
+                    "A small or branched sheet was treated as a long profile");
         const auto warm = success(run(optimized, doc, request, "warm"));
         require(warm->statistics.builtTransitions == 0 && warm->statistics.builtStates == 0 &&
                     warm->statistics.reusedTransitions == request.operations.size() &&

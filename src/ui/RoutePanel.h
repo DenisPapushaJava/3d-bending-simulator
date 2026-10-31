@@ -7,6 +7,7 @@ class QLabel;
 class QPushButton;
 class QComboBox;
 class QHBoxLayout;
+class QScrollArea;
 namespace bending::ui {
 class RoutePanel final : public QWidget {
     Q_OBJECT
@@ -70,5 +71,6 @@ class RoutePanel final : public QWidget {
     QLabel *status_;
     QHBoxLayout *strip_;
     QWidget *stepStrip_;
+    QScrollArea *stepScroll_;
 };
 } // namespace bending::ui

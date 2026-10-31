@@ -25,7 +25,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numbers>
+#include <span>
 namespace bending::cad {
 namespace {
 void cancelled(std::stop_token stop) {
@@ -38,7 +40,7 @@ void require(bool ok, const char *detail) {
 }
 struct Node {
     gp_Pnt point;
-    std::uint64_t regions;
+    std::uint32_t firstRegion, regionCount;
 };
 struct Face {
     Handle(Poly_Triangulation) mesh;
@@ -90,6 +92,7 @@ struct RouteDraftBasis::Impl {
     application::DocumentPtr source;
     application::FlatPatternPtr flat;
     std::vector<Face> faces;
+    std::vector<std::uint32_t> nodeRegions;
     std::vector<bool> referenceReversed;
 };
 RouteDraftBasis::~RouteDraftBasis() = default;
@@ -117,7 +120,8 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         add(w.solid);
     for (const auto &b : layout.bends)
         add(b.solid);
-    require(classifiers.size() < 64, "Too many draft regions");
+    require(classifiers.size() <= std::numeric_limits<std::uint32_t>::max(),
+            "Too many draft regions");
     auto copy = BRepBuilderAPI_Copy(OcctDocumentAccess::shape(native), true, false).Shape();
     BRepMesh_IncrementalMesh mesher(copy, .03, false, .12, false);
     require(mesher.IsDone(), "Cannot mesh the original draft surface");
@@ -133,18 +137,22 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
             if ((i & 255) == 0)
                 cancelled(stop);
             const auto p = mesh->Node(i).Transformed(loc.Transformation());
-            std::uint64_t members = 0;
+            const auto first = impl_->nodeRegions.size();
             for (std::size_t r = 0; r < classifiers.size(); ++r) {
                 if (boxes[r].IsOut(p))
                     continue;
                 classifiers[r]->Perform(p, tolerance * 10);
                 if (classifiers[r]->State() == TopAbs_IN || classifiers[r]->State() == TopAbs_ON) {
-                    members |= std::uint64_t{1} << r;
+                    impl_->nodeRegions.push_back(static_cast<std::uint32_t>(r));
                     ++votes[r];
                 }
             }
-            require(members != 0, "Original surface is outside the draft decomposition");
-            skin.nodes.push_back({p, members});
+            const auto count = impl_->nodeRegions.size() - first;
+            require(count != 0, "Original surface is outside the draft decomposition");
+            require(impl_->nodeRegions.size() <= std::numeric_limits<std::uint32_t>::max(),
+                    "Draft membership storage limit reached");
+            skin.nodes.push_back(
+                {p, static_cast<std::uint32_t>(first), static_cast<std::uint32_t>(count)});
         }
         skin.region =
             static_cast<std::size_t>(std::max_element(votes.begin(), votes.end()) - votes.begin());
@@ -327,13 +335,13 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             for (std::size_t i = 0; i < face.nodes.size(); ++i) {
                 const auto &node = face.nodes[i];
                 std::optional<gp_Pnt> mapped;
-                for (std::size_t r = 0; r < maps.size(); ++r)
-                    if (node.regions & (std::uint64_t{1} << r)) {
-                        const auto next = maps[r](node.point).Transformed(machine);
-                        require(!mapped || mapped->Distance(next) <= .02,
-                                "Inconsistent draft boundary mapping");
-                        mapped = next;
-                    }
+                for (const auto r :
+                     std::span(impl_->nodeRegions).subspan(node.firstRegion, node.regionCount)) {
+                    const auto next = maps[r](node.point).Transformed(machine);
+                    require(!mapped || mapped->Distance(next) <= .02,
+                            "Inconsistent draft boundary mapping");
+                    mapped = next;
+                }
                 mesh->SetNode(static_cast<int>(i + 1), *mapped);
                 envelope.Add(*mapped);
             }

@@ -271,7 +271,7 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         require(analysis.interiorContourDiagnostics.empty(),
                 "Openings in a bend zone are not yet supported for unfolding");
         require(analysis.status == BendRecognitionStatus::Completed && !analysis.bends.empty() &&
-                    analysis.bends.size() <= 32,
+                    analysis.bends.size() <= maximumSheetBends,
                 "Requires 1 to 32 recognized straight bends in a connected open sheet");
         const auto &bends = analysis.bends;
         const double tolerance = std::max(1e-6, analysis.lengthToleranceMm);

@@ -17,6 +17,7 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -158,7 +159,7 @@ class StepStrip final : public QWidget {
     using QWidget::QWidget;
     int count = 1;
     QSize sizeHint() const override {
-        return {count * 44 + 12, 44};
+        return {count * 44 + 12, QWidget::sizeHint().height()};
     }
 };
 } // namespace
@@ -197,11 +198,17 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     stepStrip_->setObjectName("routeStepStrip");
     auto *stripLayout = new QHBoxLayout(stepStrip_);
     stripLayout->setContentsMargins(2, 2, 2, 2);
-    auto *scroll = new QScrollArea(stepStrip_);
+    auto *scroll = stepScroll_ = new QScrollArea(stepStrip_);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFixedHeight(40);
+    connect(scroll->horizontalScrollBar(), &QScrollBar::rangeChanged, this,
+            [this, scroll](int, int maximum) {
+                scroll->setFixedHeight(
+                    40 + (maximum > 0 ? scroll->horizontalScrollBar()->sizeHint().height() : 0));
+                stepStrip_->updateGeometry();
+            });
     auto *strip = new StepCanvas(scroll);
     strip->moved = [this](int from, int to) { moveTo(from, to); };
     strip_ = new QHBoxLayout(strip);
@@ -298,6 +305,13 @@ void RoutePanel::select(int step, bool notify) {
     selected_ = std::clamp(step, 0, static_cast<int>(ids_.size()));
     for (std::size_t i = 0; i < steps_.size(); ++i)
         steps_[i]->setChecked(static_cast<int>(i) == selected_);
+    const auto selected = selected_;
+    const QPointer<QScrollArea> scroll(stepScroll_);
+    QTimer::singleShot(0, this, [this, selected, scroll] {
+        if (scroll && selected_ == selected && selected >= 0 &&
+            static_cast<std::size_t>(selected) < steps_.size())
+            scroll->ensureWidgetVisible(steps_[static_cast<std::size_t>(selected)], 12, 0);
+    });
     if (notify && onSelect)
         onSelect(selected_);
 }
@@ -452,7 +466,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     missingTool = index;
             }
         }
-    const bool ready = included && ids_.size() <= 12 && !busy && !preparingDraft &&
+    const bool ready = included && ids_.size() <= application::maximumSheetBends && !busy &&
+                       !preparingDraft &&
                        (mode_->currentIndex() == 0 || (perBendTools() ? assigned : toolsAvailable));
     automatic_->setEnabled(ready);
     manual_->setEnabled(ready);
@@ -614,8 +629,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             draft->checkedToolPositions
                 ? QStringLiteral("Столкновения проверены по кадрам. Полный порядок не проверен.")
                 : QStringLiteral("Выберите инструмент для проверки столкновений.");
-    } else if (ids_.size() > 12)
-        message = QStringLiteral("Первый режим порядка поддерживает до 12 полных прямых гибов.");
+    } else if (ids_.size() > application::maximumSheetBends)
+        message = QStringLiteral("Порядок поддерживает до %1 полных прямых гибов.")
+                      .arg(application::maximumSheetBends);
     else if (!included)
         message = QStringLiteral("Для полного порядка нужны все распознанные зоны детали.");
     else if (perBendTools() && missingTool)

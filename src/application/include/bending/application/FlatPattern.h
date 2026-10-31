@@ -7,6 +7,7 @@
 #include <variant>
 
 namespace bending::application {
+inline constexpr std::size_t maximumSheetBends = 32;
 struct FlatBend {
     std::size_t bendIndex;
     PointMm start; // First tangency boundary, in the common flat XY plane.

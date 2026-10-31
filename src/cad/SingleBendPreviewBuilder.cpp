@@ -164,12 +164,13 @@ double flangeExtent(const TopoDS_Shape &inner, const TopoDS_Shape &outer, const 
     }
     return bounds.CornerMax().X();
 }
-void assemble(PreviewFrame &frame) {
+void assemble(PreviewFrame &frame, bool rigidFlangesVerified = false) {
     BRep_Builder builder;
     TopoDS_Compound compound;
     builder.MakeCompound(compound);
-    for (const auto &region : frame.regions) {
-        if (!BRepCheck_Analyzer(region).IsValid()) {
+    for (std::size_t i = 0; i < frame.regions.size(); ++i) {
+        const auto &region = frame.regions[i];
+        if ((!rigidFlangesVerified || i == 1) && !BRepCheck_Analyzer(region).IsValid()) {
             throw std::runtime_error("Invalid preview region");
         }
         builder.Add(compound, region);
@@ -178,18 +179,27 @@ void assemble(PreviewFrame &frame) {
 }
 // Keep exact flange solids of the checked source (filled copy in approximation mode).
 // The original cutouts then remain in the separate display surface.
-// Every frame owns fresh geometry: meshing may not mutate the imported document.
+// Every frame owns fresh geometry and copied meshes. The isolated source flanges
+// were checked/meshed once; a direct isometry preserves their geometry and mesh accuracy.
 void placeFlanges(PreviewFrame &frame, const std::array<TopoDS_Shape, 2> &flanges,
                   const FrameBasis &sourceBasis, const simulation::BendSection &sourceSection,
                   const FrameBasis &targetBasis, const simulation::BendSection &targetSection) {
+    bool rigid = true;
     for (std::size_t i = 0; i < flanges.size(); ++i) {
         gp_Trsf placement;
         placement.SetDisplacement(flangeAxes(sourceBasis, sourceSection, i == 1),
                                   flangeAxes(targetBasis, targetSection, i == 1));
         frame.materialTransforms[i] = placement;
-        frame.regions[i * 2] = BRepBuilderAPI_Transform(flanges[i], placement, true).Shape();
+        const bool isometry =
+            !placement.IsNegative() && std::abs(placement.ScaleFactor() - 1) <= 1.e-12;
+        rigid &= isometry;
+        frame.regions[i * 2] = isometry
+                                   ? BRepBuilderAPI_Copy(flanges[i], true, true)
+                                         .Shape()
+                                         .Moved(TopLoc_Location(placement))
+                                   : BRepBuilderAPI_Transform(flanges[i], placement, true).Shape();
     }
-    assemble(frame);
+    assemble(frame, rigid);
 }
 std::optional<TopoDS_Shape> extractFlange(const TopoDS_Shape &source, const TopoDS_Shape &envelope,
                                           double tolerance) {
@@ -776,6 +786,16 @@ application::BendPreviewResult buildBendOperation(
                 return cancelled();
             }
             return unsupported("Isolated flanges and complete bend do not match the entire STEP");
+        }
+        for (const auto &flange : flanges) {
+            if (stop.stop_requested())
+                return cancelled();
+            if (!BRepCheck_Analyzer(flange).IsValid())
+                return unsupported("Invalid isolated material component");
+            BRepMesh_IncrementalMesh mesh(flange, .05, false, .35, false);
+            if (!mesh.IsDone())
+                return BendPreviewError{BendPreviewErrorCode::Failed,
+                                        "Cannot prepare the rigid material mesh"};
         }
         auto preview = std::make_shared<CadPreview>();
         preview->reversed = requestedReversed;

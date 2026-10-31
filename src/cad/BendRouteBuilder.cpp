@@ -43,6 +43,7 @@ namespace bending::cad {
 namespace {
 using namespace application;
 using Mask = std::uint64_t;
+static_assert(maximumSheetBends < 64, "Route masks need a wider representation beyond 63 bends");
 gp_Pnt point(PointMm p) {
     return {p.x, p.y, p.z};
 }
@@ -81,6 +82,28 @@ TopoDS_Shape boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolera
 TopoDS_Shape moved(const TopoDS_Shape &s, const gp_Trsf &map) {
     return BRepBuilderAPI_Transform(s, map, true).Shape();
 }
+TopoDS_Shape fused(const std::vector<TopoDS_Shape> &solids, double tolerance,
+                   std::stop_token stop) {
+    cancelled(stop);
+    check(!solids.empty(), "No material regions");
+    if (solids.size() == 1)
+        return solids.front();
+    TopTools_ListOfShape arguments, tools;
+    arguments.Append(solids.front());
+    for (std::size_t i = 1; i < solids.size(); ++i)
+        tools.Append(solids[i]);
+    BRepAlgoAPI_Fuse op;
+    op.SetArguments(arguments);
+    op.SetTools(tools);
+    op.SetNonDestructive(true);
+    op.SetRunParallel(false);
+    op.SetFuzzyValue(tolerance);
+    op.Build();
+    cancelled(stop);
+    if (!op.IsDone() || op.HasErrors() || !BRepCheck_Analyzer(op.Shape()).IsValid())
+        throw BendRouteError{BendRouteErrorCode::Failed, "Route material union failed"};
+    return op.Shape();
+}
 struct State {
     std::shared_ptr<const CadDocument> document;
     std::vector<std::optional<std::size_t>> indices;
@@ -111,11 +134,23 @@ template <class Value, std::size_t Capacity> class TransitionLru {
     using Entries = std::list<std::pair<TransitionKey, Value>>;
     Entries entries;
     std::unordered_map<TransitionKey, typename Entries::iterator, TransitionHash> index;
+    std::size_t limit = Capacity;
+
+    void trim() {
+        while (entries.size() > limit) {
+            index.erase(entries.back().first);
+            entries.pop_back();
+        }
+    }
 
   public:
     TransitionLru() = default;
     TransitionLru(const TransitionLru &) = delete;
     TransitionLru &operator=(const TransitionLru &) = delete;
+    void setLimit(std::size_t value) {
+        limit = std::clamp(value, std::size_t{1}, Capacity);
+        trim();
+    }
     const Value *peek(const TransitionKey &key) const {
         const auto found = index.find(key);
         return found == index.end() ? nullptr : &found->second->second;
@@ -140,10 +175,7 @@ template <class Value, std::size_t Capacity> class TransitionLru {
             entries.pop_front();
             throw;
         }
-        if (entries.size() > Capacity) {
-            index.erase(entries.back().first);
-            entries.pop_back();
-        }
+        trim();
     }
 };
 struct CacheData {
@@ -156,7 +188,7 @@ struct CacheData {
     std::list<Mask> stateOrder;
     // Exact inputs are compared once per operation/request and shared by all its state keys.
     std::vector<std::weak_ptr<const TransitionInputs>> inputs;
-    TransitionLru<BendPreviewPtr, 8> transitions;
+    TransitionLru<BendPreviewPtr, maximumSheetBends> transitions;
     // Null rejection is a success hint. A positive verdict alone cannot publish a cycle.
     TransitionLru<std::optional<BendPreviewError>, 512> verdicts;
     std::mutex mutex;
@@ -209,6 +241,7 @@ class RouteSearch {
     std::vector<std::shared_ptr<const TransitionInputs>> inputs;
     BendRouteStatistics statistics;
     std::vector<Mask> neighbours;
+    std::vector<std::size_t> profileRank;
     std::vector<gp_Dir> referenceAxes;
     std::vector<Bnd_Box> wallBounds;
     std::map<std::pair<Mask, std::size_t>, bool> frontPreferences;
@@ -301,9 +334,7 @@ class RouteSearch {
             display.push_back(
                 {layout->walls[i].solid, [map = maps[i]](gp_Pnt p) { return p.Transformed(map); }});
         }
-        auto geometry = solids.front();
-        for (std::size_t i = 1; i < solids.size(); ++i)
-            geometry = boolean<BRepAlgoAPI_Fuse>(geometry, solids[i], tolerance, stop);
+        auto geometry = fused(solids, tolerance, stop);
         TopTools_IndexedMapOfShape components;
         TopExp::MapShapes(geometry, TopAbs_SOLID, components);
         check(components.Extent() == 1 && std::abs(volume(geometry) - expectedVolume) <= budget,
@@ -467,7 +498,17 @@ class RouteSearch {
                     request.allowWorkpieceRotation
                         ? std::min(priorResult(mask, op, false), priorResult(mask, op, true))
                         : priorResult(mask, op, op.workpieceReversed);
-                return std::tuple{prior, std::popcount(neighbours[op.bendIndex] & mask)};
+                // A parallel open chain has a useful continuation direction. This is a
+                // tie-breaker only: interior bends and the other end remain candidates.
+                const auto continuation =
+                    profileRank.empty() ? std::size_t{0}
+                    : reversed.empty()
+                        ? profileRank[op.bendIndex]
+                        : static_cast<std::size_t>(
+                              std::abs(static_cast<int>(profileRank[op.bendIndex]) -
+                                       static_cast<int>(profileRank[reversed.back().bendIndex])));
+                return std::tuple{prior, std::popcount(neighbours[op.bendIndex] & mask),
+                                  continuation};
             };
             std::stable_sort(result.begin(), result.end(),
                              [&](auto a, auto b) { return score(a) < score(b); });
@@ -612,9 +653,9 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
         check(bool(native), "Unsupported draft document");
         const auto &analysis = native->metadata().bendAnalysis;
         const auto n = analysis.bends.size();
-        if (!n || n > 12 || request.operations.size() != n || request.step > n)
+        if (!n || n > maximumSheetBends || request.operations.size() != n || request.step > n)
             return BendRouteError{BendRouteErrorCode::InvalidInput,
-                                  "Requires every bend, up to 12 zones"};
+                                  "Requires every bend, up to 32 zones"};
         std::set<std::size_t> indices;
         std::set<std::string> ids;
         for (const auto &op : request.operations) {
@@ -707,13 +748,13 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
               !validEndSupportLimitMm(*request.maximumEndSupportLossMm))))
             return BendRouteError{BendRouteErrorCode::InvalidInput,
                                   "Partial end support requires explicit tool preview"};
-        if (!n || n > 12 || request.operations.size() != n || !request.maximumChecks ||
-            request.maximumChecks > 512 || !request.maximumTimeMs ||
+        if (!n || n > maximumSheetBends || request.operations.size() != n ||
+            !request.maximumChecks || request.maximumChecks > 512 || !request.maximumTimeMs ||
             request.maximumTimeMs > 120000 ||
             (request.manualThicknessMm &&
              (!std::isfinite(*request.manualThicknessMm) || *request.manualThicknessMm <= 0)))
             return BendRouteError{BendRouteErrorCode::InvalidInput,
-                                  "Requires every recognized bend, up to 12 zones"};
+                                  "Requires every recognized bend, up to 32 zones"};
         std::set<std::size_t> indices;
         std::set<std::string> ids;
         for (const auto &op : request.operations) {
@@ -763,6 +804,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             work->thickness = request.manualThicknessMm;
         }
         std::lock_guard workLock(work->mutex);
+        work->transitions.setLimit(std::max(std::size_t{8}, n));
         cancelled(stop);
         const bool reusedFlat = bool(work->flat);
         if (!work->flat) {
@@ -829,6 +871,40 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 if (a.bendIndex != b.bendIndex && (a.parent == b.parent || a.parent == b.child ||
                                                    a.child == b.parent || a.child == b.child))
                     search.neighbours[a.bendIndex] |= Mask{1} << b.bendIndex;
+        if (search.request.automatic && search.request.rankCandidates && n > 2 &&
+            std::all_of(search.layout->bends.begin(), search.layout->bends.end(),
+                        [&](const auto &bend) {
+                            return bend.sectionAxes.Direction().IsParallel(
+                                search.layout->bends.front().sectionAxes.Direction(),
+                                analysis.angleToleranceRadians);
+                        })) {
+            std::vector<std::vector<std::pair<std::size_t, std::size_t>>> graph(
+                search.layout->walls.size());
+            for (const auto &bend : search.layout->bends) {
+                graph[bend.parent].emplace_back(bend.child, bend.bendIndex);
+                graph[bend.child].emplace_back(bend.parent, bend.bendIndex);
+            }
+            if (std::all_of(graph.begin(), graph.end(),
+                            [](const auto &edges) { return edges.size() <= 2; })) {
+                const auto end = std::find_if(graph.begin(), graph.end(),
+                                              [](const auto &edges) { return edges.size() == 1; });
+                if (end != graph.end()) {
+                    auto wall = static_cast<std::size_t>(end - graph.begin());
+                    std::optional<std::size_t> previous;
+                    search.profileRank.resize(n);
+                    for (std::size_t rank = 0; rank < n; ++rank) {
+                        const auto edge = std::find_if(
+                            graph[wall].begin(), graph[wall].end(),
+                            [&](const auto &e) { return !previous || e.first != *previous; });
+                        check(edge != graph[wall].end(), "Incomplete profile chain");
+                        search.profileRank[edge->second] = rank;
+                        previous = wall;
+                        wall = edge->first;
+                    }
+                    search.statistics.usedProfilePriority = true;
+                }
+            }
+        }
         bool found = false;
         try {
             found = search.search((Mask{1} << n) - 1);
@@ -852,6 +928,16 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         result->evaluatedOperations = search.attempts;
         result->statistics = search.statistics;
         result->steps.assign(search.reversed.rbegin(), search.reversed.rend());
+        if (search.request.reuseCalculations) {
+            // A complete path can be longer than the working set of an earlier partial
+            // branch. Retain its exact checked cycles, not previews from failed branches.
+            Mask formed = 0;
+            for (const auto &step : result->steps) {
+                formed |= Mask{1} << step.bendIndex;
+                const auto &op = search.inputs[step.bendIndex]->operation;
+                search.remember(search.key(formed, op, step.fixedSecond), step.preview);
+            }
+        }
         result->partialEndSupport =
             std::any_of(result->steps.begin(), result->steps.end(),
                         [](const auto &step) { return step.preview->partialEndSupport(); });

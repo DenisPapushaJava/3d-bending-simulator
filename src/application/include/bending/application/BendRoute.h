@@ -1,5 +1,6 @@
 #pragma once
 #include "bending/application/Document.h"
+#include "bending/application/FlatPattern.h"
 #include "bending/core/BendTarget.h"
 #include "bending/core/ToolCatalog.h"
 #include <cmath>
@@ -42,6 +43,7 @@ struct BendRouteStatistics {
         0; // Compact, exact-input reports; no diagnostic meshes retained.
     bool reusedFlatPattern = false;
     std::size_t reorderedStates = 0;
+    bool usedProfilePriority = false;
 };
 struct BendRouteStep {
     std::string id;

@@ -10,6 +10,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
@@ -174,6 +175,15 @@ int main(int argc, char **argv) {
             if (sample && app.arguments().contains("--selection-only")) {
                 controller.shutdown();
                 return 0;
+            }
+            if (!sample && libraryArgument < 0) {
+                // Set scope after import/tool selection: a fresh document resets this control.
+                // This own DXF fixture tests tool cycles, not mounting in a press holder.
+                // Full machine coverage remains in app.machine / cad.machine / cad.floor.
+                auto *machine = window.findChild<QCheckBox *>("demoMachine");
+                require(machine, "No machine scope control");
+                machine->setChecked(false);
+                wait([&] { return !controller.hasWork(); });
             }
             // Reproduce the normal user path, including a previously changed route mode.
             mode->setCurrentIndex(0);
