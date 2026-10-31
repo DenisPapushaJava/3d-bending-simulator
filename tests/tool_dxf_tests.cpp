@@ -71,6 +71,13 @@ QByteArray wrap(const QByteArray &entities, int units = 4) {
     return "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n" + tag(70, units) +
            "0\nENDSEC\n0\nSECTION\n2\nENTITIES\n" + entities + "0\nENDSEC\n0\nEOF\n";
 }
+QByteArray inBlock(const QByteArray &entities, int units = 4) {
+    auto bytes = wrap("0\nINSERT\n2\nTool\n10\n0\n20\n0\n", units);
+    bytes.replace("0\nSECTION\n2\nENTITIES\n",
+                  "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nTool\n10\n0\n20\n0\n" + entities +
+                      "0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n");
+    return bytes;
+}
 QByteArray poly(const core::ToolDrawing &d, const QByteArray &layer = "PROFILE") {
     QByteArray s = "0\nLWPOLYLINE\n" + tag(8, layer) +
                    tag(90, static_cast<double>(d.edges.size())) + tag(70, 1);
@@ -156,7 +163,7 @@ int main(int argc, char **argv) {
         };
         require(rejected(wrap(poly(*tools.punch.drawing) + "0\nSPLINE\n8\nPROFILE\n")),
                 "Unsupported same-layer entity silently dropped");
-        require(rejected(wrap("0\nINSERT\n2\nTOOL\n")), "Block interpreted as profile");
+        require(rejected(wrap("0\nINSERT\n2\nTOOL\n")), "Missing block interpreted as profile");
         require(rejected("AutoCAD Binary DXF\r\n"), "Binary accepted");
         require(rejected("0\nSECTION\n2\nENTITIES\n"), "Truncated DXF accepted");
         auto wrong = poly(*tools.punch.drawing);
@@ -220,7 +227,7 @@ int main(int argc, char **argv) {
         wait([&] { return !controller.hasWork(); });
         auto *button = window.findChild<QPushButton *>("toolStock");
         require(button && button->isEnabled(), "DXF entry unavailable");
-        write(path, wrap(poly(*tools.punch.drawing), 0));
+        write(path, inBlock(poly(*tools.punch.drawing), 0));
         bool completed = false;
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = QApplication::activeModalWidget();

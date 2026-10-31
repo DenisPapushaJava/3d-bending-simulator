@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
+#include <QString>
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -23,10 +24,21 @@ struct Record {
     QByteArray type;
     std::vector<Tag> tags;
 };
+struct Block {
+    Record header;
+    std::vector<Record> entities;
+};
+struct Drawing {
+    std::vector<Record> entities;
+    std::map<QByteArray, Block> blocks;
+};
 struct Layer {
     std::vector<DrawingEdge> edges;
     std::optional<double> z;
     std::string error;
+};
+struct ImportAbort final : std::runtime_error {
+    using std::runtime_error::runtime_error;
 };
 [[noreturn]] void fail(const char *text) {
     throw std::runtime_error(text);
@@ -56,6 +68,20 @@ int flags(const Record &r, int code = 70, int fallback = 0) {
         fail("Некорректные флаги DXF.");
     return static_cast<int>(v);
 }
+QByteArray blockName(const Record &r) {
+    std::optional<QByteArray> name;
+    for (const auto &t : r.tags)
+        if (t.code == 2) {
+            if (name || t.value.isEmpty() || t.value.size() > 255)
+                fail("Некорректное или повторяющееся имя блока DXF.");
+            name = t.value;
+        }
+    if (!name)
+        fail("В DXF не указано имя блока.");
+    // Fold Unicode only for valid UTF-8; retain legacy code-page bytes without loss.
+    const auto utf8 = QString::fromUtf8(*name);
+    return utf8.toUtf8() == *name ? utf8.toCaseFolded().toUtf8() : name->toLower();
+}
 std::string layerName(const Record &r) {
     for (const auto &t : r.tags)
         if (t.code == 8)
@@ -71,6 +97,71 @@ void elevation(Layer &layer, double z) {
     if (layer.z && std::abs(*layer.z - z) > 1e-7)
         fail("Геометрия слоя не лежит в одной плоскости XY.");
     layer.z = z;
+}
+double bounded(double v) {
+    if (!std::isfinite(v) || std::abs(v) > 1e6)
+        fail("Преобразование блока DXF выходит за допустимый диапазон координат.");
+    return v;
+}
+// Planar similarity: circular arcs stay analytic, including under reflections.
+struct Placement {
+    double xx = 1, xy = 0, yx = 0, yy = 1, tx = 0, ty = 0, sz = 1, tz = 0;
+    DrawingPoint point(DrawingPoint p) const {
+        return {bounded(xx * p.x + xy * p.y + tx), bounded(yx * p.x + yy * p.y + ty)};
+    }
+    double z(double v) const {
+        return bounded(sz * v + tz);
+    }
+    Placement then(const Placement &child) const {
+        Placement p{xx * child.xx + xy * child.yx,
+                    xx * child.xy + xy * child.yy,
+                    yx * child.xx + yy * child.yx,
+                    yx * child.xy + yy * child.yy,
+                    xx * child.tx + xy * child.ty + tx,
+                    yx * child.tx + yy * child.ty + ty,
+                    sz * child.sz,
+                    sz * child.tz + tz};
+        for (double v : {p.xx, p.xy, p.yx, p.yy, p.tx, p.ty, p.sz, p.tz})
+            bounded(v);
+        if (std::hypot(p.xx, p.yx) < 1e-9 || std::abs(p.sz) < 1e-9)
+            fail("Слишком малый итоговый масштаб блока DXF.");
+        return p;
+    }
+    void edge(DrawingEdge &e) const {
+        e.start = point(e.start);
+        e.end = point(e.end);
+        if (e.center) {
+            e.center = point(*e.center);
+            if (xx * yy - xy * yx < 0)
+                e.sweepRadians = -e.sweepRadians;
+        }
+    }
+};
+Placement placement(const Record &r, const Record &block) {
+    if (flags(r, 70, 1) != 1 || flags(r, 71, 1) != 1)
+        fail("Массивы блоков MINSERT пока не поддержаны. Разбейте массив в CAD.");
+    for (const auto &t : r.tags)
+        if (t.code == 102 || t.code == 360)
+            fail("Блок с расширением или обрезкой XCLIP не поддержан. Разбейте его в CAD.");
+    if ((flags(block) & ~3) != 0 ||
+        std::any_of(block.tags.begin(), block.tags.end(),
+                    [](const Tag &t) { return t.code == 1 && !t.value.isEmpty(); }))
+        fail("Внешние ссылки XREF не поддержаны. Включите контур в сам DXF.");
+    const double nz = value(r, 230, 1);
+    if (value(r, 210, 0) != 0 || value(r, 220, 0) != 0 || std::abs(nz) != 1 || value(r, 39, 0) != 0)
+        fail("Нужен плоский INSERT с нормалью +Z или -Z и без толщины.");
+    const double sx = value(r, 41, 1), sy = value(r, 42, 1), sz = value(r, 43, 1);
+    if (sx == 0 || sz == 0 || std::abs(sx) != std::abs(sy))
+        fail("Нужен ненулевой равномерный масштаб INSERT по X/Y. Разбейте блок в CAD.");
+    const double angle = value(r, 50, 0) * pi / 180;
+    const double c = std::cos(angle), s = std::sin(angle);
+    // For -Z OCS the arbitrary-axis basis is (-X, +Y, -Z).
+    Placement p{nz * c * sx, -nz * s * sy, s * sx, c * sy, 0, 0, nz * sz, 0};
+    const double bx = value(block, 10, 0), by = value(block, 20, 0);
+    p.tx = nz * value(r, 10) - p.xx * bx - p.xy * by;
+    p.ty = value(r, 20) - p.yx * bx - p.yy * by;
+    p.tz = nz * value(r, 30, 0) - p.sz * value(block, 30, 0);
+    return p;
 }
 double distance(DrawingPoint a, DrawingPoint b) {
     return std::hypot(a.x - b.x, a.y - b.y);
@@ -123,17 +214,27 @@ std::vector<Tag> tags(const QByteArray &bytes) {
     }
     return result;
 }
-std::vector<Record> records(const std::vector<Tag> &all, ToolProfileFile &out) {
+Drawing records(const std::vector<Tag> &all, ToolProfileFile &out, std::stop_token stop) {
     QByteArray section;
-    std::vector<Record> result;
+    Drawing result;
+    std::vector<Record> blockRecords;
+    std::set<QByteArray> seenSections;
+    std::size_t count = 0;
     bool eof = false;
     bool unitsSeen = false;
     for (std::size_t i = 0; i < all.size(); ++i) {
+        if (stop.stop_requested())
+            fail("Импорт отменён.");
         const auto &t = all[i];
+        if (t.code == 999)
+            continue;
         if (t.code == 0 && t.value == "SECTION") {
             if (!section.isEmpty() || ++i == all.size() || all[i].code != 2)
                 fail("Неверная секция DXF.");
             section = all[i].value;
+            if ((section == "ENTITIES" || section == "BLOCKS") &&
+                !seenSections.insert(section).second)
+                fail("Повторяющаяся геометрическая секция DXF.");
         } else if (t.code == 0 && t.value == "ENDSEC") {
             if (section.isEmpty())
                 fail("Неверное завершение секции DXF.");
@@ -159,139 +260,241 @@ std::vector<Record> records(const std::vector<Tag> &all, ToolProfileFile &out) {
                 out.millimetersPerUnit = 1000;
             else
                 out.notices.push_back("Единицы в DXF не заданы или не поддержаны.");
-        } else if (section == "ENTITIES") {
+        } else if (section == "ENTITIES" || section == "BLOCKS") {
+            auto &rs = section == "ENTITIES" ? result.entities : blockRecords;
             if (t.code == 0) {
-                if (result.size() >= 20000)
+                if (++count > 20000)
                     fail("Слишком много сущностей DXF.");
-                result.push_back({t.value, {}});
+                rs.push_back({t.value, {}});
             } else {
-                if (result.empty())
+                if (rs.empty())
                     fail("Сущность DXF без типа.");
-                result.back().tags.push_back(t);
+                rs.back().tags.push_back(t);
             }
         }
     }
     if (!eof || !section.isEmpty())
         fail("DXF оборван: не найдены ENDSEC/EOF.");
-    return result;
-}
-void entities(const std::vector<Record> &rs, std::map<std::string, Layer> &layers,
-              ToolProfileFile &out, std::stop_token stop) {
-    std::size_t total = 0, annotations = 0;
-    for (std::size_t i = 0; i < rs.size(); ++i) {
+    Block *current = nullptr;
+    for (auto &r : blockRecords) {
         if (stop.stop_requested())
             fail("Импорт отменён.");
-        const auto &r = rs[i];
-        const auto name = layerName(r);
-        auto &layer = layers[name];
-        const auto before = layer.edges.size();
-        try {
-            if (value(r, 67, 0) != 0) {
-                if (r.type == "POLYLINE") {
-                    while (i + 1 < rs.size() && rs[i + 1].type == "VERTEX")
-                        ++i;
-                    if (i + 1 < rs.size() && rs[i + 1].type == "SEQEND")
-                        ++i;
-                }
-                ++annotations;
-                continue;
-            }
-            if (r.type == "TEXT" || r.type == "MTEXT" || r.type == "DIMENSION" ||
-                r.type == "POINT" || r.type == "ATTDEF") {
-                ++annotations;
-                continue;
-            }
-            plane(r);
-            if (r.type == "LINE") {
-                elevation(layer, value(r, 30, 0));
-                elevation(layer, value(r, 31, 0));
-                layer.edges.push_back(
-                    segment({value(r, 10), value(r, 20)}, {value(r, 11), value(r, 21)}));
-            } else if (r.type == "ARC" || r.type == "CIRCLE") {
-                elevation(layer, value(r, 30, 0));
-                const DrawingPoint c{value(r, 10), value(r, 20)};
-                const double radius = value(r, 40);
-                if (radius <= 0)
-                    fail("Нулевой радиус дуги DXF.");
-                const auto at = [&](double a) {
-                    return DrawingPoint{c.x + radius * std::cos(a), c.y + radius * std::sin(a)};
-                };
-                if (r.type == "CIRCLE") {
-                    layer.edges.push_back({at(0), at(pi), c, pi});
-                    layer.edges.push_back({at(pi), at(0), c, pi});
-                } else {
-                    const double start = value(r, 50) * pi / 180;
-                    double sweep = std::fmod(value(r, 51) - value(r, 50), 360.);
-                    if (sweep < 0)
-                        sweep += 360;
-                    if (sweep < 1e-9)
-                        fail("Нулевая дуга DXF.");
-                    sweep *= pi / 180;
-                    layer.edges.push_back({at(start), at(start + sweep), c, sweep});
-                }
-            } else if (r.type == "LWPOLYLINE") {
-                if ((flags(r) & ~129) != 0 || value(r, 43, 0) != 0)
-                    fail("Неподдержанная полилиния или её ширина.");
-                elevation(layer, value(r, 38, 0));
-                std::vector<Vertex> vs;
-                for (const auto &t : r.tags) {
-                    if (t.code == 10)
-                        vs.push_back({{number(t.value), 0}, 0, false});
-                    else if (t.code == 20 || t.code == 42) {
-                        if (vs.empty())
-                            fail("Неверный порядок координат полилинии.");
-                        if (t.code == 20) {
-                            if (vs.back().y)
-                                fail("Повтор Y вершины.");
-                            vs.back().p.y = number(t.value);
-                            vs.back().y = true;
-                        } else {
-                            if (vs.back().hasBulge)
-                                fail("Повтор bulge вершины.");
-                            vs.back().bulge = number(t.value);
-                            vs.back().hasBulge = true;
-                        }
-                    } else if ((t.code == 40 || t.code == 41) && number(t.value) != 0)
-                        fail("Широкая полилиния не является контуром сечения.");
-                }
-                if (value(r, 90) != static_cast<double>(vs.size()))
-                    fail("Число вершин DXF не совпадает с записью.");
-                polyline(layer, vs, (flags(r) & 1) != 0);
-            } else if (r.type == "POLYLINE") {
-                if ((flags(r) & ~129) != 0 || value(r, 40, 0) != 0 || value(r, 41, 0) != 0)
-                    fail("Нужна простая 2D-полилиния без ширины.");
-                elevation(layer, value(r, 30, 0));
-                std::vector<Vertex> vs;
-                while (++i < rs.size() && rs[i].type == "VERTEX") {
-                    const auto &v = rs[i];
-                    plane(v);
-                    if (flags(v) != 0 || value(v, 30, 0) != 0 || value(v, 40, 0) != 0 ||
-                        value(v, 41, 0) != 0)
-                        fail("Неподдержанные параметры вершины POLYLINE.");
-                    if (layerName(v) != name && layerName(v) != "0")
-                        fail("Вершины полилинии на разных слоях.");
-                    vs.push_back({{value(v, 10), value(v, 20)}, value(v, 42, 0), true});
-                    if (vs.size() > 512)
-                        fail("Слишком много вершин полилинии.");
-                }
-                if (i == rs.size() || rs[i].type != "SEQEND")
-                    fail("Полилиния DXF оборвана.");
-                polyline(layer, vs, (flags(r) & 1) != 0);
-            } else {
-                layer.error = "Неподдержанная сущность: " + r.type.toStdString() +
-                              ". Экспортируйте контур линиями/дугами.";
-            }
-        } catch (const std::exception &e) {
-            layer.error = e.what();
+        if (r.type == "BLOCK") {
+            if (current)
+                fail("Вложенное определение BLOCK без ENDBLK.");
+            if (result.blocks.size() >= 1024)
+                fail("Слишком много определений блоков DXF.");
+            const auto [it, added] = result.blocks.emplace(blockName(r), Block{r, {}});
+            if (!added)
+                fail("Повторяющееся определение блока DXF.");
+            current = &it->second;
+        } else if (r.type == "ENDBLK") {
+            if (!current)
+                fail("ENDBLK без определения BLOCK.");
+            current = nullptr;
+        } else {
+            if (!current)
+                fail("Сущность вне определения BLOCK в секции BLOCKS.");
+            current->entities.push_back(std::move(r));
         }
-        total += layer.edges.size() - before;
-        if (total > 4096)
-            fail("Слишком много рёбер DXF.");
     }
-    if (annotations)
-        out.notices.push_back("Подписи, размеры, точки и листы оформления пропущены: " +
-                              std::to_string(annotations) + ".");
+    if (current)
+        fail("Определение блока DXF оборвано: нет ENDBLK.");
+    return result;
 }
+class EntityReader {
+  public:
+    EntityReader(const Drawing &drawing, std::map<std::string, Layer> &layers, ToolProfileFile &out,
+                 std::stop_token stop)
+        : drawing(drawing), layers(layers), out(out), stop(stop) {}
+    void run() {
+        read(drawing.entities, {}, "0");
+        if (annotations)
+            out.notices.push_back("Подписи, размеры, точки и листы оформления пропущены: " +
+                                  std::to_string(annotations) + ".");
+        if (instances)
+            out.notices.push_back("Раскрыто вхождений блоков INSERT: " + std::to_string(instances) +
+                                  ".");
+    }
+
+  private:
+    const Drawing &drawing;
+    std::map<std::string, Layer> &layers;
+    ToolProfileFile &out;
+    std::stop_token stop;
+    std::vector<QByteArray> active;
+    std::size_t total = 0, annotations = 0, instances = 0, visited = 0;
+    void tick() {
+        if (stop.stop_requested())
+            throw ImportAbort("Импорт отменён.");
+        if (++visited > 20000)
+            throw ImportAbort("Слишком много сущностей после раскрытия блоков DXF.");
+    }
+    void attributes(const std::vector<Record> &rs, std::size_t &i) {
+        const auto f = flags(rs[i], 66);
+        if (f == 0)
+            return;
+        if (f != 1)
+            fail("Некорректный флаг атрибутов INSERT.");
+        while (++i < rs.size() && rs[i].type == "ATTRIB") {
+            tick();
+            ++annotations;
+        }
+        if (i == rs.size() || rs[i].type != "SEQEND")
+            fail("Атрибуты INSERT оборваны: нет SEQEND.");
+        tick();
+    }
+    void insert(const Record &r, const Placement &parent, const std::string &name) {
+        const auto key = blockName(r);
+        const auto it = drawing.blocks.find(key);
+        if (it == drawing.blocks.end())
+            throw std::runtime_error("Не найден блок DXF: " + key.toStdString() + ".");
+        if (active.size() >= 16 || ++instances > 4096)
+            fail("Превышен предел вложенности или числа вхождений блоков DXF.");
+        if (std::find(active.begin(), active.end(), key) != active.end())
+            fail("Циклическая ссылка INSERT в DXF.");
+        const auto transform = parent.then(placement(r, it->second.header));
+        active.push_back(key);
+        read(it->second.entities, transform, name);
+        active.pop_back();
+    }
+    void read(const std::vector<Record> &rs, const Placement &transform,
+              const std::string &parentLayer) {
+        for (std::size_t i = 0; i < rs.size(); ++i) {
+            tick();
+            const auto &r = rs[i];
+            const auto ownLayer = layerName(r);
+            const auto name = ownLayer == "0" ? parentLayer : ownLayer;
+            // Resolution/placement errors are fatal: excluding only the INSERT layer could
+            // otherwise accept a truncated block whose children use explicit layers.
+            if (value(r, 67, 0) != 0) {
+                if (r.type == "INSERT")
+                    attributes(rs, i);
+                else if (r.type == "POLYLINE") {
+                    while (i + 1 < rs.size() && rs[i + 1].type == "VERTEX") {
+                        ++i;
+                        tick();
+                    }
+                    if (i + 1 < rs.size() && rs[i + 1].type == "SEQEND") {
+                        ++i;
+                        tick();
+                    }
+                }
+                ++annotations;
+                continue;
+            }
+            if (r.type == "INSERT") {
+                insert(r, transform, name);
+                attributes(rs, i);
+                continue;
+            }
+            auto &layer = layers[name];
+            const auto before = layer.edges.size();
+            try {
+                if (r.type == "TEXT" || r.type == "MTEXT" || r.type == "DIMENSION" ||
+                    r.type == "POINT" || r.type == "ATTDEF") {
+                    ++annotations;
+                    continue;
+                }
+                plane(r);
+                if (r.type == "LINE") {
+                    elevation(layer, transform.z(value(r, 30, 0)));
+                    elevation(layer, transform.z(value(r, 31, 0)));
+                    layer.edges.push_back(
+                        segment({value(r, 10), value(r, 20)}, {value(r, 11), value(r, 21)}));
+                } else if (r.type == "ARC" || r.type == "CIRCLE") {
+                    elevation(layer, transform.z(value(r, 30, 0)));
+                    const DrawingPoint c{value(r, 10), value(r, 20)};
+                    const double radius = value(r, 40);
+                    if (radius <= 0)
+                        fail("Нулевой радиус дуги DXF.");
+                    const auto at = [&](double a) {
+                        return DrawingPoint{c.x + radius * std::cos(a), c.y + radius * std::sin(a)};
+                    };
+                    if (r.type == "CIRCLE") {
+                        layer.edges.push_back({at(0), at(pi), c, pi});
+                        layer.edges.push_back({at(pi), at(0), c, pi});
+                    } else {
+                        const double start = value(r, 50) * pi / 180;
+                        double sweep = std::fmod(value(r, 51) - value(r, 50), 360.);
+                        if (sweep < 0)
+                            sweep += 360;
+                        if (sweep < 1e-9)
+                            fail("Нулевая дуга DXF.");
+                        sweep *= pi / 180;
+                        layer.edges.push_back({at(start), at(start + sweep), c, sweep});
+                    }
+                } else if (r.type == "LWPOLYLINE") {
+                    if ((flags(r) & ~129) != 0 || value(r, 43, 0) != 0)
+                        fail("Неподдержанная полилиния или её ширина.");
+                    elevation(layer, transform.z(value(r, 38, 0)));
+                    std::vector<Vertex> vs;
+                    for (const auto &t : r.tags) {
+                        if (t.code == 10)
+                            vs.push_back({{number(t.value), 0}, 0, false});
+                        else if (t.code == 20 || t.code == 42) {
+                            if (vs.empty())
+                                fail("Неверный порядок координат полилинии.");
+                            if (t.code == 20) {
+                                if (vs.back().y)
+                                    fail("Повтор Y вершины.");
+                                vs.back().p.y = number(t.value);
+                                vs.back().y = true;
+                            } else {
+                                if (vs.back().hasBulge)
+                                    fail("Повтор bulge вершины.");
+                                vs.back().bulge = number(t.value);
+                                vs.back().hasBulge = true;
+                            }
+                        } else if ((t.code == 40 || t.code == 41) && number(t.value) != 0)
+                            fail("Широкая полилиния не является контуром сечения.");
+                    }
+                    if (value(r, 90) != static_cast<double>(vs.size()))
+                        fail("Число вершин DXF не совпадает с записью.");
+                    polyline(layer, vs, (flags(r) & 1) != 0);
+                } else if (r.type == "POLYLINE") {
+                    if ((flags(r) & ~129) != 0 || value(r, 40, 0) != 0 || value(r, 41, 0) != 0)
+                        fail("Нужна простая 2D-полилиния без ширины.");
+                    elevation(layer, transform.z(value(r, 30, 0)));
+                    std::vector<Vertex> vs;
+                    while (++i < rs.size() && rs[i].type == "VERTEX") {
+                        tick();
+                        const auto &v = rs[i];
+                        plane(v);
+                        if (flags(v) != 0 || value(v, 30, 0) != 0 || value(v, 40, 0) != 0 ||
+                            value(v, 41, 0) != 0)
+                            fail("Неподдержанные параметры вершины POLYLINE.");
+                        if (layerName(v) != ownLayer && layerName(v) != "0")
+                            fail("Вершины полилинии на разных слоях.");
+                        vs.push_back({{value(v, 10), value(v, 20)}, value(v, 42, 0), true});
+                        if (vs.size() > 512)
+                            fail("Слишком много вершин полилинии.");
+                    }
+                    if (i == rs.size() || rs[i].type != "SEQEND")
+                        fail("Полилиния DXF оборвана.");
+                    tick(); // SEQEND
+                    polyline(layer, vs, (flags(r) & 1) != 0);
+                } else {
+                    layer.error = "Неподдержанная сущность: " + r.type.toStdString() +
+                                  ". Экспортируйте контур линиями/дугами.";
+                }
+                for (std::size_t e = before; e < layer.edges.size(); ++e)
+                    transform.edge(layer.edges[e]);
+            } catch (const ImportAbort &) {
+                throw;
+            } catch (const std::exception &e) {
+                layer.edges.resize(before);
+                layer.error = e.what();
+            }
+            if (!active.empty() && !layer.error.empty())
+                throw std::runtime_error("Блок «" + active.back().toStdString() +
+                                         "»: " + layer.error);
+            total += layer.edges.size() - before;
+            if (total > 4096)
+                fail("Слишком много рёбер DXF.");
+        }
+    }
+};
 void contours(const std::string &name, const Layer &layer, ToolProfileFile &out,
               const std::string &source, const std::string &hash, std::stop_token stop) {
     if (!layer.error.empty()) {
@@ -395,9 +598,9 @@ ToolProfileResult read(const std::filesystem::path &path, std::stop_token stop) 
     if (file.error() != QFileDevice::NoError || bytes.size() > 4 * 1024 * 1024)
         fail("Ошибка чтения DXF.");
     ToolProfileFile result;
-    const auto rs = records(tags(bytes), result);
+    const auto rs = records(tags(bytes), result, stop);
     std::map<std::string, Layer> layers;
-    entities(rs, layers, result, stop);
+    EntityReader(rs, layers, result, stop).run();
     const auto hash =
         QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex().toStdString();
     const auto source = QFileInfo(file).fileName().toStdString();
