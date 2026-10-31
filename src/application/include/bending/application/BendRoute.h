@@ -38,6 +38,8 @@ struct BendRouteRequest {
 struct BendRouteStatistics {
     std::size_t builtStates = 0, reusedStates = 0;
     std::size_t builtTransitions = 0, reusedTransitions = 0;
+    std::size_t reusedRejections =
+        0; // Compact, exact-input reports; no diagnostic meshes retained.
     bool reusedFlatPattern = false;
     std::size_t reorderedStates = 0;
 };

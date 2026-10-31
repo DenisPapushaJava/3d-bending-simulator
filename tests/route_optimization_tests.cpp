@@ -96,6 +96,7 @@ BendRouteResult run(cad::SingleBendPreviewBuilder &builder, const DocumentPtr &d
     std::cout << name << " ms=" << ms << " states=" << stats.builtStates
               << " state-hits=" << stats.reusedStates << " transitions=" << stats.builtTransitions
               << " transition-hits=" << stats.reusedTransitions
+              << " rejection-hits=" << stats.reusedRejections
               << " flat-hit=" << stats.reusedFlatPattern << " reordered=" << stats.reorderedStates
               << std::endl;
     if (const auto *success = std::get_if<BendRoutePtr>(&result))
@@ -118,6 +119,66 @@ void equivalent(const BendRouteResult &a, const BendRouteResult &b) {
                     error->code != BendRouteErrorCode::SearchLimit,
                 "Diagnostic changed or comparison did not finish");
 }
+void verdictCache(const std::filesystem::path &folder, bool measureOnly) {
+    const auto file = folder / "branched.step";
+    STEPControl_Writer writer;
+    require(writer.Transfer(fixtures::branchedTray(), STEPControl_AsIs) == IFSelect_RetDone &&
+                writer.Write(file.string().c_str()) == IFSelect_RetDone,
+            "Write failed");
+    const auto doc = resultDocument(cad::StepImporter{}.load(file, {}, {}));
+    require(bool(doc), "Import failed");
+    const auto source = std::string(doc->sourceStep());
+    auto request = requestFor(doc, true);
+    request.rankCandidates = false; // Identical traversal makes the before/after count comparable.
+    require(request.operations.size() == 5, "Missing branched fixture bends");
+    for (auto &op : request.operations) {
+        auto parameters = *op.tools;
+        parameters.noseRadiusMm = 3; // Too large for every R2 bend, on either workpiece side.
+        auto pair = tool_fixture::explicitPair(parameters);
+        op.assignment = pair;
+        op.tools = core::toolParameters(pair);
+    }
+    auto referenceRequest = request;
+    referenceRequest.reuseCalculations = false;
+    cad::SingleBendPreviewBuilder reference, optimized;
+    const auto baseline = run(reference, doc, referenceRequest, "rejections-reference");
+    require(std::holds_alternative<BendRouteError>(baseline) &&
+                std::get<BendRouteError>(baseline).code == BendRouteErrorCode::NoRoute &&
+                std::get<BendRouteError>(baseline).evaluatedOperations == 10,
+            "Fixture must reject both sides of every final bend");
+    const auto cold = run(optimized, doc, request, "rejections-cold");
+    equivalent(baseline, cold);
+    if (!measureOnly)
+        require(std::get<BendRouteError>(cold).statistics.builtStates == 0,
+                "Rejected cycles built unused predecessor geometry");
+    const auto warm = run(optimized, doc, request, "rejections-warm");
+    equivalent(baseline, warm);
+    const auto &stats = std::get<BendRouteError>(warm).statistics;
+    if (!measureOnly)
+        require(stats.builtTransitions == 0 && stats.reusedTransitions == 10 &&
+                    stats.reusedRejections == 10 && stats.builtStates == 0,
+                "Rejections were lost when the heavy preview cache filled");
+    auto changed = request;
+    changed.operations.front().assignment->clearanceMm += 1;
+    changed.operations.front().tools = core::toolParameters(*changed.operations.front().assignment);
+    auto freshChanged = changed;
+    freshChanged.reuseCalculations = false;
+    const auto changedReference = run(reference, doc, freshChanged, "changed-rejection-reference");
+    const auto changedCached = run(optimized, doc, changed, "changed-rejection");
+    equivalent(changedReference, changedCached);
+    if (!measureOnly)
+        require(std::get<BendRouteError>(changedCached).statistics.builtTransitions == 2 &&
+                    std::get<BendRouteError>(changedCached).statistics.reusedTransitions == 8 &&
+                    std::get<BendRouteError>(changedCached).statistics.reusedRejections == 8,
+                "Changed inputs reused an old rejection or lost unrelated rejections");
+    auto limited = request;
+    limited.maximumChecks = 1;
+    require(std::get<BendRouteError>(optimized.buildRoute(doc, limited, {})).code ==
+                BendRouteErrorCode::SearchLimit,
+            "Negative cache bypassed the candidate budget");
+    equivalent(baseline, run(optimized, doc, request, "after-limited-rejections"));
+    require(doc->sourceStep() == source, "Source was modified");
+}
 } // namespace
 int main(int argc, char **argv) {
     const auto folder =
@@ -126,6 +187,12 @@ int main(int argc, char **argv) {
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
         std::filesystem::create_directories(folder);
+        if (argc > 1 && (std::string_view(argv[1]) == "--verdict-cache" ||
+                         std::string_view(argv[1]) == "--measure-verdict-cache")) {
+            verdictCache(folder, std::string_view(argv[1]) == "--measure-verdict-cache");
+            std::filesystem::remove_all(folder);
+            return 0;
+        }
         const bool branch = argc > 1 && std::string_view(argv[1]) == "--branch";
         const bool sample = argc > 1 && !branch;
         const bool tools = sample && argc > 2 && std::string_view(argv[2]) == "--tools";

@@ -37,6 +37,7 @@
 #include <numbers>
 #include <set>
 #include <tuple>
+#include <unordered_map>
 
 namespace bending::cad {
 namespace {
@@ -84,16 +85,66 @@ struct State {
     std::shared_ptr<const CadDocument> document;
     std::vector<std::optional<std::size_t>> indices;
 };
+struct TransitionInputs {
+    RouteOperation operation;
+    bool withTools, partialEndSupport;
+    std::optional<double> maximumEndSupportLossMm;
+    bool operator==(const TransitionInputs &) const = default;
+};
 struct TransitionKey {
     Mask mask;
-    RouteOperation operation;
-    bool fixedSecond, withTools, partialEndSupport;
-    std::optional<double> maximumEndSupportLossMm;
+    std::shared_ptr<const TransitionInputs> inputs;
+    bool fixedSecond;
     bool operator==(const TransitionKey &) const = default;
 };
-struct Transition {
-    TransitionKey key;
-    BendPreviewResult result;
+struct TransitionHash {
+    std::size_t operator()(const TransitionKey &key) const noexcept {
+        auto hash = std::hash<Mask>{}(key.mask);
+        hash ^= std::hash<std::shared_ptr<const TransitionInputs>>{}(key.inputs) + 0x9e3779b9u +
+                (hash << 6) + (hash >> 2);
+        return hash ^
+               (std::hash<bool>{}(key.fixedSecond) + 0x9e3779b9u + (hash << 6) + (hash >> 2));
+    }
+};
+// Stable list nodes provide LRU eviction; the hash index never scans CAD/profile data.
+template <class Value, std::size_t Capacity> class TransitionLru {
+    using Entries = std::list<std::pair<TransitionKey, Value>>;
+    Entries entries;
+    std::unordered_map<TransitionKey, typename Entries::iterator, TransitionHash> index;
+
+  public:
+    TransitionLru() = default;
+    TransitionLru(const TransitionLru &) = delete;
+    TransitionLru &operator=(const TransitionLru &) = delete;
+    const Value *peek(const TransitionKey &key) const {
+        const auto found = index.find(key);
+        return found == index.end() ? nullptr : &found->second->second;
+    }
+    const Value *find(const TransitionKey &key) {
+        const auto found = index.find(key);
+        if (found == index.end())
+            return nullptr;
+        entries.splice(entries.begin(), entries, found->second);
+        return &found->second->second;
+    }
+    void put(TransitionKey key, Value value) {
+        if (const auto found = index.find(key); found != index.end()) {
+            found->second->second = std::move(value);
+            entries.splice(entries.begin(), entries, found->second);
+            return;
+        }
+        entries.emplace_front(std::move(key), std::move(value));
+        try {
+            index.emplace(entries.front().first, entries.begin());
+        } catch (...) {
+            entries.pop_front();
+            throw;
+        }
+        if (entries.size() > Capacity) {
+            index.erase(entries.back().first);
+            entries.pop_back();
+        }
+    }
 };
 struct CacheData {
     DocumentPtr source;
@@ -103,8 +154,27 @@ struct CacheData {
     std::list<RouteDraftPtr> drafts;
     std::map<Mask, std::shared_ptr<const State>> states;
     std::list<Mask> stateOrder;
-    std::list<Transition> transitions;
+    // Exact inputs are compared once per operation/request and shared by all its state keys.
+    std::vector<std::weak_ptr<const TransitionInputs>> inputs;
+    TransitionLru<BendPreviewPtr, 8> transitions;
+    // Null rejection is a success hint. A positive verdict alone cannot publish a cycle.
+    TransitionLru<std::optional<BendPreviewError>, 512> verdicts;
     std::mutex mutex;
+
+    std::shared_ptr<const TransitionInputs> intern(TransitionInputs wanted) {
+        for (auto it = inputs.begin(); it != inputs.end();) {
+            if (auto value = it->lock()) {
+                if (*value == wanted)
+                    return value;
+                ++it;
+            } else {
+                it = inputs.erase(it);
+            }
+        }
+        auto value = std::make_shared<const TransitionInputs>(std::move(wanted));
+        inputs.push_back(value);
+        return value;
+    }
 };
 bool stableRejection(BendPreviewErrorCode code) {
     switch (code) {
@@ -136,6 +206,7 @@ class RouteSearch {
     const SheetLayout *layout = nullptr;
     double tolerance = 0, expectedVolume = 0, budget = 0;
     CacheData *cache = nullptr;
+    std::vector<std::shared_ptr<const TransitionInputs>> inputs;
     BendRouteStatistics statistics;
     std::vector<Mask> neighbours;
     std::vector<gp_Dir> referenceAxes;
@@ -288,50 +359,47 @@ class RouteSearch {
     }
 
     TransitionKey key(Mask mask, const RouteOperation &op, bool side) const {
-        auto operation = op;
-        operation.workpieceReversed = false; // Preference is not part of this resolved transition.
-        if (!request.withTools) {
-            operation.tools.reset();
-            operation.assignment.reset();
-        }
-        return {mask,
-                std::move(operation),
-                side,
-                request.withTools,
-                request.allowPartialEndSupport,
-                request.maximumEndSupportLossMm};
+        return {mask, inputs[op.bendIndex], side};
     }
     // 0 = verified success, 1 = unknown, 2 = stable rejection of this exact transition.
     int priorResult(Mask mask, const RouteOperation &op, bool side) const {
         if (!request.reuseCalculations)
             return 1;
-        const auto wanted = key(mask, op, side);
-        for (const auto &transition : cache->transitions)
-            if (transition.key == wanted)
-                return std::holds_alternative<BendPreviewPtr>(transition.result) ? 0 : 2;
+        if (const auto *verdict = cache->verdicts.peek(key(mask, op, side)))
+            return verdict->has_value() ? 2 : 0;
         return 1;
     }
     void remember(TransitionKey key, BendPreviewResult result) {
         if (!request.reuseCalculations)
             return;
         cancelled(stop);
-        cache->transitions.push_front({std::move(key), std::move(result)});
-        while (cache->transitions.size() > 8)
-            cache->transitions.pop_back();
+        if (const auto *error = std::get_if<BendPreviewError>(&result)) {
+            // Route search consumes the report, not the failed cycle. Never retain its
+            // diagnostic BReps/meshes here; single/manual previews have their own cache.
+            cache->verdicts.put(
+                std::move(key),
+                BendPreviewError{
+                    error->code, error->detail, error->frameIndex, {}, error->endSupport});
+        } else {
+            cache->transitions.put(key, std::get<BendPreviewPtr>(std::move(result)));
+            cache->verdicts.put(std::move(key), std::nullopt);
+        }
     }
     BendPreviewResult transition(Mask mask, const RouteOperation &op, bool fixedSecond) {
         const auto wanted = key(mask, op, fixedSecond);
-        if (request.reuseCalculations)
-            for (auto it = cache->transitions.begin(); it != cache->transitions.end(); ++it)
-                if (it->key == wanted) {
-                    ++statistics.reusedTransitions;
-                    auto value = it->result;
-                    cache->transitions.splice(cache->transitions.begin(), cache->transitions, it);
-                    return value;
-                }
+        if (request.reuseCalculations) {
+            if (const auto *preview = cache->transitions.find(wanted)) {
+                ++statistics.reusedTransitions;
+                return *preview;
+            }
+            if (const auto *verdict = cache->verdicts.find(wanted); verdict && *verdict) {
+                ++statistics.reusedTransitions;
+                ++statistics.reusedRejections;
+                return **verdict;
+            }
+        }
         ++statistics.builtTransitions;
         const auto after = state(mask);
-        const auto before = state(mask ^ (Mask{1} << op.bendIndex));
         const auto link = std::find_if(layout->bends.begin(), layout->bends.end(),
                                        [&](const auto &b) { return b.bendIndex == op.bendIndex; });
         check(link != layout->bends.end(), "Missing workpiece placement reference");
@@ -352,6 +420,9 @@ class RouteSearch {
             return preview;
         }
         const auto p = std::get<BendPreviewPtr>(preview);
+        // A rejected cycle never needs a canonical predecessor. Successful cycles still
+        // undergo both independent volume differences against the complete before state.
+        const auto before = state(mask ^ (Mask{1} << op.bendIndex));
         // The first state must agree with the independently assembled
         // predecessor up to the same placement of the reference wall.
         const auto &components = OcctPreviewAccess::sourceComponents(*p);
@@ -392,9 +463,11 @@ class RouteSearch {
                 const auto &op = request.operations[order];
                 // Soft accessibility estimate: fewer still-formed bends on the adjacent
                 // walls. It changes order only, never rejects a candidate or an orientation.
-                return std::tuple{
-                    std::min(priorResult(mask, op, false), priorResult(mask, op, true)),
-                    std::popcount(neighbours[op.bendIndex] & mask)};
+                const auto prior =
+                    request.allowWorkpieceRotation
+                        ? std::min(priorResult(mask, op, false), priorResult(mask, op, true))
+                        : priorResult(mask, op, op.workpieceReversed);
+                return std::tuple{prior, std::popcount(neighbours[op.bendIndex] & mask)};
             };
             std::stable_sort(result.begin(), result.end(),
                              [&](auto a, auto b) { return score(a) < score(b); });
@@ -715,6 +788,19 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         search.flat = work->flat;
         search.request = std::move(request);
         search.stop = stop;
+        search.inputs.resize(n);
+        for (auto operation : search.request.operations) {
+            // This flag is a preference; the resolved physical side belongs to the key.
+            operation.workpieceReversed = false;
+            if (!search.request.withTools) {
+                operation.tools.reset();
+                operation.assignment.reset();
+            }
+            const auto bend = operation.bendIndex;
+            search.inputs[bend] = work->intern({std::move(operation), search.request.withTools,
+                                                search.request.allowPartialEndSupport,
+                                                search.request.maximumEndSupportLossMm});
+        }
         search.layout = &OcctFlatPatternAccess::layout(*search.flat);
         search.tolerance = analysis.lengthToleranceMm;
         search.expectedVolume = volume(OcctDocumentAccess::simulationShape(*native));
