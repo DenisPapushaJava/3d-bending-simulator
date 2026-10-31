@@ -57,6 +57,76 @@ int main() {
                                       storage.write});
         require(!bad.upsert(renamed).empty() && bad.data().tools.front() == pair.punch,
                 "unreadable library overwritten");
+
+        // Completing a DXF-only entry with actual straight stock needs no repeated
+        // nominal input. It must not mutate a loaded record or a captured assignment.
+        auto inventoryOnly = pair.punch;
+        inventoryOnly.lengthMm = 0;
+        inventoryOnly.parametersConfirmed = false;
+        inventoryOnly.segments = std::vector<core::ToolSegment>{
+            {835, 3}, {100, 1}, {2000, 0}, {900, 1, core::SegmentShape::LeftHorn}};
+        application::ToolLibrarySnapshot pending{{{inventoryOnly}, {}}, "pending"};
+        bool rejectWrite = false;
+        application::ToolLibraryStorage completionStorage{
+            [&](const auto &) -> application::ToolLibraryResult { return pending; },
+            [&](const auto &, const auto &next, const auto &) -> application::ToolLibraryResult {
+                if (rejectWrite)
+                    return std::string("no write");
+                pending = {next, "completed"};
+                return pending;
+            }};
+        application::ToolLibrary completion({inventoryOnly}, "memory", completionStorage);
+        require(completion.data().tools.front() == inventoryOnly,
+                "opening automatically completed the record");
+        rejectWrite = true;
+        require(!completion.upsert(inventoryOnly).empty() &&
+                    completion.data().tools.front() == inventoryOnly,
+                "failed completion published data");
+        rejectWrite = false;
+        require(completion.upsert(inventoryOnly).empty(), "stock completion failed");
+        const auto ready = completion.data().tools.front();
+        require(ready.parametersConfirmed && ready.lengthMm == 835 &&
+                    ready.segments == inventoryOnly.segments &&
+                    ready.drawing == inventoryOnly.drawing,
+                "available stock did not complete the supported profile");
+        require(!inventoryOnly.parametersConfirmed && inventoryOnly.lengthMm == 0,
+                "completion changed the captured source");
+        auto incomplete = inventoryOnly;
+        incomplete.segments = std::vector<core::ToolSegment>{{835, 0}};
+        require(completion.upsert(incomplete).empty() &&
+                    !completion.data().tools.front().parametersConfirmed &&
+                    completion.data().tools.front().lengthMm == 0,
+                "zero template stock invented a nominal length");
+        incomplete.segments =
+            std::vector<core::ToolSegment>{{835, 1, core::SegmentShape::LeftHorn}};
+        require(completion.upsert(incomplete).empty() &&
+                    !completion.data().tools.front().parametersConfirmed,
+                "unsupported horn-only stock completed the tool");
+        incomplete.segments.reset();
+        incomplete.lengthMm = 415;
+        require(completion.upsert(incomplete).empty() &&
+                    completion.data().tools.front().parametersConfirmed &&
+                    completion.data().tools.front().lengthMm == 415,
+                "explicit nominal length did not refresh readiness");
+        incomplete.noseRadiusMm = 3;
+        require(completion.upsert(incomplete).empty() &&
+                    !completion.data().tools.front().parametersConfirmed,
+                "wrong working parameters promoted without matching the DXF");
+        incomplete = inventoryOnly;
+        incomplete.drawing = core::rotateToolDrawing(*incomplete.drawing, std::numbers::pi / 2);
+        require(completion.upsert(incomplete).empty() &&
+                    !completion.data().tools.front().parametersConfirmed,
+                "unsupported working orientation promoted");
+        auto matrix = tool_fixture::fourWayDie();
+        matrix.parametersConfirmed = false;
+        matrix.lengthMm = 0;
+        matrix.segments = std::vector<core::ToolSegment>{{415, 2}};
+        require(completion.upsert(matrix).empty(), "matrix completion failed");
+        const auto &completeMatrix = completion.data().tools.back();
+        require(completeMatrix.parametersConfirmed && completeMatrix.lengthMm == 415 &&
+                    completeMatrix.openingsMm == matrix.openingsMm &&
+                    completeMatrix.grooveSettings == matrix.grooveSettings,
+                "multi-groove completion changed working sides");
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

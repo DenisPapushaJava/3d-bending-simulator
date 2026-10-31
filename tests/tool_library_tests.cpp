@@ -9,6 +9,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -232,6 +233,59 @@ int main(int argc, char **argv) {
         bad.close();
         require(std::holds_alternative<std::string>(project::readToolLibrary(native(broken))),
                 "same ID accepted in active library and archive");
+
+        auto pendingTool = pair.punch;
+        pendingTool.lengthMm = 0;
+        pendingTool.parametersConfirmed = false;
+        pendingTool.segments = std::vector<core::ToolSegment>{{835, 3}, {100, 1}};
+        const auto pendingPath = dir.path() + "/pending.json";
+        require(!project::writeToolCatalog(native(pendingPath), {pendingTool}),
+                "pending profile fixture failed");
+        const auto pendingBytes = bytes(pendingPath);
+        application::ToolLibrary pendingLibrary(
+            {pendingTool}, native(pendingPath),
+            {project::readToolLibrary, project::writeToolLibrary});
+        const auto optionIssue = [&](const auto &tool, auto g) {
+            return selection.optionIssue(tool, g);
+        };
+        {
+            ui::ToolLibraryDialog view(pendingLibrary, controller, {}, optionIssue, nullptr);
+            require(!view.findChild<QPushButton *>("libraryUse")->isEnabled(),
+                    "unconfirmed tool became assignable on read");
+            view.reject();
+            require(bytes(pendingPath) == pendingBytes,
+                    "opening/closing automatically completed the profile");
+        }
+        ui::ToolLibraryDialog complete(pendingLibrary, controller, {}, optionIssue, nullptr);
+        complete.show();
+        require(selection.optionIssue(pendingTool, 0).contains(QStringLiteral("длину")),
+                "missing length hidden behind a generic confirmation warning");
+        // Save without re-entering the already available stock.
+        complete.findChild<QPushButton *>("stockSave")->click();
+        QApplication::processEvents();
+        require(pendingLibrary.data().tools.front().parametersConfirmed &&
+                    pendingLibrary.data().tools.front().lengthMm == 835,
+                "explicit save did not complete a previously imported profile");
+        require(complete.findChild<QPushButton *>("libraryUse")->isEnabled(),
+                "completed profile still unavailable");
+        require(pendingLibrary.data().tools.front().drawing == pendingTool.drawing &&
+                    pendingLibrary.data().tools.front().segments == pendingTool.segments,
+                "completion modified geometry or quantities");
+        complete.findChild<QPushButton *>("libraryUse")->click();
+        require(complete.choice() && complete.choice()->first.parametersConfirmed,
+                "explicit use did not capture the completed profile");
+        auto noStock = pendingTool;
+        noStock.segments.reset();
+        require(pendingLibrary.upsert(noStock).empty(), "nominal-only setup failed");
+        ui::ToolLibraryDialog nominal(pendingLibrary, controller, {}, optionIssue, nullptr);
+        nominal.findChild<QDoubleSpinBox *>("libraryNominalLength")->setValue(415);
+        nominal.findChild<QPushButton *>("stockSave")->click();
+        QApplication::processEvents();
+        require(pendingLibrary.data().tools.front().parametersConfirmed &&
+                    pendingLibrary.data().tools.front().lengthMm == 415 &&
+                    nominal.findChild<QPushButton *>("libraryUse")->isEnabled(),
+                "editing nominal length left confirmation stale");
+        nominal.reject();
         controller.shutdown();
         return 0;
     } catch (const std::exception &e) {

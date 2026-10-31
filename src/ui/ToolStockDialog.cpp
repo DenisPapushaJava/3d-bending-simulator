@@ -183,8 +183,13 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("Закрыть"));
     buttons->button(QDialogButtonBox::Close)->setVisible(!embedded_);
     layout->addWidget(buttons);
-    connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked, this,
-            [this] { save(); });
+    connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked, this, [this] {
+        // Explicit save may complete an older inventory-only entry even if
+        // the rows are unchanged. Merely opening/closing must not rewrite it.
+        if (embedded_)
+            markDirty();
+        save();
+    });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(tool_, &QComboBox::currentIndexChanged, this, [this] { load(); });
     connect(enabled_, &QCheckBox::toggled, this, [this] {

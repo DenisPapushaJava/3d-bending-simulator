@@ -482,8 +482,13 @@ QString ToolSelectionWidget::optionIssue(const core::ToolPreset &tool, std::size
         return QStringLiteral("Учебный инструмент исключён");
     if (!tool.drawing || !tool.drawing->millimeters || !core::validToolDrawing(*tool.drawing))
         return QStringLiteral("Добавьте контур DXF в мм");
-    if (!tool.parametersConfirmed)
-        return QStringLiteral("Уточните параметры инструмента");
+    if (!tool.parametersConfirmed) {
+        if (tool.lengthMm < 1)
+            return QStringLiteral(
+                "Укажите длину инструмента или сохраните доступные прямые секции в библиотеке.");
+        return QStringLiteral("Инструмент сохранён для просмотра. Проверьте рабочий профиль и "
+                              "сохраните данные в библиотеке.");
+    }
     if (tool.kind == core::ToolKind::Die) {
         if (groove >= tool.openingsMm.size())
             return QStringLiteral("Нужны параметры ручья");

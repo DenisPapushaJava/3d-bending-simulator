@@ -405,8 +405,9 @@ void ToolLibraryDialog::loadCard() {
             tool.code = name_->text().trimmed().toStdString();
             tool.manufacturer = manufacturer_->text().trimmed().toStdString();
             tool.lengthMm = length_->value();
+            const auto previous = selected();
             const auto error = library_.upsert(std::move(tool));
-            if (error.empty()) {
+            if (error.empty() && selected() != previous) {
                 changed();
                 QTimer::singleShot(0, this, [this] {
                     if (!import_) {

@@ -1,8 +1,46 @@
 #include "bending/application/ToolLibrary.h"
+#include "bending/core/ToolGeometry.h"
 #include <algorithm>
+#include <cmath>
 #include <unordered_set>
 
 namespace bending::application {
+namespace {
+bool supportedProfile(const core::ToolPreset &tool) {
+    if (!core::hasLibraryProfile(tool))
+        return false;
+    if (tool.kind == core::ToolKind::Punch) {
+        const auto p = core::detectPunchProfile(*tool.drawing);
+        return p && tool.noseRadiusMm && std::abs(p->noseRadiusMm - *tool.noseRadiusMm) <= 1e-5 &&
+               std::abs(p->angleRadians - tool.angleRadians) < 1e-6;
+    }
+    for (std::size_t g = 0; g < tool.openingsMm.size(); ++g) {
+        const auto d = core::activeDieDrawing(tool, g);
+        const auto settings = core::dieGroove(tool, g);
+        if (!d || !settings)
+            return false;
+        const auto grooves = core::detectDieGrooves(*d);
+        if (std::none_of(grooves.begin(), grooves.end(), [&](const auto &detected) {
+                return std::abs(detected.settings.rotationRadians) < 1e-6 &&
+                       std::abs(detected.openingMm - tool.openingsMm[g]) <= 1e-5 &&
+                       std::abs(detected.settings.angleRadians - settings->angleRadians) < 1e-6;
+            }))
+            return false;
+    }
+    return !tool.openingsMm.empty();
+}
+void refreshReadiness(core::ToolPreset &tool) {
+    // Only an explicit workshop save completes an inventory-only record. Do not
+    // migrate on read or infer a length from the DXF cross-section or a template.
+    if (tool.lengthMm == 0 && tool.segments)
+        for (const auto &section : *tool.segments)
+            if (section.shape == core::SegmentShape::Straight && section.quantity > 0)
+                tool.lengthMm = std::max(tool.lengthMm, section.lengthMm);
+    auto candidate = tool;
+    candidate.parametersConfirmed = true;
+    tool.parametersConfirmed = core::validToolPreset(candidate) && supportedProfile(candidate);
+}
+} // namespace
 bool validToolLibrary(const ToolLibraryData &data) {
     if (!core::validToolCatalog(data.tools) || !core::validToolCatalog(data.archived))
         return false;
@@ -52,6 +90,7 @@ std::string ToolLibrary::commit(ToolLibraryData next) {
 std::string ToolLibrary::upsert(core::ToolPreset tool) {
     if (!core::hasLibraryProfile(tool))
         return "Для библиотеки нужен полный контур DXF в миллиметрах.";
+    refreshReadiness(tool);
     auto next = snapshot_.data;
     auto found = std::find_if(next.tools.begin(), next.tools.end(),
                               [&](const auto &t) { return t.id == tool.id; });
