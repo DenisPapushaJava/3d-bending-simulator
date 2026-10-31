@@ -31,6 +31,7 @@ class DocumentSession final {
     [[nodiscard]] const core::UnfoldSettings &unfoldSettings() const {
         return unfold_;
     }
+    bool setBendWorkpieceOrientation(std::size_t recognizedIndex, bool reversed);
     bool setBendReview(std::size_t recognizedIndex, BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);

@@ -28,6 +28,9 @@ struct MachineCollision {
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual bool workpieceReversed() const noexcept {
+        return false;
+    }
     // True only when every published position includes the checked floor scope.
     [[nodiscard]] virtual bool floorChecked() const noexcept {
         return false;
@@ -137,40 +140,44 @@ class SingleBendPreviewBuilder {
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
                            core::ToolAssignment assignment, std::stop_token stop,
-                           double maximumEndSupportLossMm = 0) const {
+                           double maximumEndSupportLossMm = 0,
+                           bool workpieceReversed = false) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF setup unavailable"};
         const auto tools = core::toolParameters(assignment);
-        return tools
-                   ? buildToolSetup(document, index, target, *tools, stop, maximumEndSupportLossMm)
-                   : BendPreviewResult(BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
-                                                        "Invalid assignment"});
+        return tools ? buildToolSetup(document, index, target, *tools, stop,
+                                      maximumEndSupportLossMm, workpieceReversed)
+                     : BendPreviewResult(BendPreviewError{
+                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
     }
 
     virtual ~SingleBendPreviewBuilder() = default;
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolMotion(DocumentPtr document, std::size_t index, core::BendTarget target,
                             core::ToolAssignment assignment, std::stop_token stop,
-                            double maximumEndSupportLossMm = 0) const {
+                            double maximumEndSupportLossMm = 0,
+                            bool workpieceReversed = false) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF tool contact unavailable"};
         const auto tools = core::toolParameters(assignment);
-        return tools
-                   ? buildToolMotion(document, index, target, *tools, stop, maximumEndSupportLossMm)
-                   : BendPreviewResult(BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
-                                                        "Invalid assignment"});
+        return tools ? buildToolMotion(document, index, target, *tools, stop,
+                                       maximumEndSupportLossMm, workpieceReversed)
+                     : BendPreviewResult(BendPreviewError{
+                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
     }
     [[nodiscard]] virtual BendPreviewResult buildToolMotion(DocumentPtr, std::size_t,
                                                             core::BendTarget, core::PressTools,
-                                                            std::stop_token, double = 0) const {
+                                                            std::stop_token, double = 0,
+                                                            bool = false) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool motion unavailable"};
     }
     [[nodiscard]] virtual BendPreviewResult buildToolSetup(DocumentPtr, std::size_t,
                                                            core::BendTarget, core::PressTools,
-                                                           std::stop_token, double = 0) const {
+                                                           std::stop_token, double = 0,
+                                                           bool = false) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool setup unavailable"};
     }

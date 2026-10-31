@@ -28,6 +28,7 @@ class ImportController final : public QObject {
     void shutdown();
     application::ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
+    bool setBendWorkpieceOrientation(std::size_t recognizedIndex, bool reversed);
     bool setBendReview(std::size_t recognizedIndex, application::BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);

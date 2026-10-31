@@ -30,6 +30,24 @@ int main() {
         incomplete.punch.teaching = true;
         require(!hasCompleteDrawingToolGeometry(incomplete),
                 "Teaching profile passed real-body policy");
+        require(!operatorFacingPunchOrientation(drawn).has_value(),
+                "Symmetric punch invented an operator-side preference");
+        auto offset = drawn;
+        offset.punch.drawing->edges[2].end.x = -30;
+        offset.punch.drawing->edges[3].start.x = -30;
+        offset.punch.drawing->edges[3].end.x = -50;
+        offset.punch.drawing->edges[4].start.x = -50;
+        require(operatorFacingPunchOrientation(offset) == true,
+                "Forward-offset punch body did not face its relief toward the operator");
+        for (auto &edge : offset.punch.drawing->edges) {
+            edge.start.x = -edge.start.x;
+            edge.end.x = -edge.end.x;
+            if (edge.center)
+                edge.center->x = -edge.center->x;
+            edge.sweepRadians = -edge.sweepRadians;
+        }
+        require(operatorFacingPunchOrientation(offset) == false,
+                "Reflected DXF lost its physical front preference");
         auto tang = tool_fixture::tangPair();
         const auto mount = punchMountReference(tang);
         require(mount && std::abs(mount->heightMm - 30) < 1.e-6 &&

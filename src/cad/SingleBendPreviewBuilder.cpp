@@ -613,12 +613,27 @@ const std::array<TopoDS_Shape, 2> &
 OcctPreviewAccess::sourceComponents(const application::SingleBendPreview &preview) {
     return dynamic_cast<const CadPreview &>(preview).components;
 }
-application::BendPreviewResult
-buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
-                   bool fixedSecond, std::stop_token stop,
-                   std::optional<core::PressTools> toolParameters, bool withMotion,
-                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-                   std::optional<double> maximumEndSupportLossMm) {
+gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
+    const auto &analysis = OcctDocumentAccess::simulationBends(document);
+    const auto &bend = analysis.bends.at(index);
+    auto axis = gp_Vec(point(bend.axisStart), point(bend.axisEnd));
+    // Geometric convention, independent of transient flange/face ordering.
+    // Ignore numerical near-zero components before choosing the positive direction.
+    const double tolerance = analysis.lengthToleranceMm;
+    for (const double component : {axis.X(), axis.Y(), axis.Z()})
+        if (std::abs(component) > tolerance) {
+            if (component < 0)
+                axis.Reverse();
+            break;
+        }
+    return gp_Dir(axis);
+}
+application::BendPreviewResult buildBendOperation(
+    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
+    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
+    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis) {
+    const bool requestedReversed = fixedSecond;
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -666,6 +681,14 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             railRadial(cylinder, flangeB, point(bend.axisStart), axis, analysis.lengthToleranceMm);
         if (!radialA || !radialB) {
             return unsupported("Cannot determine tangency rails");
+        }
+        if (referenceAxis) {
+            auto normal = axis;
+            if (radialA->Crossed(*radialB).Dot(normal) < 0)
+                normal.Reverse();
+            if (std::abs(normal.Dot(gp_Vec(*referenceAxis))) < .999999)
+                return unsupported("Inconsistent workpiece reference axis");
+            fixedSecond = fixedSecond != (normal.Dot(gp_Vec(*referenceAxis)) < 0);
         }
         if (fixedSecond) {
             std::swap(radialA, radialB);
@@ -755,6 +778,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             return unsupported("Isolated flanges and complete bend do not match the entire STEP");
         }
         auto preview = std::make_shared<CadPreview>();
+        preview->reversed = requestedReversed;
         preview->components = flanges;
         preview->otherBends = multi ? analysis.bends.size() - 1 : 0;
         preview->geometry = model;
@@ -1175,6 +1199,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         if (stop.stop_requested())
                             return cancelled();
                         auto diagnostic = std::make_shared<CadPreview>();
+                        diagnostic->reversed = requestedReversed;
                         diagnostic->geometry = model;
                         diagnostic->seatedMount = preview->seatedMount;
                         diagnostic->setup = preview->setup;
@@ -1317,40 +1342,40 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildToolSetup(
     DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
-    std::stop_token stop, double maximumEndSupportLossMm) const {
+    std::stop_token stop, double maximumEndSupportLossMm, bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
-    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools, false, {},
-                              maximumEndSupportLossMm > 0, maximumEndSupportLossMm);
+    return cachedOperation(std::move(document), bendIndex, target, workpieceReversed, stop, tools,
+                           false, {}, maximumEndSupportLossMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildToolMotion(
     DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
-    std::stop_token stop, double maximumEndSupportLossMm) const {
+    std::stop_token stop, double maximumEndSupportLossMm, bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
-    return buildBendOperation(std::move(document), bendIndex, target, false, stop, tools, true, {},
-                              maximumEndSupportLossMm > 0, maximumEndSupportLossMm);
+    return cachedOperation(std::move(document), bendIndex, target, workpieceReversed, stop, tools,
+                           true, {}, maximumEndSupportLossMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion(
     DocumentPtr document, std::size_t index, core::BendTarget target,
-    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm) const {
+    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm,
+    bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
-    return buildBendOperation(std::move(document), index, target, false, stop, *tools, true,
-                              std::optional{std::move(assignment)}, maximumEndSupportLossMm > 0,
-                              maximumEndSupportLossMm);
+    return cachedOperation(std::move(document), index, target, workpieceReversed, stop, *tools,
+                           true, std::move(assignment), maximumEndSupportLossMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
     DocumentPtr document, std::size_t index, core::BendTarget target,
-    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm) const {
+    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm,
+    bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
-    return buildBendOperation(std::move(document), index, target, false, stop, *tools, false,
-                              std::optional{std::move(assignment)}, maximumEndSupportLossMm > 0,
-                              maximumEndSupportLossMm);
+    return cachedOperation(std::move(document), index, target, workpieceReversed, stop, *tools,
+                           false, std::move(assignment), maximumEndSupportLossMm);
 }
 } // namespace bending::cad

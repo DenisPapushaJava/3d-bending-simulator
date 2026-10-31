@@ -244,7 +244,8 @@ void ImportController::Impl::dispatchDraft() {
                                         .operations[job.request.step ? job.request.step - 1 : 0];
                                 const bool tools = job.request.withTools && op.tools &&
                                                    core::validPressTools(*op.tools);
-                                valid = bool(p->toolSetup()) == tools;
+                                valid = bool(p->toolSetup()) == tools &&
+                                        p->workpieceReversed() == op.workpieceReversed;
                                 if (tools)
                                     valid =
                                         valid && p->toolSetup() &&
@@ -461,6 +462,18 @@ bool ImportController::setBendToolAssignment(std::size_t index, core::ToolAssign
     emit stateChanged();
     return result;
 }
+bool ImportController::setBendWorkpieceOrientation(std::size_t index, bool reversed) {
+    if (impl_->stopping || hasWork())
+        return false;
+    const auto before = impl_->session.editRevision();
+    const bool result = impl_->session.setBendWorkpieceOrientation(index, reversed);
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
+        impl_->invalidatePreview();
+    }
+    emit stateChanged();
+    return result;
+}
 bool ImportController::setAllBendPunchOrientations(
     bool reversed, std::optional<core::PressTools> sharedTools,
     std::optional<core::ToolAssignment> sharedAssignment) {
@@ -610,6 +623,11 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     }
     auto *state = impl_.get();
     state->invalidatePreview();
+    if (const auto previous = state->routeBuilder.lock(); previous && previous != builder)
+        previous->discardRouteCache();
+    state->routeBuilder = builder;
+    const bool workpieceReversed =
+        mode == BendPreviewMode::Kinematic ? fixedSecond : entry->workpieceReversed;
     const auto id = state->previewId;
     const auto document = state->session.document();
     const auto revision = state->session.revision();
@@ -624,25 +642,26 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     QMetaObject::invokeMethod(
         state->worker,
         [state, document, revision, editRevision, id, target, recognizedIndex, fixedSecond, stop,
-         tools, assignment, mode, maximumEndSupportLossMm, builder = std::move(builder)] {
+         tools, assignment, mode, maximumEndSupportLossMm, workpieceReversed,
+         builder = std::move(builder)] {
             BendPreviewResult result =
                 BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
             try {
-                result =
-                    mode == BendPreviewMode::ToolMotion
-                        ? (assignment
-                               ? builder->buildAssignedToolMotion(document, recognizedIndex, target,
-                                                                  *assignment, stop,
-                                                                  maximumEndSupportLossMm)
-                               : builder->buildToolMotion(document, recognizedIndex, target, *tools,
-                                                          stop, maximumEndSupportLossMm))
-                    : tools ? (assignment
-                                   ? builder->buildAssignedToolSetup(document, recognizedIndex,
-                                                                     target, *assignment, stop,
-                                                                     maximumEndSupportLossMm)
-                                   : builder->buildToolSetup(document, recognizedIndex, target,
-                                                             *tools, stop, maximumEndSupportLossMm))
-                            : builder->build(document, recognizedIndex, target, fixedSecond, stop);
+                result = mode == BendPreviewMode::ToolMotion
+                             ? (assignment ? builder->buildAssignedToolMotion(
+                                                 document, recognizedIndex, target, *assignment,
+                                                 stop, maximumEndSupportLossMm, workpieceReversed)
+                                           : builder->buildToolMotion(
+                                                 document, recognizedIndex, target, *tools, stop,
+                                                 maximumEndSupportLossMm, workpieceReversed))
+                         : tools
+                             ? (assignment ? builder->buildAssignedToolSetup(
+                                                 document, recognizedIndex, target, *assignment,
+                                                 stop, maximumEndSupportLossMm, workpieceReversed)
+                                           : builder->buildToolSetup(
+                                                 document, recognizedIndex, target, *tools, stop,
+                                                 maximumEndSupportLossMm, workpieceReversed))
+                             : builder->build(document, recognizedIndex, target, fixedSecond, stop);
             } catch (const std::exception &error) {
                 result = BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
             } catch (...) {
@@ -656,7 +675,8 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                  expectedDie = assignment && assignment->useDrawingGeometry &&
                                assignment->die.drawing.has_value(),
                  expectedMachine = tools ? tools->machineModel : core::MachineModel::None,
-                 expectedReversed = tools && tools->punchReversed, result = std::move(result)] {
+                 expectedReversed = tools && tools->punchReversed, workpieceReversed,
+                 result = std::move(result)] {
                     state->running = false;
                     state->preparingPreview = false;
                     if (state->stopping) {
@@ -668,6 +688,8 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                         if (const auto *preview = std::get_if<BendPreviewPtr>(&result)) {
                             bool matchingMode =
                                 *preview && !(*preview)->unverifiedDraft() &&
+                                (mode == BendPreviewMode::Kinematic ||
+                                 (*preview)->workpieceReversed() == workpieceReversed) &&
                                 (*preview)->machineModel() == expectedMachine &&
                                 (*preview)->floorChecked() ==
                                     (expectedMachine == core::MachineModel::DemoPressV3) &&
@@ -748,6 +770,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                                 4 +
                                             1.e-8);
                                 if (!collision || !prefix || !matchingSupport ||
+                                    error.diagnostic->workpieceReversed() != workpieceReversed ||
                                     !error.diagnostic->toolSetup() ||
                                     error.diagnostic->machineModel() != expectedMachine ||
                                     error.diagnostic->floorChecked() !=
@@ -825,7 +848,8 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
         const auto *entry = session.bend(indices[i]);
         const auto &op = request.operations[i];
         if (!entry || !included(entry->review) || op.bendIndex != indices[i] ||
-            op.id != entry->id || session.bendTarget(indices[i]) != std::optional{op.target})
+            op.id != entry->id || op.workpieceReversed != entry->workpieceReversed ||
+            session.bendTarget(indices[i]) != std::optional{op.target})
             return false;
     }
     request.manualThicknessMm = session.manualThicknessMm();
@@ -920,6 +944,10 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                              ids.insert(step.id).second && p &&
                                              !p->unverifiedDraft() && !p->collision() &&
                                              p->frameCount() >= 2 &&
+                                             p->workpieceReversed() == step.fixedSecond &&
+                                             (request.allowWorkpieceRotation ||
+                                              (found != request.operations.end() &&
+                                               found->workpieceReversed == step.fixedSecond)) &&
                                              (request.withTools
                                                   ? p->pressMotion() && p->punchRetraction()
                                                   : !p->toolSetup());
@@ -996,6 +1024,10 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         else
                                             valid &= candidate.setBendTools(op.bendIndex, op.tools);
                                     }
+                                if (request.withTools)
+                                    for (const auto &step : (*route)->steps)
+                                        valid &= candidate.setBendWorkpieceOrientation(
+                                            step.bendIndex, step.fixedSecond);
                                 valid &= candidate.setBendOrder(order);
                                 if (valid)
                                     s->session = std::move(candidate);

@@ -1056,3 +1056,17 @@ D051 соблюдён: без push/PR/тегов/релиза; HiDPI не зап
 ## Пол установки — D102
 
 Целевые проверки: cad.floor, cad.machine, cad.route-draft, cad.bend-route*, cad.collision-highlight, app.machine, app.manual-route, project.portable-file и application.import-controller; независимый core проверяет новый идентификатор без Qt/OCCT. Для native 100%: `QT_SCALE_FACTOR=1 build/dev/bin/machine_workflow_tests out/floor-check/native` сохраняет также конфликт с полом и проверяет видимость/сохранность расчёта. [Охват](floor-collision.md).
+
+## D104/D105 — независимая установка детали, 2026-10-31
+
+Локально Linux/Qt 6.4/OCCT 7.6.3: `dev` собран без предупреждений, пресет `core` — **8/8**. Финальный затронутый CTest — **14/14**: `application.document-session`, `cad.workpiece-orientation`, `cad.floor`, `cad.composite-bend`, `cad.collision-highlight`, `cad.machine`, `cad.route-draft`, `cad.route-reuse`, `cad.route-heuristics`, `cad.bend-route-tools`, `cad.drawing-tools`, `cad.bend-preview`, `project.portable-file`, `application.import-controller`.
+
+Новый CAD-сценарий использует несимметричные полки и собственный асимметричный профиль: четыре независимых сочетания, отдельные Boolean, конфликт только одной стороны, одинаковое материальное занятие полного/ручного шага, строгое сохранение стороны при ручной проверке и предпочтение длинной части к оператору. Кэш подтверждается возвратом **того же immutable preview** без нового построения; отменённый запрос не получает старый положительный результат. Исправление диагностического helper теста отделило материал от инструментов и не меняло алгоритм приложения.
+
+На том же образце четыре холодных одиночных цикла в Debug занимали **2152–2243 мс**, два тёплых обращения — **22 и 48 мкс**. Это вход/выход геометрического адаптера, без GUI/rendering, не целевой норматив времени для всех STEP. Проверены разные стороны/инструмент, исходник не изменён; source/target/policy и текущий SDK задают область совпадения. Удержание четырёх объектов не означает фиксированного лимита памяти в байтах; диск переходов детали не добавлен.
+
+Нативно X11/GPU при **100%** прошли `machine_workflow_tests` и `manual_route_workflow_tests`: независимые кнопки, текущий кадр/камера, возврат к тёплому сочетанию, смена только выбранной операции без поиска, v14/повторное открытие и stale/reorder сценарии. Отдельный нативный прогон с частной ST1405S + 2030-1 V16 также прошёл; профильные снимки осмотрены. Фронт −X соответствует открытому зеву, исходный профиль ST1405S/M требует разворота для предпочтения углубления к оператору; ST1701S нейтрален. Это проверка демонстрационной сборки, не паспортного монтажа/нагрузки.
+
+Журналы/снимки остаются в игнорируемом `out/workpiece-orientation`: `final-build.log`, `core.log`, `final-regressions.log`, `cad-details.log`, `machine_workflow_tests-final.log`, `manual_route_workflow_tests-final.log`, `ST1405S-native.log`, `final-native-*.png`, `ST1405S-*.png`. `clang-format-18 --dry-run --Werror`, `git diff --check` и `scripts/version.py` прошли. Новых зависимостей, SDK/VERSION/упаковки нет; CMake добавляет только новый тестовый target. Windows/Windows GPU/удалённый CI не проверены, D051 соблюдён; HiDPI не запускался.
+
+Дополнительно выполнен локальный `cmake --install` в out/workpiece-orientation/install; установленное приложение проходит offscreen `--smoke-test`. Это проверка комплекта/запуска окна, отдельно от приведённой нативной GPU-проверки.

@@ -307,7 +307,8 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
   public:
     BendPreviewResult buildToolMotion(DocumentPtr document, std::size_t index,
                                       bending::core::BendTarget target, bending::core::PressTools,
-                                      std::stop_token stop, double = 0) const override {
+                                      std::stop_token stop, double = 0,
+                                      bool = false) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
@@ -316,7 +317,8 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     }
     BendPreviewResult buildToolSetup(DocumentPtr document, std::size_t index,
                                      bending::core::BendTarget target, bending::core::PressTools,
-                                     std::stop_token stop, double = 0) const override {
+                                     std::stop_token stop, double = 0,
+                                     bool = false) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
@@ -393,6 +395,14 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
                 controller.session().document() == source,
             "Preview replaced source document");
     if (mode != BendPreviewMode::Kinematic) {
+        require(controller.setBendWorkpieceOrientation(0, true) &&
+                    controller.prepareBendPreview(0, false, builder, mode),
+                "Cannot request a turned workpiece");
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "Unturned snapshot accepted for a turned workpiece request");
+        require(controller.setBendWorkpieceOrientation(0, false), "Cannot restore workpiece");
         bending::core::PressTools flipped{48, 1.5, 1.4, 2, 100, 10};
         flipped.punchReversed = true;
         require(controller.setBendTools(0, flipped) &&

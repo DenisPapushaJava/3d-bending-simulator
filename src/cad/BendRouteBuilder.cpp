@@ -13,11 +13,13 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Builder.hxx>
+#include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -32,6 +34,7 @@
 #include <list>
 #include <map>
 #include <mutex>
+#include <numbers>
 #include <set>
 #include <tuple>
 
@@ -135,6 +138,51 @@ class RouteSearch {
     CacheData *cache = nullptr;
     BendRouteStatistics statistics;
     std::vector<Mask> neighbours;
+    std::vector<gp_Dir> referenceAxes;
+    std::vector<Bnd_Box> wallBounds;
+    std::map<std::pair<Mask, std::size_t>, bool> frontPreferences;
+    bool preferredSide(Mask mask, const RouteOperation &op) {
+        if (!request.withTools || !request.allowWorkpieceRotation || !op.tools)
+            return op.workpieceReversed;
+        const auto key = std::pair{mask, op.bendIndex};
+        if (const auto found = frontPreferences.find(key); found != frontPreferences.end())
+            return found->second;
+        const auto link = std::find_if(layout->bends.begin(), layout->bends.end(),
+                                       [&](const auto &b) { return b.bendIndex == op.bendIndex; });
+        if (link == layout->bends.end())
+            return op.workpieceReversed;
+        std::vector<double> progress(request.operations.size());
+        for (std::size_t i = 0; i < progress.size(); ++i)
+            progress[i] = i != op.bendIndex && (mask & (Mask{1} << i)) ? 1. : 0.;
+        const auto positions = routePlacement(*layout, progress);
+        const auto &b = source->metadata().bendAnalysis.bends[op.bendIndex];
+        const auto state = simulation::draftPressState(
+            {b.thicknessMm, b.innerRadiusMm, b.angleRadians, b.lengthMm, 1, 1}, *op.tools, 0);
+        if (!state)
+            return op.workpieceReversed;
+        const auto a = state->section.fixed[0], end = state->section.fixed[1];
+        gp_Trsf machine;
+        machine.SetDisplacement(link->sectionAxes.Transformed(positions.walls[link->parent]),
+                                gp_Ax3(gp_Pnt(a.x, a.y, (op.tools->lengthMm - b.lengthMm) / 2),
+                                       gp_Dir(0, 0, 1), gp_Dir(a.x - end.x, a.y - end.y, 0)));
+        if (referenceAxes[op.bendIndex].Dot(link->sectionAxes.Direction()) < 0) {
+            gp_Trsf turn;
+            turn.SetRotation(gp_Ax1(gp_Pnt(0, 0, op.tools->lengthMm / 2), gp_Dir(0, 1, 0)),
+                             std::numbers::pi);
+            machine = turn * machine;
+        }
+        Bnd_Box box;
+        for (std::size_t i = 0; i < wallBounds.size(); ++i)
+            box.Add(wallBounds[i].Transformed(machine * positions.walls[i]));
+        bool preferred = op.workpieceReversed;
+        if (!box.IsVoid()) {
+            const double front = -box.CornerMin().X(), back = box.CornerMax().X();
+            if (std::abs(front - back) > std::max(.5, b.thicknessMm))
+                preferred = back > front;
+        }
+        frontPreferences.emplace(key, preferred);
+        return preferred; // Soft handling preference only; the same exact checker follows.
+    }
     std::set<Mask> dead;
     std::vector<BendRouteStep> reversed;
     std::size_t attempts = 0;
@@ -241,6 +289,7 @@ class RouteSearch {
 
     TransitionKey key(Mask mask, const RouteOperation &op, bool side) const {
         auto operation = op;
+        operation.workpieceReversed = false; // Preference is not part of this resolved transition.
         if (!request.withTools) {
             operation.tools.reset();
             operation.assignment.reset();
@@ -283,11 +332,20 @@ class RouteSearch {
         ++statistics.builtTransitions;
         const auto after = state(mask);
         const auto before = state(mask ^ (Mask{1} << op.bendIndex));
-        auto preview =
-            buildBendOperation(after->document, *after->indices[op.bendIndex], op.target,
-                               fixedSecond, stop, request.withTools ? op.tools : std::nullopt,
-                               request.withTools, request.withTools ? op.assignment : std::nullopt,
-                               request.allowPartialEndSupport, request.maximumEndSupportLossMm);
+        const auto link = std::find_if(layout->bends.begin(), layout->bends.end(),
+                                       [&](const auto &b) { return b.bendIndex == op.bendIndex; });
+        check(link != layout->bends.end(), "Missing workpiece placement reference");
+        std::vector<double> progress(request.operations.size());
+        for (std::size_t i = 0; i < progress.size(); ++i)
+            progress[i] = (mask & (Mask{1} << i)) ? 1. : 0.;
+        const auto placements = routePlacement(*layout, progress);
+        const auto reference =
+            referenceAxes[op.bendIndex].Transformed(placements.walls[link->parent]);
+        auto preview = buildBendOperation(
+            after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
+            request.withTools ? op.tools : std::nullopt, request.withTools,
+            request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
+            request.maximumEndSupportLossMm, reference);
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
             if (stableRejection(failure->code))
                 remember(wanted, preview);
@@ -353,11 +411,14 @@ class RouteSearch {
         for (const auto order : candidates(mask)) {
             const auto &op = request.operations[order];
             const auto bit = Mask{1} << op.bendIndex;
-            std::array<bool, 2> sides{false, true};
-            if (request.rankCandidates &&
-                priorResult(mask, op, true) < priorResult(mask, op, false))
+            const bool preferred = preferredSide(mask, op);
+            std::array<bool, 2> sides{preferred, !preferred};
+            if (request.allowWorkpieceRotation && request.rankCandidates &&
+                priorResult(mask, op, sides[1]) < priorResult(mask, op, sides[0]))
                 std::swap(sides[0], sides[1]);
-            for (const bool fixedSecond : sides) {
+            for (std::size_t choice = 0; choice < (request.allowWorkpieceRotation ? 2u : 1u);
+                 ++choice) {
+                const bool fixedSecond = sides[choice];
                 cancelled(stop);
                 if (dead.contains(mask ^ bit))
                     break;
@@ -405,11 +466,67 @@ struct SingleBendPreviewBuilder::RouteCache : CacheData {};
 SingleBendPreviewBuilder::SingleBendPreviewBuilder(std::shared_ptr<ToolGeometryCache> cache)
     : toolCache_(std::move(cache)) {}
 SingleBendPreviewBuilder::~SingleBendPreviewBuilder() = default;
+struct SingleBendPreviewBuilder::SingleCache {
+    struct Key {
+        std::size_t bend;
+        core::BendTarget target;
+        bool reversed, motion;
+        core::PressTools tools;
+        std::optional<core::ToolAssignment> assignment;
+        double supportLimit;
+        bool operator==(const Key &) const = default;
+    };
+    DocumentPtr source;
+    std::mutex mutex;
+    std::list<std::pair<Key, BendPreviewResult>> entries;
+};
+BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
+    DocumentPtr document, std::size_t index, core::BendTarget target, bool reversed,
+    std::stop_token stop, core::PressTools tools, bool motion,
+    std::optional<core::ToolAssignment> assignment, double limit) const {
+    if (stop.stop_requested())
+        return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
+    std::shared_ptr<SingleCache> cache;
+    {
+        std::lock_guard guard(routeCacheMutex_);
+        if (!singleCache_ || singleCache_->source != document) {
+            singleCache_ = std::make_shared<SingleCache>();
+            singleCache_->source = document;
+        }
+        cache = singleCache_;
+    }
+    const SingleCache::Key key{index, target, reversed, motion, tools, assignment, limit};
+    {
+        std::lock_guard guard(cache->mutex);
+        for (auto it = cache->entries.begin(); it != cache->entries.end(); ++it)
+            if (it->first == key) {
+                auto result = it->second;
+                cache->entries.splice(cache->entries.begin(), cache->entries, it);
+                return result;
+            }
+    }
+    const auto native = std::dynamic_pointer_cast<const CadDocument>(document);
+    const auto reference = native && index < native->metadata().bendAnalysis.bends.size()
+                               ? std::optional{normalBendAxis(*native, index)}
+                               : std::nullopt;
+    auto result = buildBendOperation(document, index, target, reversed, stop, tools, motion,
+                                     std::move(assignment), limit > 0, limit, reference);
+    const auto *error = std::get_if<BendPreviewError>(&result);
+    if (!stop.stop_requested() && (!error || stableRejection(error->code))) {
+        std::lock_guard guard(cache->mutex);
+        cache->entries.emplace_front(key, result);
+        while (cache->entries.size() > 4)
+            cache->entries.pop_back();
+    }
+    return result;
+}
 void SingleBendPreviewBuilder::discardRouteCache() const {
     std::shared_ptr<RouteCache> old;
+    std::shared_ptr<SingleCache> oldSingle;
     {
         std::lock_guard lock(routeCacheMutex_);
         old = std::move(routeCache_);
+        oldSingle = std::move(singleCache_);
     }
 }
 RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
@@ -488,7 +605,7 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
         const auto result = work->draftBasis->build(std::move(request), reused, stop);
         cancelled(stop);
         work->drafts.push_front(result);
-        while (work->drafts.size() > 3)
+        while (work->drafts.size() > 4)
             work->drafts.pop_back();
         return result;
     } catch (const BendRouteError &e) {
@@ -612,6 +729,14 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         const auto full = (Mask{1} << n) - 1;
         work->states.try_emplace(full, std::make_shared<const State>(std::move(original)));
         search.touchState(full);
+        search.referenceAxes.resize(n);
+        for (std::size_t i = 0; i < n; ++i)
+            search.referenceAxes[i] = normalBendAxis(*native, i);
+        for (const auto &wall : search.layout->walls) {
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(wall.solid, box, false, false);
+            search.wallBounds.push_back(box);
+        }
         search.neighbours.resize(n);
         for (const auto &a : search.layout->bends)
             for (const auto &b : search.layout->bends)

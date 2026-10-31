@@ -301,6 +301,28 @@ int main(int argc, char **argv) {
         require(slider->value() == 10 &&
                     (originalScene.isNull() || viewer->captureImage(false) == originalScene),
                 "Manual reversal lost its camera or forming position");
+        auto *partTurn = window.findChild<QToolButton *>("reverseWorkpiece");
+        require(partTurn && partTurn->isEnabled(), "Manual workpiece turn missing");
+        const auto unturned = controller.routeDraft()->visual;
+        const auto activePart = controller.routeDraft()->request.operations[0].bendIndex;
+        partTurn->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && controller.routeDraft()->visual->workpieceReversed() &&
+                    controller.session().bend(activePart)->workpieceReversed &&
+                    builder->searches == searchesBefore && slider->value() == 10 &&
+                    !controller.routeDraft()->request.operations[0].tools->punchReversed,
+                "Manual part turn changed punch, frame or started order search");
+        reverse->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && controller.routeDraft()->visual->workpieceReversed(),
+                "Manual punch turn reset the workpiece installation");
+        reverse->click();
+        wait([&] { return !controller.hasWork(); });
+        partTurn->click();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.routeDraft() && controller.routeDraft()->visual == unturned &&
+                    builder->searches == searchesBefore,
+                "Restoring a part orientation rebuilt checked geometry");
         const auto beforeStepChange = viewer->captureImage(false);
         step(4)->click();
         require(beforeStepChange.isNull() || viewer->captureImage(false) == beforeStepChange,

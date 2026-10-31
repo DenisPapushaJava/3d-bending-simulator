@@ -199,11 +199,21 @@ void testBendPreparation() {
     require(session.bend(0)->review == BendReview::Automatic && session.bendTarget(0) &&
                 session.bendTarget(0)->innerRadiusMm == 4,
             "Automatic CAD target unavailable");
+    const auto sideEdit = session.editRevision();
+    require(session.setBendWorkpieceOrientation(0, true) && session.bend(0)->workpieceReversed &&
+                !session.bend(1)->workpieceReversed && session.editRevision() == sideEdit + 1,
+            "Workpiece orientation changed another operation or missed its revision");
+    const auto unchangedSideEdit = session.editRevision();
+    require(session.setBendWorkpieceOrientation(0, true) &&
+                !session.setBendWorkpieceOrientation(99, true) &&
+                session.editRevision() == unchangedSideEdit,
+            "Invalid/unchanged orientation edited the project");
     const auto secondId = session.bend(1)->id;
     const auto orderEdit = session.editRevision();
     require(session.setBendOrder({secondId, id}) &&
                 session.orderedBends() == std::vector<std::size_t>({1, 0}) &&
                 session.bend(0)->id == id && session.bend(1)->id == secondId &&
+                session.bend(0)->workpieceReversed && !session.bend(1)->workpieceReversed &&
                 session.editRevision() == orderEdit + 1,
             "Preferred operation order broke geometric bindings");
     const auto stableOrderEdit = session.editRevision();
@@ -241,7 +251,8 @@ void testBendPreparation() {
     const auto reorderedDocument = std::make_shared<TestDocument>(reordered);
     session.complete(session.beginImport("saved.bend"),
                      OpenedProject{reorderedDocument, {}, "saved.bend", entries});
-    require(session.bend(1)->id == id && session.bend(1)->target == target &&
+    require(session.bend(1)->id == id && session.bend(1)->workpieceReversed &&
+                session.bend(1)->target == target &&
                 session.bend(0)->review == BendReview::Excluded && !session.modified(),
             "Reordering/axis reversal/face renumbering lost user intent");
     session.setBendReview(1, BendReview::Excluded);

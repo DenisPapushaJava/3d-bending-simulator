@@ -42,6 +42,16 @@ void write(const QString &path, const QByteArray &data) {
     require(file.open(QIODevice::WriteOnly) && file.write(data) == data.size(),
             "Cannot write fixture");
 }
+QJsonObject withoutWorkpieceOrientation(QJsonObject root) {
+    auto bends = root.value("bends").toArray();
+    for (qsizetype i = 0; i < bends.size(); ++i) {
+        auto entry = bends[i].toObject();
+        entry.remove("workpieceReversed");
+        bends[i] = entry;
+    }
+    root.insert("bends", bends);
+    return root;
+}
 void testProject() {
     bending::project::ProjectFiles files;
     QTemporaryDir temporary;
@@ -192,7 +202,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 13, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 14, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -253,9 +263,10 @@ void testBendProject() {
             }
             v3Bends[i] = entry;
         }
-        auto v3 = root;
+        auto v3 = withoutWorkpieceOrientation(root);
         v3.insert(QStringLiteral("version"), 3);
         v3.insert(QStringLiteral("bends"), v3Bends);
+        v3 = withoutWorkpieceOrientation(v3);
         write(destination, QJsonDocument(v3).toJson());
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->tools == tools && session.bend(0)->target == target &&
@@ -268,9 +279,10 @@ void testBendProject() {
             entry.remove(QStringLiteral("catalogTools"));
             legacyBends[i] = entry;
         }
-        auto legacy = root;
+        auto legacy = withoutWorkpieceOrientation(root);
         legacy.insert(QStringLiteral("version"), 2);
         legacy.insert(QStringLiteral("bends"), legacyBends);
+        legacy = withoutWorkpieceOrientation(legacy);
         write(destination, QJsonDocument(legacy).toJson());
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->target == target && !session.bend(0)->tools && !session.modified(),
@@ -415,7 +427,7 @@ void testCatalogProject() {
     const auto bytes = read(path);
     const auto root = QJsonDocument::fromJson(bytes).object();
     {
-        auto legacyRoot = root;
+        auto legacyRoot = withoutWorkpieceOrientation(root);
         legacyRoot.insert(QStringLiteral("version"), 4);
         auto legacyBends = legacyRoot.value(QStringLiteral("bends")).toArray();
         auto legacyBend = legacyBends[0].toObject();
@@ -546,16 +558,41 @@ void testMachineProfile() {
         require(catalog ? session.setBendToolAssignment(0, assignment)
                         : session.setBendTools(0, tools),
                 "Cannot set machine profile");
+        require(session.setBendWorkpieceOrientation(0, modern), "Cannot orient workpiece");
         require(!files.save(path, *session.document(), {}, session.bends(), {}),
                 "Cannot save machine");
         const auto opened = files.load(path, {}, {});
         require(std::holds_alternative<OpenedProject>(opened), "Machine project rejected");
         const auto &b = std::get<OpenedProject>(opened).bends.at(0);
         require(b.tools && b.tools->machineModel == assignment.machineModel &&
-                    b.tools->punchReversed == modern && (!catalog || b.catalogTools == assignment),
+                    b.tools->punchReversed == modern && b.workpieceReversed == modern &&
+                    (!catalog || b.catalogTools == assignment),
                 "Lost saved machine profile");
         const auto root = QJsonDocument::fromJson(read(destination)).object();
-        auto old = root;
+        auto old = withoutWorkpieceOrientation(root);
+        old.insert("version", 13);
+        write(destination, QJsonDocument(old).toJson());
+        const auto legacyPart = files.load(path, {}, {});
+        require(std::holds_alternative<OpenedProject>(legacyPart) &&
+                    !std::get<OpenedProject>(legacyPart).bends.at(0).workpieceReversed,
+                "Legacy project changed default workpiece orientation");
+        for (const auto &badValue :
+             {QJsonValue("true"), QJsonValue(1), QJsonValue(QJsonValue::Null)}) {
+            auto bad = root;
+            auto rows = bad.value("bends").toArray();
+            auto entry = rows[0].toObject();
+            entry.insert("workpieceReversed", badValue);
+            rows[0] = entry;
+            bad.insert("bends", rows);
+            write(destination, QJsonDocument(bad).toJson());
+            require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                    "Untyped workpiece orientation accepted");
+        }
+        auto wrongSchema = root;
+        wrongSchema.insert("version", 13);
+        write(destination, QJsonDocument(wrongSchema).toJson());
+        require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                "Workpiece orientation accepted under an older schema");
         old.insert("version", 10);
         write(destination, QJsonDocument(old).toJson());
         require(std::holds_alternative<ImportError>(files.load(path, {}, {})),

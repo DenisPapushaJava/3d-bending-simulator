@@ -532,6 +532,7 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
     if (selectedTool(tool.kind) == tool && usesCatalog() && realGeometry_->isChecked() &&
         (tool.kind == core::ToolKind::Punch || selectedGroove() == groove))
         return true;
+    const bool newPunch = tool.kind == core::ToolKind::Punch && selectedTool(tool.kind) != tool;
     updating_ = true;
     mode_->setCurrentIndex(0);
     auto *combo = tool.kind == core::ToolKind::Punch ? punch_ : die_;
@@ -540,6 +541,9 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
         populateGrooves(groove);
     realGeometry_->setChecked(true);
     fitAssemblies();
+    if (newPunch)
+        if (const auto a = assignment())
+            punchReversed_ = core::operatorFacingPunchOrientation(*a).value_or(false);
     updating_ = false;
     changed();
     return true;
@@ -609,6 +613,8 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         }
         fitAssemblies();
         chooseDrawingGeometry();
+        if (const auto a = assignment())
+            punchReversed_ = core::operatorFacingPunchOrientation(*a).value_or(false);
     }
     updating_ = false;
     updateDetails();
@@ -837,11 +843,15 @@ void ToolSelectionWidget::recommend() {
         const auto &c = result.candidates.front();
         const auto &p = workshop[c.punch];
         const auto &d = workshop[c.die];
+        const bool newPunch = selectedTool(core::ToolKind::Punch) != std::optional{p};
         mode_->setCurrentIndex(0);
         selectPair({text(p.id), text(d.id), static_cast<int>(c.groove)});
         punchAssembly_ = c.punchAssembly ? std::optional{*c.punchAssembly} : std::nullopt;
         dieAssembly_ = c.dieAssembly ? std::optional{*c.dieAssembly} : std::nullopt;
         chooseDrawingGeometry();
+        if (newPunch)
+            if (const auto a = assignment())
+                punchReversed_ = core::operatorFacingPunchOrientation(*a).value_or(false);
         changed();
         message = QStringLiteral("Предварительно: %1 / %2 · V %3 мм (%4 толщин). Вариантов: %5. "
                                  "Далее — проверка опор и пересечений.")

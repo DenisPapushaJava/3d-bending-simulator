@@ -247,6 +247,32 @@ int main(int argc, char **argv) {
                     controller.bendPreview()->toolSetup()->tools.punchReversed,
                 "Third toggle click did not reverse again");
         preview = controller.bendPreview();
+        const auto normalPart = preview;
+        auto *partTurn = window.findChild<QToolButton *>("reverseWorkpiece");
+        require(partTurn && partTurn->isEnabled() && !partTurn->isChecked() &&
+                    partTurn->text().isEmpty() && !partTurn->icon().isNull(),
+                "Independent workpiece toggle missing");
+        partTurn->click();
+        wait(controller);
+        require(controller.bendPreview() && controller.bendPreview()->workpieceReversed() &&
+                    controller.session().bend(0)->workpieceReversed && reverse->isChecked() &&
+                    frame->value() == 30,
+                "Workpiece toggle changed punch or reset the forming frame");
+        reverse->click();
+        wait(controller);
+        require(controller.bendPreview() && controller.bendPreview()->workpieceReversed() &&
+                    !reverse->isChecked() && partTurn->isChecked(),
+                "Punch toggle lost the independently turned workpiece");
+        partTurn->click();
+        wait(controller);
+        require(controller.bendPreview() && !controller.bendPreview()->workpieceReversed() &&
+                    !controller.session().bend(0)->workpieceReversed,
+                "Second workpiece click did not restore its orientation");
+        reverse->click();
+        wait(controller);
+        require(controller.bendPreview() == normalPart && frame->value() == 30,
+                "Returning to a checked combination rebuilt CAD or lost the frame");
+        preview = controller.bendPreview();
         auto *summary = window.findChild<QLabel *>("bendCheckSummary");
         require(summary && summary->text().contains("Демонстрационный станок"),
                 "Demo scope not visible beside result");
@@ -288,6 +314,10 @@ int main(int argc, char **argv) {
             whole->trigger();
         capture("-whole.png");
         viewer->fitAll();
+        partTurn->click();
+        wait(controller);
+        require(controller.bendPreview() && controller.bendPreview()->workpieceReversed(),
+                "Cannot prepare a turned workpiece for saving");
         const auto projectPath = folder.path() + "/demo.bend";
         controller.saveProject(projectPath.toStdString(), files);
         wait(controller);
@@ -299,7 +329,8 @@ int main(int argc, char **argv) {
                         core::MachineModel::DemoPressV3 &&
                     checkbox->isChecked(),
                 "Saved machine not restored to UI");
-        require(controller.session().bend(0)->tools->punchReversed && reverse->isChecked(),
+        require(controller.session().bend(0)->workpieceReversed &&
+                    controller.session().bend(0)->tools->punchReversed && reverse->isChecked(),
                 "Saved punch orientation not restored");
         checkbox->setChecked(false);
         check->click();

@@ -169,6 +169,18 @@ bool DocumentSession::setBendTarget(std::size_t recognizedIndex,
     return true;
 }
 
+bool DocumentSession::setBendWorkpieceOrientation(std::size_t index, bool reversed) {
+    const auto *entry = bend(index);
+    if (!document_ || active_ || !entry || !included(entry->review))
+        return false;
+    if (entry->workpieceReversed != reversed) {
+        bends_[*bendBindings_.byRecognizedBend[index]].workpieceReversed = reversed;
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+
 bool DocumentSession::setBendTools(std::size_t recognizedIndex,
                                    std::optional<core::PressTools> tools) {
     const auto *entry = bend(recognizedIndex);

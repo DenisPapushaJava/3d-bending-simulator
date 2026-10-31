@@ -16,6 +16,7 @@ struct RouteOperation {
     core::BendTarget target;
     std::optional<core::PressTools> tools;
     std::optional<core::ToolAssignment> assignment;
+    bool workpieceReversed = false;
     bool operator==(const RouteOperation &) const = default;
 };
 struct BendRouteRequest {
@@ -28,6 +29,7 @@ struct BendRouteRequest {
     std::size_t maximumChecks = 96;
     unsigned maximumTimeMs = 60000;
     // Diagnostic/reference switches; the UI uses both optimizations.
+    bool allowWorkpieceRotation = true; // False: check exactly the requested installations.
     bool rankCandidates = true;
     bool reuseCalculations = true;
     std::optional<double> maximumEndSupportLossMm =
@@ -42,7 +44,7 @@ struct BendRouteStatistics {
 struct BendRouteStep {
     std::string id;
     std::size_t bendIndex;
-    bool fixedSecond;
+    bool fixedSecond; // Resolved workpiece Y half-turn (legacy field name), not punch orientation.
     std::shared_ptr<const SingleBendPreview> preview;
 };
 struct BendRoute {

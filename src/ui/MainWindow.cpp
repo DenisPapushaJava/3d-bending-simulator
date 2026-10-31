@@ -62,12 +62,46 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <optional>
 
 namespace bending::ui {
 namespace {
 using namespace application;
+QIcon workpieceOrientationIcon(bool reversed) {
+    QIcon icon;
+    for (int ratio : {1, 2}) {
+        QPixmap pixmap(48 * ratio, 32 * ratio);
+        pixmap.setDevicePixelRatio(ratio);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor("#087F83"), 1.5));
+        painter.drawArc(QRectF(6, 2, 36, 12), 20 * 16, 285 * 16);
+        painter.setBrush(QColor("#087F83"));
+        QPolygonF arrow{QPointF(39, 8), QPointF(43, 4), QPointF(43, 10)};
+        painter.drawPolygon(arrow);
+        if (reversed) {
+            painter.translate(48, 0);
+            painter.scale(-1, 1);
+        }
+        QPainterPath sheet;
+        sheet.moveTo(9, 17);
+        sheet.lineTo(13, 17);
+        sheet.lineTo(13, 26);
+        sheet.lineTo(38, 26);
+        sheet.lineTo(38, 30);
+        sheet.lineTo(9, 30);
+        sheet.closeSubpath();
+        painter.setPen(QPen(QColor("#075F65"), 1));
+        painter.setBrush(QColor(reversed ? "#087F83" : "#718894"));
+        painter.drawPath(sheet);
+        painter.end();
+        icon.addPixmap(pixmap);
+    }
+    return icon;
+}
 QIcon punchOrientationIcon(bool reversed) {
     QPainterPath profile;
     profile.moveTo(8, 3);
@@ -516,6 +550,7 @@ class MainWindow::Impl {
         stageToolIssueIndex.reset();
         application::BendRouteRequest request;
         request.automatic = automatic;
+        request.allowWorkpieceRotation = automatic;
         request.withTools = withTools;
         request.allowPartialEndSupport = withTools;
         if (withTools)
@@ -556,7 +591,8 @@ class MainWindow::Impl {
                                                      : tools,
                                           !withTools ? std::nullopt
                                           : perBend  ? entry->catalogTools
-                                                     : assignment});
+                                                     : assignment,
+                                          entry->workpieceReversed});
         }
         beginPreviewReplacement();
         stopPlayback();
@@ -1006,6 +1042,27 @@ class MainWindow::Impl {
             setFrameText({});
         }
     }
+    void setWorkpieceOrientation(bool reversed) {
+        const auto index = selectedPunchIndex(); // Blank uses the first operation's installation.
+        if (!index || controller->hasWork())
+            return;
+        const auto *entry = controller->session().bend(*index);
+        if (!entry || entry->workpieceReversed == reversed)
+            return;
+        const bool multiple =
+            controller->session().document()->metadata().bendAnalysis.bends.size() > 1;
+        const int step = routePanel->selected();
+        beginPreviewReplacement(true);
+        stopPlayback();
+        if (!controller->setBendWorkpieceOrientation(*index, reversed))
+            return;
+        if (multiple) {
+            routePanel->select(step);
+        } else {
+            toolMode->setCurrentIndex(0);
+            checkTools();
+        }
+    }
     void setPunchOrientation(bool reversed) {
         const auto index = selectedPunchIndex();
         if (!index || controller->hasWork())
@@ -1205,15 +1262,42 @@ class MainWindow::Impl {
             const auto scope = blankSetupSelected()
                                    ? QStringLiteral("\nШаг 0: для всех гибов с инструментом.")
                                    : QStringLiteral("\nТолько выбранный гиб.");
+            std::optional<bool> frontPreference;
+            if (selected && selected->catalogTools) {
+                const auto &assigned = *selected->catalogTools;
+                if (!facingPunch || *facingPunch != assigned.punch) {
+                    facingPunch = assigned.punch;
+                    facingPreference = core::operatorFacingPunchOrientation(assigned);
+                }
+                frontPreference = facingPreference;
+            }
+            const auto facing =
+                frontPreference
+                    ? (reversed == *frontPreference ? QStringLiteral("Углубление к оператору.")
+                                                    : QStringLiteral("Углубление от оператора."))
+                    : (reversed ? QStringLiteral("Пуансон: положение 2.")
+                                : QStringLiteral("Пуансон: положение 1."));
             reversePunchButton->setToolTip(
-                (reversed ? QStringLiteral(
-                                "Пуансон развёрнут. Нажмите, чтобы вернуть обычную установку.")
-                          : QStringLiteral(
-                                "Пуансон установлен обычно. Нажмите, чтобы развернуть на 180°.")) +
-                scope);
+                facing + QStringLiteral(" Нажмите, чтобы развернуть на 180°.") + scope);
             reversePunchButton->setAccessibleDescription(
                 reversed ? QStringLiteral("Развёрнутая установка")
                          : QStringLiteral("Обычная установка"));
+        }
+        if (reverseWorkpieceButton) {
+            const QSignalBlocker block(reverseWorkpieceButton);
+            const auto *part = punchIndex ? session.bend(*punchIndex) : nullptr;
+            const bool reversed = part && part->workpieceReversed;
+            reverseWorkpieceButton->setEnabled(part && preview && preview->toolSetup() &&
+                                               !controller->hasWork());
+            reverseWorkpieceButton->setChecked(reversed);
+            reverseWorkpieceButton->setIcon(workpieceOrientationIcons[reversed ? 1 : 0]);
+            reverseWorkpieceButton->setToolTip(
+                QStringLiteral(
+                    "Деталь: %1. Развернуть на 180° вокруг вертикали Y.\n"
+                    "Инструмент остаётся на месте. Только текущий гиб; шаг 0 — первый гиб.\n"
+                    "«Проверить мой порядок» сохраняет положение; «Подобрать порядок» может его "
+                    "изменить.")
+                    .arg(reversed ? QStringLiteral("180°") : QStringLiteral("0°")));
         }
         operationSummary->clear();
         if (const auto &document = session.document(); document) {
@@ -1301,7 +1385,8 @@ class MainWindow::Impl {
                 return;
             request.operations.push_back(
                 {entry->id, index, *target, perBend ? entry->tools : toolSelection->parameters(),
-                 perBend ? entry->catalogTools : toolSelection->assignment()});
+                 perBend ? entry->catalogTools : toolSelection->assignment(),
+                 entry->workpieceReversed});
         }
         stopPlayback();
         viewingDraft = true;
@@ -1566,8 +1651,25 @@ class MainWindow::Impl {
                     previewReplacement->previous->unverifiedDraft() == preview->unverifiedDraft() &&
                     bool(previewReplacement->previous->pressMotion()) ==
                         bool(preview->pressMotion());
-                bendFrame->setValue(restoreFrame ? static_cast<int>(previewReplacement->frame)
-                                    : diagnostic ? bendFrame->maximum()
+                std::optional<int> matchedAngle;
+                if (!restoreFrame && previewReplacement && previewReplacement->preserveFrame) {
+                    const auto *old =
+                        previewReplacement->previous->pressState(previewReplacement->frame);
+                    double best = std::numeric_limits<double>::infinity();
+                    if (old)
+                        for (std::size_t f = 0; f < preview->frameCount(); ++f)
+                            if (const auto *state = preview->pressState(f)) {
+                                const double distance = std::abs(state->section.angleRadians -
+                                                                 old->section.angleRadians);
+                                if (distance < best) {
+                                    best = distance;
+                                    matchedAngle = static_cast<int>(f);
+                                }
+                            }
+                }
+                bendFrame->setValue(restoreFrame   ? static_cast<int>(previewReplacement->frame)
+                                    : matchedAngle ? *matchedAngle
+                                    : diagnostic   ? bendFrame->maximum()
                                     : (viewingDraft || viewingRoute) &&
                                             routePanel->selected() > 0 && !draftAutoPlay
                                         ? bendFrame->maximum()
@@ -2410,7 +2512,11 @@ class MainWindow::Impl {
     QSlider *bendFrame = nullptr;
     QPushButton *playBend = nullptr;
     QToolButton *reversePunchButton = nullptr;
+    QToolButton *reverseWorkpieceButton = nullptr;
+    std::array<QIcon, 2> workpieceOrientationIcons;
     std::array<QIcon, 2> punchOrientationIcons;
+    std::optional<core::ToolPreset> facingPunch;
+    std::optional<bool> facingPreference;
     QWidget *playbackSpeedControls = nullptr;
     QSlider *playbackSpeed = nullptr;
     QLabel *playbackSpeedValue = nullptr;
@@ -3248,6 +3354,19 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         "QToolButton:hover:!checked{background:#E8EEF2;}QToolButton:disabled{border-color:#DCE3E9;"
         "}"));
     playLayout->addWidget(impl_->reversePunchButton);
+    impl_->reverseWorkpieceButton = new QToolButton(sequence);
+    impl_->reverseWorkpieceButton->setObjectName("reverseWorkpiece");
+    impl_->workpieceOrientationIcons = {workpieceOrientationIcon(false),
+                                        workpieceOrientationIcon(true)};
+    impl_->reverseWorkpieceButton->setIcon(impl_->workpieceOrientationIcons[0]);
+    impl_->reverseWorkpieceButton->setCheckable(true);
+    impl_->reverseWorkpieceButton->setIconSize(QSize(42, 28));
+    impl_->reverseWorkpieceButton->setFixedSize(50, 34);
+    impl_->reverseWorkpieceButton->setAccessibleName(QStringLiteral("Развернуть деталь на 180°"));
+    impl_->reverseWorkpieceButton->setStyleSheet(impl_->reversePunchButton->styleSheet());
+    playLayout->addWidget(impl_->reverseWorkpieceButton);
+    connect(impl_->reverseWorkpieceButton, &QToolButton::clicked, this,
+            [this](bool reversed) { impl_->setWorkpieceOrientation(reversed); });
     connect(impl_->reversePunchButton, &QToolButton::clicked, this,
             [this](bool reversed) { impl_->setPunchOrientation(reversed); });
     playLayout->addWidget(impl_->previewControls, 1);

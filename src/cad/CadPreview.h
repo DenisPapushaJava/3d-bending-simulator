@@ -6,6 +6,10 @@ using namespace application;
 class CadPreview : public SingleBendPreview {
   public:
     bool draft = false;
+    bool reversed = false;
+    bool workpieceReversed() const noexcept override {
+        return reversed;
+    }
     bool floorChecked() const noexcept override {
         return machineModel() == core::MachineModel::DemoPressV3 && !frames.empty() &&
                std::all_of(frames.begin(), frames.end(),

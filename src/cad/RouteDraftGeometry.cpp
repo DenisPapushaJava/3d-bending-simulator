@@ -1,4 +1,5 @@
 #include "RouteDraftGeometry.h"
+#include "BendOperation.h"
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
 #include "RouteGeometry.h"
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 namespace bending::cad {
 namespace {
 void cancelled(std::stop_token stop) {
@@ -88,6 +90,7 @@ struct RouteDraftBasis::Impl {
     application::DocumentPtr source;
     application::FlatPatternPtr flat;
     std::vector<Face> faces;
+    std::vector<bool> referenceReversed;
 };
 RouteDraftBasis::~RouteDraftBasis() = default;
 RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::FlatPatternPtr flat,
@@ -98,6 +101,10 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
     const auto &layout = OcctFlatPatternAccess::layout(*impl_->flat);
     const auto &native = dynamic_cast<const CadDocument &>(*impl_->source);
     const double tolerance = native.metadata().bendAnalysis.lengthToleranceMm;
+    impl_->referenceReversed.resize(native.metadata().bendAnalysis.bends.size());
+    for (const auto &b : layout.bends)
+        impl_->referenceReversed[b.bendIndex] =
+            normalBendAxis(native, b.bendIndex).Dot(b.sectionAxes.Direction()) < 0;
     std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> classifiers;
     std::vector<Bnd_Box> boxes;
     const auto add = [&](const TopoDS_Shape &s) {
@@ -159,6 +166,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     require(link != layout.bends.end(), "Draft bend has no layout link");
     auto visual = std::make_shared<CadPreview>();
     visual->draft = true;
+    visual->reversed = active.workpieceReversed;
     visual->otherBends = request.step ? request.step - 1 : 0;
     if (active.assignment)
         visual->gaps = {active.assignment->dieAssembly ? active.assignment->dieAssembly->gapMm : 0,
@@ -226,6 +234,12 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             machine.SetDisplacement(
                 axes, gp_Ax3(gp_Pnt(a.x, a.y, (active.tools->lengthMm - bend.lengthMm) / 2),
                              gp_Dir(0, 0, 1), gp_Dir(a.x - b.x, a.y - b.y, 0)));
+            if (active.workpieceReversed != impl_->referenceReversed[active.bendIndex]) {
+                gp_Trsf turn;
+                turn.SetRotation(gp_Ax1(gp_Pnt(0, 0, active.tools->lengthMm / 2), gp_Dir(0, 1, 0)),
+                                 std::numbers::pi);
+                machine = turn * machine;
+            }
             frame.tools = tools;
             frame.toolSegments = segments;
             gp_Trsf lift;
