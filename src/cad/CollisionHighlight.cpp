@@ -1,4 +1,5 @@
 #include "CollisionHighlight.h"
+#include "CollisionStrip.h"
 #include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
@@ -11,6 +12,7 @@
 #include <TopoDS_Vertex.hxx>
 #include <algorithm>
 #include <cmath>
+#include <map>
 namespace bending::cad {
 namespace {
 constexpr std::size_t maxCentres = 8, maxTrianglesPerPatch = 2048, maxVisitsPerPatch = 80000;
@@ -60,6 +62,30 @@ std::vector<gp_Pnt> witnesses(const TopoDS_Shape &overlap, double radiusMm) {
         result.push_back(*best);
         candidates.erase(best);
     }
+    return result;
+}
+struct SurfaceMesh {
+    Bnd_Box bounds;
+    Handle(Poly_Triangulation) mesh;
+    gp_Trsf transform;
+};
+std::vector<SurfaceMesh> surfaceMeshes(const std::vector<TopoDS_Shape> &shapes,
+                                       std::stop_token stop) {
+    std::vector<SurfaceMesh> result;
+    for (const auto &shape : shapes)
+        for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+            if (stop.stop_requested())
+                return {};
+            const auto face = TopoDS::Face(faces.Current());
+            TopLoc_Location location;
+            const auto mesh = BRep_Tool::Triangulation(face, location);
+            if (mesh.IsNull())
+                continue;
+            Bnd_Box bounds;
+            BRepBndLib::Add(face, bounds);
+            if (!bounds.IsVoid())
+                result.push_back({bounds, mesh, location.Transformation()});
+        }
     return result;
 }
 struct LocalMesh {
@@ -141,31 +167,25 @@ struct LocalMesh {
         for (std::size_t i = 0; i < 3; ++i)
             patch.vertices.push_back({v[i], weights[i]});
     }
-    void shapes(const std::vector<TopoDS_Shape> &shapes) {
-        struct FaceMesh {
-            Handle(Poly_Triangulation) mesh;
-            gp_Trsf transform;
-        };
-        std::vector<FaceMesh> nearby;
-        for (const auto &shape : shapes)
-            for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
-                if (stop.stop_requested())
-                    return;
-                const auto face = TopoDS::Face(faces.Current());
-                Bnd_Box bounds;
-                BRepBndLib::Add(face, bounds);
-                if (bounds.IsVoid())
-                    continue;
-                bounds.Enlarge(patch.radiusMm);
-                if (std::none_of(patch.centres.begin(), patch.centres.end(),
-                                 [&](const auto &p) { return !bounds.IsOut(p); }))
-                    continue;
-                TopLoc_Location location;
-                const auto mesh = BRep_Tool::Triangulation(face, location);
-                if (mesh.IsNull())
-                    continue;
-                nearby.push_back({mesh, location.Transformation()});
-            }
+    void surfaces(const std::vector<SurfaceMesh> &surfaces) {
+        std::vector<const SurfaceMesh *> nearby;
+        std::optional<Bnd_Box> bandBounds;
+        if (patch.band) {
+            bandBounds.emplace();
+            for (const auto &point : *patch.band)
+                bandBounds->Add(point);
+            bandBounds->Enlarge(patch.radiusMm);
+        }
+        for (const auto &surface : surfaces) {
+            if (stop.stop_requested())
+                return;
+            auto bounds = surface.bounds;
+            bounds.Enlarge(patch.radiusMm);
+            if ((bandBounds && !surface.bounds.IsOut(*bandBounds)) ||
+                std::any_of(patch.centres.begin(), patch.centres.end(),
+                            [&](const auto &p) { return !bounds.IsOut(p); }))
+                nearby.push_back(&surface);
+        }
         for (std::size_t f = 0; f < nearby.size(); ++f) {
             const auto remaining = triangleLimit - patch.vertices.size() / 3;
             if (remaining == 0 || stop.stop_requested())
@@ -173,13 +193,23 @@ struct LocalMesh {
             const auto quota = std::max(std::size_t{1}, remaining / (nearby.size() - f));
             vertexLimit = patch.vertices.size() + 3 * quota;
             refinementDivisor = quota >= 512 ? 9 : quota >= 128 ? 4 : 1;
-            const auto &[mesh, transform] = nearby[f];
+            const auto &mesh = nearby[f]->mesh;
+            const auto &transform = nearby[f]->transform;
             for (int i = 1; i <= mesh->NbTriangles() && !full(); ++i) {
                 int a, b, c;
                 mesh->Triangle(i).Get(a, b, c);
-                triangle({mesh->Node(a).Transformed(transform),
-                          mesh->Node(b).Transformed(transform),
-                          mesh->Node(c).Transformed(transform)});
+                const std::array<gp_Pnt, 3> points{mesh->Node(a).Transformed(transform),
+                                                   mesh->Node(b).Transformed(transform),
+                                                   mesh->Node(c).Transformed(transform)};
+                if (!patch.band)
+                    triangle(points);
+                else if (!appendCollisionStrip(patch, points, vertexLimit)) {
+                    // End/oblique/curved surfaces keep the established point markers,
+                    // restricted to the same confirmed axial interval.
+                    const auto polygon = clipCollisionStripRange(points, *patch.band);
+                    for (std::size_t v = 1; v + 1 < polygon.size() && !full(); ++v)
+                        triangle({polygon[0], polygon[v], polygon[v + 1]});
+                }
             }
         }
     }
@@ -202,9 +232,11 @@ void buildCollisionHighlights(PreviewFrame &frame, const std::vector<CollisionEv
                         point.SetY(frame.floor->yMm);
                         frame.floorContacts.push_back(point);
                     }
+            const bool floor = item.firstId == "floor" || item.secondId == "floor";
+            const auto band = floor ? std::nullopt : collisionStrip(region, radius, stop);
             if (!points.empty())
                 for (const auto &id : {item.firstId, item.secondId})
-                    pending.push_back({id, radius, points, {}});
+                    pending.push_back({id, radius, points, {}, band});
         };
         bool solid = false;
         for (TopExp_Explorer it(item.overlap, TopAbs_SOLID); it.More(); it.Next()) {
@@ -219,23 +251,32 @@ void buildCollisionHighlights(PreviewFrame &frame, const std::vector<CollisionEv
                            ? maxTrianglesPerPatch
                            : std::min(maxTrianglesPerPatch,
                                       std::max(std::size_t{1}, std::size_t{8192} / pending.size()));
+    // Cache immutable surface data once per body and this frame, never across stale states.
+    std::map<std::string, std::vector<SurfaceMesh>> surfaceCache;
     for (auto &patch : pending) {
-        patch.vertices.reserve(3 * std::min(std::size_t{256}, limit));
+        if (stop.stop_requested())
+            return;
+        const std::size_t initialTriangles = patch.band ? 64 : 256;
+        patch.vertices.reserve(3 * std::min(initialTriangles, limit));
         LocalMesh mesh{patch, stop, limit};
-        std::vector<TopoDS_Shape> surfaces;
-        if (patch.bodyId == "sheet") {
-            const auto &regions =
-                frame.displayShape.IsNull() ? frame.regions : frame.displayRegions;
-            surfaces.assign(regions.begin(), regions.end());
-        } else if (patch.bodyId == "die" || patch.bodyId == "punch")
-            surfaces.push_back(frame.tools[patch.bodyId == "die" ? 0 : 1]);
-        else if (patch.bodyId == "floor" && frame.floor)
-            surfaces.push_back(frame.floor->surface);
-        else
-            for (const auto &component : frame.machine)
-                if (component.id == patch.bodyId)
-                    surfaces.push_back(component.shape);
-        mesh.shapes(surfaces);
+        auto cached = surfaceCache.find(patch.bodyId);
+        if (cached == surfaceCache.end()) {
+            std::vector<TopoDS_Shape> surfaces;
+            if (patch.bodyId == "sheet") {
+                const auto &regions =
+                    frame.displayShape.IsNull() ? frame.regions : frame.displayRegions;
+                surfaces.assign(regions.begin(), regions.end());
+            } else if (patch.bodyId == "die" || patch.bodyId == "punch")
+                surfaces.push_back(frame.tools[patch.bodyId == "die" ? 0 : 1]);
+            else if (patch.bodyId == "floor" && frame.floor)
+                surfaces.push_back(frame.floor->surface);
+            else
+                for (const auto &component : frame.machine)
+                    if (component.id == patch.bodyId)
+                        surfaces.push_back(component.shape);
+            cached = surfaceCache.emplace(patch.bodyId, surfaceMeshes(surfaces, stop)).first;
+        }
+        mesh.surfaces(cached->second);
         if (!patch.vertices.empty())
             frame.collisionHighlights.push_back(std::move(patch));
     }

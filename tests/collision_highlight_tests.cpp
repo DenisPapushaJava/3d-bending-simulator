@@ -51,6 +51,7 @@ int main() {
                 "Both colliding surfaces need local markers");
         std::size_t bytes = 0;
         for (const auto &patch : frame.collisionHighlights) {
+            require(!patch.band, "A short compact collision lost its established point marker");
             require(patch.vertices.size() <= 2048 * 3 && patch.vertices.size() % 3 == 0,
                     "Local mesh exceeded its per-body budget");
             require(patch.centres.size() <= 16 && patch.radiusMm == 8,

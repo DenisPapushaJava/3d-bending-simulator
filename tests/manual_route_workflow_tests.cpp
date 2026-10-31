@@ -19,6 +19,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
+#include <QWindow>
 #include <STEPControl_Writer.hxx>
 #include <atomic>
 #include <iostream>
@@ -98,6 +99,16 @@ int main(int argc, char **argv) {
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
         window.show();
+        if (QApplication::platformName() != QStringLiteral("offscreen")) {
+            // Let the native window manager finish exposing the canvas before the
+            // camera-preservation snapshots, as in the graphical picker scenario.
+            window.raise();
+            window.activateWindow();
+            wait([&] {
+                return window.windowHandle() && window.windowHandle()->isExposed() &&
+                       window.isActiveWindow();
+            });
+        }
         window.openStep(folder.path() + "/source.step");
         auto &controller = window.importController();
         wait([&] { return !controller.hasWork(); });
@@ -610,6 +621,16 @@ x.XCloseDisplay(d)
                 p.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
             }
             require(shot.save(output + "-collision.png"), "Collision capture failed");
+            if (viewer && viewer->isReady()) {
+                viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+                require(viewer->captureImage(true).save(output + "-collision-iso.png"),
+                        "Isometric collision capture failed");
+                std::cout << "Collision strip patches="
+                          << std::count_if(failedFrame.collisionHighlights.begin(),
+                                           failedFrame.collisionHighlights.end(),
+                                           [](const auto &p) { return p.band.has_value(); })
+                          << '\n';
+            }
         }
         require(controller.session().document()->sourceStep() == bytes, "Source was modified");
         const auto oldSource = controller.session().document();

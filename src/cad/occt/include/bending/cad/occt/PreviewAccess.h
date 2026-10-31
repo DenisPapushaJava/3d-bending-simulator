@@ -37,13 +37,16 @@ struct FloorPlane {
 };
 struct CollisionHighlightVertex {
     gp_Pnt point;
-    float strength; // Smooth radial falloff, 0..1. Visual marker, not contact pressure.
+    float strength; // Local falloff, 0..1. Visual marker, not contact pressure.
 };
 struct CollisionHighlightPatch {
     std::string bodyId;
     double radiusMm;
     std::vector<gp_Pnt> centres;
     std::vector<CollisionHighlightVertex> vertices; // Independent triangles; bounded local mesh.
+    // A verified straight edge of the overlap, bounded by its actual endpoints.
+    // Parallel surface triangles use a strip; other triangles retain point markers.
+    std::optional<std::array<gp_Pnt, 2>> band;
 };
 struct PreviewFrame {
     std::vector<CollisionHighlightPatch> collisionHighlights;
