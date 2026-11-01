@@ -1,18 +1,22 @@
 #pragma once
 
+#include "bending/viewer/ToolSegmentColors.h"
 #include <QImage>
 #include <QWidget>
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QMenu;
+class QAction;
 namespace bending::application {
 class Document;
 struct RecognizedBend;
 struct BendInteriorContourDiagnostic;
 class SingleBendPreview;
+class FlatPattern;
 } // namespace bending::application
 namespace bending::viewer {
 
@@ -30,8 +34,15 @@ class ViewerWidget final : public QWidget {
     [[nodiscard]] QString errorString() const;
     // Shared actions, owned by the viewer; null when the native backend is unavailable.
     [[nodiscard]] QMenu *navigationMenu() const;
+    [[nodiscard]] QAction *sheetOrientationAction() const;
     // Captures the OCCT framebuffer, including native surfaces QWidget::grab cannot capture.
     [[nodiscard]] QImage captureImage(bool includeControls = false);
+    // Qt-only HUD attachment. The viewer owns positioning above its native canvas.
+    void setBottomOverlay(QWidget *);
+    void setTopLeftOverlay(QWidget *);
+    void setToolSegmentColors(ToolSegmentColors);
+    // Redraws the current presentations/HUD without changing the camera or CAD inputs.
+    void refreshScene();
     void fitAll();
     void setCutoutsVisible(bool visible);
     void setDimensionsVisible(bool visible);
@@ -44,12 +55,15 @@ class ViewerWidget final : public QWidget {
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
     // Distinguishes the bend zone from its adjacent planar flanges.
     void highlightBend(const application::RecognizedBend &bend, quint64 revision);
+    void highlightPreviewBend(std::optional<std::size_t>);
     void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
                                  quint64 revision);
     [[nodiscard]] QString
     presentBendPreview(std::shared_ptr<const application::SingleBendPreview> preview,
                        std::size_t frameIndex, quint64 documentRevision);
     [[nodiscard]] QString endBendPreview();
+    [[nodiscard]] QString presentFlatPattern(std::shared_ptr<const application::FlatPattern>,
+                                             quint64 documentRevision);
     // Explicit diagnostic scene, never shown by the normal application startup.
     void showDiagnosticBox();
 
@@ -60,6 +74,11 @@ class ViewerWidget final : public QWidget {
   private:
     class Impl;
     std::unique_ptr<Impl> impl_;
+    void queueOverlayLayout();
+    void layoutOverlays();
+
+  protected:
+    bool eventFilter(QObject *, QEvent *) override;
 };
 
 } // namespace bending::viewer

@@ -1,7 +1,9 @@
 #pragma once
 
+#include "bending/application/BendRoute.h"
 #include "bending/application/Document.h"
 #include "bending/core/BendTarget.h"
+#include "bending/core/ToolCatalog.h"
 #include "bending/simulation/FlatToolSetup.h"
 #include "bending/simulation/PressMotion.h"
 #include "bending/simulation/SingleBend.h"
@@ -19,9 +21,59 @@ struct PunchRetractionCheck {
     double liftMm;
     double finalClearanceMm;
 };
+enum class ToolCollisionPair { SheetDie, SheetPunch, DiePunch };
+struct MachineCollision {
+    std::string firstId, firstName, secondId, secondName;
+};
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual bool workpieceReversed() const noexcept {
+        return false;
+    }
+    // True only when every published position includes the checked floor scope.
+    [[nodiscard]] virtual bool floorChecked() const noexcept {
+        return false;
+    }
+    [[nodiscard]] virtual bool seatedPunchMount() const noexcept {
+        return false;
+    }
+    [[nodiscard]] virtual core::MachineModel machineModel() const noexcept {
+        return core::MachineModel::None;
+    }
+    [[nodiscard]] virtual std::optional<MachineCollision>
+    machineCollisionAtFrame(std::size_t) const {
+        return {};
+    }
+    [[nodiscard]] virtual bool unverifiedDraft() const noexcept {
+        return false;
+    }
+    // One operation: every other bend remains in its imported formed state.
+    [[nodiscard]] virtual std::size_t otherFormedBends() const noexcept {
+        return 0;
+    }
+    [[nodiscard]] virtual std::array<double, 2> toolSegmentGaps() const noexcept {
+        return {0, 0};
+    }
+    [[nodiscard]] virtual const BendEndSupport *partialEndSupport() const noexcept {
+        return nullptr;
+    }
+    [[nodiscard]] virtual bool usesDrawingTools() const noexcept {
+        return false;
+    }
+    [[nodiscard]] virtual bool usesDrawingPunch() const noexcept {
+        return usesDrawingTools();
+    }
+    [[nodiscard]] virtual bool usesDrawingDie() const noexcept {
+        return usesDrawingTools();
+    }
+    [[nodiscard]] virtual std::optional<ToolCollisionPair> collision() const noexcept {
+        return {};
+    }
+    [[nodiscard]] virtual std::optional<ToolCollisionPair>
+    collisionAtFrame(std::size_t) const noexcept {
+        return collision();
+    }
     [[nodiscard]] virtual bool ignoresClosedCutouts() const noexcept {
         return false;
     }
@@ -47,6 +99,8 @@ enum class BendPreviewErrorCode {
     UnsupportedGeometry,
     BendZoneInteriorContours,
     UnsupportedParameters,
+    UnsupportedToolGeometry,
+    NarrowDieOpening,
     TargetMismatch,
     ToolTooShort,
     MissingLeftSupport,
@@ -55,29 +109,75 @@ enum class BendPreviewErrorCode {
     NoseTooLarge,
     SupportNotProven,
     ToolIntersection,
+    MachineIntersection,
     ContactLost,
+    SheetIntersection,
     RetractionNotProven,
     Cancelled,
-    Failed
+    Failed,
+    EndSupportLimitExceeded
 };
 struct BendPreviewError {
     BendPreviewErrorCode code;
     std::string detail;
     std::optional<std::size_t> frameIndex = std::nullopt;
+    BendPreviewPtr diagnostic = {}; // Safe prefix + failed state, never a successful ToolMotion.
+    std::optional<BendEndSupport> endSupport = std::nullopt;
 };
 using BendPreviewResult = std::variant<BendPreviewPtr, BendPreviewError>;
 class SingleBendPreviewBuilder {
   public:
+    // Drop retained route work on close/new import. Must not wait for an active CAD call.
+    virtual void discardRouteCache() const {}
+    [[nodiscard]] virtual RouteDraftResult buildRouteDraft(DocumentPtr, RouteDraftRequest,
+                                                           std::stop_token) const {
+        return BendRouteError{BendRouteErrorCode::Unsupported, "Draft preview unavailable"};
+    }
+    [[nodiscard]] virtual BendRouteResult buildRoute(DocumentPtr, BendRouteRequest,
+                                                     std::stop_token) const {
+        return BendRouteError{BendRouteErrorCode::Unsupported, "Route builder unavailable"};
+    }
+    [[nodiscard]] virtual BendPreviewResult
+    buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
+                           core::ToolAssignment assignment, std::stop_token stop,
+                           double maximumEndSupportLossMm = 0,
+                           bool workpieceReversed = false) const {
+        if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
+            return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
+                                    "DXF setup unavailable"};
+        const auto tools = core::toolParameters(assignment);
+        return tools ? buildToolSetup(document, index, target, *tools, stop,
+                                      maximumEndSupportLossMm, workpieceReversed)
+                     : BendPreviewResult(BendPreviewError{
+                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
+    }
+
     virtual ~SingleBendPreviewBuilder() = default;
+    [[nodiscard]] virtual BendPreviewResult
+    buildAssignedToolMotion(DocumentPtr document, std::size_t index, core::BendTarget target,
+                            core::ToolAssignment assignment, std::stop_token stop,
+                            double maximumEndSupportLossMm = 0,
+                            bool workpieceReversed = false) const {
+        if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
+            return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
+                                    "DXF tool contact unavailable"};
+        const auto tools = core::toolParameters(assignment);
+        return tools ? buildToolMotion(document, index, target, *tools, stop,
+                                       maximumEndSupportLossMm, workpieceReversed)
+                     : BendPreviewResult(BendPreviewError{
+                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
+    }
     [[nodiscard]] virtual BendPreviewResult buildToolMotion(DocumentPtr, std::size_t,
                                                             core::BendTarget, core::PressTools,
-                                                            std::stop_token) const {
+                                                            std::stop_token, double = 0,
+                                                            bool = false) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool motion unavailable"};
     }
     [[nodiscard]] virtual BendPreviewResult buildToolSetup(DocumentPtr, std::size_t,
                                                            core::BendTarget, core::PressTools,
-                                                           std::stop_token) const {
+                                                           std::stop_token, double = 0,
+                                                           bool = false) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool setup unavailable"};
     }

@@ -6,7 +6,10 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QMouseEvent>
+#include <QPushButton>
+#include <QScreen>
 #include <QThread>
+#include <QVBoxLayout>
 #include <QWheelEvent>
 
 #include <functional>
@@ -74,6 +77,7 @@ int main(int argc, char *argv[]) {
             widget.setDimensionsVisible(true);
             widget.setDimensionsVisible(false);
             widget.fitAll();
+            widget.refreshScene();
             widget.setOrientation(Viewer::Orientation::Top);
             require(widget.captureImage().isNull(),
                     "Unavailable rendering must not fabricate an image");
@@ -166,6 +170,59 @@ int main(int argc, char *argv[]) {
             QApplication::sendEvent(canvas, &wheel);
             require(differences(beforeZoom, widget.captureImage()) > 200,
                     "Wheel input had no effect");
+            const auto beforeRefresh = widget.captureImage();
+            const auto signalsBeforeRefresh = selectionSignals;
+            auto *refresh = widget.findChild<QAction *>(QStringLiteral("refreshScene"));
+            require(refresh && refresh->isEnabled() &&
+                        refresh->shortcut() == QKeySequence(Qt::Key_F5),
+                    "Scene refresh/F5 is missing");
+            refresh->trigger();
+            require(differences(beforeRefresh, widget.captureImage()) == 0 &&
+                        selectionSignals == signalsBeforeRefresh,
+                    "Refresh changed the camera, geometry or selection");
+
+            // Recreate the native graphics resources from the same diagnostic shape.
+            QEvent nativeChange(QEvent::WinIdChange);
+            QApplication::sendEvent(canvas, &nativeChange);
+            waitUntil([&] { return widget.isReady() || !widget.errorString().isEmpty(); });
+            require(widget.isReady() && differences(beforeRefresh, widget.captureImage()) < 30,
+                    "Native recreation lost the current camera or shape");
+
+            auto *hud = new QWidget;
+            hud->setStyleSheet(QStringLiteral("background:#D04B55;"));
+            auto *hudLayout = new QVBoxLayout(hud);
+            hudLayout->setContentsMargins(6, 6, 6, 6);
+            auto *step = new QPushButton(QStringLiteral("0   1   2   3   4"), hud);
+            hudLayout->addWidget(step);
+            widget.setBottomOverlay(hud);
+            hud->show();
+            const auto hudReady = [&] {
+                return hud->isVisible() && hud->width() >= hud->sizeHint().width() &&
+                       hud->height() >= hud->sizeHint().height() &&
+                       hud->geometry().bottom() < canvas->height() - 10;
+            };
+            waitUntil(hudReady);
+            // Read the native on-screen composition, not a HUD pasted over ToPixMap().
+            const auto nativeHudVisible = [&] {
+                const auto shot = widget.screen()->grabWindow(widget.winId()).toImage();
+                if (shot.isNull())
+                    return false;
+                const auto point = hud->mapTo(&widget, QPoint(2, 2)) * shot.devicePixelRatio();
+                return shot.rect().contains(point) &&
+                       shot.pixelColor(point) == QColor(QStringLiteral("#D04B55"));
+            };
+            waitUntil(nativeHudVisible);
+            step->setMinimumHeight(68);
+            step->updateGeometry();
+            refresh->trigger();
+            waitUntil(hudReady);
+            require(hud->height() >= 80 && nativeHudVisible(),
+                    "Refresh left the relaid-out native HUD clipped or invisible");
+            hud->hide();
+            widget.refreshScene();
+            QCoreApplication::processEvents();
+            require(hud->isHidden(), "Refresh enabled a deliberately hidden overlay");
+            hud->show();
             widget.fitAll();
             widget.resize(760, 520);
             QCoreApplication::processEvents();
@@ -183,6 +240,8 @@ int main(int argc, char *argv[]) {
             widget.showNormal();
             QCoreApplication::processEvents();
             require(!widget.captureImage().isNull(), "Minimize/restore lost the graphics context");
+            waitUntil(hudReady);
+            waitUntil(nativeHudVisible);
             if (const auto path = qEnvironmentVariable("BENDING_VIEWER_SNAPSHOT");
                 !path.isEmpty()) {
                 widget.setOrientation(Viewer::Orientation::Isometric);

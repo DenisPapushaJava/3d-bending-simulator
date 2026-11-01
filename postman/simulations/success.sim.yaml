@@ -1,0 +1,6 @@
+simulation: github-update-success
+routing: path
+mocks:
+  - name: github-updates
+    routeKey: github
+    path: postman/mocks/github-updates/config.yaml

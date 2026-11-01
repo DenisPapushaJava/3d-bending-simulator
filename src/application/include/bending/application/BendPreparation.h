@@ -28,6 +28,7 @@ struct BendPreparation {
     std::optional<core::BendTarget> target;
     std::optional<core::PressTools> tools = std::nullopt;
     std::optional<core::ToolAssignment> catalogTools = std::nullopt;
+    bool workpieceReversed = false; // Physical Y half-turn; independent of tool orientation.
 };
 struct BendBindings {
     // Current recognized zone -> preparation entry. Ambiguous matches stay unbound.

@@ -150,6 +150,127 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
     return result;
 }
 
+DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &info, double height,
+                                           const DimensionLayout &layout) {
+    DimensionAnnotations result;
+    const auto &hi = info.bounds.maximum;
+    const double gap = std::max(hi.x, hi.y) * .12;
+    struct LabelBox {
+        double x, y, halfWidth;
+    };
+    std::vector<LabelBox> labels;
+    const auto screen = [&](const gp_Pnt &p) {
+        const gp_Vec v(gp_Pnt(0, 0, 0), p);
+        return std::pair{v.Dot(layout.right) / layout.right.SquareMagnitude(),
+                         v.Dot(layout.up) / layout.up.SquareMagnitude()};
+    };
+    const auto halfWidth = [](const QString &caption) { return .075 * caption.size() + .1; };
+    const auto measure = [&](gp_Pnt a, gp_Pnt b, gp_Vec offset, const QString &caption,
+                             const Quantity_Color &color) {
+        length(result, a, b, offset, caption, height, color);
+        const auto [x, y] = screen(gp_Pnt((a.XYZ() + b.XYZ()) * .5).Translated(offset));
+        labels.push_back({x, y, halfWidth(caption)});
+    };
+    measure({0, 0, hi.z}, {hi.x, 0, hi.z}, {0, -gap, 0},
+            QStringLiteral("Ширина %1 мм").arg(number(hi.x)), dimensionColor);
+    measure({0, 0, hi.z}, {0, hi.y, hi.z}, {-gap, 0, 0},
+            QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), dimensionColor);
+    const auto bendId = [](std::size_t index) {
+        return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
+    };
+    struct CoordinateRow {
+        double value;
+        bool x;
+        std::vector<std::size_t> ids;
+    };
+    std::vector<CoordinateRow> rows;
+    const auto coordinate = [&](double value, bool x, std::size_t id) {
+        auto row = std::find_if(rows.begin(), rows.end(), [&](const auto &r) {
+            return r.x == x && std::abs(r.value - value) <= 1.e-5;
+        });
+        if (row == rows.end())
+            rows.push_back({value, x, {id}});
+        else
+            row->ids.push_back(id);
+    };
+    for (const auto &b : info.bends) {
+        const auto line = b.centreLine();
+        if (std::abs(line[0].y - line[1].y) < 1.e-5)
+            coordinate(line[0].y, false, b.bendIndex);
+        else if (std::abs(line[0].x - line[1].x) < 1.e-5)
+            coordinate(line[0].x, true, b.bendIndex);
+        else {
+            coordinate((line[0].x + line[1].x) / 2, true, b.bendIndex);
+            coordinate((line[0].y + line[1].y) / 2, false, b.bendIndex);
+        }
+    }
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) {
+        return std::pair{a.x, a.value} < std::pair{b.x, b.value};
+    });
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        auto &row = rows[i];
+        std::sort(row.ids.begin(), row.ids.end());
+        QString ids;
+        if (row.ids.size() > 1 && row.ids.back() - row.ids.front() + 1 == row.ids.size())
+            ids = bendId(row.ids.front()) + QChar(0x2013) + bendId(row.ids.back());
+        else {
+            QStringList names;
+            for (auto id : row.ids)
+                names << bendId(id);
+            ids = names.join(QLatin1Char('/'));
+        }
+        const double offset = gap * (1 + i * .65);
+        measure(row.x ? gp_Pnt(0, hi.y, hi.z) : gp_Pnt(hi.x, 0, hi.z),
+                row.x ? gp_Pnt(row.value, hi.y, hi.z) : gp_Pnt(hi.x, row.value, hi.z),
+                row.x ? gp_Vec(0, offset, 0) : gp_Vec(offset, 0, 0),
+                QStringLiteral("%1 · %2 %3 мм")
+                    .arg(ids, row.x ? QStringLiteral("X") : QStringLiteral("Y"), number(row.value)),
+                bendColor);
+    }
+    const auto [cx, cy] = screen({hi.x / 2, hi.y / 2, hi.z});
+    for (const auto &b : info.bends) {
+        const auto line = b.centreLine();
+        const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
+        const auto [ax, ay] = screen(anchor);
+        const gp_Vec axis(point(line[0]), point(line[1]));
+        double nx = -axis.Dot(layout.up), ny = axis.Dot(layout.right);
+        const double norm = std::hypot(nx, ny);
+        if (norm > 1.e-10) {
+            nx /= norm;
+            ny /= norm;
+        } else {
+            nx = 0;
+            ny = 1;
+        }
+        // Put the caption towards the blank interior, away from the outside dimensions.
+        if (nx * (cx - ax) + ny * (cy - ay) < 0) {
+            nx = -nx;
+            ny = -ny;
+        }
+        const auto caption =
+            QStringLiteral("%1 %2 · %3° · L %4 мм")
+                .arg(bendId(b.bendIndex),
+                     b.direction > 0 ? QStringLiteral("↑") : QStringLiteral("↓"),
+                     number(180 - b.turnRadians * 180 / std::numbers::pi), number(b.lengthMm()));
+        const double distance = 1 + .8 * std::abs(nx);
+        const double x = ax + nx * distance, initialY = ay + ny * distance;
+        // Screen units are 50 px. Reserve a conservative text box and separate nearby bends.
+        const double width = halfWidth(caption);
+        double y = initialY;
+        for (std::size_t row = 0; row < info.bends.size() * 2 + 1; ++row) {
+            const double shift = (row + 1) / 2 * .6 * (row % 2 ? 1 : -1);
+            y = initialY + shift;
+            if (std::none_of(labels.begin(), labels.end(), [&](const auto &placed) {
+                    return std::abs(x - placed.x) < width + placed.halfWidth &&
+                           std::abs(y - placed.y) < .5;
+                }))
+                break;
+        }
+        labels.push_back({x, y, width});
+        callout(result, anchor, layout.right * (x - ax) + layout.up * (y - ay), caption, height);
+    }
+    return result;
+}
 DimensionAnnotations previewDimensions(const cad::PreviewFrame &frame,
                                        const simulation::SingleBend &model, double height,
                                        const DimensionLayout &layout) {
@@ -159,9 +280,9 @@ DimensionAnnotations previewDimensions(const cad::PreviewFrame &frame,
     }
     const auto &anchors = *frame.dimensions;
     length(result, anchors.fixed[0], anchors.fixed[1], -layout.right * 2.2 - layout.up * 0.6,
-           QStringLiteral("A прям. %1 мм").arg(number(model.fixedFlangeMm)), height);
+           QStringLiteral("П1 прям. %1 мм").arg(number(model.fixedFlangeMm)), height);
     length(result, anchors.moving[0], anchors.moving[1], layout.right * 2.2 - layout.up * 0.6,
-           QStringLiteral("B прям. %1 мм").arg(number(model.movingFlangeMm)), height);
+           QStringLiteral("П2 прям. %1 мм").arg(number(model.movingFlangeMm)), height);
     length(result, anchors.fixed[1], anchors.fixed[1].Translated(anchors.widthVector),
            -layout.up * 1.8, QStringLiteral("Ширина %1 мм").arg(number(model.widthMm)), height);
     callout(result, anchors.bendMiddle, layout.up * 1.8,

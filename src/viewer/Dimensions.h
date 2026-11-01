@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/Document.h"
+#include "bending/application/FlatPattern.h"
 #include "bending/cad/occt/PreviewAccess.h"
 
 #include <AIS_InteractiveObject.hxx>
@@ -28,4 +29,7 @@ documentDimensions(const application::DocumentMetadata &, const TopTools_Indexed
 [[nodiscard]] DimensionAnnotations previewDimensions(const cad::PreviewFrame &,
                                                      const simulation::SingleBend &,
                                                      double textHeight, const DimensionLayout &);
+[[nodiscard]] DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &,
+                                                         double textHeight,
+                                                         const DimensionLayout &);
 } // namespace bending::viewer

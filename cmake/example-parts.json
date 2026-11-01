@@ -1,0 +1,38 @@
+{
+  "format": "bending-example-parts",
+  "version": 1,
+  "parts": [
+    {
+      "id": "profiled",
+      "file": "profiled-bend-6mm.step",
+      "title": "Уголок с отверстиями",
+      "description": "1 гиб · 6 мм — толщина, инструмент, развёртка и чертёж",
+      "bends": 1,
+      "thicknessMm": 6
+    },
+    {
+      "id": "clearance",
+      "file": "tool-clearance-2mm.step",
+      "title": "Профиль: выбор пуансона",
+      "description": "2 гиба · 2 мм — форма пуансона и столкновения",
+      "bends": 2,
+      "thicknessMm": 2
+    },
+    {
+      "id": "tray",
+      "file": "tray-four-bends-2mm.step",
+      "title": "Лоток с четырьмя гибами",
+      "description": "4 гиба · 2 мм — ручной порядок и состав секций",
+      "bends": 4,
+      "thicknessMm": 2
+    },
+    {
+      "id": "panel",
+      "file": "wall-panel-1000mm.step",
+      "title": "Стеновая панель · 16 гибов",
+      "description": "1,5 мм · L1000 — развёртка, чертёж и ручные шаги; нужен набор секций",
+      "bends": 16,
+      "thicknessMm": 1.5
+    }
+  ]
+}

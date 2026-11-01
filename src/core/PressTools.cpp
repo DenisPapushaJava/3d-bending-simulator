@@ -12,7 +12,10 @@ bool validPressTools(const PressTools &t) noexcept {
         return std::isfinite(v) && v >= low && v <= high;
     };
     constexpr double degree = std::numbers::pi / 180.0;
-    return in(t.openingMm, 1.0, 1000.0) && in(t.dieAngleRadians, 30.0 * degree, 120.0 * degree) &&
+    return (t.machineModel == MachineModel::None || t.machineModel == MachineModel::DemoPressV1 ||
+            t.machineModel == MachineModel::DemoPressV2 ||
+            t.machineModel == MachineModel::DemoPressV3) &&
+           in(t.openingMm, 1.0, 1000.0) && in(t.dieAngleRadians, 30.0 * degree, 120.0 * degree) &&
            in(t.punchAngleRadians, 10.0 * degree, 120.0 * degree) &&
            in(t.noseRadiusMm, 0.1, t.openingMm / 4.0) && in(t.lengthMm, 1.0, 100000.0) &&
            in(t.clearanceMm, 0.1, 1000.0) && in(punchLengthMm(t), 1.0, 100000.0);

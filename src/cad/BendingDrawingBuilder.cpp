@@ -1,16 +1,23 @@
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "BendRecognizer.h"
 #include "DrawingOpenings.h"
+#include "DrawingProfiles.h"
+#include "DrawingRepeats.h"
+#include "DrawingSections.h"
 #include "bending/cad/CadDocument.h"
+#include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/FlatPatternAccess.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
@@ -65,6 +72,55 @@ std::array<double, 4> bounds(const TopoDS_Shape &shape, const Frame &frame,
         throw std::runtime_error("Cannot measure finite drawing bounds");
     const auto low = box.CornerMin(), high = box.CornerMax();
     return {low.X(), low.Y(), high.X(), high.Y()};
+}
+void overallWitnesses(const TopoDS_Shape &shape, const Frame &frame, DrawingDimension &dimension,
+                      bool horizontal, std::stop_token stop) {
+    std::array<DrawingPoint, 2> points;
+    const std::array targets{dimension.start, dimension.end};
+    const auto axis = horizontal ? frame.u : frame.v;
+    try {
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(shape, box, false, false);
+        if (box.IsVoid() || box.IsOpen())
+            return;
+        const auto center = gp_Pnt((box.CornerMin().XYZ() + box.CornerMax().XYZ()) / 2);
+        const double reach = box.CornerMin().Distance(box.CornerMax()) + 1;
+        for (std::size_t i = 0; i < 2; ++i) {
+            if (stop.stop_requested())
+                throw DrawingError{"Cancelled", true};
+            const double coordinate = horizontal ? targets[i].x : targets[i].y;
+            // Keep the support plane outside the solid. A touching/intersecting plane
+            // can produce an arbitrary zero-distance inner solution in OCCT.
+            const double offset = std::max(1., dimension.valueMm * .01);
+            const auto origin = center.Translated(
+                gp_Vec(axis) * (coordinate + (i == 0 ? -offset : offset) -
+                                gp_Vec(gp_Pnt(0, 0, 0), center).Dot(gp_Vec(axis))));
+            const auto plane =
+                BRepBuilderAPI_MakeFace(gp_Pln(origin, axis), -reach, reach, -reach, reach).Face();
+            BRepExtrema_DistShapeShape distance(shape, plane);
+            if (stop.stop_requested())
+                throw DrawingError{"Cancelled", true};
+            if (!distance.IsDone() || std::abs(distance.Value() - offset) > 1e-5 ||
+                !distance.NbSolution())
+                return;
+            double closest = 1e100;
+            for (int j = 1; j <= distance.NbSolution(); ++j) {
+                const auto point = project(distance.PointOnShape1(j), frame);
+                if (std::abs((horizontal ? point.x : point.y) - coordinate) > 1e-5)
+                    continue;
+                const double delta = std::hypot(point.x - targets[i].x, point.y - targets[i].y);
+                if (delta < closest) {
+                    closest = delta;
+                    points[i] = point;
+                }
+            }
+            if (closest == 1e100)
+                return;
+        }
+        dimension.witnesses = points;
+    } catch (const Standard_Failure &) {
+        // Keep the measured projection if this optional contour attachment is unavailable.
+    }
 }
 struct CircleArcs {
     DrawingPoint center;
@@ -701,6 +757,7 @@ std::optional<VariableSections> variableSections(const TopoDS_Shape &shape,
             if (classifier.State() != TopAbs_IN && classifier.State() != TopAbs_ON)
                 return {};
             profile.bendNotes.push_back({project(anchor, group.frame), index});
+            profile.dimensionedBends.push_back(index);
         }
         if (!result.details.empty()) {
             const auto &first = result.details.front().view;
@@ -734,6 +791,137 @@ std::optional<VariableSections> variableSections(const TopoDS_Shape &shape,
              ""});
     }
     return result;
+}
+void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
+                        const DrawingRequest &request, std::size_t &budget, std::stop_token stop) {
+    if (!request.unfoldSettings)
+        return;
+    const auto &metadata = document->metadata();
+    const auto &settings = *request.unfoldSettings;
+    auto flat = request.preparedFlatPattern;
+    if (!flat || !OcctFlatPatternAccess::belongsTo(*flat, *document) ||
+        flat->info().settings != settings ||
+        (request.manualThicknessMm &&
+         std::abs(flat->info().thicknessMm - *request.manualThicknessMm) >
+             std::max(1e-6, metadata.bendAnalysis.lengthToleranceMm))) {
+        auto flatResult =
+            FlatPatternBuilder{}.build(document, {settings, request.manualThicknessMm}, stop);
+        if (const auto *error = std::get_if<FlatPatternError>(&flatResult)) {
+            if (error->code == FlatPatternErrorCode::Cancelled)
+                throw DrawingError{"Cancelled", true};
+            drawing.flatPatternError = *error;
+            flat.reset();
+        } else
+            flat = std::get<FlatPatternPtr>(std::move(flatResult));
+    }
+    if (flat) {
+        DrawingFlatPattern unfolded;
+        unfolded.info = flat->info();
+        const auto &info = unfolded.info;
+        bool topFound = false;
+        for (TopExp_Explorer e(OcctFlatPatternAccess::geometry(*flat), TopAbs_FACE); e.More();
+             e.Next()) {
+            const auto face = TopoDS::Face(e.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane ||
+                std::abs(std::abs(surface.Plane().Axis().Direction().Z()) - 1) > 1e-7 ||
+                std::abs(surface.Plane().Location().Z() - info.thicknessMm) > 1e-5)
+                continue;
+            if (topFound)
+                throw DrawingError{"Multiple top contours in the flat pattern"};
+            contours(face, false, unfolded.view, budget, stop);
+            topFound = true;
+        }
+        if (!topFound || unfolded.view.paths.empty())
+            throw DrawingError{"Missing verified flat contour"};
+        auto &v = unfolded.view;
+        const auto &hi = info.bounds.maximum;
+        v.minimum = {0, 0};
+        v.maximum = {hi.x, hi.y};
+        v.dimensions.push_back({{0, 0}, {hi.x, 0}, hi.x, ""});
+        v.dimensions.push_back({{0, 0}, {0, hi.y}, hi.y, ""});
+        std::vector<double> ys, xs{0, hi.x};
+        for (const auto &b : info.bends) {
+            const auto line = b.centreLine();
+            if (std::abs(line[0].y - line[1].y) < 1.e-5) {
+                ys.push_back(line[0].y);
+                xs.push_back(line[0].x);
+                xs.push_back(line[1].x);
+            } else if (std::abs(line[0].x - line[1].x) < 1.e-5) {
+                xs.push_back(line[0].x);
+                ys.push_back(line[0].y);
+                ys.push_back(line[1].y);
+            } else {
+                xs.push_back(line[0].x);
+                xs.push_back(line[1].x);
+                ys.push_back(line[0].y);
+                ys.push_back(line[1].y);
+            }
+        }
+        const auto unique = [](auto &values) {
+            std::sort(values.begin(), values.end());
+            values.erase(std::unique(values.begin(), values.end(),
+                                     [](double a, double b) { return std::abs(a - b) < 1e-5; }),
+                         values.end());
+        };
+        unique(ys);
+        unique(xs);
+        for (auto y : ys)
+            if (y > 1.e-5 && y < hi.y - 1.e-5)
+                v.sectionDimensions.push_back({{hi.x, 0}, {hi.x, y}, y, ""});
+        if (xs.size() > 2)
+            for (std::size_t i = 1; i < xs.size(); ++i)
+                v.axialDimensions.push_back(
+                    {{xs[i - 1], hi.y}, {xs[i], hi.y}, xs[i] - xs[i - 1], ""});
+        compactRepeatedFlat(unfolded, 1e-5);
+        // Witnesses attach to the actual flat contour at the measured coordinate.
+        // This changes presentation anchors only, never the measured value.
+        const auto witness = [&](DrawingPoint target, bool horizontal) {
+            std::optional<DrawingPoint> best;
+            for (const auto &path : v.paths)
+                for (std::size_t i = 1; i < path.points.size(); ++i) {
+                    const auto a = path.points[i - 1], b = path.points[i];
+                    const double from = horizontal ? a.x : a.y, to = horizontal ? b.x : b.y;
+                    const double coordinate = horizontal ? target.x : target.y;
+                    if (coordinate < std::min(from, to) - 1e-5 ||
+                        coordinate > std::max(from, to) + 1e-5)
+                        continue;
+                    const auto consider = [&](DrawingPoint point) {
+                        if (!best || std::hypot(point.x - target.x, point.y - target.y) <
+                                         std::hypot(best->x - target.x, best->y - target.y))
+                            best = point;
+                    };
+                    if (std::abs(to - from) < 1e-10) {
+                        consider(a);
+                        consider(b);
+                    } else {
+                        const double f = std::clamp((coordinate - from) / (to - from), 0., 1.);
+                        consider({a.x + f * (b.x - a.x), a.y + f * (b.y - a.y)});
+                    }
+                }
+            return best;
+        };
+        for (auto *dimensions : {&v.dimensions, &v.sectionDimensions, &v.axialDimensions})
+            for (auto &dimension : *dimensions) {
+                const bool horizontal = std::abs(dimension.end.x - dimension.start.x) >
+                                        std::abs(dimension.end.y - dimension.start.y);
+                const auto first = witness(dimension.start, horizontal),
+                           second = witness(dimension.end, horizontal);
+                if (!first || !second)
+                    throw DrawingError{"Cannot attach a flat dimension to its contour"};
+                dimension.witnesses = std::array{*first, *second};
+            }
+        for (const auto &contour : OcctFlatPatternAccess::openingContours(*flat)) {
+            budget += contour.size();
+            if (budget > 200000)
+                throw DrawingError{"Drawing projection exceeds 200000 points"};
+            DrawingPath path;
+            for (const auto &p : contour)
+                path.points.push_back({p.x, p.y});
+            v.paths.push_back(std::move(path));
+        }
+        drawing.flatPattern = std::move(unfolded);
+    }
 }
 } // namespace
 DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest request,
@@ -898,10 +1086,17 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         drawing->sourceName.assign(utf8.begin(), utf8.end());
         std::size_t budget = 0;
         const auto openings = drawingOpenings(shape, faces, stop);
+        const std::array<gp_Ax2, 3> classicalFrames{
+            gp_Ax2(gp_Pnt(0, 0, 0), frames[0].normal, frames[0].u),
+            gp_Ax2(gp_Pnt(0, 0, 0), frames[1].normal, frames[1].u),
+            gp_Ax2(gp_Pnt(0, 0, 0), frames[2].normal, frames[2].u)};
+        drawing->classicalViews.emplace();
         auto profileGroup = planProfileGroup(shape, bendAnalysis.bends, frames,
                                              bendAnalysis.lengthToleranceMm, budget, stop);
         for (std::size_t i = 0; i < frames.size(); ++i) {
             drawing->views[i] = viewOf(shape, frames[i], budget, stop, i < 3 ? &openings : nullptr);
+            if (i < 3)
+                (*drawing->classicalViews)[i] = drawing->views[i];
             if (i > 0 && i < 3 && std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
                     return o.normal.IsParallel(frames[i].normal, 1e-7);
                 })) {
@@ -913,6 +1108,17 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     frames[i].normal.Reverse();
                     opposite.reverseProjection = true;
                     drawing->views[i] = std::move(opposite);
+                    drawing->auxiliaryViews.push_back({drawing->views[i], i == 1 ? "Ц" : "Ч", i});
+                    const auto &main = (*drawing->classicalViews)[0];
+                    const auto direction = classicalFrames[i].Direction();
+                    const double dx = direction.Dot(classicalFrames[0].XDirection());
+                    const double dy = direction.Dot(classicalFrames[0].YDirection());
+                    const DrawingPoint viewAnchor{(main.minimum.x + main.maximum.x) / 2 -
+                                                      dx * (main.maximum.x - main.minimum.x) / 2,
+                                                  (main.minimum.y + main.maximum.y) / 2 -
+                                                      dy * (main.maximum.y - main.minimum.y) / 2};
+                    (*drawing->classicalViews)[0].viewArrows.push_back(
+                        {viewAnchor, {dx, dy}, drawing->auxiliaryViews.back().designation});
                 }
             }
         }
@@ -927,6 +1133,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             const std::array<double, 2> gap{fv.minimum.x + keep / 2, fv.maximum.x - keep / 2};
             drawing->views[0].omittedX = gap;
             drawing->views[1].omittedX = gap;
+            (*drawing->classicalViews)[0].omittedX = gap;
+            (*drawing->classicalViews)[1].omittedX = gap;
         }
         auto &front = drawing->views[0];
         front.dimensions.push_back({{front.minimum.x, front.minimum.y},
@@ -942,6 +1150,19 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                   {top.minimum.x, top.maximum.y},
                                   top.maximum.y - top.minimum.y,
                                   ""});
+        overallWitnesses(shape, frames[0], front.dimensions[0], true, stop);
+        overallWitnesses(shape, frames[0], front.dimensions[1], false, stop);
+        overallWitnesses(shape, frames[1], top.dimensions[0], false, stop);
+        (*drawing->classicalViews)[0].dimensions = front.dimensions;
+        auto &classicalTop = (*drawing->classicalViews)[1];
+        classicalTop.dimensions.push_back({{classicalTop.minimum.x, classicalTop.minimum.y},
+                                           {classicalTop.minimum.x, classicalTop.maximum.y},
+                                           classicalTop.maximum.y - classicalTop.minimum.y,
+                                           {}});
+        const Frame classicalTopFrame{classicalFrames[1].XDirection(),
+                                      classicalFrames[1].YDirection(),
+                                      classicalFrames[1].Direction()};
+        overallWitnesses(shape, classicalTopFrame, classicalTop.dimensions[0], false, stop);
         const double baseScale = drawingScale(*drawing).value_or(1);
         const auto addBend = [&](const RecognizedBend &bend, bool diagnostic) {
             const gp_Vec axisVector(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
@@ -966,6 +1187,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                             {}};
             if (!diagnostic) {
                 const gp_Dir axis(axisVector);
+                const auto angular = drawingBendCorner(bend, faces, at);
+                if (angular)
+                    row.interiorAngleRadians = angular->interior;
                 std::array<std::optional<FlangeSize>, 2> measured;
                 for (std::size_t i = 0; i < 2; ++i) {
                     const auto other =
@@ -982,14 +1206,6 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                         row.outerFlangeMm[i] = measured[i]->value;
                     }
                 }
-                if (measured[0] && measured[1]) {
-                    const auto first = gp_Vec(measured[0]->corner, measured[0]->end).Normalized();
-                    const auto second = gp_Vec(measured[1]->corner, measured[1]->end).Normalized();
-                    const double angle = std::acos(std::clamp(first.Dot(second), -1., 1.));
-                    if (angle > 1e-5 && angle < std::numbers::pi - 1e-5 &&
-                        std::abs(angle + bend.angleRadians - std::numbers::pi) < 1e-5)
-                        row.interiorAngleRadians = angle;
-                }
                 const bool trueProfile = std::abs(axis.Dot(frames[best].normal)) > 1 - 1e-7;
                 const bool enlarged = row.interiorAngleRadians &&
                                       ((bend.innerRadiusMm + bend.thicknessMm) * baseScale < 1.5 ||
@@ -1004,7 +1220,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     grouped ? profileGroup->station
                             : gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z)
                                   .Translated(axisVector * .5);
-                if (enlarged) {
+                if (enlarged && measured[0] && measured[1]) {
                     if (drawing->details.size() >= 24)
                         throw std::runtime_error("At most 24 enlarged bend profiles are supported");
                     if (!trueProfile) {
@@ -1021,15 +1237,20 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                          budget, stop);
                 }
                 auto &profile = detail ? *detail : drawing->views[best];
-                if (row.interiorAngleRadians && (detail || trueProfile))
-                    profile.angles.push_back({project(measured[0]->corner, profileFrame),
-                                              project(measured[0]->end, profileFrame),
-                                              project(measured[1]->end, profileFrame),
-                                              *row.interiorAngleRadians,
-                                              (bend.innerRadiusMm + bend.thicknessMm) /
-                                                      std::sin(*row.interiorAngleRadians / 2) -
-                                                  bend.innerRadiusMm});
+                const bool angleShown = angular && (detail || trueProfile);
+                if (angleShown)
+                    profile.angles.push_back(
+                        {project(angular->point, profileFrame),
+                         project(angular->point.Translated(gp_Vec(angular->directions[0])),
+                                 profileFrame),
+                         project(angular->point.Translated(gp_Vec(angular->directions[1])),
+                                 profileFrame),
+                         *row.interiorAngleRadians,
+                         (bend.innerRadiusMm + bend.thicknessMm) /
+                                 std::sin(*row.interiorAngleRadians / 2) -
+                             bend.innerRadiusMm});
                 bool thicknessAdded = false;
+                std::array<bool, 2> dimensionShown{};
                 for (std::size_t i = 0; i < 2; ++i) {
                     if (!measured[i])
                         continue;
@@ -1061,9 +1282,11 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                         continue;
                     if (detail || drawing->bends.empty()) {
                         const auto direction = gp_Vec(m.corner, m.end).Normalized();
-                        if (std::abs(direction.Dot(gp_Vec(profileFrame.normal))) < 1e-7)
+                        if (std::abs(direction.Dot(gp_Vec(profileFrame.normal))) < 1e-7) {
                             profile.dimensions.push_back({project(m.corner, profileFrame), end,
                                                           m.value, "H" + std::to_string(i + 1)});
+                            dimensionShown[i] = true;
+                        }
                     }
                     if (m.virtualEnd || thicknessAdded || (!detail && !drawing->bends.empty()))
                         continue;
@@ -1097,6 +1320,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 }
                 profile.bendNotes.push_back(
                     {project(noteAnchor, profileFrame), drawing->bends.size()});
+                if (angleShown && dimensionShown[0] && dimensionShown[1])
+                    profile.dimensionedBends.push_back(drawing->bends.size());
                 noted = true;
                 if (detail) {
                     const std::string designation =
@@ -1138,6 +1363,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                        detailView.angles.end());
                 combined.bendNotes.insert(combined.bendNotes.end(), detailView.bendNotes.begin(),
                                           detailView.bendNotes.end());
+                combined.dimensionedBends.insert(combined.dimensionedBends.end(),
+                                                 detailView.dimensionedBends.begin(),
+                                                 detailView.dimensionedBends.end());
                 for (const auto &dimension : detailView.dimensions) {
                     const auto equalPoint = [](DrawingPoint a, DrawingPoint b) {
                         return std::hypot(a.x - b.x, a.y - b.y) < 1e-5;
@@ -1231,6 +1459,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             for (auto faceIndex : opening.wallFaces)
                 used[faceIndex] = true;
         drawing->unrecognizedCylindricalFaces = 0;
+        for (auto index : drawingContourRoundings(shape, faces, bendAnalysis.bends,
+                                                  bendAnalysis.lengthToleranceMm, stop))
+            used[index] = true;
         for (int i = 1; i <= faces.Extent(); ++i) {
             BRepAdaptor_Surface cylinderSurface(TopoDS::Face(faces(i)));
             if (cylinderSurface.GetType() != GeomAbs_Cylinder || used[static_cast<std::size_t>(i)])
@@ -1239,6 +1470,36 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             BRepTools::UVBounds(TopoDS::Face(faces(i)), u0, u1, v0, v1);
             if (u1 - u0 < 2 * std::numbers::pi - 1e-5)
                 ++drawing->unrecognizedCylindricalFaces;
+        }
+        if (drawing->variableProfile != DrawingVariableProfile::Measured) {
+            drawing->profiles = drawingProfiles(
+                bendAnalysis.bends, faces, gp_Ax2(gp_Pnt(0, 0, 0), frames[0].normal, frames[0].u),
+                bendAnalysis.lengthToleranceMm, stop);
+            for (auto &profile : drawing->profiles) {
+                const auto &first = bendAnalysis.bends[profile.bends.front()];
+                const gp_Pnt axisPoint(first.axisStart.x, first.axisStart.y, first.axisStart.z);
+                const gp_Vec axis(profile.normal.x, profile.normal.y, profile.normal.z);
+                const gp_Pnt station(profile.station.x, profile.station.y, profile.station.z);
+                profile.locator = project(
+                    axisPoint.Translated(axis * gp_Vec(axisPoint, station).Dot(axis)), frames[3]);
+                for (std::size_t k = 0; k < profile.bends.size(); ++k)
+                    drawing->bends[profile.bends[k]].interiorAngleRadians =
+                        profile.view.angles[k].radians;
+                for (const auto &segment : profile.segments)
+                    for (auto adjacent : {segment.previousBend, segment.nextBend}) {
+                        if (!adjacent)
+                            continue;
+                        const auto &adjacentBend = bendAnalysis.bends[*adjacent];
+                        for (std::size_t sideIndex = 0; sideIndex < 2; ++sideIndex) {
+                            std::array pair{adjacentBend.flangeFaces[sideIndex * 2],
+                                            adjacentBend.flangeFaces[sideIndex * 2 + 1]};
+                            std::sort(pair.begin(), pair.end());
+                            if (pair == segment.wallFaces)
+                                drawing->bends[*adjacent].outerFlangeMm[sideIndex] =
+                                    segment.dimension.valueMm;
+                        }
+                    }
+            }
         }
         drawing->declaredThicknessMm = request.manualThicknessMm;
         if (!drawing->bends.empty()) {
@@ -1258,6 +1519,25 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         const double arrow = std::max(5.0, std::min(30.0, longest * .2));
         drawing->views[3].sideAnchor = project(anchor, frames[3]);
         drawing->views[3].sideTip = project(anchor.Translated(gp_Vec(side) * arrow), frames[3]);
+        if (drawing->variableProfile != DrawingVariableProfile::Measured)
+            prepareClassicalDrawing(shape, faces, bendAnalysis.bends, classicalFrames, *drawing,
+                                    bendAnalysis.lengthToleranceMm, budget, stop);
+        try {
+            prepareFlatDrawing(*drawing, document, request, budget, stop);
+        } catch (const DrawingError &error) {
+            if (error.cancelled)
+                throw;
+            drawing->flatPatternError =
+                FlatPatternError{FlatPatternErrorCode::Failed, error.detail};
+        } catch (const Standard_Failure &error) {
+            drawing->flatPatternError =
+                FlatPatternError{FlatPatternErrorCode::Failed,
+                                 error.GetMessageString() ? error.GetMessageString()
+                                                          : "Flat contour preparation failed"};
+        } catch (const std::runtime_error &error) {
+            drawing->flatPatternError =
+                FlatPatternError{FlatPatternErrorCode::Failed, error.what()};
+        }
         if (!drawingScale(*drawing))
             return DrawingError{"The part does not fit the supported A3 / standard scale range"};
         return BendingDrawingPtr(std::move(drawing));

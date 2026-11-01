@@ -87,11 +87,6 @@ int main() {
             const core::BendTarget target{bend.angleRadians, bend.innerRadiusMm};
             const cad::SingleBendPreviewBuilder builder;
             const auto kin = builder.build(doc, 0, target, false, {});
-            if (metadata.bendAnalysis.bends.size() > 1) {
-                require(std::holds_alternative<application::BendPreviewError>(kin),
-                        "Multiple bends were treated as one");
-                continue;
-            }
             if (const auto *error = std::get_if<application::BendPreviewError>(&kin))
                 throw std::runtime_error(error->detail);
             const auto preview = std::get<application::BendPreviewPtr>(kin);
@@ -111,8 +106,20 @@ int main() {
             const core::PressTools tools{
                 48, std::numbers::pi / 2, 85 * std::numbers::pi / 180, 2, 100, 10};
             const auto motion = builder.buildToolMotion(doc, 0, target, tools, {});
-            if (const auto *error = std::get_if<application::BendPreviewError>(&motion))
+            if (const auto *error = std::get_if<application::BendPreviewError>(&motion)) {
+                if (metadata.bendAnalysis.bends.size() > 1 &&
+                    error->code == application::BendPreviewErrorCode::ToolIntersection) {
+                    require(
+                        error->diagnostic &&
+                            error->diagnostic->otherFormedBends() ==
+                                metadata.bendAnalysis.bends.size() - 1 &&
+                            displayTriangles(cad::OcctPreviewAccess::frame(*error->diagnostic, 0),
+                                             source, false) == topology,
+                        "Whole-part collision diagnostic lost visible cutouts");
+                    continue;
+                }
                 throw std::runtime_error(error->detail);
+            }
             const auto moved = std::get<application::BendPreviewPtr>(motion);
             require(moved->ignoresClosedCutouts() && moved->frameCount() == 61 &&
                         moved->punchRetraction(),

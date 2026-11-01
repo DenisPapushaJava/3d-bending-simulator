@@ -1,11 +1,16 @@
 #include "bending/Version.h"
 #include "bending/cad/BendingDrawingBuilder.h"
+#include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/Kernel.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/project/DxfToolImporter.h"
+#include "bending/project/GeometryCacheFiles.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
+#include "bending/update/UpdateClient.h"
 #include "bending/viewer/ViewerWidget.h"
 #include <QSettings>
 
@@ -17,8 +22,29 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QPalette>
+#include <QProxyStyle>
+#include <QSslSocket>
+#include <QStandardPaths>
+#include <QStatusBar>
 #include <QTimer>
 #include <algorithm>
+#include <filesystem>
+
+namespace {
+class ApplicationStyle final : public QProxyStyle {
+  public:
+    ApplicationStyle() : QProxyStyle(QStringLiteral("Fusion")) {}
+
+    int styleHint(StyleHint hint, const QStyleOption *option = nullptr,
+                  const QWidget *widget = nullptr,
+                  QStyleHintReturn *returnData = nullptr) const override {
+        // Windows otherwise paints disabled captions twice, with a shifted light copy.
+        if (hint == SH_EtchDisabledText)
+            return 0;
+        return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+};
+} // namespace
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -36,7 +62,7 @@ int main(int argc, char *argv[]) {
     resource("CSF_SHMessage", "SHMessage");
     resource("CSF_UnitsLexicon", "UnitsAPI/Lexi_Expr.dat");
     resource("CSF_UnitsDefinition", "UnitsAPI/Units.dat");
-    QApplication::setStyle(QStringLiteral("Fusion"));
+    QApplication::setStyle(new ApplicationStyle);
     QPalette palette;
     palette.setColor(QPalette::Window, QColor("#F7F9FB"));
     palette.setColor(QPalette::Base, Qt::white);
@@ -60,11 +86,44 @@ int main(int argc, char *argv[]) {
     QApplication::setWindowIcon(applicationIcon);
     QCoreApplication::setApplicationVersion(QString::fromUtf8(
         bending::version.data(), static_cast<qsizetype>(bending::version.size())));
+    const auto portableRoot = bending::update::discoverPortableRoot(
+        QCoreApplication::applicationDirPath(), QCoreApplication::applicationVersion());
+    if (!portableRoot.isEmpty()) {
+        const auto file = QDir(portableRoot).filePath(QStringLiteral("data/settings.ini"));
+        QDir().mkpath(QFileInfo(file).absolutePath());
+        if (!QFileInfo::exists(file)) {
+            QSettings legacy;
+            QSettings portable(file, QSettings::IniFormat);
+            for (const auto &key : legacy.allKeys())
+                portable.setValue(key, legacy.value(key));
+            portable.sync();
+        }
+        bending::ui::setPreferencesFile(file);
+    }
+#ifdef _WIN32
+    QSslSocket::setActiveBackend(QStringLiteral("schannel"));
+#endif
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Импорт и просмотр STEP · симулятор гибки"));
     parser.addHelpOption();
     parser.addVersionOption();
+    const QCommandLineOption updateProbe(
+        QStringLiteral("update-runtime-probe"),
+        QStringLiteral("Проверить TLS-комплект без сетевых запросов"));
+    const QCommandLineOption updateToken(QStringLiteral("update-token"),
+                                         QStringLiteral("Внутренний токен перезапуска"),
+                                         QStringLiteral("token"));
+    const QCommandLineOption updateRoot(QStringLiteral("portable-root"),
+                                        QStringLiteral("Внутренняя папка portable-комплекта"),
+                                        QStringLiteral("directory"));
+    parser.addOptions({updateProbe, updateToken, updateRoot});
+    const QCommandLineOption noToolCache(QStringLiteral("no-tool-cache"),
+                                         QStringLiteral("Отключить кэш оснастки для диагностики"));
+    const QCommandLineOption toolCacheDirectory(QStringLiteral("tool-cache-dir"),
+                                                QStringLiteral("Папка постоянного кэша оснастки"),
+                                                QStringLiteral("directory"));
+    parser.addOptions({noToolCache, toolCacheDirectory});
     QCommandLineOption smokeTest(QStringLiteral("smoke-test"),
                                  QStringLiteral("Проверить создание окна и завершиться"));
     parser.addOption(smokeTest);
@@ -80,22 +139,55 @@ int main(int argc, char *argv[]) {
                                  QStringLiteral("STEP одной детали или проект .bend для открытия"),
                                  QStringLiteral("[step]"));
     parser.process(app);
+    if (parser.isSet(updateProbe)) {
+        const bool ready = QSslSocket::supportsSsl()
+#ifdef _WIN32
+                           && QSslSocket::activeBackend() == QStringLiteral("schannel")
+#endif
+            ;
+        return ready ? 0 : 1;
+    }
     if (parser.positionalArguments().size() > 1) {
         parser.showHelp(1);
     }
 
     const auto files = std::make_shared<bending::project::ProjectFiles>();
-    const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>();
-    auto catalogue = bending::project::builtInToolCatalog();
-    if (const auto *error = std::get_if<std::string>(&catalogue)) {
-        qCritical() << "Tool catalogue failed:" << QString::fromStdString(*error);
+    std::shared_ptr<bending::cad::ToolGeometryCache> toolCache;
+    if (!parser.isSet(noToolCache)) {
+        const auto cacheDirectory =
+            parser.isSet(toolCacheDirectory) ? parser.value(toolCacheDirectory)
+            : !portableRoot.isEmpty()
+                ? QDir(portableRoot).filePath("data/cache/tool-geometry")
+                : QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+                      .filePath("cache/tool-geometry");
+#ifdef _WIN32
+        const std::filesystem::path cachePath(cacheDirectory.toStdWString());
+#else
+        const std::filesystem::path cachePath(cacheDirectory.toStdString());
+#endif
+        toolCache = std::make_shared<bending::cad::ToolGeometryCache>(
+            std::make_shared<bending::project::GeometryCacheFiles>(cachePath));
+    }
+    const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>(toolCache);
+    bending::core::ToolCatalog tools;
+    bending::core::ToolCatalog starter;
+    auto bundled = bending::project::readStarterToolCatalog();
+    if (const auto *error = std::get_if<std::string>(&bundled)) {
+        qCritical() << "Starter tool library unavailable:" << QString::fromStdString(*error);
         return 1;
     }
-    auto tools = std::get<bending::core::ToolCatalog>(std::move(catalogue));
-    const auto savedCatalog =
-        (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
-            ? QString{}
-            : QSettings().value(QStringLiteral("tools/catalogPath")).toString();
+    // Startup probes and explicit catalogues stay isolated from workshop initialization.
+    if (!parser.isSet(smokeTest) && !parser.isSet(graphicsTest) && !parser.isSet(toolCatalogOption))
+        starter = std::get<bending::core::ToolCatalog>(std::move(bundled));
+    auto savedCatalog = (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
+                            ? QString{}
+                            : bending::ui::toolCatalogPath();
+    if (savedCatalog.isEmpty() && !parser.isSet(smokeTest) && !parser.isSet(graphicsTest)) {
+        const auto existing =
+            QDir(bending::ui::toolLibraryDirectory()).filePath("tools/tool-catalog.json");
+        if (QFileInfo::exists(existing))
+            savedCatalog = existing;
+    }
     if (parser.isSet(toolCatalogOption) || !savedCatalog.isEmpty()) {
         const auto argument =
             parser.isSet(toolCatalogOption) ? parser.value(toolCatalogOption) : savedCatalog;
@@ -126,10 +218,18 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
+    bending::update::UpdateClient updates({QCoreApplication::applicationVersion(), {}, 30000},
+                                          &app);
     bending::ui::MainWindow window({bending::version, bending::cad::kernelVersion()}, files, files,
                                    previewBuilder, std::move(tools));
     window.setToolCatalogLoader(bending::project::readToolCatalog);
+    window.setToolProfileImport(
+        std::make_shared<bending::project::DxfToolImporter>(),
+        {bending::project::readToolLibrary, bending::project::writeToolLibrary},
+        std::move(starter));
     window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
+    window.setFlatPatternBuilder(std::make_shared<bending::cad::FlatPatternBuilder>());
+    window.setUpdateClient(&updates);
     const bool hasFile = !parser.positionalArguments().isEmpty();
     if (hasFile) {
         window.openStep(parser.positionalArguments().first());
@@ -139,6 +239,26 @@ int main(int argc, char *argv[]) {
         viewer->showDiagnosticBox();
     }
     window.show();
+    if (parser.isSet(updateToken) &&
+        QDir(parser.value(updateRoot)).canonicalPath() == portableRoot && !portableRoot.isEmpty()) {
+        auto *acknowledge = new QTimer(&app);
+        auto deadline = std::make_shared<QElapsedTimer>();
+        deadline->start();
+        QObject::connect(acknowledge, &QTimer::timeout, &app, [&, acknowledge, deadline, viewer] {
+            if (viewer && viewer->isReady() && window.isVisible()) {
+                if (bending::update::acknowledgeUpdate(portableRoot,
+                                                       QCoreApplication::applicationVersion(),
+                                                       parser.value(updateToken)))
+                    window.statusBar()->showMessage(
+                        QStringLiteral("Программа обновлена до %1")
+                            .arg(QCoreApplication::applicationVersion()),
+                        8000);
+                acknowledge->stop();
+            } else if (deadline->elapsed() > 25000)
+                acknowledge->stop();
+        });
+        acknowledge->start(100);
+    }
     if (parser.isSet(graphicsTest) || parser.isSet(smokeTest)) {
         auto *timer = new QTimer(&app);
         QElapsedTimer started;

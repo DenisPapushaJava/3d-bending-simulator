@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/core/PressTools.h"
+#include "bending/core/ToolSegments.h"
 
 #include <optional>
 #include <string>
@@ -20,7 +21,7 @@ struct DrawingEdge {
     double sweepRadians = 0;            // Signed mathematical XY sweep.
     bool operator==(const DrawingEdge &) const = default;
 };
-// Source drawing for inspection only; never silently substituted for the simulation body.
+// Source contour; simulation use requires an explicit, validated assignment mode.
 struct ToolDrawing {
     std::string sourceFile;
     std::string sha256;
@@ -29,7 +30,12 @@ struct ToolDrawing {
     bool operator==(const ToolDrawing &) const = default;
 };
 [[nodiscard]] bool validToolDrawing(const ToolDrawing &drawing);
-// Catalogue facts only. Simulation bodies remain idealized working profiles.
+struct DieGroove {
+    double angleRadians = 0;
+    double rotationRadians = 0; // Counterclockwise rotation of the captured section.
+    bool operator==(const DieGroove &) const = default;
+};
+// Catalogue facts; the assignment selects idealized or supported drawing geometry.
 struct ToolPreset {
     std::string id;
     std::string manufacturer;
@@ -45,6 +51,8 @@ struct ToolPreset {
     bool teaching = false;
     bool parametersConfirmed = true; // False: inventory entry, unavailable for assignment/search.
     std::optional<ToolDrawing> drawing = std::nullopt;
+    std::vector<DieGroove> grooveSettings = {}; // Empty: legacy common angle, upright section.
+    std::optional<std::vector<ToolSegment>> segments = std::nullopt; // Null: legacy single tool.
     bool operator==(const ToolPreset &) const = default;
 };
 using ToolCatalog = std::vector<ToolPreset>;
@@ -54,9 +62,21 @@ struct ToolAssignment {
     std::size_t groove = 0;
     double clearanceMm = 10;
     std::string machineName;
+    bool useDrawingGeometry = false; // Use each known drawing; preserve saved legacy choice.
+    std::optional<ToolAssembly> punchAssembly = std::nullopt;
+    std::optional<ToolAssembly> dieAssembly = std::nullopt;
+    MachineModel machineModel = MachineModel::None;
+    bool punchReversed = false;
     bool operator==(const ToolAssignment &) const = default;
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);
+// Workshop entries require a captured millimetre DXF contour. Legacy project data is separate.
+[[nodiscard]] bool hasLibraryProfile(const ToolPreset &tool);
 [[nodiscard]] bool validToolCatalog(const ToolCatalog &catalog);
+[[nodiscard]] std::optional<DieGroove> dieGroove(const ToolPreset &, std::size_t);
+[[nodiscard]] ToolDrawing rotateToolDrawing(const ToolDrawing &, double radians);
+[[nodiscard]] std::optional<ToolDrawing> activeDieDrawing(const ToolPreset &, std::size_t);
 [[nodiscard]] std::optional<PressTools> toolParameters(const ToolAssignment &assignment);
+[[nodiscard]] std::optional<double> toolLength(const ToolPreset &,
+                                               const std::optional<ToolAssembly> &);
 } // namespace bending::core

@@ -1,0 +1,10 @@
+simulation: github-update-timeout
+routing: path
+mocks:
+  - name: github-updates
+    routeKey: github
+    path: postman/mocks/github-updates/config.yaml
+    scenarios:
+      - overrides:
+          conditions:
+            latency: {delay_ms: 2000}

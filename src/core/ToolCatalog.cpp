@@ -1,4 +1,5 @@
 #include "bending/core/ToolCatalog.h"
+#include "bending/core/ToolGeometry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -55,8 +56,18 @@ bool validToolPreset(const ToolPreset &t) {
         !text(t.source, 2048) || !text(t.notes, 4096, true) ||
         !size(t.lengthMm, t.parametersConfirmed ? 1 : 0, 100000) ||
         (t.drawing && !validToolDrawing(*t.drawing)) ||
-        (t.heightMm && !size(*t.heightMm, .1, 100000))) {
+        (t.heightMm && !size(*t.heightMm, .1, 100000)) ||
+        (t.segments && !validToolSegments(*t.segments))) {
         return false;
+    }
+    if (!t.grooveSettings.empty()) {
+        if (t.kind != ToolKind::Die || t.grooveSettings.size() != t.openingsMm.size() ||
+            t.grooveSettings.size() > 16 || !t.drawing || !t.drawing->millimeters ||
+            !std::all_of(t.grooveSettings.begin(), t.grooveSettings.end(), [](const auto &g) {
+                return size(g.angleRadians * 180 / std::numbers::pi, 30 - 1.e-9, 120 + 1.e-9) &&
+                       size(g.rotationRadians, -std::numbers::pi, std::numbers::pi);
+            }))
+            return false;
     }
     if (!t.parametersConfirmed) {
         return (t.kind == ToolKind::Punch || t.kind == ToolKind::Die) &&
@@ -78,14 +89,42 @@ bool validToolPreset(const ToolPreset &t) {
         return size(opening, 1, 1000) && openings.insert(opening).second;
     });
 }
+std::optional<DieGroove> dieGroove(const ToolPreset &t, std::size_t g) {
+    if (t.kind != ToolKind::Die || g >= t.openingsMm.size() ||
+        (!t.grooveSettings.empty() && t.grooveSettings.size() != t.openingsMm.size()))
+        return {};
+    return t.grooveSettings.empty() ? DieGroove{t.angleRadians, 0} : t.grooveSettings[g];
+}
+ToolDrawing rotateToolDrawing(const ToolDrawing &drawing, double radians) {
+    auto result = drawing;
+    const double c = std::cos(radians), s = std::sin(radians);
+    const auto rotate = [&](DrawingPoint &p) { p = {p.x * c - p.y * s, p.x * s + p.y * c}; };
+    for (auto &e : result.edges) {
+        rotate(e.start);
+        rotate(e.end);
+        if (e.center)
+            rotate(*e.center);
+    }
+    return result;
+}
+std::optional<ToolDrawing> activeDieDrawing(const ToolPreset &t, std::size_t g) {
+    const auto settings = dieGroove(t, g);
+    if (!settings || !t.drawing)
+        return {};
+    return rotateToolDrawing(*t.drawing, settings->rotationRadians);
+}
 bool validToolCatalog(const ToolCatalog &catalog) {
-    if (catalog.empty() || catalog.size() > 512) {
+    if (catalog.size() > 512) {
         return false;
     }
     std::set<std::string> ids;
     return std::all_of(catalog.begin(), catalog.end(), [&](const auto &tool) {
         return validToolPreset(tool) && ids.insert(tool.id).second;
     });
+}
+bool hasLibraryProfile(const ToolPreset &tool) {
+    return !tool.teaching && tool.drawing && tool.drawing->millimeters &&
+           validToolDrawing(*tool.drawing);
 }
 std::optional<PressTools> toolParameters(const ToolAssignment &a) {
     if (!validToolPreset(a.punch) || !validToolPreset(a.die) || !a.punch.parametersConfirmed ||
@@ -94,13 +133,27 @@ std::optional<PressTools> toolParameters(const ToolAssignment &a) {
         !text(a.machineName, 256, true)) {
         return {};
     }
+    if (a.useDrawingGeometry && !drawingToolGeometry(a))
+        return {};
+    const auto punchLength = toolLength(a.punch, a.punchAssembly);
+    const auto dieLength = toolLength(a.die, a.dieAssembly);
+    if (!punchLength || !dieLength)
+        return {};
     PressTools result{a.die.openingsMm[a.groove],
-                      a.die.angleRadians,
+                      dieGroove(a.die, a.groove)->angleRadians,
                       a.punch.angleRadians,
                       *a.punch.noseRadiusMm,
-                      a.die.lengthMm,
+                      *dieLength,
                       a.clearanceMm,
-                      a.punch.lengthMm};
+                      *punchLength,
+                      a.machineModel,
+                      a.punchReversed};
     return validPressTools(result) ? std::optional{result} : std::nullopt;
+}
+std::optional<double> toolLength(const ToolPreset &tool,
+                                 const std::optional<ToolAssembly> &assembly) {
+    if (assembly)
+        return tool.segments ? assemblyLength(*tool.segments, *assembly) : std::nullopt;
+    return tool.segments ? std::nullopt : std::optional{tool.lengthMm};
 }
 } // namespace bending::core

@@ -167,7 +167,14 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
             return result;
         const double originalVolume = volume(source), filledVolume = volume(solid);
         const double budget = std::max(originalVolume * 1e-8, area(source) * tolerance * 2);
-        if (!std::isfinite(filledVolume) || filledVolume - originalVolume <= budget)
+        double cutoutArea = 0;
+        for (const auto i : removed)
+            cutoutArea += area(faces(i));
+        // Unchanged large host faces must not hide a small positive cutout volume.
+        // The existing global budget remains the bound for lost original material.
+        const double positiveBudget =
+            std::max({1.e-6, originalVolume * 1.e-12, cutoutArea * tolerance * 2});
+        if (!std::isfinite(filledVolume) || filledVolume - originalVolume <= positiveBudget)
             return result;
         Bnd_Box originalBox, filledBox;
         BRepBndLib::AddOptimal(source, originalBox, false, false);
@@ -189,6 +196,19 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
         if (!missing.IsDone() || missing.HasErrors() ||
             !BRepCheck_Analyzer(missing.Shape()).IsValid() ||
             !std::isfinite(volume(missing.Shape())) || volume(missing.Shape()) > budget)
+            return result;
+        BRepAlgoAPI_Cut added;
+        added.SetArguments(tools);
+        added.SetTools(arguments);
+        added.SetNonDestructive(true);
+        added.SetFuzzyValue(tolerance);
+        added.Build();
+        if (stop.stop_requested())
+            return {};
+        if (!added.IsDone() || added.HasErrors() || !BRepCheck_Analyzer(added.Shape()).IsValid() ||
+            !std::isfinite(volume(added.Shape())) || volume(added.Shape()) <= positiveBudget ||
+            std::abs(filledVolume - originalVolume - volume(added.Shape()) +
+                     volume(missing.Shape())) > budget)
             return result;
         result.shape = solid;
         result.report.status = Status::Filled;

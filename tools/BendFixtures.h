@@ -81,17 +81,20 @@ inline TopoDS_Shape cornerTrimmedBend() {
 }
 // Independently designed MIT fixture: two perforated flanges, a countersink and
 // a clipped free corner. The bend and its full-width support strips are intact.
-inline TopoDS_Shape profiledBend() {
+inline TopoDS_Shape profiledBend(bool openings = true) {
     auto shape = bentStrip(8, 6);
-    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
-                                       gp_Ax2(gp_Pnt(7, -26, 25), gp_Dir(1, 0, 0)), 1.5, 8))
-                .Shape();
-    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCone(
+    if (openings) {
+        shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(gp_Pnt(7, -26, 25), gp_Dir(1, 0, 0)), 1.5, 8))
+                    .Shape();
+        shape =
+            BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCone(
                                        gp_Ax2(gp_Pnt(14, -26, 25), gp_Dir(-1, 0, 0)), 3, 1.5, 1.5))
                 .Shape();
-    shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
-                                       gp_Ax2(gp_Pnt(-26, 7, 50), gp_Dir(0, 1, 0)), 2.5, 8))
-                .Shape();
+        shape = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(gp_Pnt(-26, 7, 50), gp_Dir(0, 1, 0)), 2.5, 8))
+                    .Shape();
+    }
     BRepBuilderAPI_MakeWire corner;
     const std::array<gp_Pnt, 3> points{gp_Pnt(7, -30, 0), gp_Pnt(7, -27, 0), gp_Pnt(7, -30, 3)};
     for (std::size_t i = 0; i < points.size(); ++i) {
@@ -112,7 +115,7 @@ inline TopoDS_Shape bendWithZoneOpening(bool through = true) {
             .Shape();
     return BRepAlgoAPI_Cut(bentStrip(8, 6), cutter).Shape();
 }
-inline TopoDS_Shape channel(double length = 80) {
+inline TopoDS_Shape channel(double length = 80, double baseWidth = 80, double flangeTop = 40) {
     BRepBuilderAPI_MakeWire wire;
     const auto line = [&](const gp_Pnt &a, const gp_Pnt &b) {
         wire.Add(BRepBuilderAPI_MakeEdge(a, b).Edge());
@@ -125,18 +128,18 @@ inline TopoDS_Shape channel(double length = 80) {
                      .Edge());
     };
     constexpr double pi = std::numbers::pi;
-    line({-6, 40, 0}, {-6, 6, 0});
+    line({-6, flangeTop, 0}, {-6, 6, 0});
     arc(0, 6, pi, 1.5 * pi);
-    line({0, 0, 0}, {80, 0, 0});
-    arc(80, 6, 1.5 * pi, 2 * pi);
-    line({86, 6, 0}, {86, 40, 0});
-    line({86, 40, 0}, {84, 40, 0});
-    line({84, 40, 0}, {84, 6, 0});
-    arc(80, 4, 2 * pi, 1.5 * pi);
-    line({80, 2, 0}, {0, 2, 0});
+    line({0, 0, 0}, {baseWidth, 0, 0});
+    arc(baseWidth, 6, 1.5 * pi, 2 * pi);
+    line({baseWidth + 6, 6, 0}, {baseWidth + 6, flangeTop, 0});
+    line({baseWidth + 6, flangeTop, 0}, {baseWidth + 4, flangeTop, 0});
+    line({baseWidth + 4, flangeTop, 0}, {baseWidth + 4, 6, 0});
+    arc(baseWidth, 4, 2 * pi, 1.5 * pi);
+    line({baseWidth, 2, 0}, {0, 2, 0});
     arc(0, 4, 1.5 * pi, pi);
-    line({-4, 6, 0}, {-4, 40, 0});
-    line({-4, 40, 0}, {-6, 40, 0});
+    line({-4, 6, 0}, {-4, flangeTop, 0});
+    line({-4, flangeTop, 0}, {-6, flangeTop, 0});
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, length))
         .Shape();
 }
@@ -151,5 +154,30 @@ inline TopoDS_Shape cornerTrimmedChannel() {
     const auto plane = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(83, 0, 0), gp_Dir(-1, 0, 1))).Face();
     const auto below = BRepPrimAPI_MakeHalfSpace(plane, gp_Pnt(0, 0, -100)).Solid();
     return BRepAlgoAPI_Cut(channel(), below).Shape();
+}
+// Own Z-profile with a long return flange; one bend order crosses the floor.
+inline TopoDS_Shape floorClearanceProfile() {
+    constexpr double pi = std::numbers::pi, height = 100;
+    BRepBuilderAPI_MakeWire wire;
+    const auto line = [&](gp_Pnt a, gp_Pnt b) { wire.Add(BRepBuilderAPI_MakeEdge(a, b)); };
+    const auto arc = [&](double x, double y, double r, double a, double b) {
+        wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(fixtures::polar(r, a, x, y),
+                                                            fixtures::polar(r, (a + b) / 2, x, y),
+                                                            fixtures::polar(r, b, x, y))
+                                             .Value()));
+    };
+    line({-1600, 0, 0}, {0, 0, 0});
+    arc(0, 6, 6, -pi / 2, 0);
+    line({6, 6, 0}, {6, height - 6, 0});
+    arc(10, height - 6, 4, pi, pi / 2);
+    line({10, height - 2, 0}, {40, height - 2, 0});
+    line({40, height - 2, 0}, {40, height, 0});
+    line({40, height, 0}, {10, height, 0});
+    arc(10, height - 6, 6, pi / 2, pi);
+    line({4, height - 6, 0}, {4, 6, 0});
+    arc(0, 6, 4, 0, -pi / 2);
+    line({0, 2, 0}, {-1600, 2, 0});
+    line({-1600, 2, 0}, {-1600, 0, 0});
+    return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, 80)).Shape();
 }
 } // namespace bending::fixtures

@@ -3,6 +3,8 @@
 #include <QJsonObject>
 
 namespace bending::project {
+QString machineModelJson(core::MachineModel);
+bool readMachineModel(const QJsonValue &, core::MachineModel &);
 QJsonObject presetJson(const core::ToolPreset &preset);
 bool readPreset(const QJsonObject &object, core::ToolPreset &preset);
 QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &assignment);

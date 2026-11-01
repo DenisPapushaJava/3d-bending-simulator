@@ -1,0 +1,12 @@
+version: 1
+id: f3f857d4-5cb3-4777-8c78-a24d6dc9190b
+name: github-updates
+slug: github-updates
+protocol: http
+port: 4500
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true
+interceptRequests: true
+origin: api.github.com

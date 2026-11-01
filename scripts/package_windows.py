@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -39,11 +40,41 @@ def unpack_patched_source(archive_path, destination, port, patches):
     shutil.rmtree(destination / ".git")
 
 
-def archive_tree(output, folder):
+def archive_tree(output, folder, excluded_roots=()):
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(folder.rglob("*")):
-            if path.is_file():
+            if path.is_file() and path.relative_to(folder).parts[0] not in excluded_roots:
                 archive.write(path, path.relative_to(folder.parent))
+
+
+def configure_portable(stage, version, launcher):
+    """Versioned immutable runtime; the stable native bootstrap never loads Qt."""
+    runtime = stage / "runtime" / version
+    runtime.mkdir(parents=True)
+    for name in ("bin", "share"):
+        shutil.move(str(stage / name), runtime / name)
+    (runtime / "VERSION").write_text(version + "\n", encoding="utf-8")
+    files = []
+    for path in sorted(runtime.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError("Portable runtime must not contain links")
+        if path.is_file():
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            files.append({"path": path.relative_to(runtime).as_posix(),
+                          "size": path.stat().st_size, "sha256": digest.hexdigest()})
+    manifest = {"format": 1, "application": "3d-bending-simulator",
+                "version": version, "platform": "windows-x86_64",
+                "bootstrapProtocol": 1, "files": files}
+    (runtime / "runtime-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (runtime / ".ready").write_text(version + "\n", encoding="utf-8")
+    shutil.copy2(launcher, stage / "3d-bending-simulator.exe")
+    (stage / "current.txt").write_text(version + "\n", encoding="utf-8")
+    (stage / "portable-format.txt").write_text("1\n", encoding="utf-8")
+    return runtime
 
 
 def main():
@@ -55,6 +86,8 @@ def main():
     output = ROOT / "out"
     name = f"3d-bending-simulator-{version}-windows-x86_64"
     stage = output / name
+    if stage.exists():
+        shutil.rmtree(stage)
     stage.mkdir(parents=True, exist_ok=True)
     subprocess.run(["cmake", "--install", "build/release", "--prefix", str(stage)], check=True)
     for dll in (ROOT / "build/release/bin").glob("*.dll"):
@@ -63,9 +96,15 @@ def main():
     executable = stage / "bin/3d-bending-simulator.exe"
     subprocess.run([str(deploy), "--release", "--no-translations", "--no-compiler-runtime",
                     "--no-opengl-sw", "--no-system-d3d-compiler", "--no-system-dxc-compiler",
-                    "--skip-plugin-types", "iconengines,imageformats,generic",
+                    "--skip-plugin-types", "iconengines,imageformats,generic,tls",
                     "--dir", str(stage / "bin"), str(executable)], check=True)
-    inventoried_dlls = {"qt6core.dll", "qt6gui.dll", "qt6widgets.dll", "freetype.dll"}
+    # Deploy only the OS TLS backend; do not pull OpenSSL's optional DLLs/plugins.
+    schannel = args.qt_root / "plugins/tls/qschannelbackend.dll"
+    if not schannel.is_file():
+        raise RuntimeError("Qt Schannel TLS backend is missing")
+    (stage / "bin/tls").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(schannel, stage / "bin/tls/qschannelbackend.dll")
+    inventoried_dlls = {"qt6core.dll", "qt6gui.dll", "qt6widgets.dll", "qt6network.dll", "freetype.dll"}
     unexpected_dlls = {dll.name for dll in (stage / "bin").glob("*.dll")
                        if not dll.name.lower().startswith("tk")
                        and dll.name.lower() not in inventoried_dlls}
@@ -171,20 +210,26 @@ def main():
         encoding="utf-8")
     (stage / "README.txt").write_text(
         f"3D Bending Simulator {version} — экспериментальный выпуск Windows x64.\n\n"
-        "Распакуйте весь архив и запустите bin/3d-bending-simulator.exe.\n"
+        "Распакуйте весь архив и запустите 3d-bending-simulator.exe в корне папки.\n"
         "Откройте STEP/STP одной детали или проект .bend; файл можно перетащить в окно.\n"
-        "Этапы работы: Деталь → Инструмент → Проверка.\n"
-        "Учебные STEP: share/3d-bending-simulator/examples.\n\n"
+        "Этапы работы: Деталь → Инструмент → Гибка.\n"
+        f"Учебные STEP: runtime/{version}/share/3d-bending-simulator/examples.\n\n"
         "Доступны просмотр детали, распознавание поддержанных прямых сгибов,\n"
-        "подбор по параметрам, геометрический просмотр одного сгиба и справочный PDF.\n"
-        "Это не физический расчёт материала и не проверка полного маршрута гибки.\n"
+        "реальная DXF-библиотека, подбор инструмента/секций, ручной порядок и ограниченный поиск,\n"
+        "геометрические проверки, теоретическая развёртка и справочный PDF.\n"
+        "Столкновения проверяются в дискретных положениях; это не физический расчёт\n"
+        "материала и не подтверждение пригодности детали к изготовлению.\n"
+        "Демонстрационный станок не заменяет точную конфигурацию вашего оборудования.\n"
         "Интерактивная работа на Windows/GPU ещё требует проверки.\n\n"
         "Может потребоваться Microsoft Visual C++ 2015–2022 x64 Runtime:\n"
         "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist\n"
         "Сохраняйте структуру папок, DLL и плагины рядом с EXE.\n"
-        "DLL допускается заменять совместимыми сборками. Лицензии — в share/licenses.\n"
+        f"DLL допускается заменять совместимыми сборками. Лицензии — в runtime/{version}/share/licenses.\n"
         "Соответствующие исходники Qt/OCCT/FreeType — в соседнем dependency-sources ZIP.\n"
-        "Встроенное обновление пока отсутствует.\n"
+        "Ручная проверка: Справка → Проверить обновления.\n"
+        "Обновление запускается только по команде пользователя. Предыдущий runtime сохраняется.\n"
+        "Переход с alpha.1: распакуйте новый ZIP в отдельную папку.\n"
+        "Настройки: data/settings.ini. Проекты храните вне папок runtime.\n"
         "Проект: https://github.com/DenisPapushaJava/3d-bending-simulator\n",
         encoding="utf-8")
 
@@ -204,9 +249,16 @@ def main():
         font_probe.unlink()
     subprocess.run([str(executable), "--smoke-test"], env=environment, check=True, timeout=20)
     subprocess.run([str(executable), "--smoke-test",
-                    str(stage / "share/3d-bending-simulator/examples/plate-inch.stp")],
+                    str(stage / "share/3d-bending-simulator/examples/profiled-bend-6mm.step")],
                    env=environment, check=True, timeout=30)
-    archive_tree(output / f"{name}.zip", stage)
+    subprocess.run([str(executable), "--update-runtime-probe"], env=environment, check=True, timeout=20)
+    configure_portable(stage, version, ROOT / "build/release/bin/3d-bending-launcher.exe")
+    subprocess.run([str(stage / "3d-bending-simulator.exe"), "--smoke-test"],
+                   env=environment, check=True, timeout=30)
+    subprocess.run([str(stage / "3d-bending-simulator.exe"), "--update-runtime-probe"],
+                   env=environment, check=True, timeout=20)
+    # Root launcher probes create private settings/lock files; never publish them.
+    archive_tree(output / f"{name}.zip", stage, excluded_roots={"data", ".updates"})
     archive_tree(output / f"{sources.name}.zip", sources)
 
 

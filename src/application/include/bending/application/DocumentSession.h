@@ -4,12 +4,19 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace bending::application {
 struct ImportRequest {
     std::uint64_t id;
     std::uint64_t baseRevision;
     std::filesystem::path source;
+};
+
+struct BendToolUpdate {
+    std::size_t bendIndex;
+    std::optional<core::PressTools> tools;
+    std::optional<core::ToolAssignment> assignment;
 };
 
 // GUI-independent state machine. Its owner serializes calls; no Qt, SDK or worker ownership here.
@@ -23,11 +30,25 @@ class DocumentSession final {
     void close();
     [[nodiscard]] ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
+    bool setUnfoldSettings(core::UnfoldSettings);
+    // One revision-checked transaction for the part-input form. nullopt preserves auto origin.
+    bool setPartInputs(std::uint64_t revision, std::uint64_t editRevision,
+                       std::optional<double> manualThicknessMm, core::UnfoldSettings);
+    [[nodiscard]] bool hasPartInputs() const;
+    [[nodiscard]] const core::UnfoldSettings &unfoldSettings() const {
+        return unfold_;
+    }
+    bool setBendWorkpieceOrientation(std::size_t recognizedIndex, bool reversed);
     bool setBendReview(std::size_t recognizedIndex, BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
+    // Validate the entire batch before publishing it; a change advances one edit revision.
+    bool setBendToolAssignments(const std::vector<BendToolUpdate> &updates);
     [[nodiscard]] std::optional<core::BendTarget> bendTarget(std::size_t recognizedIndex) const;
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
+    [[nodiscard]] std::vector<std::size_t> orderedBends() const;
+    // The existing preparation array carries the preferred order, not a validation result.
+    bool setBendOrder(const std::vector<std::string> &ids);
     [[nodiscard]] const std::vector<BendPreparation> &bends() const {
         return bends_;
     }
@@ -78,5 +99,6 @@ class DocumentSession final {
     bool modified_ = false;
     std::vector<BendPreparation> bends_;
     BendBindings bendBindings_;
+    core::UnfoldSettings unfold_;
 };
 } // namespace bending::application

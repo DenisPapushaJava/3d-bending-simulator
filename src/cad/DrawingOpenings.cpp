@@ -191,6 +191,8 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
             gp_Dir major = plane.XAxis().Direction();
             bool allowed = true, curved = false, circular = true;
             double radius = 0, span = 0;
+            double longestLine = 0;
+            std::vector<gp_Dir> lineDirections;
             int edges = 0;
             for (BRepTools_WireExplorer ei(wire, face); ei.More(); ei.Next()) {
                 BRepAdaptor_Curve curve(ei.Current());
@@ -214,14 +216,26 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                     major = curve.Ellipse().XAxis().Direction();
                     curved = true;
                     circular = false;
-                } else if (curve.GetType() == GeomAbs_Line)
+                } else if (curve.GetType() == GeomAbs_Line) {
                     circular = false;
-                else {
+                    lineDirections.push_back(curve.Line().Direction());
+                    const auto size = curve.Value(curve.FirstParameter())
+                                          .Distance(curve.Value(curve.LastParameter()));
+                    if (size > longestLine) {
+                        longestLine = size;
+                        major = curve.Line().Direction();
+                    }
+                } else {
                     allowed = false;
                     break;
                 }
             }
-            if (!allowed || !curved)
+            const bool rectangle =
+                !curved && edges == 4 && lineDirections.size() == 4 &&
+                std::all_of(lineDirections.begin(), lineDirections.end(), [&](auto direction) {
+                    return direction.IsParallel(major, 1e-7) || direction.IsNormal(major, 1e-7);
+                });
+            if (!allowed || (!curved && !rectangle))
                 continue;
             const auto box = bounds(wire, plane.Position().Ax2());
             const auto center = plane.Location().Translated(
@@ -276,8 +290,16 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
         if (!opening.normal.IsParallel(projection.Direction(), 1e-7))
             continue;
         const auto c = project(opening.center, projection);
-        if (std::any_of(centers.begin(), centers.end(),
-                        [&](auto old) { return std::hypot(old.x - c.x, old.y - c.y) < tolerance; }))
+        const bool duplicate = std::any_of(centers.begin(), centers.end(), [&](auto old) {
+            return std::hypot(old.x - c.x, old.y - c.y) < tolerance;
+        });
+        if (duplicate &&
+            (!opening.circular ||
+             std::any_of(
+                 view.holeDiameters.begin(), view.holeDiameters.end(), [&](const auto &old) {
+                     return std::hypot(old.first.x - c.x, old.first.y - c.y) < tolerance &&
+                            std::abs(old.second - 2 * opening.major.Magnitude()) < tolerance;
+                 })))
             continue;
         const double depth =
             gp_Vec(gp_Pnt(0, 0, 0), opening.center).Dot(gp_Vec(projection.Direction()));
@@ -299,6 +321,10 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
             knownCircle ||
             visibleCoverage(BRepBuilderAPI_Transform(opening.wire, flatten, true).Shape(), visible);
         if (!fullyVisible)
+            continue;
+        if (opening.circular)
+            view.holeDiameters.push_back({c, 2 * opening.major.Magnitude()});
+        if (duplicate)
             continue;
         centers.push_back(c);
         ++view.visibleOpeningCount;
@@ -327,5 +353,59 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
                  c, value, ""});
         }
     }
+}
+std::vector<std::size_t> drawingContourRoundings(const TopoDS_Shape &shape,
+                                                 const TopTools_IndexedMapOfShape &faces,
+                                                 const std::vector<RecognizedBend> &bends,
+                                                 double linearTolerance, std::stop_token stop) {
+    TopTools_IndexedDataMapOfShapeListOfShape neighbors;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, neighbors);
+    std::vector<std::size_t> result;
+    linearTolerance = std::max(1e-5, linearTolerance);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const auto face = TopoDS::Face(faces(i));
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Cylinder)
+            continue;
+        std::vector<std::size_t> walls;
+        for (TopExp_Explorer e(face, TopAbs_EDGE); e.More(); e.Next()) {
+            const auto edge = TopoDS::Edge(e.Current());
+            if (BRepAdaptor_Curve(edge).GetType() != GeomAbs_Circle)
+                continue;
+            for (const auto &neighbor : neighbors.FindFromKey(edge)) {
+                const auto flat = TopoDS::Face(neighbor);
+                BRepAdaptor_Surface plane(flat);
+                if (plane.GetType() != GeomAbs_Plane ||
+                    !plane.Plane().Axis().Direction().IsParallel(
+                        surface.Cylinder().Axis().Direction(), 1e-7))
+                    continue;
+                bool outer = false;
+                for (TopExp_Explorer oe(BRepTools::OuterWire(flat), TopAbs_EDGE); oe.More();
+                     oe.Next())
+                    outer = outer || oe.Current().IsSame(edge);
+                const auto index = static_cast<std::size_t>(faces.FindIndex(flat));
+                if (outer && std::find(walls.begin(), walls.end(), index) == walls.end())
+                    walls.push_back(index);
+            }
+        }
+        if (walls.size() != 2)
+            continue;
+        std::sort(walls.begin(), walls.end());
+        double u0, u1, v0, v1;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        for (const auto &b : bends)
+            for (std::size_t side = 0; side < 2; ++side) {
+                std::array pair{b.flangeFaces[side * 2], b.flangeFaces[side * 2 + 1]};
+                std::sort(pair.begin(), pair.end());
+                if (pair[0] == walls[0] && pair[1] == walls[1] &&
+                    std::abs(v1 - v0 - b.thicknessMm) <= linearTolerance &&
+                    std::find(result.begin(), result.end(), static_cast<std::size_t>(i)) ==
+                        result.end())
+                    result.push_back(static_cast<std::size_t>(i));
+            }
+    }
+    return result;
 }
 } // namespace bending::cad

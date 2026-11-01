@@ -1,0 +1,10 @@
+simulation: github-update-rate-limit
+routing: path
+mocks:
+  - name: github-updates
+    routeKey: github
+    path: postman/mocks/github-updates/config.yaml
+    scenarios:
+      - overrides:
+          conditions:
+            error: {status_code: 429}

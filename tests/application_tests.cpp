@@ -1,3 +1,4 @@
+#include "bending/application/BendRoute.h"
 #include "bending/application/DocumentSession.h"
 
 #include <algorithm>
@@ -15,8 +16,9 @@ void require(bool value, const char *message) {
 }
 class TestDocument final : public Document {
   public:
-    explicit TestDocument(BendAnalysis analysis = {}) {
+    explicit TestDocument(BendAnalysis analysis = {}, ThicknessAnalysis thickness = {}) {
         metadata_.bendAnalysis = std::move(analysis);
+        metadata_.thickness = std::move(thickness);
     }
     const DocumentMetadata &metadata() const noexcept override {
         return metadata_;
@@ -122,6 +124,13 @@ void testProjectState() {
     analysis.evidence.push_back({5, 6, 4.0});
     require(!suggestThickness(analysis), "Conflicting distances were silently resolved");
     analysis.evidence.pop_back();
+    analysis.evidence.push_back({5, 6, 6., ThicknessEvidenceKind::BendRadii});
+    require(suggestThickness(analysis) == 6.0 &&
+                validateThickness(6.0, analysis) == ThicknessValidation::LocalMatch,
+            "Bend evidence was lost or promoted to a constant-thickness proof");
+    analysis.evidence.push_back({7, 8, 3., ThicknessEvidenceKind::BendRadii});
+    require(!suggestThickness(analysis), "A minority thickness was silently ignored");
+    analysis.evidence.pop_back();
     for (const auto status :
          {ThicknessStatus::Ambiguous, ThicknessStatus::LimitReached, ThicknessStatus::Failed}) {
         analysis.status = status;
@@ -131,7 +140,51 @@ void testProjectState() {
     analysis.evidence.clear();
     require(!suggestThickness(analysis), "Missing geometry invented a default thickness");
 }
+void testPartInputs() {
+    using namespace bending;
+    DocumentSession s;
+    ThicknessAnalysis thickness{ThicknessStatus::Detected, 6.00000004, 1.e-6, {}};
+    auto doc = std::make_shared<TestDocument>(BendAnalysis{}, thickness);
+    s.complete(s.beginImport("six.step"), DocumentPtr(doc));
+    const auto rev = s.revision(), edit = s.editRevision();
+    core::UnfoldSettings steel{core::SheetMaterial::MildSteel, {}, 1};
+    require(!s.hasPartInputs(), "Missing material was silently filled");
+    require(!s.setPartInputs(rev, edit, 3., steel) && !s.modified() && !s.manualThicknessMm() &&
+                s.unfoldSettings().material == core::SheetMaterial::Unknown,
+            "Conflicting transaction partially edited the session");
+    auto badRule = steel;
+    badRule.referenceVersion = 9;
+    require(!s.setPartInputs(rev, edit, 6., badRule) && s.editRevision() == edit,
+            "Invalid rule committed thickness");
+    require(s.setPartInputs(rev, edit, {}, steel) && s.hasPartInputs() && !s.manualThicknessMm() &&
+                s.editRevision() == edit + 1 &&
+                suggestThickness(s.document()->metadata().thickness) == thickness.thicknessMm,
+            "Auto origin/precision was lost or transaction was not atomic");
+    require(!s.setPartInputs(rev, edit, 6., steel), "Stale edit was applied");
+    auto current = s.editRevision();
+    require(s.setPartInputs(rev, current, {}, steel) && s.editRevision() == current,
+            "Unchanged form invalidates caches");
+    const auto pending = s.beginImport("other.step");
+    require(!s.setPartInputs(rev, current, 6., steel), "Edited during import");
+    s.cancel();
+    s.close();
+    require(!s.setPartInputs(rev, current, 6., steel), "Closed document accepted a draft");
+    s.complete(s.beginImport("unknown.step"), DocumentPtr(std::make_shared<TestDocument>()));
+    require(!s.setPartInputs(s.revision(), s.editRevision(), {}, steel),
+            "Missing thickness was filled with a default");
+    core::UnfoldSettings expert{core::SheetMaterial::Unknown, .42, 1};
+    current = s.editRevision();
+    require(s.setPartInputs(s.revision(), current, 2., expert) && s.hasPartInputs() &&
+                s.manualThicknessMm() == 2. && s.editRevision() == current + 1,
+            "Expert mode or manual thickness was lost");
+    require(!s.complete(pending, DocumentPtr(doc)), "Old request replaced edited part");
+}
 void testBendPreparation() {
+    require(BendRouteToolLengthIssue{80, 835, 100}.coversBend() &&
+                !BendRouteToolLengthIssue{100, 80, 835}.coversBend() &&
+                !BendRouteToolLengthIssue{100, 835, 80}.coversBend() &&
+                BendRouteToolLengthIssue{100, 99.9999999, 100}.coversBend(1.e-6),
+            "Independent tool spans or geometric tolerance were lost");
     BendAnalysis analysis;
     analysis.status = BendRecognitionStatus::Completed;
     analysis.bends = {
@@ -158,6 +211,49 @@ void testBendPreparation() {
     require(session.bend(0)->review == BendReview::Automatic && session.bendTarget(0) &&
                 session.bendTarget(0)->innerRadiusMm == 4,
             "Automatic CAD target unavailable");
+    const auto sideEdit = session.editRevision();
+    require(session.setBendWorkpieceOrientation(0, true) && session.bend(0)->workpieceReversed &&
+                !session.bend(1)->workpieceReversed && session.editRevision() == sideEdit + 1,
+            "Workpiece orientation changed another operation or missed its revision");
+    const auto unchangedSideEdit = session.editRevision();
+    require(session.setBendWorkpieceOrientation(0, true) &&
+                !session.setBendWorkpieceOrientation(99, true) &&
+                session.editRevision() == unchangedSideEdit,
+            "Invalid/unchanged orientation edited the project");
+    const auto secondId = session.bend(1)->id;
+    const auto orderEdit = session.editRevision();
+    require(session.setBendOrder({secondId, id}) &&
+                session.orderedBends() == std::vector<std::size_t>({1, 0}) &&
+                session.bend(0)->id == id && session.bend(1)->id == secondId &&
+                session.bend(0)->workpieceReversed && !session.bend(1)->workpieceReversed &&
+                session.editRevision() == orderEdit + 1,
+            "Preferred operation order broke geometric bindings");
+    const auto stableOrderEdit = session.editRevision();
+    require(!session.setBendOrder({id, id}) && !session.setBendOrder({"unknown", id}) &&
+                !session.setBendOrder({id}) && session.setBendOrder({secondId, id}) &&
+                session.editRevision() == stableOrderEdit,
+            "Invalid or unchanged order edited the project");
+    require(session.setBendOrder({id, secondId}), "Original order not restored");
+    const bending::core::PressTools tools{16, std::numbers::pi / 3, std::numbers::pi / 6, .8, 100,
+                                          10};
+    auto anotherTool = tools;
+    anotherTool.openingMm = 20;
+    const auto toolsRevision = session.editRevision();
+    const std::vector<BendToolUpdate> updates{{0, tools, {}}, {1, anotherTool, {}}};
+    require(session.setBendToolAssignments(updates) &&
+                session.editRevision() == toolsRevision + 1 && session.bend(0)->tools == tools &&
+                session.bend(1)->tools == anotherTool && session.bend(0)->workpieceReversed,
+            "Tool batch was not atomic or changed the workpiece installation");
+    const auto stableToolsRevision = session.editRevision();
+    require(session.setBendToolAssignments(updates) &&
+                session.editRevision() == stableToolsRevision &&
+                !session.setBendToolAssignments({{0, anotherTool, {}}, {99, tools, {}}}) &&
+                !session.setBendToolAssignments({{0, anotherTool, {}}, {0, tools, {}}}) &&
+                session.bend(0)->tools == tools && session.bend(1)->tools == anotherTool &&
+                session.editRevision() == stableToolsRevision,
+            "Invalid/no-op tool batch partially edited the session");
+    require(session.setBendToolAssignments({{0, {}, {}}, {1, {}, {}}}),
+            "Cannot clear tool assignments atomically");
     require(session.setBendReview(0, BendReview::Pending) && !session.bendTarget(0) &&
                 !session.setBendTarget(0, target),
             "Pending zone accepted a target");
@@ -187,7 +283,8 @@ void testBendPreparation() {
     const auto reorderedDocument = std::make_shared<TestDocument>(reordered);
     session.complete(session.beginImport("saved.bend"),
                      OpenedProject{reorderedDocument, {}, "saved.bend", entries});
-    require(session.bend(1)->id == id && session.bend(1)->target == target &&
+    require(session.bend(1)->id == id && session.bend(1)->workpieceReversed &&
+                session.bend(1)->target == target &&
                 session.bend(0)->review == BendReview::Excluded && !session.modified(),
             "Reordering/axis reversal/face renumbering lost user intent");
     session.setBendReview(1, BendReview::Excluded);
@@ -235,7 +332,14 @@ int main() {
     try {
         testSession();
         testProjectState();
+        testPartInputs();
         testBendPreparation();
+        require(withinEndSupportLimit({50, .46, 49.54}, 3) &&
+                    withinEndSupportLimit({50, 3, 47}, 3) &&
+                    !withinEndSupportLimit({50, 3.01, 47}, 3) &&
+                    !withinEndSupportLimit({50, .46, 49.54}, 0) &&
+                    !withinEndSupportLimit({4, 3, 3.5}, 3),
+                "Per-end support allowance/central-strip boundaries failed");
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

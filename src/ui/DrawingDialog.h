@@ -10,6 +10,9 @@ class DrawingDialog final : public QDialog {
                   std::optional<std::size_t> selectedFace, QWidget *parent);
     ~DrawingDialog() override;
 
+  protected:
+    void done(int result) override;
+
   private:
     class Impl;
     std::unique_ptr<Impl> impl_;

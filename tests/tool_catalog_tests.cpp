@@ -1,3 +1,4 @@
+#include "ToolFixtures.h"
 #include "bending/core/ToolCatalog.h"
 #include "bending/core/ToolSelection.h"
 #include <cmath>
@@ -15,6 +16,150 @@ void require(bool value, const char *message) {
 int main() {
     using namespace bending::core;
     try {
+        const auto drawn = tool_fixture::pair();
+        require(hasCompleteDrawingToolGeometry(drawn), "Explicit tool bodies were rejected");
+        require(hasLibraryProfile(drawn.punch), "Captured DXF missing from workshop policy");
+        auto missingProfile = drawn.punch;
+        missingProfile.drawing.reset();
+        require(!hasLibraryProfile(missingProfile), "Parameter-only record admitted to workshop");
+        const auto measured = detectPunchProfile(*drawn.punch.drawing);
+        const auto size = toolProfileSize(*drawn.punch.drawing);
+        require(measured && size &&
+                    std::abs(measured->angleRadians - drawn.punch.angleRadians) < 1.e-8 &&
+                    std::abs(measured->noseRadiusMm - *drawn.punch.noseRadiusMm) < 1.e-8 &&
+                    std::abs(size->heightMm - 45) < 1.e-8,
+                "DXF nose/dimensions differ from simulation references");
+        for (double degrees : {26., 60., 90., 120.}) {
+            const auto profile =
+                tool_fixture::explicitPair(
+                    {48, std::numbers::pi / 2, degrees * std::numbers::pi / 180, 2.5, 80, 10})
+                    .punch;
+            const auto m = detectPunchProfile(*profile.drawing);
+            require(m && std::abs(m->angleRadians - profile.angleRadians) < 1.e-8 &&
+                        std::abs(m->noseRadiusMm - 2.5) < 1.e-8,
+                    "Nose detection depends on a particular angle or radius");
+        }
+        auto unsupported = *drawn.punch.drawing;
+        for (auto &edge : unsupported.edges) {
+            edge.center.reset();
+            edge.sweepRadians = 0;
+        }
+        require(validToolDrawing(unsupported) && toolProfileSize(unsupported) &&
+                    !detectPunchProfile(unsupported),
+                "Sharp/unsupported profile invented a rounded nose");
+        require(!detectPunchProfile(rotateToolDrawing(*drawn.punch.drawing, std::numbers::pi)) &&
+                    !hasLibraryProfile(missingProfile),
+                "Upside-down DXF invented an upright nose");
+        auto incomplete = drawn;
+        incomplete.useDrawingGeometry = false;
+        require(!hasCompleteDrawingToolGeometry(incomplete),
+                "Legacy idealized assignment passed real-body policy");
+        incomplete = drawn;
+        incomplete.die.drawing.reset();
+        require(!hasCompleteDrawingToolGeometry(incomplete),
+                "Partial DXF pair passed real-body policy");
+        incomplete = drawn;
+        incomplete.punch.teaching = true;
+        require(!hasCompleteDrawingToolGeometry(incomplete),
+                "Teaching profile passed real-body policy");
+        require(!defaultPunchOrientation(drawn.punch).has_value(),
+                "Symmetric punch invented an operator-side preference");
+        require(defaultPunchOrientation(tool_fixture::offsetPunch()) == true,
+                "Default punch relief is not toward the operator/open throat");
+        require(defaultPunchOrientation(tool_fixture::offsetPunch(true)) == false,
+                "Mirrored DXF lost the same physical default");
+        require(!defaultPunchOrientation(drawn.die), "A die invented a punch orientation");
+        auto tang = tool_fixture::tangPair();
+        const auto mount = punchMountReference(tang);
+        require(mount && std::abs(mount->heightMm - 30) < 1.e-6 &&
+                    std::abs(mount->shoulderY - 45) < 1.e-6 && std::abs(mount->centreX - 1) < 1.e-6,
+                "Top tang/shoulder mount not recognized");
+        require(!punchMountReference(drawn), "Plain profile invented a tang mount");
+        tang.punchReversed = true;
+        const auto reversedMount = punchMountReference(tang);
+        require(reversedMount && std::abs(reversedMount->centreX + 1) < 1.e-6 &&
+                    toolParameters(tang)->punchReversed,
+                "Orientation lost mount or assignment");
+        auto machine = drawn;
+        machine.machineModel = MachineModel::DemoPressV1;
+        require(toolParameters(machine)->machineModel == MachineModel::DemoPressV1,
+                "Assignment lost machine scope");
+        machine.machineModel = static_cast<MachineModel>(999);
+        require(!toolParameters(machine), "Unknown machine model accepted");
+        const auto multi = tool_fixture::fourWayDie();
+        require(validToolPreset(multi) && multi.grooveSettings.size() == 4,
+                "Four-way die not recognized");
+        for (std::size_t g = 0; g < 4; ++g) {
+            const ToolAssignment a{drawn.punch, multi, g, 3, "", true};
+            require(toolParameters(a).has_value() && drawingToolGeometry(a).has_value(),
+                    "Quarter-turn groove not recognized");
+            require(hasCompleteDrawingToolGeometry(a),
+                    "Multi-V physical body lost its working side");
+            require(std::abs(toolParameters(a)->dieAngleRadians -
+                             (60 + 10 * static_cast<double>(g)) * std::numbers::pi / 180) < 1.e-10,
+                    "Global angle leaked into active groove");
+        }
+        auto wrongMulti = multi;
+        wrongMulti.grooveSettings.pop_back();
+        require(!validToolPreset(wrongMulti), "Unbound groove rotation accepted");
+        wrongMulti = multi;
+        wrongMulti.grooveSettings[0].rotationRadians = std::numeric_limits<double>::quiet_NaN();
+        require(!validToolPreset(wrongMulti), "NaN rotation accepted");
+        const ToolSelectionRequest angleRequest{1, 95 * std::numbers::pi / 180, 8, 40};
+        require(screenTools(angleRequest, drawn.punch, multi, 0) == ToolRejection::None &&
+                    screenTools(angleRequest, drawn.punch, multi, 3) == ToolRejection::Angle,
+                "Selection ignored per-groove angle");
+        const auto geometry = drawingToolGeometry(drawn);
+        require(geometry && toolParameters(drawn) &&
+                    std::abs(geometry->shoulderHalfSpanMm - (6 + .8 / std::sqrt(3.))) < 1.e-8 &&
+                    std::abs(geometry->punchTip.y) < 1.e-8,
+                "Round shoulder references not recognized");
+        require(!standardAirBendOpening(6, 12) && standardAirBendOpening(6, 50) &&
+                    minimumStandardDieOpeningMm(6) == 30 && referenceDieOpeningMm(6) == 48,
+                "Opening guard or 8t reference changed");
+        auto v20 = tool_fixture::pair(20), v22 = tool_fixture::pair(22);
+        v20.die.id = "die-v20";
+        v22.die.id = "die-v22";
+        const ToolSelectionRequest threeMm{3, std::numbers::pi / 2, 4, 40};
+        require(minimumStandardDieOpeningMm(3) == 15 && referenceDieOpeningMm(3) == 24 &&
+                    screenTools(threeMm, v20.punch, v20.die, 0) == ToolRejection::None &&
+                    screenTools(threeMm, v22.punch, v22.die, 0) == ToolRejection::None,
+                "8t recommendation became a hard minimum for 3 mm on V20/V22");
+        const auto belowReference = selectTools({v20.punch, v20.die, v22.die}, threeMm);
+        require(belowReference.candidates.size() == 2 && belowReference.candidates.front().die == 2,
+                "Selection lost valid openings below the 8t preference");
+        auto wide = tool_fixture::pair(50);
+        wide.die.id = "wide";
+        const auto choice =
+            selectTools({drawn.punch, drawn.die, wide.die}, {6, std::numbers::pi / 2, 8, 40});
+        require(choice.candidates.size() == 1 && choice.candidates[0].die == 2,
+                "6 mm selection did not exclude V12/prefer available V50");
+        auto partial = drawn;
+        partial.die.drawing.reset();
+        auto mixed = drawingToolGeometry(partial);
+        require(mixed && mixed->hasPunch && !mixed->hasDie && toolParameters(partial),
+                "Known punch depends on missing die drawing");
+        partial = drawn;
+        partial.punch.drawing.reset();
+        mixed = drawingToolGeometry(partial);
+        require(mixed && !mixed->hasPunch && mixed->hasDie && toolParameters(partial),
+                "Known die depends on missing punch drawing");
+        partial.die.drawing.reset();
+        require(!drawingToolGeometry(partial) && !toolParameters(partial),
+                "DXF mode without any contour was accepted");
+        auto wrong = drawn;
+        wrong.die.drawing->millimeters = false;
+        require(!drawingToolGeometry(wrong) && !toolParameters(wrong),
+                "Unknown units admitted real geometry");
+        wrong = drawn;
+        wrong.die.openingsMm[0] = 13;
+        require(!drawingToolGeometry(wrong), "V mismatch was silently normalized");
+        wrong = drawn;
+        wrong.punch.noseRadiusMm = 1;
+        require(!drawingToolGeometry(wrong), "Nose mismatch accepted");
+        wrong = drawn;
+        wrong.punch.drawing->edges[0].center->x += 1;
+        require(!drawingToolGeometry(wrong), "Broken arc accepted");
         const ToolPreset punch{"p",
                                "test",
                                "P26",
@@ -31,8 +176,8 @@ int main() {
                              835, 60,     {},   {10, 16, 22, 35}, "own fixture",
                              "",  false};
         require(validToolCatalog({punch, die}), "Valid catalogue rejected");
-        require(!validToolCatalog({}) && !validToolCatalog({punch, punch}),
-                "Empty/duplicate catalogue accepted");
+        require(validToolCatalog({}) && !validToolCatalog({punch, punch}),
+                "Empty workshop rejected or duplicate catalogue accepted");
         for (std::size_t i = 0; i < die.openingsMm.size(); ++i) {
             const auto t = toolParameters({punch, die, i, 10, "Test machine"});
             require(t && t->openingMm == die.openingsMm[i] && t->lengthMm == 835 &&

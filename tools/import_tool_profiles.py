@@ -184,6 +184,8 @@ def import_profiles(catalog, directory, millimeters=()):
                    if re.fullmatch(re.escape(path.stem.upper()) + '[SM]?', t['code'].upper())]
         if not matches:
             raise ValueError('Add a catalogue inventory record before importing ' + path.name)
+        if any(t.get('grooveSettings') for t in matches):
+            raise ValueError('Use the application to replace this profile and recognize its groove orientations: ' + path.name)
         drawing = dict(sourceFile=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                        millimeters=headers.get('$INSUNITS') == '4' or path.stem.upper() in millimeters,
                        edges=contour)
@@ -191,14 +193,15 @@ def import_profiles(catalog, directory, millimeters=()):
             tool['drawing'] = drawing
         report.append(dict(file=path.name, tools=[t['code'] for t in matches],
                            millimeters=drawing['millimeters'], edges=len(contour), ignoredEdges=ignored))
-    catalog['version'] = 2
+    catalog['version'] = max(catalog.get('version', 1), 2)
     return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
-    parser.add_argument('--catalog', type=Path, default=Path(__file__).resolve().parents[1] / 'src/project/data/tool-catalog.json')
+    parser.add_argument('--catalog', type=Path, required=True,
+                        help='Existing private catalogue; new tools are added in the application from DXF')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--replace', action='store_true')
     parser.add_argument('--millimeters', action='append', default=[], metavar='CODE',

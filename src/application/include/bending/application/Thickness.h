@@ -6,10 +6,12 @@
 
 namespace bending::application {
 enum class ThicknessStatus { Unsupported, Detected, Ambiguous, LimitReached, Failed };
+enum class ThicknessEvidenceKind { PlanarWalls, BendRadii };
 struct ThicknessEvidence {
     std::size_t firstFace;
     std::size_t secondFace;
     double distanceMm;
+    ThicknessEvidenceKind kind = ThicknessEvidenceKind::PlanarWalls;
 };
 struct ThicknessAnalysis {
     ThicknessStatus status = ThicknessStatus::Unsupported;

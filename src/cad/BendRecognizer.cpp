@@ -125,8 +125,8 @@ std::optional<EndBounds> inspectEnd(const TopoDS_Edge &edge, const TopoDS_Face &
                      minimumU,     maximumU};
 }
 
-bool joinDrawingEnds(std::vector<EndBounds> &caps, double u0, double u1, double v0, double v1,
-                     double tolerance) {
+bool joinEnds(std::vector<EndBounds> &caps, double u0, double u1, double v0, double v1,
+              double tolerance) {
     std::array<std::vector<EndBounds>, 2> groups;
     for (const auto &piece : caps) {
         if (piece.maximumV < (v0 + v1) / 2)
@@ -168,7 +168,7 @@ bool joinDrawingEnds(std::vector<EndBounds> &caps, double u0, double u1, double 
 std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                                   const TopTools_IndexedMapOfShape &faces,
                                   const TopTools_IndexedDataMapOfShapeListOfShape &neighbors,
-                                  double tolerance, bool drawing) {
+                                  double tolerance) {
     BRepAdaptor_Surface surface(face, true);
     const auto cylinder = surface.Cylinder();
     double u0, u1, v0, v1;
@@ -186,7 +186,7 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
         return {};
     }
     TopExp::MapShapes(outerWire, TopAbs_EDGE, edges);
-    if (drawing ? (edges.Extent() < 4 || edges.Extent() > 12) : edges.Extent() != 4) {
+    if (edges.Extent() < 4 || edges.Extent() > 12) {
         return {};
     }
     std::vector<std::size_t> boundaryFaces;
@@ -248,7 +248,7 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                 otherSurface.GetType() == GeomAbs_Plane &&
                 parallel(otherSurface.Plane().Axis().Direction(), cylinder.Axis().Direction());
             const auto cap = inspectEnd(edge, face, faces.FindIndex(other), normalPlanarCap, u0, u1,
-                                        tolerance, drawing);
+                                        tolerance, true);
             if (!cap) {
                 return {};
             }
@@ -260,7 +260,7 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
         capFaces.push_back(cap.face);
     std::sort(capFaces.begin(), capFaces.end());
     capFaces.erase(std::unique(capFaces.begin(), capFaces.end()), capFaces.end());
-    if (drawing && !joinDrawingEnds(caps, u0, u1, v0, v1, tolerance))
+    if (!joinEnds(caps, u0, u1, v0, v1, tolerance))
         return {};
     if (rails.size() != 2 || caps.size() != 2 || rails[0].flange == rails[1].flange ||
         caps[0].face == caps[1].face) {
@@ -408,10 +408,8 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
             const auto &face = TopoDS::Face(faces(i));
             if (BRepAdaptor_Surface(face, true).GetType() == GeomAbs_Cylinder) {
                 ++result.unrecognizedCylindricalFaces;
-                if (const auto patch =
-                        inspectPatch(face, static_cast<std::size_t>(i), faces, neighbors,
-                                     result.lengthToleranceMm,
-                                     purpose == BendRecognitionPurpose::DrawingMeasurements)) {
+                if (const auto patch = inspectPatch(face, static_cast<std::size_t>(i), faces,
+                                                    neighbors, result.lengthToleranceMm)) {
                     patches.push_back(*patch);
                 }
             }

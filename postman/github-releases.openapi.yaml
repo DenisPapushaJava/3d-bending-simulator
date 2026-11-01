@@ -1,0 +1,71 @@
+openapi: 3.0.3
+info:
+  title: GitHub Releases subset used by 3D Bending Simulator
+  version: 1.0.0
+  description: Read-only client contract from official GitHub Releases documentation; not the entire API. Public access, no token.
+servers:
+  - url: https://api.github.com
+paths:
+  /repos/DenisPapushaJava/3d-bending-simulator/releases:
+    get:
+      operationId: listReleases
+      parameters:
+        - {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+        - {in: query, name: per_page, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
+      responses:
+        '200':
+          description: Client filters drafts, versions and channels before offering a release
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Release'}
+              example: []
+        '403': {description: Rate limit or access failure; never reported as up-to-date}
+        '429': {description: Rate limited; retry only by user command}
+        '502': {description: Upstream failure}
+  /DenisPapushaJava/3d-bending-simulator/releases/download/{tag}/{name}:
+    servers:
+      - url: https://github.com
+    get:
+      operationId: downloadReleaseAsset
+      parameters:
+        - {in: path, name: tag, required: true, schema: {type: string}}
+        - {in: path, name: name, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Exact Windows ZIP bytes or SHA256SUMS.txt for a published version
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+            text/plain:
+              schema: {type: string}
+        '302':
+          description: HTTPS redirect to GitHub asset CDN; destination checked by the client
+          headers:
+            Location: {schema: {type: string, format: uri}, description: Allowlisted HTTPS address}
+        '404': {description: Missing package; no installation}
+        '429': {description: Rate limited; no automatic retry}
+components:
+  schemas:
+    Release:
+      type: object
+      required: [tag_name, draft, prerelease, published_at, assets]
+      properties:
+        tag_name: {type: string}
+        draft: {type: boolean}
+        prerelease: {type: boolean}
+        published_at: {type: string, format: date-time, nullable: true}
+        body: {type: string, nullable: true, description: Displayed as plain text only}
+        assets:
+          type: array
+          items: {$ref: '#/components/schemas/Asset'}
+    Asset:
+      type: object
+      required: [name, state, size, browser_download_url]
+      properties:
+        name: {type: string}
+        state: {type: string, description: Only uploaded assets are accepted}
+        size: {type: integer, format: int64, minimum: 0}
+        browser_download_url: {type: string, format: uri}
+        digest: {type: string, nullable: true, description: Optional sha256 digest cross-checked with SHA256SUMS.txt}

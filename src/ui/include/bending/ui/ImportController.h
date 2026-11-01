@@ -1,7 +1,9 @@
 #pragma once
+#include "bending/application/ToolProfileImport.h"
 
 #include "bending/application/BendingDrawing.h"
 #include "bending/application/DocumentSession.h"
+#include "bending/application/FlatPattern.h"
 #include "bending/application/ProjectWriter.h"
 #include "bending/application/SingleBendPreview.h"
 
@@ -26,9 +28,16 @@ class ImportController final : public QObject {
     void shutdown();
     application::ThicknessValidation setManualThickness(double valueMm);
     void useAutomaticThickness();
+    bool setBendWorkpieceOrientation(std::size_t recognizedIndex, bool reversed);
     bool setBendReview(std::size_t recognizedIndex, application::BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
+    bool setBendToolAssignments(const std::vector<application::BendToolUpdate> &updates);
+    // One transaction for included, assigned bends. A shared setup replaces their assignments;
+    // without one, only orientation changes and each bend retains its own tools.
+    bool setAllBendPunchOrientations(bool reversed,
+                                     std::optional<core::PressTools> sharedTools = {},
+                                     std::optional<core::ToolAssignment> sharedAssignment = {});
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     void saveProject(std::filesystem::path path,
                      std::shared_ptr<const application::ProjectWriter> writer);
@@ -36,11 +45,31 @@ class ImportController final : public QObject {
     [[nodiscard]] QString saveError() const;
     [[nodiscard]] const application::DocumentSession &session() const;
     [[nodiscard]] bool hasWork() const;
+    bool prepareToolProfile(application::ToolProfileInput,
+                            std::shared_ptr<const application::ToolProfileImporter>,
+                            std::function<void(application::ToolProfileResult)>);
+    void cancelToolProfile();
     bool
     prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
                        std::shared_ptr<const application::SingleBendPreviewBuilder> builder,
-                       application::BendPreviewMode mode = application::BendPreviewMode::Kinematic);
+                       application::BendPreviewMode mode = application::BendPreviewMode::Kinematic,
+                       double maximumEndSupportLossMm = 0);
     void discardBendPreview();
+    bool prepareBendRoute(application::BendRouteRequest,
+                          std::shared_ptr<const application::SingleBendPreviewBuilder>);
+    void discardBendRoute();
+    void discardToolChecks();
+    bool setBendOrder(const std::vector<std::string> &);
+    [[nodiscard]] application::BendRoutePtr bendRoute() const;
+    [[nodiscard]] std::optional<application::BendRouteError> bendRouteError() const;
+    [[nodiscard]] bool isPreparingRoute() const;
+    [[nodiscard]] std::optional<application::BendRouteProgress> bendRouteProgress() const;
+    bool prepareRouteDraft(application::RouteDraftRequest,
+                           std::shared_ptr<const application::SingleBendPreviewBuilder>);
+    void discardRouteDraft();
+    [[nodiscard]] application::RouteDraftPtr routeDraft() const;
+    [[nodiscard]] std::optional<application::BendRouteError> routeDraftError() const;
+    [[nodiscard]] bool isPreparingDraft() const;
     [[nodiscard]] application::BendPreviewPtr bendPreview() const;
     [[nodiscard]] const std::optional<application::BendPreviewError> &bendPreviewError() const;
     [[nodiscard]] bool isPreparingPreview() const;
@@ -50,6 +79,13 @@ class ImportController final : public QObject {
     [[nodiscard]] std::optional<application::DrawingError> drawingError() const;
     [[nodiscard]] bool isPreparingDrawing() const;
     void cancelDrawing();
+    bool setUnfoldSettings(core::UnfoldSettings);
+    bool setPartInputs(std::uint64_t revision, std::uint64_t editRevision,
+                       std::optional<double> manualThicknessMm, core::UnfoldSettings);
+    bool prepareFlatPattern(std::shared_ptr<const application::FlatPatternBuilder>);
+    [[nodiscard]] application::FlatPatternPtr flatPattern() const;
+    [[nodiscard]] std::optional<application::FlatPatternError> flatPatternError() const;
+    [[nodiscard]] bool isPreparingFlatPattern() const;
 
   signals:
     void stateChanged();

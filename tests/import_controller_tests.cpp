@@ -198,8 +198,8 @@ class GatedWriter final : public ProjectWriter {
   public:
     std::optional<std::string> save(const std::filesystem::path &path, const Document &,
                                     std::optional<double>,
-                                    const std::vector<BendPreparation> &bends,
-                                    std::stop_token stop) const override {
+                                    const std::vector<BendPreparation> &bends, std::stop_token stop,
+                                    bending::core::UnfoldSettings = {}) const override {
         require(QThread::currentThread() != QCoreApplication::instance()->thread(),
                 "Save ran in GUI thread");
         if (path == "failed.bend") {
@@ -262,8 +262,12 @@ void testSaveRace() {
 }
 class TestPreview final : public SingleBendPreview {
   public:
-    explicit TestPreview(bool tools = false, bool motion = false, bool certified = true)
-        : withTools_(tools), withMotion_(motion), certified_(certified) {}
+    explicit TestPreview(bool tools = false, bool motion = false, bool certified = true,
+                         bending::core::MachineModel machine = bending::core::MachineModel::None)
+        : withTools_(tools), withMotion_(motion), certified_(certified), machine_(machine) {}
+    bending::core::MachineModel machineModel() const noexcept override {
+        return machine_;
+    }
     const bending::simulation::PressMotion *pressMotion() const noexcept override {
         return withMotion_ ? &motion_ : nullptr;
     }
@@ -290,6 +294,7 @@ class TestPreview final : public SingleBendPreview {
     bool withTools_;
     bool withMotion_;
     bool certified_;
+    bending::core::MachineModel machine_;
     bending::simulation::PressMotion motion_{};
     bending::simulation::PressState state_{};
     bending::simulation::PressState returned_{
@@ -302,7 +307,8 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
   public:
     BendPreviewResult buildToolMotion(DocumentPtr document, std::size_t index,
                                       bending::core::BendTarget target, bending::core::PressTools,
-                                      std::stop_token stop) const override {
+                                      std::stop_token stop, double = 0,
+                                      bool = false) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
@@ -311,12 +317,16 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     }
     BendPreviewResult buildToolSetup(DocumentPtr document, std::size_t index,
                                      bending::core::BendTarget target, bending::core::PressTools,
-                                     std::stop_token stop) const override {
+                                     std::stop_token stop, double = 0,
+                                     bool = false) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
         }
-        return BendPreviewPtr(std::make_shared<TestPreview>(true));
+        return BendPreviewPtr(
+            std::make_shared<TestPreview>(true, false, true,
+                                          omitFloor ? bending::core::MachineModel::DemoPressV3
+                                                    : bending::core::MachineModel::None));
     }
     BendPreviewResult build(DocumentPtr, std::size_t, bending::core::BendTarget, bool,
                             std::stop_token) const override {
@@ -346,6 +356,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     mutable bool released = true;
     std::atomic<bool> fail{false};
     std::atomic<bool> omitRetraction{false};
+    std::atomic<bool> omitFloor{false};
 };
 void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     const auto importer = std::make_shared<GatedImporter>();
@@ -383,6 +394,27 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     require(controller.bendPreview() && !controller.bendPreviewError() &&
                 controller.session().document() == source,
             "Preview replaced source document");
+    if (mode != BendPreviewMode::Kinematic) {
+        require(controller.setBendWorkpieceOrientation(0, true) &&
+                    controller.prepareBendPreview(0, false, builder, mode),
+                "Cannot request a turned workpiece");
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "Unturned snapshot accepted for a turned workpiece request");
+        require(controller.setBendWorkpieceOrientation(0, false), "Cannot restore workpiece");
+        bending::core::PressTools flipped{48, 1.5, 1.4, 2, 100, 10};
+        flipped.punchReversed = true;
+        require(controller.setBendTools(0, flipped) &&
+                    controller.prepareBendPreview(0, false, builder, mode),
+                "Cannot request reversed punch");
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "Normal snapshot accepted for reversed punch request");
+        prepare();
+        waitUntil(finished);
+    }
     if (mode == BendPreviewMode::ToolMotion) {
         builder->omitRetraction = true;
         prepare();
@@ -395,6 +427,21 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
         waitUntil(finished);
         require(controller.bendPreview() && !controller.bendPreviewError(),
                 "Complete cycle did not recover");
+    }
+    if (mode == BendPreviewMode::ToolSetup) {
+        auto withFloor = bending::core::PressTools{48, 1.5, 1.4, 2, 100, 10};
+        withFloor.machineModel = bending::core::MachineModel::DemoPressV3;
+        builder->omitFloor = true;
+        require(controller.setBendTools(0, withFloor) &&
+                    controller.prepareBendPreview(0, false, builder, mode),
+                "Cannot request floor-checked setup");
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "V3 model label accepted without the floor check scope");
+        builder->omitFloor = false;
+        prepare();
+        waitUntil(finished);
     }
     const auto revision = controller.session().editRevision();
     controller.discardBendPreview();

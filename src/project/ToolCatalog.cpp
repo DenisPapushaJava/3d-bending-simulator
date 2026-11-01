@@ -1,15 +1,21 @@
 #include "bending/project/ToolCatalog.h"
 #include "ToolJson.h"
+#include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLockFile>
 #include <QResource>
+#include <QSaveFile>
 #include <cmath>
 #include <limits>
 
-static void initializeToolCatalog() {
-    Q_INIT_RESOURCE(tool_catalog);
+static void initStarterTools() {
+    Q_INIT_RESOURCE(starter_tools);
 }
+
 namespace bending::project {
 namespace {
 QJsonValue number(const std::optional<double> &value) {
@@ -26,7 +32,7 @@ bool readNumber(const QJsonValue &value, std::optional<double> &out) {
     out = value.toDouble();
     return true;
 }
-ToolCatalogResult readFile(QFile &file) {
+ToolCatalogResult readFile(QFile &file, QByteArray *captured = nullptr) {
     constexpr qint64 limit = 4 * 1024 * 1024;
     if (!file.open(QIODevice::ReadOnly) || file.size() <= 0 || file.size() > limit) {
         return std::string("Cannot read catalogue or size exceeds 4 MiB");
@@ -35,6 +41,8 @@ ToolCatalogResult readFile(QFile &file) {
     if (file.error() != QFileDevice::NoError || bytes.size() > limit) {
         return std::string("Cannot read catalogue");
     }
+    if (captured)
+        *captured = bytes;
     QJsonParseError error;
     const auto json = QJsonDocument::fromJson(bytes, &error);
     if (error.error != QJsonParseError::NoError || !json.isObject()) {
@@ -42,7 +50,9 @@ ToolCatalogResult readFile(QFile &file) {
     }
     const auto root = json.object();
     if (root.value("format") != QStringLiteral("bending-tool-catalog") ||
-        (root.value("version").toDouble(-1) != 1 && root.value("version").toDouble(-1) != 2) ||
+        (root.value("version").toDouble(-1) != 1 && root.value("version").toDouble(-1) != 2 &&
+         root.value("version").toDouble(-1) != 3 && root.value("version").toDouble(-1) != 4 &&
+         root.value("version").toDouble(-1) != 5) ||
         !root.value("tools").isArray() || root.value("tools").toArray().size() > 512) {
         return std::string("Unsupported catalogue format/version");
     }
@@ -52,15 +62,50 @@ ToolCatalogResult readFile(QFile &file) {
         if (!item.isObject() || !readPreset(item.toObject(), preset)) {
             return std::string("Invalid tool definition");
         }
+        if (root.value("version").toInt() < 3 && !preset.grooveSettings.empty())
+            return std::string("Groove orientations require catalogue version 3");
+        if (root.value("version").toInt() < 4 && preset.segments)
+            return std::string("Segment stock requires catalogue version 4");
         tools.push_back(std::move(preset));
     }
     if (!core::validToolCatalog(tools)) {
         return std::string("Invalid catalogue or duplicate tool IDs");
     }
+    if (root.value("version").toInt() == 5) {
+        if (!root.value("archived").isArray() || root.value("archived").toArray().size() > 512)
+            return std::string("Invalid library archive");
+        application::ToolLibraryData data{tools, {}};
+        for (const auto &item : root.value("archived").toArray()) {
+            core::ToolPreset preset;
+            if (!item.isObject() || !readPreset(item.toObject(), preset))
+                return std::string("Invalid archived tool definition");
+            data.archived.push_back(std::move(preset));
+        }
+        if (!application::validToolLibrary(data))
+            return std::string("Invalid library archive or duplicate IDs");
+    } else if (root.contains("archived")) {
+        return std::string("Tool archive requires library version 5");
+    }
     return tools;
 }
 } // namespace
 QJsonObject presetJson(const core::ToolPreset &t) {
+    QJsonValue segments(QJsonValue::Null);
+    if (t.segments) {
+        QJsonArray rows;
+        for (const auto &s : *t.segments)
+            rows.append(
+                QJsonObject{{"lengthMm", s.lengthMm},
+                            {"quantity", static_cast<int>(s.quantity)},
+                            {"shape", s.shape == core::SegmentShape::Straight   ? "straight"
+                                      : s.shape == core::SegmentShape::LeftHorn ? "left-horn"
+                                                                                : "right-horn"}});
+        segments = rows;
+    }
+    QJsonArray grooves;
+    for (const auto &g : t.grooveSettings)
+        grooves.append(
+            QJsonObject{{"angleRadians", g.angleRadians}, {"rotationRadians", g.rotationRadians}});
     QJsonArray openings;
     for (double v : t.openingsMm) {
         openings.append(v);
@@ -89,13 +134,34 @@ QJsonObject presetJson(const core::ToolPreset &t) {
             {"heightMm", number(t.heightMm)},
             {"noseRadiusMm", number(t.noseRadiusMm)},
             {"openingsMm", openings},
+            {"grooveSettings", grooves},
             {"source", QString::fromStdString(t.source)},
             {"notes", QString::fromStdString(t.notes)},
             {"teaching", t.teaching},
             {"parametersConfirmed", t.parametersConfirmed},
-            {"drawing", drawing}};
+            {"drawing", drawing},
+            {"segments", segments}};
 }
 bool readPreset(const QJsonObject &o, core::ToolPreset &t) {
+    t.segments.reset();
+    if (o.contains("segments") && !o.value("segments").isNull()) {
+        if (!o.value("segments").isArray() || o.value("segments").toArray().size() > 64)
+            return false;
+        t.segments.emplace();
+        for (const auto &value : o.value("segments").toArray()) {
+            const auto s = value.toObject();
+            const auto q = s.value("quantity").toDouble(-1);
+            const auto kind = s.value("shape").toString();
+            if (!value.isObject() || !s.value("lengthMm").isDouble() || q < 0 || q > 1000 ||
+                std::floor(q) != q ||
+                (kind != "straight" && kind != "left-horn" && kind != "right-horn"))
+                return false;
+            t.segments->push_back({s.value("lengthMm").toDouble(), static_cast<unsigned>(q),
+                                   kind == "straight"    ? core::SegmentShape::Straight
+                                   : kind == "left-horn" ? core::SegmentShape::LeftHorn
+                                                         : core::SegmentShape::RightHorn});
+        }
+    }
     for (const auto &[name, destination] : {std::pair{"id", &t.id},
                                             {"manufacturer", &t.manufacturer},
                                             {"code", &t.code},
@@ -166,6 +232,19 @@ bool readPreset(const QJsonObject &o, core::ToolPreset &t) {
         t.drawing = std::move(drawing);
     }
     t.openingsMm.clear();
+    t.grooveSettings.clear();
+    if (o.contains("grooveSettings")) {
+        if (!o.value("grooveSettings").isArray() || o.value("grooveSettings").toArray().size() > 16)
+            return false;
+        for (const auto &item : o.value("grooveSettings").toArray()) {
+            const auto g = item.toObject();
+            if (!item.isObject() || !g.value("angleRadians").isDouble() ||
+                !g.value("rotationRadians").isDouble())
+                return false;
+            t.grooveSettings.push_back(
+                {g.value("angleRadians").toDouble(), g.value("rotationRadians").toDouble()});
+        }
+    }
     if (o.value("openingsMm").toArray().size() > 16) {
         return false;
     }
@@ -181,11 +260,51 @@ QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
     if (!a) {
         return QJsonValue(QJsonValue::Null);
     }
+    const auto assembly = [](const std::optional<core::ToolAssembly> &value) {
+        if (!value)
+            return QJsonValue(QJsonValue::Null);
+        QJsonArray rows;
+        for (const auto row : value->pieces)
+            rows.append(static_cast<int>(row));
+        return QJsonValue(QJsonObject{{"pieces", rows}, {"gapMm", value->gapMm}});
+    };
     return QJsonObject{{"punch", presetJson(a->punch)},
                        {"die", presetJson(a->die)},
                        {"groove", static_cast<int>(a->groove)},
                        {"clearanceMm", a->clearanceMm},
-                       {"machineName", QString::fromStdString(a->machineName)}};
+                       {"machineName", QString::fromStdString(a->machineName)},
+                       {"machineModel", machineModelJson(a->machineModel)},
+                       {"punchReversed", a->punchReversed},
+                       {"useDrawingGeometry", a->useDrawingGeometry},
+                       {"punchAssembly", assembly(a->punchAssembly)},
+                       {"dieAssembly", assembly(a->dieAssembly)}};
+}
+QString machineModelJson(core::MachineModel model) {
+    if (model == core::MachineModel::DemoPressV3)
+        return QStringLiteral("demo-press-v3");
+    if (model == core::MachineModel::DemoPressV2)
+        return QStringLiteral("demo-press-v2");
+    return model == core::MachineModel::DemoPressV1 ? QStringLiteral("demo-press-v1")
+                                                    : QStringLiteral("none");
+}
+bool readMachineModel(const QJsonValue &value, core::MachineModel &model) {
+    if (value.isString() && value.toString() == QStringLiteral("demo-press-v3")) {
+        model = core::MachineModel::DemoPressV3;
+        return true;
+    }
+    if (value.isUndefined() || (value.isString() && value.toString() == QStringLiteral("none"))) {
+        model = core::MachineModel::None;
+        return true;
+    }
+    if (value.isString() && value.toString() == QStringLiteral("demo-press-v1")) {
+        model = core::MachineModel::DemoPressV1;
+        return true;
+    }
+    if (value.isString() && value.toString() == QStringLiteral("demo-press-v2")) {
+        model = core::MachineModel::DemoPressV2;
+        return true;
+    }
+    return false;
 }
 bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment> &assignment) {
     if (value.isNull()) {
@@ -197,6 +316,32 @@ bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment>
     }
     const auto o = value.toObject();
     core::ToolAssignment a;
+    if (!readMachineModel(o.value("machineModel"), a.machineModel))
+        return false;
+    if (o.contains("punchReversed") && !o.value("punchReversed").isBool())
+        return false;
+    a.punchReversed = o.value("punchReversed").toBool(false);
+    const auto readAssembly = [](const QJsonValue &v, std::optional<core::ToolAssembly> &out) {
+        if (v.isNull() || v.isUndefined())
+            return true;
+        if (!v.isObject() || !v.toObject().value("pieces").isArray() ||
+            v.toObject().value("pieces").toArray().isEmpty() ||
+            v.toObject().value("pieces").toArray().size() > 512 ||
+            !v.toObject().value("gapMm").isDouble())
+            return false;
+        out.emplace();
+        out->gapMm = v.toObject().value("gapMm").toDouble();
+        for (const auto &row : v.toObject().value("pieces").toArray()) {
+            const double n = row.toDouble(-1);
+            if (n < 0 || n >= 64 || std::floor(n) != n)
+                return false;
+            out->pieces.push_back(static_cast<std::size_t>(n));
+        }
+        return true;
+    };
+    if (!readAssembly(o.value("punchAssembly"), a.punchAssembly) ||
+        !readAssembly(o.value("dieAssembly"), a.dieAssembly))
+        return false;
     const double groove = o.value("groove").toDouble(-1);
     if (!o.value("punch").isObject() || !o.value("die").isObject() ||
         !readPreset(o.value("punch").toObject(), a.punch) ||
@@ -205,6 +350,9 @@ bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment>
         !o.value("machineName").isString()) {
         return false;
     }
+    if (o.contains("useDrawingGeometry") && !o.value("useDrawingGeometry").isBool())
+        return false;
+    a.useDrawingGeometry = o.value("useDrawingGeometry").toBool(false);
     a.groove = static_cast<std::size_t>(groove);
     a.clearanceMm = o.value("clearanceMm").toDouble();
     a.machineName = o.value("machineName").toString().toStdString();
@@ -222,13 +370,120 @@ ToolCatalogResult readToolCatalog(const std::filesystem::path &path) {
 #endif
     return readFile(file);
 }
-ToolCatalogResult builtInToolCatalog() {
+ToolCatalogResult readStarterToolCatalog() {
     static const bool initialized = [] {
-        initializeToolCatalog();
+        initStarterTools();
         return true;
     }();
     (void)initialized;
-    QFile file(QStringLiteral(":/bending/tool-catalog.json"));
+    QFile file(QStringLiteral(":/tools/starter-tools-v1.json"));
     return readFile(file);
+}
+std::optional<std::string> writeToolCatalog(const std::filesystem::path &path,
+                                            const core::ToolCatalog &catalog) {
+    if (!core::validToolCatalog(catalog))
+        return "Некорректный каталог или повторяющиеся идентификаторы.";
+    QJsonArray tools;
+    for (const auto &tool : catalog)
+        tools.append(presetJson(tool));
+    const auto bytes =
+        QJsonDocument(
+            QJsonObject{{"format", "bending-tool-catalog"}, {"version", 4}, {"tools", tools}})
+            .toJson();
+    if (bytes.size() > 4 * 1024 * 1024)
+        return "Библиотека превышает 4 МиБ. Инструмент не добавлен.";
+#ifdef _WIN32
+    QSaveFile file(QString::fromStdWString(path.native()));
+#else
+    QSaveFile file(QString::fromUtf8(path.native().c_str()));
+#endif
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+        return "Не удалось сохранить библиотеку. Проверьте доступ к папке настроек.";
+    return {};
+}
+application::ToolLibraryResult readToolLibrary(const std::filesystem::path &path) {
+#ifdef _WIN32
+    const auto name = QString::fromStdWString(path.wstring());
+#else
+    const auto name = QString::fromUtf8(path.string().c_str());
+#endif
+    if (!QFileInfo::exists(name))
+        return application::ToolLibrarySnapshot{{}, "missing", false};
+    QFile file(name);
+    QByteArray bytes;
+    auto parsed = readFile(file, &bytes);
+    if (const auto *error = std::get_if<std::string>(&parsed))
+        return *error;
+    application::ToolLibrarySnapshot result;
+    result.data.tools = std::get<core::ToolCatalog>(std::move(parsed));
+    const auto root = QJsonDocument::fromJson(bytes).object();
+    for (const auto &item : root.value("archived").toArray()) {
+        core::ToolPreset tool;
+        if (!readPreset(item.toObject(), tool))
+            return std::string("Некорректная запись архива.");
+        result.data.archived.push_back(std::move(tool));
+    }
+    result.revision =
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex().toStdString();
+    return result;
+}
+application::ToolLibraryResult writeToolLibrary(const std::filesystem::path &path,
+                                                const application::ToolLibraryData &data,
+                                                const std::string &expectedRevision) {
+    if (!application::validToolLibrary(data))
+        return std::string("Некорректные данные библиотеки.");
+#ifdef _WIN32
+    const auto name = QString::fromStdWString(path.wstring());
+#else
+    const auto name = QString::fromUtf8(path.string().c_str());
+#endif
+    if (!QDir().mkpath(QFileInfo(name).absolutePath()))
+        return std::string("Не удалось создать папку библиотеки.");
+    QLockFile lock(name + QStringLiteral(".lock"));
+    if (!lock.tryLock(0))
+        return std::string("Библиотека занята другим процессом. Повторите сохранение.");
+    const auto current = readToolLibrary(path);
+    if (const auto *error = std::get_if<std::string>(&current))
+        return *error;
+    if (std::get<application::ToolLibrarySnapshot>(current).revision != expectedRevision)
+        return std::string("Библиотека изменена другим окном или процессом. Закройте и откройте "
+                           "программу, чтобы загрузить актуальную версию. Изменения не записаны.");
+    if (expectedRevision != "missing") {
+        QFile previous(name);
+        if (!previous.open(QIODevice::ReadOnly))
+            return std::string("Не удалось прочитать прежнюю библиотеку.");
+        const auto original = previous.read(4 * 1024 * 1024 + 1);
+        if (previous.error() != QFileDevice::NoError || original.size() > 4 * 1024 * 1024 ||
+            QCryptographicHash::hash(original, QCryptographicHash::Sha256).toHex().toStdString() !=
+                expectedRevision)
+            return std::string("Библиотека изменилась во время сохранения. Изменения не записаны.");
+        previous.close();
+        if (QJsonDocument::fromJson(original).object().value("version").toInt() < 5) {
+            QSaveFile backup(name + QStringLiteral(".pre-v5.json"));
+            backup.setDirectWriteFallback(false);
+            if (!backup.open(QIODevice::WriteOnly) || backup.write(original) != original.size() ||
+                !backup.commit())
+                return std::string("Не удалось сохранить резервную копию старого формата. "
+                                   "Библиотека не изменена.");
+        }
+    }
+    QJsonArray tools, archived;
+    for (const auto &tool : data.tools)
+        tools.append(presetJson(tool));
+    for (const auto &tool : data.archived)
+        archived.append(presetJson(tool));
+    const auto bytes = QJsonDocument(QJsonObject{{"format", "bending-tool-catalog"},
+                                                 {"version", 5},
+                                                 {"tools", tools},
+                                                 {"archived", archived}})
+                           .toJson();
+    if (bytes.size() > 4 * 1024 * 1024)
+        return std::string("Библиотека вместе с удалёнными инструментами превышает 4 МиБ.");
+    QSaveFile file(name);
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+        return std::string("Не удалось сохранить библиотеку. Прежние данные сохранены.");
+    return application::ToolLibrarySnapshot{
+        data, QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex().toStdString()};
 }
 } // namespace bending::project

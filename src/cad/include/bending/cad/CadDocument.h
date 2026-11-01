@@ -14,7 +14,8 @@ using application::PointMm;
 
 class StepImporter;
 
-// One validated solid in millimetres. Only the importer can create a document.
+// One validated solid in millimetres. The importer creates session documents;
+// the native bridge may create private derived states for route checking.
 // The geometry is owned here; copying a mutable OCCT handle is not part of this API.
 class CadDocument final : public application::Document {
   public:

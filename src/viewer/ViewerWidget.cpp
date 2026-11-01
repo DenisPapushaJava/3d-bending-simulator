@@ -1,7 +1,13 @@
 #include "bending/viewer/ViewerWidget.h"
+#include "CollisionPresentation.h"
 #include "Dimensions.h"
+#include "SheetOrientationPresentation.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include "bending/cad/occt/FlatPatternAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include <BRepBndLib.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
 
 #include <AIS_ColoredShape.hxx>
 #include <AIS_InteractiveContext.hxx>
@@ -13,6 +19,7 @@
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
 #include <Font_NameOfFont.hxx>
+#include <Graphic3d_Camera.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -37,6 +44,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPointer>
 #include <QResizeEvent>
 #include <QStackedLayout>
 #include <QTimer>
@@ -47,6 +55,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <numbers>
 #include <stdexcept>
 #include <utility>
 
@@ -68,7 +77,9 @@ struct FaceHighlights {
 };
 
 class OcctCanvas final : public QWidget {
+    enum class CameraSpace : std::size_t { Cad, Flat, Kinematic, Press };
     enum class DisplayStyle { Edges, Shaded, Wireframe };
+    enum class SceneSpace { Cad, Flat, Kinematic, Press };
 
   public:
     explicit OcctCanvas(QWidget *parent) : QWidget(parent) {
@@ -134,7 +145,44 @@ class OcctCanvas final : public QWidget {
         fit->setShortcutContext(Qt::WidgetWithChildrenShortcut);
         addAction(fit);
         connect(fit, &QAction::triggered, this, [this] { fitAll(); });
-        const auto icon = [](bool isHome) {
+        auto *refresh = navigationMenu_->addAction(QStringLiteral("Обновить вид"));
+        refresh->setObjectName(QStringLiteral("refreshScene"));
+        refresh->setShortcut(QKeySequence(Qt::Key_F5));
+        refresh->setShortcutContext(Qt::WindowShortcut);
+        refresh->setToolTip(QStringLiteral("Перерисовать сцену и панели без пересчёта гибки · F5"));
+        addAction(refresh);
+        connect(refresh, &QAction::triggered, this, [this] { refreshScene(); });
+        machineVisibleAction_ = navigationMenu_->addAction(QStringLiteral("Показать станок"));
+        machineVisibleAction_->setObjectName(QStringLiteral("showMachine"));
+        machineVisibleAction_->setCheckable(true);
+        machineVisibleAction_->setChecked(true);
+        connect(machineVisibleAction_, &QAction::toggled, this, [this] {
+            if (preview_)
+                presentPreview(preview_, previewFrame_, revision_);
+        });
+        floorVisibleAction_ = navigationMenu_->addAction(QStringLiteral("Показать пол"));
+        floorVisibleAction_->setObjectName(QStringLiteral("showFloor"));
+        floorVisibleAction_->setCheckable(true);
+        floorVisibleAction_->setChecked(true);
+        floorVisibleAction_->setToolTip(
+            QStringLiteral("Видимость пола не отключает проверку столкновений."));
+        connect(floorVisibleAction_, &QAction::toggled, this, [this] {
+            if (preview_)
+                presentPreview(preview_, previewFrame_, revision_);
+        });
+        auto *fitMachine = navigationMenu_->addAction(QStringLiteral("Вписать станок"));
+        fitMachineAction_ = fitMachine;
+        fitMachine->setObjectName(QStringLiteral("fitMachine"));
+        connect(fitMachine, &QAction::triggered, this, [this] {
+            if (!ready_ || !preview_ || !machineVisibleAction_->isChecked())
+                return;
+            guarded([&] {
+                fitPreview(*preview_, previewFrame_, true);
+                view_->Redraw();
+            });
+        });
+        enum class NavigationIcon { Home, Fit, Refresh };
+        const auto icon = [](NavigationIcon type) {
             QIcon result;
             for (int ratio : {1, 2}) {
                 QPixmap pixels(24 * ratio, 24 * ratio);
@@ -143,7 +191,7 @@ class OcctCanvas final : public QWidget {
                 QPainter painter(&pixels);
                 painter.setRenderHint(QPainter::Antialiasing);
                 painter.setPen(QPen(QColor("#1C2938"), 1.6));
-                if (isHome) {
+                if (type == NavigationIcon::Home) {
                     painter.drawPolyline(QPolygonF{{3, 11}, {12, 3}, {21, 11}});
                     painter.drawPolyline(QPolygonF{{6, 10},
                                                    {6, 21},
@@ -153,6 +201,9 @@ class OcctCanvas final : public QWidget {
                                                    {14, 21},
                                                    {18, 21},
                                                    {18, 10}});
+                } else if (type == NavigationIcon::Refresh) {
+                    painter.drawArc(QRectF(4, 4, 16, 16), 45 * 16, 270 * 16);
+                    painter.drawPolyline(QPolygonF{{13, 18}, {19, 18}, {19, 23}});
                 } else {
                     for (int x : {0, 1})
                         for (int y : {0, 1}) {
@@ -167,8 +218,9 @@ class OcctCanvas final : public QWidget {
             }
             return result;
         };
-        home->setIcon(icon(true));
-        fit->setIcon(icon(false));
+        home->setIcon(icon(NavigationIcon::Home));
+        fit->setIcon(icon(NavigationIcon::Fit));
+        refresh->setIcon(icon(NavigationIcon::Refresh));
         const auto button = [&](QAction *action, const char *name) {
             auto *result = new QToolButton(controls_);
             result->setObjectName(QString::fromLatin1(name));
@@ -182,6 +234,7 @@ class OcctCanvas final : public QWidget {
         };
         button(home, "homeView");
         button(fit, "fitView");
+        button(refresh, "refreshView")->setToolTip(refresh->toolTip());
         auto *menuButton = new QToolButton(controls_);
         menuButton->setObjectName(QStringLiteral("viewOptions"));
         menuButton->setText(QStringLiteral("Вид"));
@@ -202,6 +255,93 @@ class OcctCanvas final : public QWidget {
         connect(dimensionsAction_, &QAction::toggled, this,
                 [this](bool visible) { setDimensionsVisible(visible); });
         updateDimensionButton();
+        sideAction_ = navigationMenu_->addAction(QStringLiteral("Стороны A/B"));
+        sideAction_->setObjectName(QStringLiteral("showSheetSides"));
+        sideAction_->setCheckable(true);
+        sideAction_->setEnabled(false);
+        sideAction_->setToolTip(QStringLiteral("Две стороны листа и постоянная метка края 1"));
+        connect(sideAction_, &QAction::toggled, this, [this] {
+            if (preview_)
+                presentPreview(preview_, previewFrame_, revision_);
+            else if (flat_)
+                presentFlat(flat_, revision_);
+            else
+                setHighlights(highlights_, revision_);
+        });
+        sideLegend_ = new QWidget(this);
+        sideLegend_->setObjectName(QStringLiteral("sheetSideLegend"));
+        sideLegend_->setAttribute(Qt::WA_NativeWindow);
+        sideLegend_->setStyleSheet(
+            QStringLiteral("QWidget#sheetSideLegend {background:#202A36;border:1px solid "
+                           "#526171;border-radius:5px;}"
+                           "QLabel {color:#E1E7EE;background:transparent;}"));
+        auto *legendRow = new QHBoxLayout(sideLegend_);
+        legendRow->setContentsMargins(9, 4, 4, 4);
+        legendRow->setSpacing(10);
+        sideLegendText_ = new QLabel(sideLegend_);
+        legendRow->addWidget(sideLegendText_);
+        nextEdge_ = new QToolButton(sideLegend_);
+        nextEdge_->setObjectName(QStringLiteral("nextSheetEdge"));
+        nextEdge_->setText(QStringLiteral("Другой край"));
+        nextEdge_->setAccessibleName(QStringLiteral("Перенести метку 1 на другой край"));
+        nextEdge_->setToolTip(
+            QStringLiteral("Выбрать следующий свободный край базовой полки для метки 1"));
+        nextEdge_->setStyleSheet(controls_->styleSheet());
+        legendRow->addWidget(nextEdge_);
+        connect(nextEdge_, &QToolButton::clicked, this, [this] {
+            const auto &edges = sceneOrientation().edges;
+            if (!edges.empty())
+                edgeIndex_ = (edgeIndex_ + 1) % edges.size();
+            refreshOrientation();
+        });
+        sideLegend_->hide();
+        orbitLockAction_ = navigationMenu_->addAction(QStringLiteral("Обход вокруг Y"));
+        orbitLockAction_->setObjectName(QStringLiteral("lockPressVertical"));
+        orbitLockAction_->setCheckable(true);
+        orbitLockAction_->setIconText(QStringLiteral("Y"));
+        orbitLockAction_->setToolTip(QStringLiteral(
+            "Выравнивает Y строго вверх, камеру — горизонтально. ПКМ: обход вокруг Y. "
+            "СКМ: перенос, колесо: масштаб. Изометрия и вид сверху/снизу снимают якорь. "
+            "Повторное нажатие возвращает свободное вращение."));
+        orbitLockButton_ = new QToolButton(this);
+        orbitLockButton_->setObjectName(QStringLiteral("pressOrbitLock"));
+        orbitLockButton_->setAttribute(Qt::WA_NativeWindow);
+        orbitLockButton_->setDefaultAction(orbitLockAction_);
+        orbitLockButton_->setText(QStringLiteral("Y"));
+        orbitLockButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        orbitLockButton_->setAccessibleName(QStringLiteral("Обход вокруг вертикальной оси Y"));
+        orbitLockButton_->setFixedSize(62, 30);
+        orbitLockButton_->setStyleSheet(controls_->styleSheet());
+        QIcon anchor;
+        for (int ratio : {1, 2})
+            for (const auto state : {QIcon::Off, QIcon::On}) {
+                QPixmap pixels(24 * ratio, 24 * ratio);
+                pixels.setDevicePixelRatio(ratio);
+                pixels.fill(Qt::transparent);
+                QPainter painter(&pixels);
+                painter.setRenderHint(QPainter::Antialiasing);
+                painter.setPen(QPen(state == QIcon::On ? QColor(Qt::white) : QColor("#526171"), 1.7,
+                                    Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                painter.drawEllipse(QPointF(12, 4), 2, 2);
+                painter.drawLine(QPointF(12, 6), QPointF(12, 21));
+                painter.drawLine(QPointF(8, 10), QPointF(16, 10));
+                painter.drawArc(QRectF(4, 5, 16, 16), 180 * 16, 180 * 16);
+                painter.drawPolyline(QPolygonF{{3, 16}, {4, 13}, {7, 15}});
+                painter.drawPolyline(QPolygonF{{17, 15}, {20, 13}, {21, 16}});
+                painter.end();
+                anchor.addPixmap(pixels, QIcon::Normal, state);
+            }
+        orbitLockAction_->setIcon(anchor);
+        orbitLockButton_->hide();
+        orbitLockAction_->setEnabled(false);
+        connect(orbitLockAction_, &QAction::toggled, this, [this](bool locked) {
+            if (locked && pressOrbitLocked())
+                guarded([&] {
+                    levelPressCamera();
+                    refreshDimensions();
+                    view_->Redraw();
+                });
+        });
     }
 
     ~OcctCanvas() override {
@@ -211,19 +351,74 @@ class OcctCanvas final : public QWidget {
     std::function<void(const QString &)> onError;
     std::function<void()> onReady;
     std::function<void(quint64, int)> onSelection;
+    std::function<void()> onSurfaceChanged;
 
     QMenu *navigationMenu() const {
         return navigationMenu_;
+    }
+    QAction *sheetOrientationAction() const {
+        return sideAction_;
+    }
+    void setBottomOverlay(QWidget *widget) {
+        bottomOverlay_ = widget;
+    }
+    void setTopLeftOverlay(QWidget *widget) {
+        topLeftOverlay_ = widget;
+    }
+    void layoutOrientationLegend() {
+        positionSideLegend();
     }
 
     bool ready() const {
         return ready_;
     }
 
+    void refreshScene() {
+        guarded([&] {
+            // Rebuild only GPU presentations from existing immutable shapes/meshes.
+            // Keep selection, camera, machine filtering and the current simulation frame.
+            for (const auto &object :
+                 {Handle(AIS_InteractiveObject)(presentation_),
+                  Handle(AIS_InteractiveObject)(evidence_), Handle(AIS_InteractiveObject)(support_),
+                  Handle(AIS_InteractiveObject)(navigationCube_)}) {
+                if (!object.IsNull())
+                    context_->RecomputePrsOnly(object, false, true);
+            }
+            for (const auto &object : dimensions_.objects)
+                context_->RecomputePrsOnly(object, false, true);
+            for (const auto &object : sideMarkers_)
+                context_->RecomputePrsOnly(object, false, true);
+            view_->MustBeResized();
+            view_->ZFitAll();
+            view_->Invalidate();
+            view_->Redraw();
+        });
+        positionControls();
+        if (onSurfaceChanged)
+            onSurfaceChanged();
+    }
+
     QString present(const TopoDS_Shape &shape, application::DocumentPtr document, quint64 revision,
                     bool diagnostic = false) {
+        const bool sameSource = document && document == document_ && revision == revision_;
+        if (sameSource)
+            rememberSceneCamera();
+        else
+            sceneCameras_ = {};
         TopTools_IndexedMapOfShape faces;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        cad::SheetOrientationVisual orientation;
+        if (const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(document)) {
+            const auto &tags = cad::OcctDocumentAccess::sheetOrientation(*native);
+            if (tags.available &&
+                tags.faces.size() == static_cast<std::size_t>(faces.Extent()) + 1) {
+                for (int i = 1; i <= faces.Extent(); ++i)
+                    if (tags.faces[i] != cad::SheetSide::Neutral)
+                        orientation.sides[tags.faces[i] == cad::SheetSide::A ? 0 : 1].push_back(
+                            faces(i));
+                orientation.edges = tags.reference.edges;
+            }
+        }
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
@@ -232,6 +427,8 @@ class OcctCanvas final : public QWidget {
                 candidate->Attributes()->SetAutoTriangulation(diagnostic);
                 context_->SetColor(candidate, Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
                                    false);
+                if (sideAction_->isChecked())
+                    applySheetSideColors(candidate, orientation);
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
                                                                            : AIS_Shaded,
@@ -240,8 +437,10 @@ class OcctCanvas final : public QWidget {
                     context_->Remove(presentation_, false);
                 }
                 removeDimensions();
-                view_->SetProj(V3d_XposYnegZpos);
-                view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
+                if (!restoreSceneCamera(CameraSpace::Cad)) {
+                    view_->SetProj(V3d_XposYnegZpos);
+                    view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
+                }
                 view_->ZFitAll();
                 context_->ClearSelected(false);
                 view_->Redraw();
@@ -258,11 +457,15 @@ class OcctCanvas final : public QWidget {
                                             : FaceHighlights{};
         presentation_ = candidate;
         preview_.reset();
+        flat_.reset();
         shape_ = shape;
         faces_ = std::move(faces);
         document_ = std::move(document);
         revision_ = revision;
         diagnostic_ = diagnostic;
+        sourceOrientation_ = std::move(orientation);
+        if (!sameSource)
+            edgeIndex_ = 0;
         setHighlights(retainedHighlights, revision_);
         if (onSelection) {
             onSelection(revision_, 0);
@@ -270,6 +473,15 @@ class OcctCanvas final : public QWidget {
         return {};
     }
 
+    void setToolSegmentColors(ToolSegmentColors colors) {
+        if (segmentColors_ == colors)
+            return;
+        segmentColors_ = std::move(colors);
+        if (preview_) {
+            const auto preview = preview_;
+            presentPreview(preview, previewFrame_, revision_);
+        }
+    }
     QString presentPreview(application::BendPreviewPtr preview, std::size_t index,
                            quint64 revision) {
         if (revision != revision_ || !document_ || !preview || index >= preview->frameCount()) {
@@ -277,11 +489,30 @@ class OcctCanvas final : public QWidget {
         }
         const auto &frame = cad::OcctPreviewAccess::frame(*preview, index);
         const bool entering = preview_ != preview;
+        // A new immutable result is still the same workspace. Reframe only when entering
+        // from CAD or changing between the machine (Y-up) and kinematic (Z-up) spaces.
+        const bool preserveView =
+            preview_ && bool(preview_->toolSetup()) == bool(preview->toolSetup());
+        if (entering && !preserveView)
+            rememberSceneCamera();
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
-                candidate = new AIS_ColoredShape(frame.displayShape.IsNull() ? frame.shape
-                                                                             : frame.displayShape);
+                TopoDS_Compound display;
+                BRep_Builder builder;
+                builder.MakeCompound(display);
+                builder.Add(display,
+                            frame.displayShape.IsNull() ? frame.shape : frame.displayShape);
+                if (machineVisibleAction_->isChecked())
+                    for (const auto &c : frame.machine)
+                        builder.Add(display, c.shape);
+                if (frame.floor && floorVisibleAction_->isChecked()) {
+                    builder.Add(display, frame.floor->surface);
+                    builder.Add(display, frame.floor->grid);
+                }
+                candidate = new CollisionPresentation(
+                    display, frame.collisionHighlights, machineVisibleAction_->isChecked(),
+                    floorVisibleAction_->isChecked(), frame.floorContacts);
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
                 const std::array<Quantity_Color, 3> colors{
@@ -294,8 +525,29 @@ class OcctCanvas final : public QWidget {
                     TopTools_IndexedMapOfShape regionFaces;
                     TopExp::MapShapes(regions[region], TopAbs_FACE, regionFaces);
                     for (int face = 1; face <= regionFaces.Extent(); ++face) {
-                        candidate->SetCustomColor(regionFaces(face), colors[region]);
+                        candidate->SetCustomColor(
+                            regionFaces(face),
+                            sideAction_->isChecked()
+                                ? Quantity_Color(.57, .61, .65, Quantity_TOC_sRGB)
+                                : colors[region]);
+                        candidate->SetCustomTransparency(regionFaces(face), 0);
+                        if (sideAction_->isChecked() && region == 1) {
+                            const auto drawer = candidate->CustomAspects(regionFaces(face));
+                            drawer->SetFaceBoundaryDraw(true);
+                            drawer->SetFaceBoundaryAspect(new Prs3d_LineAspect(
+                                Quantity_Color(.95, .70, .27, Quantity_TOC_sRGB), Aspect_TOL_SOLID,
+                                2));
+                        }
                     }
+                }
+                if (sideAction_->isChecked())
+                    applySheetSideColors(candidate, frame.orientation);
+                if (hoverPreviewBend_ && *hoverPreviewBend_ < frame.bendZones.size()) {
+                    TopTools_IndexedMapOfShape faces;
+                    TopExp::MapShapes(frame.bendZones[*hoverPreviewBend_], TopAbs_FACE, faces);
+                    for (int f = 1; f <= faces.Extent(); ++f)
+                        candidate->SetCustomColor(faces(f),
+                                                  Quantity_Color(.92, .65, .22, Quantity_TOC_RGB));
                 }
                 const std::array<Quantity_Color, 2> toolColors{
                     Quantity_Color(0.30, 0.36, 0.44, Quantity_TOC_RGB),
@@ -304,6 +556,28 @@ class OcctCanvas final : public QWidget {
                     if (!frame.tools[tool].IsNull()) {
                         candidate->SetCustomColor(frame.tools[tool], toolColors[tool]);
                     }
+                    for (const auto &segment : frame.toolSegments[tool]) {
+                        const auto color = toolSegmentColor(segment.lengthMm, segmentColors_);
+                        const Quantity_Color native(color.redF(), color.greenF(), color.blueF(),
+                                                    Quantity_TOC_sRGB);
+                        TopTools_IndexedMapOfShape faces;
+                        TopExp::MapShapes(segment.shape, TopAbs_FACE, faces);
+                        for (int face = 1; face <= faces.Extent(); ++face)
+                            candidate->SetCustomColor(faces(face), native);
+                    }
+                }
+                for (const auto &c : frame.machine) {
+                    const Quantity_Color color(c.moving ? .40 : .31, c.moving ? .47 : .40,
+                                               c.moving ? .55 : .48, Quantity_TOC_RGB);
+                    candidate->SetCustomColor(c.shape, color);
+                    candidate->SetCustomTransparency(c.shape, .55);
+                }
+                if (frame.floor) {
+                    candidate->SetCustomColor(frame.floor->surface,
+                                              Quantity_Color(.14, .19, .22, Quantity_TOC_RGB));
+                    candidate->SetCustomTransparency(frame.floor->surface, .82);
+                    candidate->SetCustomColor(frame.floor->grid,
+                                              Quantity_Color(.25, .31, .36, Quantity_TOC_RGB));
                 }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
@@ -318,14 +592,20 @@ class OcctCanvas final : public QWidget {
                     }
                 }
                 context_->ClearSelected(false);
-                if (entering) {
+                if (entering && !preserveView &&
+                    !restoreSceneCamera(preview->toolSetup() ? CameraSpace::Press
+                                                             : CameraSpace::Kinematic)) {
                     if (preview->toolSetup()) {
-                        view_->SetProj(1.0, 0.5, 3.0);
+                        // Y is vertical, Z runs along the bend line. From +Z the
+                        // right-hand profile shows the operator's open throat to the left.
+                        view_->SetProj(V3d_Zpos, true);
                         view_->SetUp(0.0, 1.0, 0.0);
+                        if (orbitLockAction_->isChecked())
+                            levelPressCamera();
                     } else {
                         view_->SetProj(V3d_XposYnegZpos);
                     }
-                    fitPreview(*preview);
+                    fitPreview(*preview, index, preview->toolSetup() != nullptr);
                 }
                 view_->ZFitAll();
                 if (!dimensionsVisible_) {
@@ -343,8 +623,10 @@ class OcctCanvas final : public QWidget {
         evidence_.Nullify();
         support_.Nullify();
         preview_ = std::move(preview);
+        flat_.reset();
         previewFrame_ = index;
         refreshDimensions();
+        refreshOrientation();
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -353,7 +635,7 @@ class OcctCanvas final : public QWidget {
     QString endPreview() {
         QString error;
         try {
-            error = preview_ ? present(shape_, document_, revision_) : QString{};
+            error = (preview_ || flat_) ? present(shape_, document_, revision_) : QString{};
         } catch (const Standard_Failure &failure) {
             error = failureText(failure);
         } catch (const std::exception &failure) {
@@ -363,6 +645,59 @@ class OcctCanvas final : public QWidget {
             fail(error);
         }
         return error;
+    }
+
+    QString presentFlat(application::FlatPatternPtr flat, quint64 revision) {
+        if (revision != revision_ || !document_ || !flat)
+            return QStringLiteral("Неактуальная развёртка");
+        const bool entering = flat_ != flat;
+        if (entering)
+            rememberSceneCamera();
+        Handle(AIS_ColoredShape) candidate;
+        if (ready_) {
+            try {
+                candidate = new AIS_ColoredShape(cad::OcctFlatPatternAccess::shape(*flat));
+                candidate->Attributes()->SetAutoTriangulation(false);
+                candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
+                candidate->SetColor(Quantity_Color(.25, .64, .73, Quantity_TOC_RGB));
+                if (sideAction_->isChecked())
+                    applySheetSideColors(candidate, cad::OcctFlatPatternAccess::orientation(*flat));
+                for (const auto &line : cad::OcctFlatPatternAccess::bendLines(*flat)) {
+                    candidate->SetCustomColor(line, Quantity_Color(1., .45, .08, Quantity_TOC_RGB));
+                    candidate->SetCustomWidth(line, 2.5);
+                }
+                context_->Display(candidate,
+                                  displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
+                                                                           : AIS_Shaded,
+                                  -1, false);
+                for (const auto &old : {Handle(AIS_Shape)(presentation_), evidence_, support_})
+                    if (!old.IsNull())
+                        context_->Remove(old, false);
+                removeDimensions();
+                context_->ClearSelected(false);
+                if (entering && !restoreSceneCamera(CameraSpace::Flat)) {
+                    view_->SetProj(V3d_Zpos);
+                    view_->FitAll(.25, false);
+                }
+                view_->ZFitAll();
+            } catch (const Standard_Failure &e) {
+                restore(candidate);
+                return failureText(e);
+            } catch (const std::exception &e) {
+                restore(candidate);
+                return QString::fromUtf8(e.what());
+            }
+        }
+        presentation_ = candidate;
+        evidence_.Nullify();
+        support_.Nullify();
+        preview_.reset();
+        flat_ = std::move(flat);
+        refreshDimensions();
+        refreshOrientation();
+        if (onSelection)
+            onSelection(revision_, 0);
+        return {};
     }
 
     void clearDocument(quint64 revision) {
@@ -376,14 +711,19 @@ class OcctCanvas final : public QWidget {
         support_.Nullify();
         dimensions_.objects.clear();
         dimensions_.labels.clear();
+        sideMarkers_.clear();
+        sourceOrientation_ = {};
         highlights_ = {};
         shape_.Nullify();
         faces_.Clear();
         document_.reset();
         preview_.reset();
+        flat_.reset();
         revision_ = revision;
+        sceneCameras_ = {};
         diagnostic_ = false;
         updateDimensionButton();
+        refreshOrientation();
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -447,7 +787,7 @@ class OcctCanvas final : public QWidget {
         sanitize(state.cutouts);
         state.bend = state.bend && !state.primary.empty();
         highlights_ = std::move(state);
-        if (preview_) {
+        if (preview_ || flat_) {
             return;
         }
         guarded([&] {
@@ -460,11 +800,14 @@ class OcctCanvas final : public QWidget {
             support_.Nullify();
             if (!presentation_.IsNull()) {
                 presentation_->ClearCustomAspects();
-                context_->SetColor(presentation_,
-                                   highlights_.bend
-                                       ? Quantity_Color(0.27, 0.35, 0.40, Quantity_TOC_RGB)
-                                       : Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
-                                   false);
+                context_->SetColor(
+                    presentation_,
+                    sideAction_->isChecked() ? Quantity_Color(.57, .61, .65, Quantity_TOC_sRGB)
+                    : highlights_.bend       ? Quantity_Color(0.27, 0.35, 0.40, Quantity_TOC_RGB)
+                                             : Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
+                    false);
+                if (sideAction_->isChecked())
+                    applySheetSideColors(presentation_, sourceOrientation_);
                 if (highlights_.bend) {
                     for (const auto i : highlights_.primary) {
                         const auto &face = faces_(static_cast<int>(i));
@@ -505,13 +848,16 @@ class OcctCanvas final : public QWidget {
                 support_ = outline(highlights_.flanges,
                                    Quantity_Color(0.30, 0.50, 0.60, Quantity_TOC_RGB), 1.0);
             }
-            evidence_ = outline(highlights_.primary,
-                                highlights_.bend ? Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB)
-                                                 : Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
-                                3.0);
+            evidence_ =
+                outline(sideAction_->isChecked() && !highlights_.bend ? std::vector<std::size_t>{}
+                                                                      : highlights_.primary,
+                        highlights_.bend ? Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB)
+                                         : Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
+                        3.0);
             view_->Redraw();
         });
         refreshDimensions();
+        refreshOrientation();
     }
 
     void fitAll() {
@@ -520,7 +866,7 @@ class OcctCanvas final : public QWidget {
         }
         guarded([&] {
             if (preview_) {
-                fitPreview(*preview_);
+                fitPreview(*preview_, previewFrame_, false);
             } else {
                 view_->FitAll(dimensionsVisible_ ? 0.3 : 0.1, false);
             }
@@ -537,17 +883,18 @@ class OcctCanvas final : public QWidget {
             switch (orientation) {
             case ViewerWidget::Orientation::Isometric:
                 if (yup) {
-                    view_->SetProj(1.0, 0.5, 3.0);
+                    view_->SetProj(-1.0, 0.5, 3.0);
                     view_->SetUp(0.0, 1.0, 0.0);
+                    releaseOrbitForInclinedView();
                     fitAll();
                     return;
                 }
                 break;
             case ViewerWidget::Orientation::Front:
-                projection = yup ? V3d_Zpos : V3d_Yneg;
+                projection = yup ? V3d_Xneg : V3d_Yneg;
                 break;
             case ViewerWidget::Orientation::Back:
-                projection = yup ? V3d_Zneg : V3d_Ypos;
+                projection = yup ? V3d_Xpos : V3d_Ypos;
                 break;
             case ViewerWidget::Orientation::Top:
                 projection = yup ? V3d_Ypos : V3d_Zpos;
@@ -556,13 +903,14 @@ class OcctCanvas final : public QWidget {
                 projection = yup ? V3d_Yneg : V3d_Zneg;
                 break;
             case ViewerWidget::Orientation::Left:
-                projection = V3d_Xneg;
+                projection = yup ? V3d_Zneg : V3d_Xneg;
                 break;
             case ViewerWidget::Orientation::Right:
-                projection = V3d_Xpos;
+                projection = yup ? V3d_Zpos : V3d_Xpos;
                 break;
             }
             view_->SetProj(projection, yup);
+            releaseOrbitForInclinedView();
             fitAll();
         });
     }
@@ -603,6 +951,10 @@ class OcctCanvas final : public QWidget {
             result.setDevicePixelRatio(devicePixelRatioF());
             QPainter painter(&result);
             painter.drawPixmap(controls_->pos(), controls_->grab());
+            if (orbitLockButton_->isVisible())
+                painter.drawPixmap(orbitLockButton_->pos(), orbitLockButton_->grab());
+            if (sideLegend_->isVisible())
+                painter.drawPixmap(sideLegend_->pos(), sideLegend_->grab());
         }
         return result;
     }
@@ -611,8 +963,15 @@ class OcctCanvas final : public QWidget {
     bool event(QEvent *event) override {
         const bool handled = QWidget::event(event);
         if (event->type() == QEvent::WinIdChange && ready_) {
+            restoreCamera_ = new Graphic3d_Camera(view_->Camera());
+            restoreRevision_ = revision_;
+            restoreSpace_ = sceneSpace();
             release();
             attempted_ = false;
+            update();
+        } else if (event->type() == QEvent::WindowActivate) {
+            guarded([&] { view_->Invalidate(); });
+            positionControls();
             update();
         }
         return handled;
@@ -630,17 +989,22 @@ class OcctCanvas final : public QWidget {
     }
 
     void resizeEvent(QResizeEvent *) override {
-        controls_->adjustSize();
-        controls_->move(qMax(12, width() - controls_->width() - 12), 12);
+        positionControls();
         updateNavigationCube();
         refreshDimensions();
         guarded([&] { view_->Redraw(); });
+        if (onSurfaceChanged)
+            onSurfaceChanged();
     }
 
     void showEvent(QShowEvent *) override {
         if (!window_.IsNull()) {
             window_->Map();
         }
+        guarded([&] { view_->Invalidate(); });
+        positionControls();
+        if (onSurfaceChanged)
+            onSurfaceChanged();
         update();
     }
 
@@ -649,17 +1013,19 @@ class OcctCanvas final : public QWidget {
         lastPosition_ = physicalPoint(event->position());
         guarded([&] {
             if (event->button() == Qt::RightButton) {
-                view_->StartRotation(lastPosition_.x(), lastPosition_.y());
+                if (!pressOrbitLocked())
+                    view_->StartRotation(lastPosition_.x(), lastPosition_.y());
             } else if (event->button() == Qt::LeftButton) {
                 context_->MoveTo(lastPosition_.x(), lastPosition_.y(), view_, false);
                 const auto cubeOwner =
                     Handle(AIS_ViewCubeOwner)::DownCast(context_->DetectedOwner());
                 if (!cubeOwner.IsNull()) {
                     view_->SetProj(cubeOwner->MainOrientation(), preview_ && preview_->toolSetup());
+                    releaseOrbitForInclinedView();
                     fitAll();
                     return;
                 }
-                if (!preview_) {
+                if (!preview_ && !flat_) {
                     context_->SelectDetected(AIS_SelectionScheme_Replace);
                     context_->InitSelected();
                     int face = 0;
@@ -678,7 +1044,16 @@ class OcctCanvas final : public QWidget {
         const auto position = physicalPoint(event->position());
         guarded([&] {
             if (event->buttons().testFlag(Qt::RightButton)) {
-                view_->Rotation(position.x(), position.y());
+                if (pressOrbitLocked()) {
+                    const auto camera = view_->Camera();
+                    gp_Trsf orbit;
+                    orbit.SetRotation(gp_Ax1(camera->Center(), gp_Dir(0, 1, 0)),
+                                      -2 * std::numbers::pi * (position.x() - lastPosition_.x()) /
+                                          physicalSize().width());
+                    camera->Transform(orbit);
+                    levelPressCamera();
+                } else
+                    view_->Rotation(position.x(), position.y());
             } else if (event->buttons().testFlag(Qt::MiddleButton)) {
                 view_->Pan(position.x() - lastPosition_.x(), lastPosition_.y() - position.y());
             } else if (event->buttons() == Qt::NoButton) {
@@ -774,12 +1149,12 @@ class OcctCanvas final : public QWidget {
                 const auto label = [&](V3d_TypeOfOrientation side, const char *value) {
                     navigationCube_->SetBoxSideLabel(side, value);
                 };
-                label(V3d_Xpos, "СПРАВА");
-                label(V3d_Xneg, "СЛЕВА");
+                label(V3d_Xpos, yup ? "СЗАДИ" : "СПРАВА");
+                label(V3d_Xneg, yup ? "СПЕРЕДИ" : "СЛЕВА");
                 label(yup ? V3d_Ypos : V3d_Zpos, "СВЕРХУ");
                 label(yup ? V3d_Yneg : V3d_Zneg, "СНИЗУ");
-                label(yup ? V3d_Zpos : V3d_Yneg, "СПЕРЕДИ");
-                label(yup ? V3d_Zneg : V3d_Ypos, "СЗАДИ");
+                label(yup ? V3d_Zpos : V3d_Yneg, yup ? "СПРАВА" : "СПЕРЕДИ");
+                label(yup ? V3d_Zneg : V3d_Ypos, yup ? "СЛЕВА" : "СЗАДИ");
                 navigationCube_->SetTransformPersistence(new Graphic3d_TransformPers(
                     Graphic3d_TMF_TriedronPers, Aspect_TOTP_RIGHT_UPPER,
                     Graphic3d_Vec2i(qRound(82 * ratio), qRound(116 * ratio))));
@@ -802,14 +1177,32 @@ class OcctCanvas final : public QWidget {
         navigationMenu_->setEnabled(hasGeometry);
         for (auto *action : navigationMenu_->findChildren<QAction *>())
             action->setEnabled(hasGeometry);
+        const bool press = preview_ && preview_->toolSetup();
+        const bool machine = press && preview_->machineModel() != core::MachineModel::None;
+        const bool floor = press && preview_->machineModel() == core::MachineModel::DemoPressV3;
+        floorVisibleAction_->setVisible(floor);
+        floorVisibleAction_->setEnabled(hasGeometry && floor);
+        for (auto *action : {machineVisibleAction_, fitMachineAction_}) {
+            action->setVisible(machine);
+            action->setEnabled(hasGeometry && machine);
+        }
+        fitMachineAction_->setEnabled(hasGeometry && machine && machineVisibleAction_->isChecked());
+        if (orbitLockAction_) {
+            orbitLockAction_->setEnabled(hasGeometry && press);
+            orbitLockButton_->setVisible(press);
+            orbitLockButton_->setEnabled(hasGeometry && press);
+            positionOrbitLock();
+        }
         updateNavigationCube();
         dimensionsAction_->setEnabled(ready_ && document_ != nullptr);
         const auto description = dimensions_.labels.join(QStringLiteral("\n"));
-        const auto scope = preview_
-                               ? QStringLiteral("Размеры текущего положения. A/B — прямые участки "
-                                                "полок от касания зоны, по их габаритам.")
-                               : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
-                                                "измерения исходной модели.");
+        const auto scope =
+            flat_ ? QStringLiteral(
+                        "Теоретическая развёртка: габариты и координаты линий гиба, не X упора.")
+            : preview_ ? QStringLiteral("Размеры текущего положения. П1/П2 — прямые участки "
+                                        "полок от касания зоны, по их габаритам.")
+                       : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
+                                        "измерения исходной модели.");
         dimensionsButton_->setToolTip(
             QStringLiteral("Показать / скрыть размеры · Ctrl+D\n%1\n%2").arg(scope, description));
         dimensionsButton_->setAccessibleDescription(scope + QLatin1Char('\n') + description);
@@ -830,7 +1223,8 @@ class OcctCanvas final : public QWidget {
                 const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
                 const DimensionLayout layout{right, up};
                 dimensions_ =
-                    preview_
+                    flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout)
+                    : preview_
                         ? previewDimensions(cad::OcctPreviewAccess::frame(*preview_, previewFrame_),
                                             preview_->model(), 14.0 * devicePixelRatioF(), layout)
                         : documentDimensions(document_->metadata(), faces_,
@@ -852,7 +1246,8 @@ class OcctCanvas final : public QWidget {
             }
             if (!presentation_.IsNull()) {
                 context_->Display(presentation_, AIS_Shaded,
-                                  preview_ ? -1 : AIS_Shape::SelectionMode(TopAbs_FACE), false);
+                                  (preview_ || flat_) ? -1 : AIS_Shape::SelectionMode(TopAbs_FACE),
+                                  false);
             }
             view_->Redraw();
             refreshDimensions();
@@ -864,13 +1259,33 @@ class OcctCanvas final : public QWidget {
         return {qMax(1, qRound(width() * devicePixelRatioF())),
                 qMax(1, qRound(height() * devicePixelRatioF()))};
     }
-    void fitPreview(const application::SingleBendPreview &preview) {
+    void fitPreview(const application::SingleBendPreview &preview, std::size_t index,
+                    bool includeMachine) {
         const auto bounds = preview.bounds();
         Bnd_Box box;
         box.Add(gp_Pnt(bounds.minimum.x, bounds.minimum.y, bounds.minimum.z));
         box.Add(gp_Pnt(bounds.maximum.x, bounds.maximum.y, bounds.maximum.z));
+        if (includeMachine && machineVisibleAction_->isChecked())
+            for (const auto &component : cad::OcctPreviewAccess::frame(preview, index).machine)
+                BRepBndLib::Add(component.shape, box);
         view_->FitAll(box, dimensionsVisible_ ? 0.3 : 0.1, false);
+        reserveTransportSpace();
         view_->ZFitAll();
+    }
+    void reserveTransportSpace() {
+        const bool bottomVisible = bottomOverlay_ && bottomOverlay_->isVisible();
+        const bool topVisible = topLeftOverlay_ && topLeftOverlay_->isVisible();
+        if (bottomVisible || topVisible) {
+            const auto size = physicalSize();
+            const int hudHeight = std::max(bottomVisible ? bottomOverlay_->height() : 0,
+                                           topVisible ? topLeftOverlay_->height() : 0);
+            const int inset = qRound((hudHeight + 24) * devicePixelRatioF());
+            // Symmetric padding keeps the original orbit target while leaving
+            // the lower part of the fitted geometry clear of the transport.
+            const int available = std::max(size.height() / 3, size.height() - 2 * inset);
+            const auto camera = view_->Camera();
+            camera->SetScale(camera->Scale() * size.height() / available);
+        }
     }
 
     QPoint physicalPoint(QPointF point) const {
@@ -897,14 +1312,25 @@ class OcctCanvas final : public QWidget {
     void initialize() {
         attempted_ = true;
         try {
+            if (restoreRevision_ != revision_ || restoreSpace_ != sceneSpace())
+                restoreCamera_.Nullify();
             // app configures runtime resources before starting any CAD worker.
             display_ = new Aspect_DisplayConnection();
             driver_ = new OpenGl_GraphicDriver(display_);
             scene_ = new V3d_Viewer(driver_);
             Handle(V3d_AmbientLight) ambient = new V3d_AmbientLight();
-            ambient->SetIntensity(0.3f);
             scene_->AddLight(ambient);
-            scene_->AddLight(new V3d_DirectionalLight(gp_Dir(-0.2, 0.5, -1.0)));
+            // Broad fill from all sides: retain enough shading to read bends,
+            // without a single dominant light or a dark back/underside.
+            for (const auto &[direction, intensity] : std::array{
+                     std::pair{gp_Dir(-1, -1, -1), 0.32f}, std::pair{gp_Dir(1, -1, 1), 0.24f},
+                     std::pair{gp_Dir(1, 1, -1), 0.40f}, std::pair{gp_Dir(-1, 1, 1), 0.12f}}) {
+                // Classic shading weights light by linear RGB, rather than the
+                // ray/path-tracing Intensity() property.
+                Handle(V3d_DirectionalLight) fill = new V3d_DirectionalLight(
+                    direction, Quantity_Color(intensity, intensity, intensity, Quantity_TOC_RGB));
+                scene_->AddLight(fill);
+            }
             scene_->SetLightOn();
             context_ = new AIS_InteractiveContext(scene_);
             view_ = scene_->CreateView();
@@ -922,11 +1348,19 @@ class OcctCanvas final : public QWidget {
 
             ready_ = true;
             updateDimensionButton();
-            if (preview_) {
+            if (flat_) {
+                const auto flat = flat_;
+                if (restoreCamera_.IsNull())
+                    flat_.reset();
+                const auto error = presentFlat(flat, revision_);
+                if (!error.isEmpty())
+                    throw std::runtime_error(error.toStdString());
+            } else if (preview_) {
                 // Rebuild native resources from the same immutable worker snapshot.
                 const auto preview = preview_;
                 const auto index = previewFrame_;
-                preview_.reset();
+                if (restoreCamera_.IsNull())
+                    preview_.reset();
                 const auto error = presentPreview(preview, index, revision_);
                 if (!error.isEmpty()) {
                     throw std::runtime_error(error.toStdString());
@@ -937,6 +1371,16 @@ class OcctCanvas final : public QWidget {
                     throw std::runtime_error(error.toStdString());
                 }
             }
+            if (!restoreCamera_.IsNull()) {
+                restoreCamera_->SetAspect(static_cast<double>(size.width()) / size.height());
+                view_->SetCamera(restoreCamera_);
+                restoreCamera_.Nullify();
+                view_->ZFitAll();
+                view_->Invalidate();
+            }
+            positionControls();
+            if (onSurfaceChanged)
+                onSurfaceChanged();
             if (ready_ && onReady) {
                 onReady();
             }
@@ -991,6 +1435,63 @@ class OcctCanvas final : public QWidget {
     QToolButton *dimensionsButton_ = nullptr;
     QAction *dimensionsAction_ = nullptr;
     QMenu *navigationMenu_ = nullptr;
+    QAction *machineVisibleAction_ = nullptr;
+    QAction *floorVisibleAction_ = nullptr;
+    QAction *fitMachineAction_ = nullptr;
+    QAction *orbitLockAction_ = nullptr;
+    QPointer<QWidget> bottomOverlay_;
+    QPointer<QWidget> topLeftOverlay_;
+    std::array<Handle(Graphic3d_Camera), 4> sceneCameras_;
+    CameraSpace cameraSpace() const {
+        return flat_                   ? CameraSpace::Flat
+               : !preview_             ? CameraSpace::Cad
+               : preview_->toolSetup() ? CameraSpace::Press
+                                       : CameraSpace::Kinematic;
+    }
+    void rememberSceneCamera() {
+        if (ready_ && !view_.IsNull() && restoreCamera_.IsNull())
+            sceneCameras_[static_cast<std::size_t>(cameraSpace())] =
+                new Graphic3d_Camera(view_->Camera());
+    }
+    bool restoreSceneCamera(CameraSpace space) {
+        const auto &saved = sceneCameras_[static_cast<std::size_t>(space)];
+        if (saved.IsNull())
+            return false;
+        Handle(Graphic3d_Camera) camera = new Graphic3d_Camera(saved);
+        const auto size = physicalSize();
+        camera->SetAspect(static_cast<double>(size.width()) / size.height());
+        view_->SetCamera(camera);
+        return true;
+    }
+    QToolButton *orbitLockButton_ = nullptr;
+    bool pressOrbitLocked() const {
+        return orbitLockAction_ && orbitLockAction_->isChecked() && preview_ &&
+               preview_->toolSetup();
+    }
+    void positionOrbitLock() {
+        if (orbitLockButton_)
+            orbitLockButton_->move(qMax(0, width() - 82 - orbitLockButton_->width() / 2), 174);
+    }
+    void levelPressCamera() {
+        const auto camera = view_->Camera();
+        const auto direction = camera->Direction();
+        // Preserve azimuth, target, distance and scale; remove both pitch and roll.
+        // At a top/bottom pole azimuth is undefined, so use the press home azimuth.
+        camera->SetDirection(direction.X() * direction.X() + direction.Z() * direction.Z() > 1.e-10
+                                 ? gp_Dir(direction.X(), 0, direction.Z())
+                                 : gp_Dir(1, 0, -3));
+        camera->SetUp(gp_Dir(0, 1, 0));
+    }
+    void releaseOrbitForInclinedView() {
+        if (!pressOrbitLocked())
+            return;
+        // Honour explicit cube/menu views, without showing a checked anchor on
+        // an inclined camera or silently replacing the requested projection.
+        if (std::abs(view_->Camera()->Direction().Y()) > 1.e-10)
+            orbitLockAction_->setChecked(false);
+        else
+            levelPressCamera();
+    }
     QWidget *controls_ = nullptr;
     DisplayStyle displayStyle_ = DisplayStyle::Edges;
     Handle(AIS_ViewCube) navigationCube_;
@@ -998,6 +1499,84 @@ class OcctCanvas final : public QWidget {
     DimensionAnnotations dimensions_;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
+
+  public:
+    void highlightPreviewBend(std::optional<std::size_t> i) {
+        if (hoverPreviewBend_ == i)
+            return;
+        hoverPreviewBend_ = i;
+        if (preview_)
+            presentPreview(preview_, previewFrame_, revision_);
+    }
+
+  private:
+    cad::SheetOrientationVisual sourceOrientation_;
+    QAction *sideAction_ = nullptr;
+    QWidget *sideLegend_ = nullptr;
+    QLabel *sideLegendText_ = nullptr;
+    QToolButton *nextEdge_ = nullptr;
+    std::size_t edgeIndex_ = 0;
+    std::vector<Handle(AIS_InteractiveObject)> sideMarkers_;
+    const cad::SheetOrientationVisual &sceneOrientation() const {
+        if (preview_)
+            return cad::OcctPreviewAccess::frame(*preview_, previewFrame_).orientation;
+        if (flat_)
+            return cad::OcctFlatPatternAccess::orientation(*flat_);
+        return sourceOrientation_;
+    }
+    void positionSideLegend() {
+        if (!sideLegend_)
+            return;
+        sideLegend_->adjustSize();
+        const int bottom =
+            bottomOverlay_ && bottomOverlay_->isVisible() ? bottomOverlay_->y() : height();
+        sideLegend_->move(12, std::max(12, bottom - sideLegend_->height() - 12));
+        sideLegend_->raise();
+    }
+    void refreshOrientation() {
+        const bool available = document_ && !sourceOrientation_.sides[0].empty() &&
+                               !sourceOrientation_.sides[1].empty();
+        sideAction_->setEnabled(available || (document_ && sideAction_->isChecked()));
+        const bool removedMarkers = !sideMarkers_.empty();
+        if (ready_)
+            for (const auto &object : sideMarkers_)
+                context_->Remove(object, false);
+        sideMarkers_.clear();
+        const auto &orientation = sceneOrientation();
+        const bool visible = document_ && sideAction_->isChecked();
+        sideLegend_->setVisible(visible);
+        if (!visible) {
+            if (ready_ && removedMarkers)
+                view_->Redraw();
+            return;
+        }
+        const bool mapped = !orientation.sides[0].empty() && !orientation.sides[1].empty();
+        auto legend = QStringLiteral("<span style='color:#668AA6'>●</span> A &nbsp; <span "
+                                     "style='color:#AE756E'>●</span> B");
+        if (!orientation.edges.empty())
+            legend += QStringLiteral(" &nbsp; · &nbsp; край <b>1</b>");
+        sideLegendText_->setText(mapped ? legend
+                                        : QStringLiteral("Стороны в этом состоянии недоступны"));
+        nextEdge_->setVisible(mapped && !orientation.edges.empty());
+        nextEdge_->setEnabled(orientation.edges.size() > 1);
+        if (ready_ && mapped && !orientation.edges.empty()) {
+            try {
+                sideMarkers_ =
+                    sheetEdgeMarker(orientation.edges[edgeIndex_ % orientation.edges.size()],
+                                    14 * devicePixelRatioF());
+                for (const auto &object : sideMarkers_)
+                    context_->Display(object, 0, -1, false);
+            } catch (const Standard_Failure &) {
+                sideMarkers_.clear();
+            }
+        }
+        positionSideLegend();
+        if (ready_)
+            view_->Redraw();
+    }
+    std::optional<std::size_t> hoverPreviewBend_;
+    ToolSegmentColors segmentColors_;
+    application::FlatPatternPtr flat_;
     std::size_t previewFrame_ = 0;
     quint64 revision_ = 0;
     bool diagnostic_ = false;
@@ -1008,12 +1587,35 @@ class OcctCanvas final : public QWidget {
     Handle(AIS_InteractiveContext) context_;
     Handle(V3d_View) view_;
     Handle(Aspect_NeutralWindow) window_;
+    Handle(Graphic3d_Camera) restoreCamera_;
+    quint64 restoreRevision_ = 0;
+    SceneSpace restoreSpace_ = SceneSpace::Cad;
+
+    SceneSpace sceneSpace() const {
+        return flat_      ? SceneSpace::Flat
+               : preview_ ? (preview_->toolSetup() ? SceneSpace::Press : SceneSpace::Kinematic)
+                          : SceneSpace::Cad;
+    }
+
+    void positionControls() {
+        controls_->adjustSize();
+        controls_->move(qMax(12, width() - controls_->width() - 12), 12);
+        controls_->raise();
+        controls_->update();
+        positionOrbitLock();
+        orbitLockButton_->raise();
+        orbitLockButton_->update();
+        positionSideLegend();
+    }
 };
 
 } // namespace
 
 class ViewerWidget::Impl {
   public:
+    bool overlayLayoutQueued = false;
+    QPointer<QWidget> bottomOverlay;
+    QPointer<QWidget> topLeftOverlay;
     OcctCanvas *canvas = nullptr; // Qt parent owns the canvas and its native resources.
     QLabel *errorPage = nullptr;
     QStackedLayout *layout = nullptr;
@@ -1055,6 +1657,7 @@ ViewerWidget::ViewerWidget(QWidget *parent) : QWidget(parent), impl_(std::make_u
     impl_->canvas->onSelection = [this](quint64 revision, int face) {
         emit selectionChanged(revision, face);
     };
+    impl_->canvas->onSurfaceChanged = [this] { queueOverlayLayout(); };
     impl_->canvas->onError = [this, reportError](const QString &message) {
         // Switch pages after the native paint/input event has completed.
         QTimer::singleShot(0, this, [reportError, message] { reportError(message); });
@@ -1073,17 +1676,130 @@ QString ViewerWidget::errorString() const {
 }
 
 QImage ViewerWidget::captureImage(bool includeControls) {
-    return impl_->canvas ? impl_->canvas->captureImage(includeControls) : QImage{};
+    auto result = impl_->canvas ? impl_->canvas->captureImage(includeControls) : QImage{};
+    if (!result.isNull() && includeControls)
+        for (const auto &overlay : {impl_->bottomOverlay, impl_->topLeftOverlay})
+            if (overlay && overlay->isVisible()) {
+                QPainter painter(&result);
+                painter.drawPixmap(overlay->mapTo(impl_->canvas, QPoint()), overlay->grab());
+            }
+    return result;
+}
+void ViewerWidget::setBottomOverlay(QWidget *widget) {
+    if (impl_->canvas)
+        impl_->canvas->setBottomOverlay(widget);
+    if (impl_->bottomOverlay && impl_->bottomOverlay != widget) {
+        impl_->bottomOverlay->removeEventFilter(this);
+        impl_->bottomOverlay->hide();
+    }
+    impl_->bottomOverlay = widget;
+    if (!widget)
+        return;
+    auto *host = impl_->canvas ? static_cast<QWidget *>(impl_->canvas) : this;
+    widget->setParent(host);
+    if (impl_->canvas)
+        widget->setAttribute(Qt::WA_NativeWindow);
+    host->installEventFilter(this);
+    widget->installEventFilter(this);
+    widget->hide();
+    queueOverlayLayout();
+}
+void ViewerWidget::setTopLeftOverlay(QWidget *widget) {
+    if (impl_->canvas)
+        impl_->canvas->setTopLeftOverlay(widget);
+    if (impl_->topLeftOverlay && impl_->topLeftOverlay != widget) {
+        impl_->topLeftOverlay->removeEventFilter(this);
+        impl_->topLeftOverlay->hide();
+    }
+    impl_->topLeftOverlay = widget;
+    if (!widget)
+        return;
+    auto *host = impl_->canvas ? static_cast<QWidget *>(impl_->canvas) : this;
+    widget->setParent(host);
+    if (impl_->canvas)
+        widget->setAttribute(Qt::WA_NativeWindow);
+    host->installEventFilter(this);
+    widget->installEventFilter(this);
+    widget->hide();
+    queueOverlayLayout();
+}
+void ViewerWidget::queueOverlayLayout() {
+    if (impl_->overlayLayoutQueued)
+        return;
+    impl_->overlayLayoutQueued = true;
+    // LayoutRequest/Show filters run before Qt has finished arranging child widgets.
+    QTimer::singleShot(0, this, [this] {
+        impl_->overlayLayoutQueued = false;
+        layoutOverlays();
+    });
+}
+void ViewerWidget::layoutOverlays() {
+    auto *widget = impl_->bottomOverlay.data();
+    if (widget && widget->parentWidget()) {
+        widget->ensurePolished();
+        if (widget->layout())
+            widget->layout()->activate();
+        const auto size = widget->parentWidget()->size();
+        const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
+        const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
+        const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
+        if (widget->geometry() != target)
+            widget->setGeometry(target);
+        widget->raise();
+        widget->update();
+    }
+    widget = impl_->topLeftOverlay.data();
+    if (widget && widget->parentWidget()) {
+        widget->ensurePolished();
+        const auto size = widget->parentWidget()->size();
+        // Keep the view cube and the transport clear, including in a narrow window.
+        const int width = std::max(1, std::min(size.width() - 140, widget->sizeHint().width()));
+        const int bottom = impl_->bottomOverlay && impl_->bottomOverlay->isVisible()
+                               ? impl_->bottomOverlay->y()
+                               : size.height();
+        const int height =
+            std::max(1, std::min({bottom - 24, size.height() / 2, widget->sizeHint().height()}));
+        const QRect target(12, 12, width, height);
+        if (widget->geometry() != target)
+            widget->setGeometry(target);
+        widget->raise();
+        widget->update();
+    }
+    if (impl_->canvas)
+        impl_->canvas->layoutOrientationLegend();
+}
+bool ViewerWidget::eventFilter(QObject *watched, QEvent *event) {
+    const auto matches = [watched](const auto &widget) {
+        return widget && (watched == widget || watched == widget->parentWidget());
+    };
+    if ((matches(impl_->bottomOverlay) || matches(impl_->topLeftOverlay)) &&
+        (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
+         event->type() == QEvent::LayoutRequest || event->type() == QEvent::WinIdChange ||
+         event->type() == QEvent::WindowActivate))
+        queueOverlayLayout();
+    return QWidget::eventFilter(watched, event);
 }
 
 QMenu *ViewerWidget::navigationMenu() const {
     return impl_->canvas ? impl_->canvas->navigationMenu() : nullptr;
+}
+QAction *ViewerWidget::sheetOrientationAction() const {
+    return impl_->canvas ? impl_->canvas->sheetOrientationAction() : nullptr;
 }
 
 void ViewerWidget::fitAll() {
     if (impl_->canvas) {
         impl_->canvas->fitAll();
     }
+}
+void ViewerWidget::refreshScene() {
+    if (impl_->canvas)
+        impl_->canvas->refreshScene();
+    queueOverlayLayout();
+}
+void ViewerWidget::setToolSegmentColors(ToolSegmentColors colors) {
+    if (impl_->canvas)
+        impl_->canvas->setToolSegmentColors(std::move(colors));
 }
 
 void ViewerWidget::setOrientation(Orientation orientation) {
@@ -1159,6 +1875,10 @@ QString ViewerWidget::presentBendPreview(application::BendPreviewPtr preview,
         return QString::fromUtf8(error.what());
     }
 }
+void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i) {
+    if (impl_->canvas)
+        impl_->canvas->highlightPreviewBend(i);
+}
 QString ViewerWidget::endBendPreview() {
     return impl_->canvas ? impl_->canvas->endPreview() : QString{};
 }
@@ -1173,4 +1893,11 @@ void ViewerWidget::showDiagnosticBox() {
     }
 }
 
+} // namespace bending::viewer
+
+namespace bending::viewer {
+QString ViewerWidget::presentFlatPattern(std::shared_ptr<const application::FlatPattern> flat,
+                                         quint64 revision) {
+    return impl_->canvas ? impl_->canvas->presentFlat(std::move(flat), revision) : impl_->error;
+}
 } // namespace bending::viewer
