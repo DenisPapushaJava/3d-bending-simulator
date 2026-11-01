@@ -1126,22 +1126,38 @@ class MainWindow::Impl {
         playback->stop();
         playBend->setText(QStringLiteral("Воспроизвести"));
     }
+    bool shortToolPlaybackBlocked() const {
+        const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
+        return draft && draft->toolLengths && shortToolDiagnosticDraft.lock() != draft;
+    }
     static bool collisionAt(const application::BendPreviewPtr &preview, std::size_t frame) {
         return preview &&
                (preview->collisionAtFrame(frame) || preview->machineCollisionAtFrame(frame));
     }
     void refreshPlaybackAvailability(const application::BendPreviewPtr &preview) {
+        const bool lengthBlocked = shortToolPlaybackBlocked();
+        if (lengthBlocked) {
+            stopPlayback();
+            draftAutoPlay = false;
+        }
         const bool animated =
             preview && (preview->frameCount() > 1 || preview->unverifiedDraft() || viewingRoute);
-        playBend->setEnabled(animated && !viewingSource && !controller->hasWork() &&
-                             previewDisplayError.isEmpty() && stageSetupIssue.isEmpty() &&
+        playBend->setEnabled(animated && !lengthBlocked && !viewingSource &&
+                             !controller->hasWork() && previewDisplayError.isEmpty() &&
+                             stageSetupIssue.isEmpty() &&
                              !collisionAt(preview, static_cast<std::size_t>(bendFrame->value())));
         playbackSpeedControls->setEnabled(playBend->isEnabled());
     }
     void setFrameText(const QString &text) {
         frameLabel->setText(text);
-        bendFrame->setToolTip(text);
-        playBend->setToolTip(text);
+        const auto tooltip = shortToolPlaybackBlocked()
+                                 ? QStringLiteral("Инструмент короче линии гиба. Подберите секции "
+                                                  "или другой инструмент. Диагностический "
+                                                  "просмотр доступен в подробностях проверки "
+                                                  "выбранного гиба.")
+                                 : text;
+        bendFrame->setToolTip(tooltip);
+        playBend->setToolTip(tooltip);
     }
     std::optional<std::size_t> selectedOperationIndex() const {
         if (viewingRoute && controller->bendRoute() && routePanel->selected() > 0)
@@ -1165,6 +1181,7 @@ class MainWindow::Impl {
         return indices.empty() ? std::nullopt : std::optional{indices.front()};
     }
     void beginPreviewReplacement(bool preserveFrame = false) {
+        shortToolDiagnosticDraft.reset();
         if (!viewingSource && displayedPreview && !previewReplacement) {
             previewReplacement = PreviewReplacement{
                 controller->session().document(), controller->session().revision(),
@@ -1353,9 +1370,15 @@ class MainWindow::Impl {
         const auto primaryMessage = result;
         const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
         const bool shortTools = draft && draft->toolLengths && !preparing;
+        const auto lengthPlaybackNotice =
+            shortTools
+                ? (shortToolPlaybackBlocked() ? QStringLiteral("Воспроизведение заблокировано.")
+                                              : QStringLiteral("Диагностический просмотр."))
+                : QString{};
         // Length remains visible even when a collision/floor message takes priority.
         if (shortTools)
-            result += QLatin1Char('\n') + ToolSelectionWidget::lengthIssue(*draft->toolLengths);
+            result += QLatin1Char('\n') + ToolSelectionWidget::lengthIssue(*draft->toolLengths) +
+                      QLatin1Char('\n') + lengthPlaybackNotice;
         if (bendMessages && !preparing) {
             std::vector<BendMessage> messages;
             const auto lengths = draft && draft->toolLengths ? draft->toolLengths
@@ -1394,7 +1417,10 @@ class MainWindow::Impl {
                 messages.push_back(
                     {BendMessageKind::ToolLength,
                      draft ? BendMessageSeverity::Warning : BendMessageSeverity::Error, title,
-                     ToolSelectionWidget::lengthIssue(*lengths)});
+                     ToolSelectionWidget::lengthIssue(*lengths) +
+                         (lengthPlaybackNotice.isEmpty()
+                              ? QString{}
+                              : QLatin1Char('\n') + lengthPlaybackNotice)});
             }
             if (partial)
                 messages.push_back({BendMessageKind::Support, BendMessageSeverity::Warning,
@@ -1574,6 +1600,10 @@ class MainWindow::Impl {
         }
         wantFlat = false;
         displayedFlat.reset();
+        if (shortToolPlaybackBlocked() && bendFrame->value() != 0) {
+            const QSignalBlocker block(bendFrame);
+            bendFrame->setValue(0);
+        }
         const auto index = static_cast<std::size_t>(bendFrame->value());
         if (!viewingDraft && !viewingRoute && preview->pressMotion() &&
             controller->session().orderedBends().size() == 1)
@@ -1843,6 +1873,17 @@ class MainWindow::Impl {
         toolWorkspace->setContext(multiple ? toolAssignmentScope->currentText() : QString{});
         toolWorkspace->refresh();
         const auto preview = scenePreview();
+        const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
+        const bool shortDraft = draft && draft->toolLengths;
+        if (!shortDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
+            controller->hasWork() || shortToolDiagnosticDraft.lock() != draft)
+            shortToolDiagnosticDraft.reset();
+        {
+            const QSignalBlocker block(shortToolDiagnostic);
+            shortToolDiagnostic->setChecked(shortDraft && shortToolDiagnosticDraft.lock() == draft);
+        }
+        shortToolDiagnostic->setVisible(shortDraft && draft->request.step > 0);
+        shortToolDiagnostic->setEnabled(shortDraft && !controller->hasWork());
         const bool diagnostic =
             preview && !preview->unverifiedDraft() &&
             (preview->collision() || preview->machineCollisionAtFrame(preview->frameCount() - 1));
@@ -1859,7 +1900,9 @@ class MainWindow::Impl {
                 previewStatus->setToolTip(failure);
             }
         }
-        if (preview && (displayedPreview != preview || positionedPreview != preview) &&
+        if (preview &&
+            (displayedPreview != preview || positionedPreview != preview ||
+             (shortToolPlaybackBlocked() && bendFrame->value() != 0)) &&
             !viewingSource) {
             if (positionedPreview != preview) {
                 const QSignalBlocker block(bendFrame);
@@ -1909,6 +1952,7 @@ class MainWindow::Impl {
         showKinematics->setVisible(staticSetup && !diagnostic);
         showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
         bendFrame->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
+                              !shortToolPlaybackBlocked() &&
                               !((viewingRoute || viewingDraft) && routePanel->selected() == 0) &&
                               previewDisplayError.isEmpty());
         refreshPlaybackAvailability(preview);
@@ -2642,6 +2686,8 @@ class MainWindow::Impl {
     std::string toolContextId;
     bool viewingRoute = false;
     bool viewingDraft = false, draftAutoPlay = false;
+    std::weak_ptr<const application::RouteDraft> shortToolDiagnosticDraft;
+    QToolButton *shortToolDiagnostic = nullptr;
     bool lastRouteAutomatic = true;
     bool checkedToolJob = false, checkedToolCancelled = false, checkedToolManualOverride = false;
     std::uint64_t checkedToolDocument = 0, checkedToolEdit = 0;
@@ -3383,6 +3429,28 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     operationLayout->removeWidget(impl_->checkScope);
     reportLayout->addWidget(impl_->checkScope);
     reportLayout->addWidget(impl_->previewStatus);
+    impl_->shortToolDiagnostic = new QToolButton(report);
+    impl_->shortToolDiagnostic->setObjectName("shortToolDiagnostic");
+    impl_->shortToolDiagnostic->setText(QStringLiteral("Диагностический просмотр"));
+    impl_->shortToolDiagnostic->setAccessibleName(
+        QStringLiteral("Диагностический просмотр с коротким инструментом"));
+    impl_->shortToolDiagnostic->setCheckable(true);
+    impl_->shortToolDiagnostic->setToolTip(QStringLiteral(
+        "Разрешить движение только для осмотра текущего гиба. Недостаточная длина остаётся "
+        "ошибкой; столкновения проверяются и останавливают воспроизведение. "
+        "При смене шага или инструмента разрешение сбрасывается."));
+    impl_->shortToolDiagnostic->hide();
+    reportLayout->addWidget(impl_->shortToolDiagnostic);
+    connect(impl_->shortToolDiagnostic, &QToolButton::toggled, this, [this](bool enabled) {
+        const auto draft = impl_->viewingDraft ? impl_->controller->routeDraft() : nullptr;
+        impl_->shortToolDiagnosticDraft.reset();
+        if (enabled && draft && draft->toolLengths && draft->request.step > 0 &&
+            !impl_->viewingSource && impl_->propertyTabs->currentIndex() == 2 &&
+            !impl_->controller->hasWork())
+            impl_->shortToolDiagnosticDraft = draft;
+        impl_->refreshPreview();
+        impl_->showPreviewFrame();
+    });
     reportLayout->addWidget(impl_->routePanel->reportWidget());
     operationLayout->addWidget(report);
     report->hide();
@@ -3679,7 +3747,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     updatePlaybackSpeed(impl_->playbackSpeed->value());
     connect(impl_->bendFrame, &QSlider::valueChanged, this, [this] { impl_->showPreviewFrame(); });
     connect(impl_->playback, &QTimer::timeout, this, [this] {
-        if (Impl::collisionAt(impl_->scenePreview(),
+        if (impl_->shortToolPlaybackBlocked() ||
+            Impl::collisionAt(impl_->scenePreview(),
                               static_cast<std::size_t>(impl_->bendFrame->value()))) {
             impl_->stopPlayback();
             return;
@@ -3712,6 +3781,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->stopPlayback();
             return;
         }
+        if (!impl_->playBend->isEnabled() || impl_->shortToolPlaybackBlocked())
+            return;
         if (impl_->viewingRoute && impl_->routePanel->selected() == 0)
             impl_->routePanel->select(1);
         if (impl_->viewingDraft && impl_->routePanel->selected() == 0) {
