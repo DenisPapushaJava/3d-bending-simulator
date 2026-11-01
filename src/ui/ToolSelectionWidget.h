@@ -22,6 +22,10 @@ class QToolButton;
 class QDialog;
 class QAction;
 
+namespace bending::application {
+struct BendRouteToolLengthIssue;
+}
+
 namespace bending::ui {
 // UI drafts and local preferences; only MainWindow commits a choice to DocumentSession.
 class ImportController;
@@ -52,12 +56,14 @@ class ToolSelectionWidget final : public QWidget {
     }
     [[nodiscard]] QString optionIssue(const core::ToolPreset &, std::size_t groove) const;
     [[nodiscard]] QString geometryIssue() const;
+    [[nodiscard]] QString lengthIssue() const;
+    [[nodiscard]] static QString lengthIssue(const application::BendRouteToolLengthIssue &);
     [[nodiscard]] double maximumEndSupportLossMm() const;
     [[nodiscard]] static QString assignmentIssue(const std::optional<core::ToolAssignment> &);
     void showPicker(core::ToolKind, QWidget *anchor);
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
-                             bool allBends = false);
+                             bool allBends = false, double lengthToleranceMm = 1.e-5);
     [[nodiscard]] std::vector<core::ToolAssignment> checkedCandidates() const;
     void suggestForNewPart();
     void setCheckedSearchState(bool busy, const QString &status = {}, bool resumable = false);
@@ -122,9 +128,11 @@ class ToolSelectionWidget final : public QWidget {
     QPushButton *stock_;
     QDoubleSpinBox *segmentGap_;
     QLabel *assemblySummary_;
+    QLabel *lengthWarning_;
     QLabel *recommendation_;
     std::optional<core::ToolSelectionRequest> selectionRequest_;
     bool allBends_ = false;
+    double lengthToleranceMm_ = 1.e-5;
     QDoubleSpinBox *clearance_;
     QDoubleSpinBox *endSupportLimit_;
     std::vector<Pair> favoritePairs_;

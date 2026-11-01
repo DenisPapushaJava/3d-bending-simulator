@@ -114,6 +114,11 @@ struct BendRouteToolLengthIssue {
     double bendLengthMm;
     double punchLengthMm;
     double dieLengthMm;
+    [[nodiscard]] bool coversBend(double toleranceMm = 0) const noexcept {
+        return punchLengthMm + toleranceMm >= bendLengthMm &&
+               dieLengthMm + toleranceMm >= bendLengthMm;
+    }
+    bool operator==(const BendRouteToolLengthIssue &) const = default;
 };
 struct BendRouteError {
     BendRouteErrorCode code;
@@ -140,6 +145,7 @@ struct RouteDraft {
     bool reusedBasis = false;
     std::size_t checkedToolPositions = 0;
     std::string toolNotice;
+    std::optional<BendRouteToolLengthIssue> toolLengths;
 };
 using RouteDraftPtr = std::shared_ptr<const RouteDraft>;
 using RouteDraftResult = std::variant<RouteDraftPtr, BendRouteError>;

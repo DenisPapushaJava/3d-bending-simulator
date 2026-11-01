@@ -138,6 +138,29 @@ int main(int argc, char **argv) {
         const auto tool = run(builder, doc, request);
         const auto warm = run(builder, doc, request);
         require(warm->visual == tool->visual, "Warm draft recomputed geometry");
+        for (const bool shortPunch : {false, true}) {
+            auto shortRequest = request;
+            const double length = doc->metadata().bendAnalysis.bends.front().lengthMm;
+            shortRequest.operations.front().tools->lengthMm = shortPunch ? length + 20 : length - 5;
+            shortRequest.operations.front().tools->punchLengthMm =
+                shortPunch ? length - 5 : length + 20;
+            const auto inspected = run(builder, doc, shortRequest);
+            require(inspected->toolLengths && inspected->toolLengths->bendLengthMm == length &&
+                        inspected->toolLengths->punchLengthMm ==
+                            *shortRequest.operations.front().tools->punchLengthMm &&
+                        inspected->toolLengths->dieLengthMm ==
+                            shortRequest.operations.front().tools->lengthMm &&
+                        inspected->checkedToolPositions == 21,
+                    "Short punch/die lacks its length report or collision checks");
+            BendRouteRequest full;
+            full.operations = shortRequest.operations;
+            full.withTools = true;
+            const auto rejected = builder.buildRoute(doc, full, {});
+            const auto *error = std::get_if<BendRouteError>(&rejected);
+            require(error && error->operationError == BendPreviewErrorCode::ToolTooShort &&
+                        error->toolLengths == inspected->toolLengths,
+                    "A short diagnostic tool was accepted as a checked route");
+        }
         if (!sample) {
             const auto thickFile = folder / "six-mm.step";
             STEPControl_Writer writer;

@@ -318,6 +318,9 @@ class OcctCanvas final : public QWidget {
     void setBottomOverlay(QWidget *widget) {
         bottomOverlay_ = widget;
     }
+    void setTopLeftOverlay(QWidget *widget) {
+        topLeftOverlay_ = widget;
+    }
 
     bool ready() const {
         return ready_;
@@ -1176,9 +1179,13 @@ class OcctCanvas final : public QWidget {
         view_->ZFitAll();
     }
     void reserveTransportSpace() {
-        if (bottomOverlay_ && bottomOverlay_->isVisible()) {
+        const bool bottomVisible = bottomOverlay_ && bottomOverlay_->isVisible();
+        const bool topVisible = topLeftOverlay_ && topLeftOverlay_->isVisible();
+        if (bottomVisible || topVisible) {
             const auto size = physicalSize();
-            const int inset = qRound((bottomOverlay_->height() + 24) * devicePixelRatioF());
+            const int hudHeight = std::max(bottomVisible ? bottomOverlay_->height() : 0,
+                                           topVisible ? topLeftOverlay_->height() : 0);
+            const int inset = qRound((hudHeight + 24) * devicePixelRatioF());
             // Symmetric padding keeps the original orbit target while leaving
             // the lower part of the fitted geometry clear of the transport.
             const int available = std::max(size.height() / 3, size.height() - 2 * inset);
@@ -1339,6 +1346,7 @@ class OcctCanvas final : public QWidget {
     QAction *fitMachineAction_ = nullptr;
     QAction *orbitLockAction_ = nullptr;
     QPointer<QWidget> bottomOverlay_;
+    QPointer<QWidget> topLeftOverlay_;
     std::array<Handle(Graphic3d_Camera), 4> sceneCameras_;
     CameraSpace cameraSpace() const {
         return flat_                   ? CameraSpace::Flat
@@ -1448,6 +1456,7 @@ class ViewerWidget::Impl {
   public:
     bool overlayLayoutQueued = false;
     QPointer<QWidget> bottomOverlay;
+    QPointer<QWidget> topLeftOverlay;
     OcctCanvas *canvas = nullptr; // Qt parent owns the canvas and its native resources.
     QLabel *errorPage = nullptr;
     QStackedLayout *layout = nullptr;
@@ -1509,12 +1518,12 @@ QString ViewerWidget::errorString() const {
 
 QImage ViewerWidget::captureImage(bool includeControls) {
     auto result = impl_->canvas ? impl_->canvas->captureImage(includeControls) : QImage{};
-    if (!result.isNull() && includeControls && impl_->bottomOverlay &&
-        impl_->bottomOverlay->isVisible()) {
-        QPainter painter(&result);
-        painter.drawPixmap(impl_->bottomOverlay->mapTo(impl_->canvas, QPoint()),
-                           impl_->bottomOverlay->grab());
-    }
+    if (!result.isNull() && includeControls)
+        for (const auto &overlay : {impl_->bottomOverlay, impl_->topLeftOverlay})
+            if (overlay && overlay->isVisible()) {
+                QPainter painter(&result);
+                painter.drawPixmap(overlay->mapTo(impl_->canvas, QPoint()), overlay->grab());
+            }
     return result;
 }
 void ViewerWidget::setBottomOverlay(QWidget *widget) {
@@ -1536,6 +1545,25 @@ void ViewerWidget::setBottomOverlay(QWidget *widget) {
     widget->hide();
     queueOverlayLayout();
 }
+void ViewerWidget::setTopLeftOverlay(QWidget *widget) {
+    if (impl_->canvas)
+        impl_->canvas->setTopLeftOverlay(widget);
+    if (impl_->topLeftOverlay && impl_->topLeftOverlay != widget) {
+        impl_->topLeftOverlay->removeEventFilter(this);
+        impl_->topLeftOverlay->hide();
+    }
+    impl_->topLeftOverlay = widget;
+    if (!widget)
+        return;
+    auto *host = impl_->canvas ? static_cast<QWidget *>(impl_->canvas) : this;
+    widget->setParent(host);
+    if (impl_->canvas)
+        widget->setAttribute(Qt::WA_NativeWindow);
+    host->installEventFilter(this);
+    widget->installEventFilter(this);
+    widget->hide();
+    queueOverlayLayout();
+}
 void ViewerWidget::queueOverlayLayout() {
     if (impl_->overlayLayoutQueued)
         return;
@@ -1543,28 +1571,47 @@ void ViewerWidget::queueOverlayLayout() {
     // LayoutRequest/Show filters run before Qt has finished arranging child widgets.
     QTimer::singleShot(0, this, [this] {
         impl_->overlayLayoutQueued = false;
-        layoutBottomOverlay();
+        layoutOverlays();
     });
 }
-void ViewerWidget::layoutBottomOverlay() {
+void ViewerWidget::layoutOverlays() {
     auto *widget = impl_->bottomOverlay.data();
-    if (!widget || !widget->parentWidget())
-        return;
-    widget->ensurePolished();
-    if (widget->layout())
-        widget->layout()->activate();
-    const auto size = widget->parentWidget()->size();
-    const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
-    const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
-    const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
-    if (widget->geometry() != target)
-        widget->setGeometry(target);
-    widget->raise();
-    widget->update();
+    if (widget && widget->parentWidget()) {
+        widget->ensurePolished();
+        if (widget->layout())
+            widget->layout()->activate();
+        const auto size = widget->parentWidget()->size();
+        const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
+        const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
+        const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
+        if (widget->geometry() != target)
+            widget->setGeometry(target);
+        widget->raise();
+        widget->update();
+    }
+    widget = impl_->topLeftOverlay.data();
+    if (widget && widget->parentWidget()) {
+        widget->ensurePolished();
+        const auto size = widget->parentWidget()->size();
+        // Keep the view cube and the transport clear, including in a narrow window.
+        const int width = std::max(1, std::min(size.width() - 140, widget->sizeHint().width()));
+        const int bottom = impl_->bottomOverlay && impl_->bottomOverlay->isVisible()
+                               ? impl_->bottomOverlay->y()
+                               : size.height();
+        const int height =
+            std::max(1, std::min({bottom - 24, size.height() / 2, widget->sizeHint().height()}));
+        const QRect target(12, 12, width, height);
+        if (widget->geometry() != target)
+            widget->setGeometry(target);
+        widget->raise();
+        widget->update();
+    }
 }
 bool ViewerWidget::eventFilter(QObject *watched, QEvent *event) {
-    auto *widget = impl_->bottomOverlay.data();
-    if (widget && (watched == widget || watched == widget->parentWidget()) &&
+    const auto matches = [watched](const auto &widget) {
+        return widget && (watched == widget || watched == widget->parentWidget());
+    };
+    if ((matches(impl_->bottomOverlay) || matches(impl_->topLeftOverlay)) &&
         (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
          event->type() == QEvent::LayoutRequest || event->type() == QEvent::WinIdChange ||
          event->type() == QEvent::WindowActivate))

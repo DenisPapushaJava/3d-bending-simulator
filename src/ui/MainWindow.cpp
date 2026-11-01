@@ -1,4 +1,5 @@
 #include "bending/ui/MainWindow.h"
+#include "BendMessagePanel.h"
 #include "DrawingDialog.h"
 #include "PartInputDialog.h"
 #include "ProcessStepButton.h"
@@ -1113,6 +1114,8 @@ class MainWindow::Impl {
                          controller->isPreparingDraft());
         playbackControls->setVisible(transport);
         operationOverlay->setVisible(checking && (transport || (document && bendCount > 1)));
+        if (bendMessages)
+            bendMessages->setActive(checking && document && !viewingSource && !wantFlat);
     }
 
     void showPlaybackPanel() {
@@ -1276,7 +1279,8 @@ class MainWindow::Impl {
                          ? QStringLiteral("В этом кадре пересечений с инструментом не найдено.\n"
                                           "Полный порядок, опора и отвод не проверены.")
                          : QStringLiteral("Инструмент не задан.\nСтолкновения не проверены.");
-            if (controller->routeDraft() && !controller->routeDraft()->toolNotice.empty())
+            if (controller->routeDraft() && !controller->routeDraft()->toolLengths &&
+                !controller->routeDraft()->toolNotice.empty())
                 result += QLatin1Char('\n') + text(controller->routeDraft()->toolNotice);
         } else if (controller->bendRouteError())
             result = routePanel->statusText();
@@ -1346,11 +1350,81 @@ class MainWindow::Impl {
                     result += QStringLiteral("\nПереналадка не проверена.");
             }
         }
+        const auto primaryMessage = result;
+        const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
+        const bool shortTools = draft && draft->toolLengths && !preparing;
+        // Length remains visible even when a collision/floor message takes priority.
+        if (shortTools)
+            result += QLatin1Char('\n') + ToolSelectionWidget::lengthIssue(*draft->toolLengths);
+        if (bendMessages && !preparing) {
+            std::vector<BendMessage> messages;
+            const auto lengths = draft && draft->toolLengths ? draft->toolLengths
+                                 : controller->bendRouteError()
+                                     ? controller->bendRouteError()->toolLengths
+                                     : std::nullopt;
+            if (collision)
+                messages.push_back({BendMessageKind::Collision, BendMessageSeverity::Error,
+                                    machineCollision && machineCollision->secondId == "floor"
+                                        ? QStringLiteral("Столкновение с полом")
+                                        : QStringLiteral("Столкновение"),
+                                    primaryMessage});
+            else if (!lengths && (!stageSetupIssue.isEmpty() || !previewDisplayError.isEmpty() ||
+                                  controller->routeDraftError() || controller->bendRouteError() ||
+                                  controller->bendPreviewError())) {
+                const auto error = controller->bendRouteError();
+                const bool limited =
+                    error && (error->code == application::BendRouteErrorCode::SearchLimit ||
+                              error->code == application::BendRouteErrorCode::NoRoute);
+                messages.push_back(
+                    {BendMessageKind::CheckIssue,
+                     limited ? BendMessageSeverity::Warning : BendMessageSeverity::Error,
+                     limited ? QStringLiteral("Порядок пока не найден")
+                             : QStringLiteral("Проверка не пройдена"),
+                     primaryMessage});
+            }
+            if (lengths) {
+                const bool punchShort = lengths->punchLengthMm < lengths->bendLengthMm;
+                const bool dieShort = lengths->dieLengthMm < lengths->bendLengthMm;
+                const auto title =
+                    punchShort && dieShort ? QStringLiteral("Короткий пуансон и матрица")
+                    : punchShort ? QStringLiteral("Пуансон короче на %1 мм")
+                                       .arg(number(lengths->bendLengthMm - lengths->punchLengthMm))
+                                 : QStringLiteral("Матрица короче на %1 мм")
+                                       .arg(number(lengths->bendLengthMm - lengths->dieLengthMm));
+                messages.push_back(
+                    {BendMessageKind::ToolLength,
+                     draft ? BendMessageSeverity::Warning : BendMessageSeverity::Error, title,
+                     ToolSelectionWidget::lengthIssue(*lengths)});
+            }
+            if (partial)
+                messages.push_back({BendMessageKind::Support, BendMessageSeverity::Warning,
+                                    QStringLiteral("Неполная опора у торцов"),
+                                    QStringLiteral("У торца отсутствует часть опоры. Доступен "
+                                                   "геометрический просмотр; устойчивость и "
+                                                   "пригодность к изготовлению не подтверждены.")});
+            if (preview && preview->ignoresClosedCutouts())
+                messages.push_back(
+                    {BendMessageKind::Approximation, BendMessageSeverity::Warning,
+                     QStringLiteral("Отверстия исключены из проверки"),
+                     QStringLiteral(
+                         "Отверстия видимы. Проверки относятся к отдельной "
+                         "копии с заполненными вырезами; их физическое влияние не рассчитано.")});
+            if (messages.empty() && preview && preview->unverifiedDraft())
+                messages.push_back({BendMessageKind::Scope,
+                                    draft && !draft->checkedToolPositions
+                                        ? BendMessageSeverity::Warning
+                                        : BendMessageSeverity::Information,
+                                    draft && !draft->checkedToolPositions
+                                        ? QStringLiteral("Инструмент не выбран")
+                                        : QStringLiteral("Просмотр шага · порядок не проверен"),
+                                    primaryMessage});
+            bendMessages->setMessages(std::move(messages));
+        }
         checkSummary->setText(result);
         checkSummary->setStyleSheet(
             collision && !preparing
                 ? QStringLiteral("background:#FBE9E7;color:#8F2318;border-radius:4px;padding:10px;")
-            : partial || controller->bendRouteError() || controller->routeDraftError()
+            : partial || shortTools || controller->bendRouteError() || controller->routeDraftError()
                 ? QStringLiteral("background:#FFF2CC;color:#704500;border-radius:4px;padding:10px;")
                 : QStringLiteral(
                       "background:#F0F3F6;color:#1C2938;border-radius:4px;padding:10px;"));
@@ -1676,7 +1750,9 @@ class MainWindow::Impl {
                     }
             }
         }
-        toolSelection->setSelectionRequest(selectionRequest, allBends);
+        toolSelection->setSelectionRequest(
+            selectionRequest, allBends,
+            document ? document->metadata().bendAnalysis.lengthToleranceMm : 1.e-5);
         if (checkedToolJob && controller->hasWork() && !controller->isPreparingRoute()) {
             // Toolbar cancellation or another command can stop the worker too.
             checkedToolCancelled = true;
@@ -2684,6 +2760,7 @@ class MainWindow::Impl {
     QTimer *playback = nullptr;
     QWidget *playbackControls = nullptr;
     QWidget *operationOverlay = nullptr;
+    BendMessagePanel *bendMessages = nullptr;
     QLabel *operationSummary = nullptr;
     std::optional<std::uint64_t> shownBendEditRevision;
     int shownTargetRow = -1;
@@ -3679,6 +3756,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         "QWidget#routeStepStrip{border:0;}QWidget#playbackControls{background:transparent;}"));
     impl_->viewer->setBottomOverlay(impl_->operationOverlay);
     impl_->operationOverlay->hide();
+    impl_->bendMessages = new BendMessagePanel(this);
+    impl_->viewer->setTopLeftOverlay(impl_->bendMessages);
     impl_->routePanel->onSelect = [this](int) {
         impl_->beginPreviewReplacement();
         impl_->stopPlayback();

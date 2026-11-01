@@ -200,10 +200,12 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     if (request.withTools && !withTools)
         result->toolNotice = "Инструмент этого гиба не задан; столкновения не проверены.";
     if (withTools) {
-        if (std::min(active.tools->lengthMm, core::punchLengthMm(*active.tools)) +
-                analysis.lengthToleranceMm <
-            bend.lengthMm)
+        const BendRouteToolLengthIssue lengths{bend.lengthMm, core::punchLengthMm(*active.tools),
+                                               active.tools->lengthMm};
+        if (!lengths.coversBend(analysis.lengthToleranceMm)) {
+            result->toolLengths = lengths;
             result->toolNotice = "Инструмент короче линии гиба; полная длина не обеспечена.";
+        }
         require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
                 "Inconsistent draft tool assignment");
         tools = makeRouteDraftTools(*active.tools, active.assignment, stop, segments);

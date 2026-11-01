@@ -89,11 +89,15 @@ void verifyToolStageTransitions(const QString &folder) {
     auto hook = tool_fixture::hook().punch;
     hook.id = "hook";
     hook.code = "Hook";
+    auto shortPunch = pair.punch;
+    shortPunch.id = "short";
+    shortPunch.code = "Short";
+    shortPunch.lengthMm = 40;
     auto specialDie = tool_fixture::pair(20).die;
     specialDie.id = "special-die";
     specialDie.segments = std::vector<core::ToolSegment>{{40, 2}};
     ui::MainWindow window({"test", "test"}, files, files, builder,
-                          {pair.punch, hook, pair.die, specialDie});
+                          {pair.punch, hook, shortPunch, pair.die, specialDie});
     window.setAutomaticPartInputPrompt(false);
     window.resize(1280, 850);
     window.show();
@@ -137,6 +141,47 @@ void verifyToolStageTransitions(const QString &folder) {
             }
         throw std::runtime_error("Punch missing from the library");
     };
+    stage(2);
+    stage(1);
+    pickPunch(QStringLiteral("Short"));
+    stage(2);
+    require(c.routeDraft() && c.routeDraft()->toolLengths &&
+                window.findChild<QLabel *>("bendCheckSummary")->text().contains("не хватает"),
+            "The manual blank silently accepted a short tool");
+    auto *messages = window.findChild<QWidget *>("bendMessages");
+    auto *messageToggle = window.findChild<QToolButton *>("bendMessagesToggle");
+    require(messages && messages->isVisible() && messageToggle,
+            "The current bend warnings are missing from the viewport");
+    const auto messageDrafts = builder->drafts.load();
+    const auto messageEdit = c.session().editRevision();
+    messageToggle->click();
+    QApplication::processEvents();
+    require(window.findChild<QLabel *>("bendMessagesText")->text().contains("не хватает") &&
+                builder->drafts == messageDrafts && c.session().editRevision() == messageEdit,
+            "Expanding messages lost the length detail or launched a calculation");
+    require(!messages->geometry().intersects(
+                window.findChild<QWidget *>("operationOverlay")->geometry()),
+            "Expanded messages overlap the step strip or playback controls");
+    if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
+        auto shot = window.grab().toImage();
+        auto *viewer = window.findChild<viewer::ViewerWidget *>();
+        if (viewer && viewer->isReady()) {
+            QPainter painter(&shot);
+            painter.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
+        }
+        require(shot.save(output + "-messages.png"), "Message snapshot failed");
+    }
+    window.resize(900, 650);
+    QApplication::processEvents();
+    require(messages->geometry().right() < messages->parentWidget()->width() - 100 &&
+                !messages->geometry().intersects(
+                    window.findChild<QWidget *>("operationOverlay")->geometry()),
+            "Messages cover the cube or transport after resize");
+    window.resize(1280, 850);
+    messageToggle->click();
+    stage(1);
+    require(!messages->isVisible(), "Bend messages escaped into the tool workspace");
+    pickPunch(QStringLiteral("P60"));
     stage(2);
     step(2);
     window.findChild<QToolButton *>("reversePunch")->click();
@@ -292,6 +337,8 @@ int main(int argc, char **argv) {
         require(toolWorkspace && toolWorkspace->isVisible() && !viewer->isVisible() &&
                     !controller.hasWork() && builder->drafts == 0 && builder->searches == 0,
                 "Tool stage retained the part scene or started CAD");
+        require(window.findChild<QLabel *>("toolLengthWarning")->isVisible(),
+                "Tool selection hides its insufficient nominal length");
         snapshotStage("-tools.png");
         window.findChild<QToolButton *>("processStage0")->click();
         require(viewer->isVisible() && !toolWorkspace->isVisible() &&

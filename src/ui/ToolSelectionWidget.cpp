@@ -17,6 +17,7 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -53,6 +54,12 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setAlignment(Qt::AlignTop);
+    lengthWarning_ = wrapped(this);
+    lengthWarning_->setObjectName("toolLengthWarning");
+    lengthWarning_->setStyleSheet(
+        "background:#FFF2CC;color:#704500;border-radius:4px;padding:8px;");
+    lengthWarning_->hide();
+    layout->addWidget(lengthWarning_);
     mode_ = new QComboBox(this);
     mode_->setObjectName(QStringLiteral("toolSourceMode"));
     mode_->setAccessibleName(QStringLiteral("Источник параметров инструмента"));
@@ -424,6 +431,29 @@ std::optional<core::PressTools> ToolSelectionWidget::rawParameters() const {
     }
     return {}; // Saved manual parameters may be read, but cannot create a new tool body.
 }
+QString ToolSelectionWidget::lengthIssue(const application::BendRouteToolLengthIssue &lengths) {
+    const auto number = [](double value) { return QLocale().toString(value, 'g', 6); };
+    QString result = QStringLiteral("Длина гиба: %1 мм.").arg(number(lengths.bendLengthMm));
+    const auto append = [&](const QString &name, double length) {
+        result += QStringLiteral("\n%1: %2 мм").arg(name, number(length));
+        if (length < lengths.bendLengthMm)
+            result +=
+                QStringLiteral(" — не хватает %1 мм").arg(number(lengths.bendLengthMm - length));
+        result += QLatin1Char('.');
+    };
+    append(QStringLiteral("Пуансон"), lengths.punchLengthMm);
+    append(QStringLiteral("Матрица"), lengths.dieLengthMm);
+    return result + QStringLiteral("\nТолько просмотр: гибка не подтверждена. "
+                                   "Подберите секции или другой инструмент.");
+}
+QString ToolSelectionWidget::lengthIssue() const {
+    const auto tools = rawParameters();
+    if (!tools || !selectionRequest_)
+        return {};
+    const application::BendRouteToolLengthIssue lengths{
+        selectionRequest_->bendLengthMm, core::punchLengthMm(*tools), tools->lengthMm};
+    return lengths.coversBend(lengthToleranceMm_) ? QString{} : lengthIssue(lengths);
+}
 QString ToolSelectionWidget::openingIssue() const {
     if (!usesCatalog() || !selectionRequest_)
         return {};
@@ -688,6 +718,9 @@ void ToolSelectionWidget::refreshFavorites() {
     }
 }
 void ToolSelectionWidget::updateDetails() {
+    const auto lengthIssueText = lengthIssue();
+    lengthWarning_->setText(lengthIssueText);
+    lengthWarning_->setVisible(!lengthIssueText.isEmpty());
     const bool legacyMachine =
         demoMachine_->isChecked() && machineModel_ != core::MachineModel::DemoPressV3;
     upgradeFloor_->setVisible(legacyMachine);
@@ -828,16 +861,19 @@ void ToolSelectionWidget::rememberChoice() {
     settings->setValue(QStringLiteral("tools/machine"), machine_->text());
 }
 void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
-                                              bool allBends) {
+                                              bool allBends, double lengthToleranceMm) {
     const bool different = selectionRequest_ != request || allBends_ != allBends;
+    const bool toleranceChanged = lengthToleranceMm_ != lengthToleranceMm;
+    lengthToleranceMm_ = lengthToleranceMm;
     if (different) {
         allBends_ = allBends;
         selectionRequest_ = request;
         fitAssemblies();
         recommendation_->clear();
         recommendation_->hide();
-        updateDetails();
     }
+    if (different || toleranceChanged)
+        updateDetails();
     recommend_->setEnabled(usesCatalog() && selectionRequest_.has_value());
 }
 void ToolSelectionWidget::setCheckedSearchState(bool busy, const QString &status, bool resumable) {

@@ -180,6 +180,11 @@ void testPartInputs() {
     require(!s.complete(pending, DocumentPtr(doc)), "Old request replaced edited part");
 }
 void testBendPreparation() {
+    require(BendRouteToolLengthIssue{80, 835, 100}.coversBend() &&
+                !BendRouteToolLengthIssue{100, 80, 835}.coversBend() &&
+                !BendRouteToolLengthIssue{100, 835, 80}.coversBend() &&
+                BendRouteToolLengthIssue{100, 99.9999999, 100}.coversBend(1.e-6),
+            "Independent tool spans or geometric tolerance were lost");
     BendAnalysis analysis;
     analysis.status = BendRecognitionStatus::Completed;
     analysis.bends = {

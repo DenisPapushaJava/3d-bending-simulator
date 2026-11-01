@@ -265,6 +265,16 @@ void ImportController::Impl::dispatchDraft() {
                                             bool(op.assignment &&
                                                  op.assignment->useDrawingGeometry &&
                                                  op.assignment->die.drawing);
+                                std::optional<BendRouteToolLengthIssue> expectedLengths;
+                                if (tools) {
+                                    const auto &analysis = job.document->metadata().bendAnalysis;
+                                    const BendRouteToolLengthIssue lengths{
+                                        analysis.bends[op.bendIndex].lengthMm,
+                                        core::punchLengthMm(*op.tools), op.tools->lengthMm};
+                                    if (!lengths.coversBend(analysis.lengthToleranceMm))
+                                        expectedLengths = lengths;
+                                }
+                                valid &= (*value)->toolLengths == expectedLengths;
                             } else
                                 valid = false;
                             if (valid)
