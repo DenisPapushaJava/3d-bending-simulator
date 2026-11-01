@@ -283,28 +283,31 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         "Источник формы каждого инструмента указан возле сечений. "
         "Учебная сборка станка выбирается отдельно; допустимая нагрузка не проверяется."));
     setupLayout->addWidget(scope);
-    const auto selected = [this] {
+    const auto selected = [this](std::optional<core::ToolKind> only = {}) {
         if (!updating_) {
-            fitAssemblies();
+            fitAssemblies(only);
             chooseDrawingGeometry();
         }
-        changed();
+        changed(!only                            ? Change::Parameters
+                : *only == core::ToolKind::Punch ? Change::Punch
+                                                 : Change::Die);
     };
-    connect(mode_, &QComboBox::currentIndexChanged, this, selected);
+    connect(mode_, &QComboBox::currentIndexChanged, this, [selected] { selected(); });
     connect(punch_, &QComboBox::currentIndexChanged, this, [this, selected] {
         if (!updating_)
             resetPunchOrientation();
-        selected();
+        selected(core::ToolKind::Punch);
     });
     connect(die_, &QComboBox::currentIndexChanged, this, [this] {
         populateGrooves();
         if (!updating_) {
-            fitAssemblies();
+            fitAssemblies(core::ToolKind::Die);
             chooseDrawingGeometry();
         }
-        changed();
+        changed(Change::Die);
     });
-    connect(groove_, &QComboBox::currentIndexChanged, this, selected);
+    connect(groove_, &QComboBox::currentIndexChanged, this,
+            [selected] { selected(core::ToolKind::Die); });
     for (auto *combo : {punch_, die_, groove_})
         connect(combo, &QComboBox::activated, this, [this] {
             if (!updating_ && chooseDrawingGeometry())
@@ -318,7 +321,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
             if (previous != selectedTool(core::ToolKind::Punch))
                 resetPunchOrientation();
             chooseDrawingGeometry();
-            changed();
+            changed(Change::Pair);
         }
     });
     connect(favorite_, &QPushButton::clicked, this, [this] {
@@ -540,8 +543,12 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
     if (found == catalog_.end())
         return false;
     if (selectedTool(tool.kind) == tool && usesCatalog() && realGeometry_->isChecked() &&
-        (tool.kind == core::ToolKind::Punch || selectedGroove() == groove))
+        (tool.kind == core::ToolKind::Punch || selectedGroove() == groove)) {
+        // Selecting the common profile explicitly may replace another bend's exception.
+        if (allBends_)
+            changed(tool.kind == core::ToolKind::Punch ? Change::Punch : Change::Die);
         return true;
+    }
     const auto previous = selectedTool(tool.kind);
     const bool sameProfile = previous && previous->id == tool.id && previous->drawing &&
                              tool.drawing &&
@@ -555,11 +562,11 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
     if (tool.kind == core::ToolKind::Die)
         populateGrooves(groove);
     realGeometry_->setChecked(true);
-    fitAssemblies();
+    fitAssemblies(tool.kind);
     if (newPunch)
         resetPunchOrientation();
     updating_ = false;
-    changed();
+    changed(tool.kind == core::ToolKind::Punch ? Change::Punch : Change::Die);
     return true;
 }
 void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
@@ -774,14 +781,14 @@ void ToolSelectionWidget::updateDetails() {
     sources_->setText(text(p.source + "\n" + p.notes + "\n\n" + d.source + "\n" + d.notes));
     sources_->setMinimumHeight(sources_->heightForWidth(240));
 }
-void ToolSelectionWidget::changed() {
+void ToolSelectionWidget::changed(Change selected) {
     recommendation_->clear();
     recommendation_->hide();
     if (updating_)
         return;
     updateDetails();
     if (onChanged)
-        onChanged();
+        onChanged(selected);
 }
 QString ToolSelectionWidget::summary() const {
     const auto tools = parameters();
@@ -882,7 +889,7 @@ void ToolSelectionWidget::suggestForNewPart() {
         auto a = std::move(candidates.front());
         a.punchReversed = core::defaultPunchOrientation(a.punch).value_or(false);
         setChoice(core::toolParameters(a), a);
-        changed();
+        changed(Change::Pair);
         setCheckedSearchState(false, QStringLiteral("Предварительный подбор"));
         return;
     }
@@ -934,7 +941,7 @@ void ToolSelectionWidget::recommend() {
         chooseDrawingGeometry();
         if (newPunch)
             resetPunchOrientation();
-        changed();
+        changed(Change::Pair);
         message = QStringLiteral("Предварительно: %1 / %2 · V %3 мм (%4 толщин). Вариантов: %5. "
                                  "Далее — проверка опор и пересечений.")
                       .arg(text(p.code), text(d.code))
@@ -1010,9 +1017,12 @@ void ToolSelectionWidget::fitSelectedAssemblies() {
     recommendation_->setMinimumHeight(recommendation_->heightForWidth(240));
     recommendation_->show();
 }
-std::array<core::SegmentPlan, 2> ToolSelectionWidget::fitAssemblies() {
-    punchAssembly_.reset();
-    dieAssembly_.reset();
+std::array<core::SegmentPlan, 2>
+ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only) {
+    if (!only || *only == core::ToolKind::Punch)
+        punchAssembly_.reset();
+    if (!only || *only == core::ToolKind::Die)
+        dieAssembly_.reset();
     std::array<core::SegmentPlan, 2> plans;
     if (!selectionRequest_)
         return plans;
@@ -1032,8 +1042,10 @@ std::array<core::SegmentPlan, 2> ToolSelectionWidget::fitAssemblies() {
             assembly = plan.assembly;
         return plan;
     };
-    plans[0] = fit(preset(punch_), punchAssembly_);
-    plans[1] = fit(preset(die_), dieAssembly_);
+    if (!only || *only == core::ToolKind::Punch)
+        plans[0] = fit(preset(punch_), punchAssembly_);
+    if (!only || *only == core::ToolKind::Die)
+        plans[1] = fit(preset(die_), dieAssembly_);
     return plans;
 }
 void ToolSelectionWidget::importCatalog() {

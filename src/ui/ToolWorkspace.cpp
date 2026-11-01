@@ -31,6 +31,10 @@ ToolWorkspace::ToolWorkspace(QWidget *parent) : QWidget(parent) {
     setObjectName("toolWorkspace");
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(20, 20, 20, 20);
+    context_ = new QLabel(this);
+    context_->setObjectName("toolWorkspaceContext");
+    context_->setTextFormat(Qt::PlainText);
+    layout->addWidget(context_);
     profiles_ = new QWidget(this);
     profiles_->setObjectName("toolWorkspaceProfiles");
     auto *row = new QHBoxLayout(profiles_);
@@ -69,6 +73,10 @@ ToolWorkspace::ToolWorkspace(QWidget *parent) : QWidget(parent) {
 }
 void ToolWorkspace::bindSelection(ToolSelectionWidget *selection) {
     selection_ = selection;
+}
+void ToolWorkspace::setContext(const QString &text) {
+    context_->setText(text);
+    context_->setVisible(!text.isEmpty());
 }
 void ToolWorkspace::refresh() {
     if (!selection_)

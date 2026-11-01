@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
         const auto before = selection.assignment();
         int changed = 0;
         int cancelled = 0;
-        selection.onChanged = [&] { ++changed; };
+        selection.onChanged = [&](auto) { ++changed; };
         selection.onCancelChecked = [&] { ++cancelled; };
         QString error;
         QTimer::singleShot(0, [&] {

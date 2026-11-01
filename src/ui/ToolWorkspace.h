@@ -12,6 +12,7 @@ class ToolWorkspace final : public QWidget {
   public:
     explicit ToolWorkspace(QWidget *parent = nullptr);
     void bindSelection(ToolSelectionWidget *);
+    void setContext(const QString &);
     void refresh();
 
   private:
@@ -21,6 +22,6 @@ class ToolWorkspace final : public QWidget {
     QHBoxLayout *grooves_;
     QWidget *grooveRow_;
     std::optional<core::ToolPreset> shownDie_;
-    QLabel *punch_, *die_;
+    QLabel *context_, *punch_, *die_;
 };
 } // namespace bending::ui

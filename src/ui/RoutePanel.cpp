@@ -181,8 +181,7 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     mode_->setAccessibleName(QStringLiteral("Охват проверки порядка гибов"));
     mode_->setToolTip(QStringLiteral("Охват полной проверки порядка. Ручной просмотр всегда "
                                      "проверяет столкновения с назначенным инструментом."));
-    mode_->addItems({QStringLiteral("Без инструмента"), QStringLiteral("Одна пара для всех гибов"),
-                     QStringLiteral("По назначениям гибов")});
+    mode_->addItems({QStringLiteral("Без инструмента"), QStringLiteral("С инструментом")});
     mode_->setCurrentIndex(1);
     actions->addWidget(manual_);
     actions->addWidget(mode_);
@@ -316,12 +315,9 @@ void RoutePanel::select(int step, bool notify) {
     if (notify && onSelect)
         onSelect(selected_);
 }
-void RoutePanel::setWithTools(bool withTools, bool perBend) {
+void RoutePanel::setWithTools(bool withTools) {
     const QSignalBlocker block(mode_);
-    mode_->setCurrentIndex(withTools ? (perBend ? 2 : 1) : 0);
-}
-bool RoutePanel::perBendTools() const {
-    return mode_->currentIndex() == 2;
+    mode_->setCurrentIndex(withTools ? 1 : 0);
 }
 bool RoutePanel::withTools() const {
     return mode_->currentIndex() != 0;
@@ -468,8 +464,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             }
         }
     const bool ready = included && ids_.size() <= application::maximumSheetBends && !busy &&
-                       !preparingDraft &&
-                       (mode_->currentIndex() == 0 || (perBendTools() ? assigned : toolsAvailable));
+                       !preparingDraft && (mode_->currentIndex() == 0 || assigned);
     automatic_->setEnabled(ready);
     manual_->setEnabled(ready);
     mode_->setEnabled(!busy);
@@ -636,7 +631,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                       .arg(application::maximumSheetBends);
     else if (!included)
         message = QStringLiteral("Для полного порядка нужны все распознанные зоны детали.");
-    else if (perBendTools() && missingTool)
+    else if (withTools() && missingTool)
         message = QStringLiteral("Не назначен инструмент для B%1. Выберите шаг → «Инструмент…». "
                                  "Назначения сохраняются отдельно для каждого гиба.")
                       .arg(*missingTool + 1, 2, 10, QLatin1Char('0'));

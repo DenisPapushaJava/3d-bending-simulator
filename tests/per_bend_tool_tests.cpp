@@ -8,6 +8,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -112,7 +113,7 @@ int main(int argc, char **argv) {
         window.findChild<QToolButton *>("processStage2")->click();
         wait([&] { return !controller.hasWork(); });
         auto *mode = window.findChild<QComboBox *>("bendRouteMode");
-        mode->setCurrentIndex(2);
+        mode->setCurrentIndex(1);
         auto *prepare = window.findChild<QPushButton *>("prepareBendRoute");
         require(!prepare->isEnabled() && !controller.hasWork(),
                 "Missing assignments started a search");
@@ -120,13 +121,13 @@ int main(int argc, char **argv) {
         window.findChild<QPushButton *>("routeEditTool")->click();
         wait([&] { return !controller.hasWork(); });
         auto *scope = window.findChild<QComboBox *>("toolAssignmentScope");
-        auto *selection = window.findChild<QComboBox *>("toolBendSelection");
         auto *assign = window.findChild<QPushButton *>("assignBendTool");
-        require(scope->currentIndex() == 1 && selection->isVisible(), "No per-bend tool editor");
+        require(scope->currentIndex() == 1 && scope->isVisible(), "No per-bend tool editor");
         std::vector<std::optional<core::PressTools>> expected(bends.size());
         std::vector<std::optional<core::ToolAssignment>> assignments(bends.size());
         for (std::size_t index = 0; index < bends.size(); ++index) {
-            selection->setCurrentIndex(selection->findData(static_cast<int>(index)));
+            scope->setCurrentIndex(
+                scope->findData(QString::fromStdString(controller.session().bend(index)->id)));
             if (sample) {
                 // Owned finite contours; this audit makes no workshop stock/force claim.
                 const core::PressTools tools{8 * bends[index].thicknessMm, std::numbers::pi / 3,
@@ -183,7 +184,7 @@ int main(int argc, char **argv) {
                 " checks=" + std::to_string(error->evaluatedOperations) + ": " + error->detail);
         const auto route = controller.bendRoute();
         require(route && route->steps.size() == bends.size() && route->withTools &&
-                    mode->currentIndex() == 2 && !controller.bendPreview(),
+                    mode->currentIndex() == 1 && !controller.bendPreview(),
                 "No complete route");
         for (std::size_t i = 0; i < route->steps.size(); ++i) {
             const auto &step = route->steps[i];
@@ -224,7 +225,7 @@ int main(int argc, char **argv) {
             wait([&] { return !controller.hasWork(); });
             const auto manual = controller.bendRoute();
             require(manual && manual->steps.front().id == order.front() &&
-                        mode->currentIndex() == 2,
+                        mode->currentIndex() == 1,
                     "Manual checking lost the per-bend mode/order");
             for (const auto &step : manual->steps)
                 require(step.preview->toolSetup()->tools == *expected[step.bendIndex],
@@ -249,13 +250,8 @@ int main(int argc, char **argv) {
         require(controller.saveError().isEmpty(), "Project save failed");
         window.openStep(saved);
         wait([&] { return !controller.hasWork(); });
-        const bool distinct =
-            std::any_of(expected.begin(), expected.end(),
-                        [&](const auto &tool) { return tool != expected.front(); }) ||
-            std::any_of(assignments.begin(), assignments.end(),
-                        [&](const auto &assignment) { return assignment != assignments.front(); });
-        require(scope->currentIndex() == (distinct ? 1 : 0) && !controller.bendRoute(),
-                "Reopening lost the per-bend mode or restored stale validation");
+        require(scope->currentIndex() == 0 && !controller.bendRoute(),
+                "Reopening restored a hidden edit scope or stale validation");
         for (std::size_t i = 0; i < expected.size(); ++i)
             require(controller.session().bend(i)->tools == expected[i] &&
                         controller.session().bend(i)->catalogTools == assignments[i],
@@ -285,12 +281,15 @@ int main(int argc, char **argv) {
             for (std::size_t i = 0; i < assignments.size(); ++i)
                 require(controller.session().bend(i)->catalogTools == assignments[i],
                         "Planning a shared draft rewrote independent assignments");
-            scope->setCurrentIndex(1);
             const auto shortest = static_cast<std::size_t>(
                 std::min_element(bends.begin(), bends.end(),
                                  [](auto &a, auto &b) { return a.lengthMm < b.lengthMm; }) -
                 bends.begin());
-            selection->setCurrentIndex(selection->findData(static_cast<int>(shortest)));
+            scope->setCurrentIndex(
+                scope->findData(QString::fromStdString(controller.session().bend(shortest)->id)));
+            // Leaving the global editor accepts its valid draft in one transaction.
+            for (std::size_t i = 0; i < assignments.size(); ++i)
+                assignments[i] = controller.session().bend(i)->catalogTools;
             punch->setCurrentIndex(1);
             die->setCurrentIndex(1);
             fitSections->click();
@@ -309,6 +308,25 @@ int main(int argc, char **argv) {
                 if (i != shortest)
                     require(controller.session().bend(i)->catalogTools == assignments[i],
                             "Fitting one bend changed another bend's tool/sections");
+            scope->setCurrentIndex(0);
+            auto *quick = window.findChild<QAction *>("recommendToolsQuick");
+            quick->trigger();
+            assign->click();
+            const auto ordered = controller.session().orderedBends();
+            const auto common = *controller.session().bend(ordered.front())->catalogTools;
+            auto exception = common;
+            exception.punch = common.punch.id == pair.punch.id ? other.punch : pair.punch;
+            exception.punchAssembly = exception.punch.segments
+                                          ? std::optional{core::ToolAssembly{{0, 0}, 0}}
+                                          : std::nullopt;
+            require(controller.setBendToolAssignment(ordered.back(), exception),
+                    "Cannot prepare a local profile exception");
+            quick->trigger(); // The recommendation already matches the displayed first bend.
+            assign->click();
+            for (const auto i : ordered)
+                require(controller.session().bend(i)->catalogTools == common,
+                        "Global quick selection retained a local exception to the same pair");
+            require(!controller.hasWork(), "Quick assignment unexpectedly started a CAD search");
         }
         controller.shutdown();
         if (!sample) {

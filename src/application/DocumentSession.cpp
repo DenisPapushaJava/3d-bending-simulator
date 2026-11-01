@@ -227,6 +227,29 @@ bool DocumentSession::setBendToolAssignment(std::size_t index, core::ToolAssignm
     return true;
 }
 
+bool DocumentSession::setBendToolAssignments(const std::vector<BendToolUpdate> &updates) {
+    if (!document_ || active_)
+        return false;
+    auto candidate = *this;
+    std::vector<std::size_t> seen;
+    for (const auto &update : updates) {
+        if (std::find(seen.begin(), seen.end(), update.bendIndex) != seen.end())
+            return false;
+        seen.push_back(update.bendIndex);
+        if (update.assignment && core::toolParameters(*update.assignment) != update.tools)
+            return false;
+        if (update.assignment
+                ? !candidate.setBendToolAssignment(update.bendIndex, *update.assignment)
+                : !candidate.setBendTools(update.bendIndex, update.tools))
+            return false;
+    }
+    if (candidate.editRevision_ != editRevision_) {
+        candidate.editRevision_ = editRevision_ + 1;
+        *this = std::move(candidate);
+    }
+    return true;
+}
+
 ThicknessValidation DocumentSession::setManualThickness(double valueMm) {
     if (!document_ || active_) {
         return ThicknessValidation::Invalid;

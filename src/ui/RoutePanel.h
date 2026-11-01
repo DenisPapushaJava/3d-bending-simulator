@@ -19,8 +19,7 @@ class RoutePanel final : public QWidget {
                  std::optional<application::BendRouteError> draftError = {},
                  bool preparingDraft = false);
     void select(int step, bool notify = true);
-    void setWithTools(bool, bool perBend = false);
-    [[nodiscard]] bool perBendTools() const;
+    void setWithTools(bool);
     [[nodiscard]] bool withTools() const;
     void setExpandedSearch(bool expanded) {
         expandedSearch_ = expanded;

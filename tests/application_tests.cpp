@@ -229,6 +229,26 @@ void testBendPreparation() {
                 session.editRevision() == stableOrderEdit,
             "Invalid or unchanged order edited the project");
     require(session.setBendOrder({id, secondId}), "Original order not restored");
+    const bending::core::PressTools tools{16, std::numbers::pi / 3, std::numbers::pi / 6, .8, 100,
+                                          10};
+    auto anotherTool = tools;
+    anotherTool.openingMm = 20;
+    const auto toolsRevision = session.editRevision();
+    const std::vector<BendToolUpdate> updates{{0, tools, {}}, {1, anotherTool, {}}};
+    require(session.setBendToolAssignments(updates) &&
+                session.editRevision() == toolsRevision + 1 && session.bend(0)->tools == tools &&
+                session.bend(1)->tools == anotherTool && session.bend(0)->workpieceReversed,
+            "Tool batch was not atomic or changed the workpiece installation");
+    const auto stableToolsRevision = session.editRevision();
+    require(session.setBendToolAssignments(updates) &&
+                session.editRevision() == stableToolsRevision &&
+                !session.setBendToolAssignments({{0, anotherTool, {}}, {99, tools, {}}}) &&
+                !session.setBendToolAssignments({{0, anotherTool, {}}, {0, tools, {}}}) &&
+                session.bend(0)->tools == tools && session.bend(1)->tools == anotherTool &&
+                session.editRevision() == stableToolsRevision,
+            "Invalid/no-op tool batch partially edited the session");
+    require(session.setBendToolAssignments({{0, {}, {}}, {1, {}, {}}}),
+            "Cannot clear tool assignments atomically");
     require(session.setBendReview(0, BendReview::Pending) && !session.bendTarget(0) &&
                 !session.setBendTarget(0, target),
             "Pending zone accepted a target");

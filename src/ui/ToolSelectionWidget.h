@@ -27,6 +27,7 @@ namespace bending::ui {
 class ImportController;
 class ToolSelectionWidget final : public QWidget {
   public:
+    enum class Change { Parameters, Punch, Die, Pair };
     ToolSelectionWidget(core::ToolCatalog catalog, QWidget *parent);
     void setChoice(const std::optional<core::PressTools> &tools,
                    const std::optional<core::ToolAssignment> &assignment);
@@ -65,7 +66,7 @@ class ToolSelectionWidget final : public QWidget {
                               application::ToolLibraryStorage);
     std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
         loadCatalog;
-    std::function<void()> onChanged;
+    std::function<void(Change)> onChanged;
     std::function<void()> onAppearanceChanged;
     std::function<void()> onCheckedRecommend;
     std::function<void()> onCancelChecked;
@@ -80,7 +81,7 @@ class ToolSelectionWidget final : public QWidget {
     };
     [[nodiscard]] std::optional<core::PressTools> rawParameters() const;
     bool chooseDrawingGeometry();
-    void changed();
+    void changed(Change selected = Change::Parameters);
     void updateDetails();
     void populateGrooves(std::size_t selected = 0);
     void selectPreset(QComboBox *combo, const core::ToolPreset &preset);
@@ -91,7 +92,7 @@ class ToolSelectionWidget final : public QWidget {
     void refreshFavorites();
     void recommend();
     void fitSelectedAssemblies();
-    std::array<core::SegmentPlan, 2> fitAssemblies();
+    std::array<core::SegmentPlan, 2> fitAssemblies(std::optional<core::ToolKind> only = {});
     void importCatalog();
     void importDxf(std::optional<core::ToolKind> initialKind = {});
     void showLibrary(std::optional<core::ToolKind> kind = {}, bool add = false);

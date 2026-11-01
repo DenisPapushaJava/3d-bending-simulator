@@ -4,12 +4,19 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace bending::application {
 struct ImportRequest {
     std::uint64_t id;
     std::uint64_t baseRevision;
     std::filesystem::path source;
+};
+
+struct BendToolUpdate {
+    std::size_t bendIndex;
+    std::optional<core::PressTools> tools;
+    std::optional<core::ToolAssignment> assignment;
 };
 
 // GUI-independent state machine. Its owner serializes calls; no Qt, SDK or worker ownership here.
@@ -35,6 +42,8 @@ class DocumentSession final {
     bool setBendReview(std::size_t recognizedIndex, BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
+    // Validate the entire batch before publishing it; a change advances one edit revision.
+    bool setBendToolAssignments(const std::vector<BendToolUpdate> &updates);
     [[nodiscard]] std::optional<core::BendTarget> bendTarget(std::size_t recognizedIndex) const;
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     [[nodiscard]] std::vector<std::size_t> orderedBends() const;

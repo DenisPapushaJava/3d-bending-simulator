@@ -478,6 +478,20 @@ bool ImportController::setBendWorkpieceOrientation(std::size_t index, bool rever
     emit stateChanged();
     return result;
 }
+bool ImportController::setBendToolAssignments(
+    const std::vector<application::BendToolUpdate> &updates) {
+    if (impl_->stopping || hasWork())
+        return false;
+    const auto before = impl_->session.editRevision();
+    if (!impl_->session.setBendToolAssignments(updates))
+        return false;
+    if (before != impl_->session.editRevision()) {
+        impl_->invalidateRoute();
+        impl_->invalidatePreview();
+        emit stateChanged();
+    }
+    return true;
+}
 bool ImportController::setAllBendPunchOrientations(
     bool reversed, std::optional<core::PressTools> sharedTools,
     std::optional<core::ToolAssignment> sharedAssignment) {
@@ -800,6 +814,11 @@ void ImportController::discardBendPreview() {
 }
 void ImportController::discardBendRoute() {
     impl_->invalidateRoute();
+    emit stateChanged();
+}
+void ImportController::discardToolChecks() {
+    impl_->invalidateRoute();
+    impl_->invalidatePreview();
     emit stateChanged();
 }
 bool ImportController::setBendOrder(const std::vector<std::string> &ids) {

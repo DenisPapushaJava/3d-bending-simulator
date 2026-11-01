@@ -5,10 +5,12 @@
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
+#include <QDialog>
 #include <QElapsedTimer>
 #include <QLabel>
 #include <QPainter>
@@ -80,12 +82,162 @@ std::vector<std::string> order(const ui::ImportController &c) {
         ids.push_back(c.session().bend(i)->id);
     return ids;
 }
+void verifyToolStageTransitions(const QString &folder) {
+    auto files = std::make_shared<project::ProjectFiles>();
+    auto builder = std::make_shared<Builder>();
+    auto pair = tool_fixture::pair(16);
+    auto hook = tool_fixture::hook().punch;
+    hook.id = "hook";
+    hook.code = "Hook";
+    auto specialDie = tool_fixture::pair(20).die;
+    specialDie.id = "special-die";
+    specialDie.segments = std::vector<core::ToolSegment>{{40, 2}};
+    ui::MainWindow window({"test", "test"}, files, files, builder,
+                          {pair.punch, hook, pair.die, specialDie});
+    window.setAutomaticPartInputPrompt(false);
+    window.resize(1280, 850);
+    window.show();
+    auto &c = window.importController();
+    window.openStep(folder + "/source.step");
+    wait([&] { return !c.hasWork(); });
+    const auto indices = c.session().orderedBends();
+    require(indices.size() == 4, "Tool transition fixture lost four bends");
+    auto other = pair;
+    other.die = specialDie;
+    other.dieAssembly = core::ToolAssembly{{0, 0}, 0};
+    std::vector<application::BendToolUpdate> initial;
+    for (const auto i : indices) {
+        const auto a = i == indices[1] ? other : pair;
+        initial.push_back({i, core::toolParameters(a), a});
+    }
+    unsigned changes = 0;
+    const auto transaction =
+        QObject::connect(&c, &ui::ImportController::stateChanged, &window, [&] { ++changes; });
+    require(c.setBendToolAssignments(initial) && changes == 1,
+            "Initial tool batch notified intermediate sessions");
+    require(c.setBendToolAssignments(initial) && changes == 1,
+            "An unchanged tool batch emitted a refresh");
+    QObject::disconnect(transaction);
+    require(c.setBendWorkpieceOrientation(indices[1], true), "Cannot turn the part");
+    auto stage = [&](int n) {
+        window.findChild<QToolButton *>(QStringLiteral("processStage%1").arg(n))->click();
+        wait([&] { return !c.hasWork(); });
+    };
+    auto step = [&](int n) {
+        window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(n))->click();
+        wait([&] { return !c.hasWork(); });
+    };
+    auto *scope = window.findChild<QComboBox *>("toolAssignmentScope");
+    auto *punch = window.findChild<QComboBox *>("punchPreset");
+    const auto pickPunch = [&](const QString &name) {
+        for (int at = 0; at < punch->count(); ++at)
+            if (punch->itemText(at).contains(name)) {
+                punch->setCurrentIndex(at);
+                return;
+            }
+        throw std::runtime_error("Punch missing from the library");
+    };
+    stage(2);
+    step(2);
+    window.findChild<QToolButton *>("reversePunch")->click();
+    wait([&] { return !c.hasWork(); });
+    stage(1);
+    require(scope->currentText() == QStringLiteral("Гиб 2"), "Step context was hidden/lost");
+    require(window.findChild<QLabel *>("toolWorkspaceContext")->text() == scope->currentText(),
+            "Tool cards do not show the editing scope");
+    if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty())
+        require(window.grab().save(output + "-local-tools.png"), "Tool context snapshot failed");
+    pickPunch(QStringLiteral("Hook"));
+    stage(2);
+    require(c.routeDraft() && c.routeDraft()->checkedToolPositions == 21 && builder->searches == 0,
+            "Changing a local tool skipped collision checks or launched a search");
+    for (const auto i : indices) {
+        const auto &a = *c.session().bend(i)->catalogTools;
+        require(a.punch == (i == indices[1] ? hook : pair.punch) &&
+                    a.die == (i == indices[1] ? specialDie : pair.die) &&
+                    c.session().bend(i)->workpieceReversed == (i == indices[1]),
+                "Local tool choice changed another bend, die or part orientation");
+    }
+    require(c.session().bend(indices[1])->catalogTools->dieAssembly == other.dieAssembly,
+            "Changing a punch refitted an unchanged die assembly");
+    step(0);
+    stage(1);
+    require(scope->currentText() == QStringLiteral("Вся деталь"),
+            "Zero did not restore the global edit context");
+    const auto before = c.session().editRevision();
+    pickPunch(QStringLiteral("Hook"));
+    stage(2);
+    require(c.session().editRevision() == before + 1 && c.routeDraft() &&
+                c.routeDraft()->checkedToolPositions == 1 && builder->searches == 0,
+            "Global tool choice was not one transaction/one checked setup");
+    for (const auto i : indices) {
+        const auto &a = *c.session().bend(i)->catalogTools;
+        require(a.punch == hook && a.die == (i == indices[1] ? specialDie : pair.die) &&
+                    c.session().bend(i)->workpieceReversed == (i == indices[1]),
+                "Global punch choice reset another field");
+    }
+    const auto ready = c.routeDraft();
+    const auto count = builder->drafts.load();
+    const auto unchanged = c.session().editRevision();
+    stage(1);
+    stage(2);
+    require(c.routeDraft() == ready && builder->drafts == count &&
+                c.session().editRevision() == unchanged,
+            "Unchanged tool navigation invalidated the ready scene");
+    step(3);
+    stage(1);
+    const auto selectedId = scope->currentData().toString();
+    auto ids = order(c);
+    std::swap(ids[1], ids[2]);
+    require(c.setBendOrder(ids) && scope->currentData().toString() == selectedId &&
+                scope->currentText() == QStringLiteral("Гиб 2"),
+            "Reordering changed the edited operation instead of its number");
+    pickPunch(QStringLiteral("P60"));
+    window.findChild<QPushButton *>("assignBendTool")->click();
+    require(c.session().bend(indices[2])->catalogTools->punch == pair.punch &&
+                c.session().bend(indices[1])->catalogTools->punch == hook,
+            "The context applied a local tool to its old step number");
+    const auto project = folder + "/tool-transition.bend";
+    c.saveProject(project.toStdString(), files);
+    wait([&] { return !c.isSaving(); });
+    require(c.saveError().isEmpty(), "Cannot save per-bend tool edits");
+    window.openStep(project);
+    wait([&] { return !c.hasWork(); });
+    require(scope->currentIndex() == 0 && !c.routeDraft() &&
+                c.session().bend(indices[2])->catalogTools->punch == pair.punch &&
+                c.session().bend(indices[1])->catalogTools->punch == hook,
+            "Reopening lost assignments or restored stale edit context/checks");
+    auto legacy = *c.session().bend(indices[1])->catalogTools;
+    legacy.useDrawingGeometry = false;
+    require(c.setBendToolAssignment(indices[1], legacy), "Cannot prepare a legacy assignment");
+    stage(1);
+    bool offered = false;
+    QTimer::singleShot(50, &window, [&] {
+        if (auto *popup = window.findChild<QDialog *>("toolPickerPopup")) {
+            if (auto *option = popup->findChild<QToolButton *>("toolOption_hook_0")) {
+                offered = option->isEnabled();
+                option->click();
+            } else
+                popup->reject();
+        }
+    });
+    window.findChild<QToolButton *>("punchProfile")->click();
+    require(offered, "The common punch is missing from the graphic picker");
+    stage(2);
+    require(c.routeDraft() && c.routeDraft()->checkedToolPositions == 1,
+            "Explicit profile selection did not prepare the new DXF setup");
+    for (const auto i : indices)
+        require(c.session().bend(i)->catalogTools->punch == hook &&
+                    c.session().bend(i)->catalogTools->useDrawingGeometry,
+                "Explicit global choice of the displayed punch retained a local exception");
+}
 } // namespace
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("manual-route-test");
     QTemporaryDir folder;
     require(folder.isValid(), "Temporary directory failed");
+    ui::setPreferencesFile(folder.path() + "/settings.ini");
     try {
         STEPControl_Writer writer;
         require(writer.Transfer(fixtures::tray(), STEPControl_AsIs) == IFSelect_RetDone &&
@@ -186,7 +338,7 @@ int main(int argc, char **argv) {
         more->click();
         require(controller.session().editRevision() == inputEdit && !controller.hasWork(),
                 "Opening route details edited inputs or launched CAD");
-        mode->setCurrentIndex(2);
+        mode->setCurrentIndex(1);
         auto step = [&](int n) {
             return window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(n));
         };
@@ -216,7 +368,7 @@ int main(int argc, char **argv) {
         require(controller.routeDraft() && controller.routeDraft()->request.step == 0 &&
                     controller.routeDraft()->checkedToolPositions == 1 &&
                     builder->drafts == globalDrafts + 1 && builder->searches == 0 &&
-                    order(controller) == originalOrder && mode->currentIndex() == 2,
+                    order(controller) == originalOrder && mode->currentIndex() == 1,
                 "Global reversal searched an order, lost zero or skipped collision checks");
         for (const auto i : indices) {
             const auto *entry = controller.session().bend(i);
@@ -254,7 +406,7 @@ int main(int argc, char **argv) {
         window.findChild<QToolButton *>("processStage2")->click();
         step(0)->click();
         wait([&] { return !controller.hasWork(); });
-        mode->setCurrentIndex(1); // A shared setup can also be set once on zero.
+        mode->setCurrentIndex(1); // The check mode does not change the scope of tool editing.
         wait([&] { return !controller.hasWork(); });
         require(reverse->isChecked(), "Shared zero setup lost its current orientation");
         reverse->click();
@@ -262,8 +414,10 @@ int main(int argc, char **argv) {
         require(mode->currentIndex() == 1 && controller.routeDraft() && builder->searches == 0,
                 "Global reversal forced individual mode or launched search");
         for (const auto i : controller.session().orderedBends())
-            require(controller.session().bend(i)->catalogTools == pair,
-                    "Shared zero orientation did not apply the common setup to every bend");
+            require(controller.session().bend(i)->catalogTools == (i == indices[2]   ? third
+                                                                   : i == indices[1] ? other
+                                                                                     : pair),
+                    "Zero orientation replaced an independent tool assignment");
         auto *report = window.findChild<QToolButton *>("checkReportToggle");
         report->click();
         require(window.findChild<QLabel *>("bendPreviewStatus")->isVisible() &&
@@ -297,7 +451,7 @@ int main(int argc, char **argv) {
         require(originalScene.isNull() || viewer->captureImage(false) == originalScene,
                 "Manual reversal displayed the source part during invalidation");
         wait([&] { return !controller.hasWork(); });
-        require(controller.routeDraft() && mode->currentIndex() == 2 &&
+        require(controller.routeDraft() && mode->currentIndex() == 1 &&
                     builder->searches == searchesBefore,
                 "Per-step reversal launched order search or stayed shared");
         require(slider->value() == 10, "Manual reversal reset the forming position");
@@ -420,7 +574,9 @@ x.XCloseDisplay(d)
                     builder->searches == 0,
                 "Reorder lost insertion, selected bend, numbering or invoked search");
         for (auto i : controller.session().orderedBends())
-            require(controller.session().bend(i)->catalogTools == pair,
+            require(controller.session().bend(i)->catalogTools == (i == indices[2]   ? third
+                                                                   : i == indices[1] ? other
+                                                                                     : pair),
                     "Reorder changed a tool assignment");
         window.findChild<QPushButton *>("routeUndo")->click();
         if (!qEnvironmentVariableIsSet("BENDING_NATIVE_DRAG"))
@@ -490,7 +646,7 @@ x.XCloseDisplay(d)
         require(controller.routeDraft() && builder->searches == 1,
                 "Reorder launched an implicit full check");
         // Snapshot with real DXF tools and a selected partially formed frame.
-        mode->setCurrentIndex(2);
+        mode->setCurrentIndex(1);
         wait([&] { return !controller.hasWork(); });
         step(2)->click();
         wait([&] { return !controller.hasWork(); });
@@ -656,6 +812,8 @@ x.XCloseDisplay(d)
         wait([&] { return !controller.hasWork(); });
         require(!controller.routeDraft() && !controller.session().document(),
                 "Closed document accepted a late draft");
+        window.close();
+        verifyToolStageTransitions(folder.path());
         std::cout << "Manual prefixes, collision scope, stable reorder, undo/redo, explicit check "
                      "and stale selection passed\n";
     } catch (const std::exception &e) {
