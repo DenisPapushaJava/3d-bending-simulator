@@ -5,6 +5,7 @@
 #include "CollisionReuse.h"
 #include "GeometryCacheInternal.h"
 #include "RouteGeometry.h"
+#include "SheetOrientation.h"
 #include "TrimmedBend.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/DrawingTools.h"
@@ -88,7 +89,8 @@ TopoDS_Shape visibleSource(const TopoDS_Shape &source) {
 }
 void makeDisplay(PreviewFrame &frame, const TopoDS_Shape &source,
                  const simulation::SingleBend &model, const FrameBasis &from, const FrameBasis &to,
-                 const simulation::BendSection &section, std::stop_token stop) {
+                 const simulation::BendSection &section, std::stop_token stop,
+                 const std::vector<SheetSide> &sides) {
     BRep_Builder builder;
     TopoDS_Compound assembly;
     builder.MakeCompound(assembly);
@@ -138,6 +140,8 @@ void makeDisplay(PreviewFrame &frame, const TopoDS_Shape &source,
                                    : meanPhi > model.angleRadians + 1.0e-7 ? 2
                                                                            : 1;
         builder.Add(frame.displayRegions[region], display);
+        if (static_cast<std::size_t>(i) < sides.size() && sides[i] != SheetSide::Neutral)
+            frame.orientation.sides[sides[i] == SheetSide::A ? 0 : 1].push_back(display);
     }
     for (const auto &region : frame.displayRegions) {
         builder.Add(assembly, region);
@@ -273,18 +277,21 @@ struct SkinFace {
     TopAbs_Orientation orientation;
     std::vector<SkinNode> nodes;
     std::size_t region = 0;
+    SheetSide side = SheetSide::Neutral;
 };
 using WholePartSkin = std::vector<SkinFace>;
 WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
                                    const std::array<TopoDS_Shape, 2> &flanges,
                                    const TopoDS_Shape &sector, double tolerance,
-                                   std::stop_token stop) {
+                                   std::stop_token stop, const std::vector<SheetSide> &sides) {
     // Membership is in immutable SOURCE components and does not depend on the
     // displayed angle. Preserve all rail memberships; never cache across operations.
     WholePartSkin result;
     std::array<BRepClass3d_SolidClassifier, 3> classifiers{BRepClass3d_SolidClassifier(flanges[0]),
                                                            BRepClass3d_SolidClassifier(sector),
                                                            BRepClass3d_SolidClassifier(flanges[1])};
+    TopTools_IndexedMapOfShape sourceFaces;
+    TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
     for (TopExp_Explorer f(source, TopAbs_FACE); f.More(); f.Next()) {
         if (stop.stop_requested())
             return {};
@@ -294,6 +301,9 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
         if (original.IsNull())
             throw std::runtime_error("Missing original surface mesh");
         SkinFace skin{original, face.Orientation(), {}, 0};
+        const auto index = static_cast<std::size_t>(sourceFaces.FindIndex(face));
+        if (index < sides.size())
+            skin.side = sides[index];
         skin.nodes.reserve(static_cast<std::size_t>(original->NbNodes()));
         std::array<unsigned, 3> votes{};
         for (int n = 1; n <= original->NbNodes(); ++n) {
@@ -372,6 +382,8 @@ void makeWholePartDisplay(PreviewFrame &frame, const WholePartSkin &source,
         builder.MakeFace(skin, mesh);
         skin.Orientation(face.orientation);
         builder.Add(frame.displayRegions[face.region], skin);
+        if (face.side != SheetSide::Neutral)
+            frame.orientation.sides[face.side == SheetSide::A ? 0 : 1].push_back(skin);
     }
     TopoDS_Compound assembly;
     builder.MakeCompound(assembly);
@@ -381,6 +393,52 @@ void makeWholePartDisplay(PreviewFrame &frame, const WholePartSkin &source,
         if (!tool.IsNull())
             builder.Add(assembly, tool);
     frame.displayShape = assembly;
+}
+void frameOrientation(PreviewFrame &frame, const SheetOrientationData &orientation,
+                      const std::array<std::vector<SheetSide>, 2> &flanges, SheetSide inner,
+                      const FrameBasis &basis, const simulation::BendSection &section,
+                      std::optional<std::size_t> referenceFlange) {
+    if (!orientation.available)
+        return;
+    try {
+        if (frame.displayShape.IsNull()) {
+            appendSheetSides(frame.orientation, frame.regions[0], flanges[0]);
+            appendSheetSides(frame.orientation, frame.regions[2], flanges[1]);
+            for (TopExp_Explorer it(frame.regions[1], TopAbs_FACE); it.More(); it.Next()) {
+                const auto face = TopoDS::Face(it.Current());
+                BRepAdaptor_Surface surface(face);
+                SheetSide side = SheetSide::Neutral;
+                const auto opposite = inner == SheetSide::A ? SheetSide::B : SheetSide::A;
+                if (inner != SheetSide::Neutral && surface.GetType() == GeomAbs_Cylinder &&
+                    section.innerRadiusMm) {
+                    const auto r = surface.Cylinder().Radius();
+                    if (std::abs(r - *section.innerRadiusMm) < 1e-5)
+                        side = inner;
+                    else if (std::abs(r - *section.innerRadiusMm -
+                                      orientation.reference.thicknessMm) < 1e-5)
+                        side = opposite;
+                } else if (inner != SheetSide::Neutral && !section.innerRadiusMm &&
+                           surface.GetType() == GeomAbs_Plane) {
+                    const auto plane = surface.Plane();
+                    if (std::abs(plane.Axis().Direction().Dot(gp_Dir(basis.z))) < 1e-7) {
+                        if (plane.Distance(sectionPoint(basis, section.innerArc[0])) < 1e-5)
+                            side = inner;
+                        else if (plane.Distance(sectionPoint(basis, section.outerArc[0])) < 1e-5)
+                            side = opposite;
+                    }
+                }
+                if (side != SheetSide::Neutral)
+                    frame.orientation.sides[side == SheetSide::A ? 0 : 1].push_back(face);
+            }
+        }
+        if (referenceFlange)
+            frame.orientation.edges =
+                movedSheetReference(orientation.reference,
+                                    frame.materialTransforms[*referenceFlange])
+                    .edges;
+    } catch (const Standard_Failure &) {
+        frame.orientation = {}; // A decoration cannot change a checked transition.
+    }
 }
 std::optional<gp_Vec> railRadial(const TopoDS_Face &cylinder, const TopoDS_Face &flange,
                                  const gp_Pnt &axisOrigin, const gp_Vec &axis, double tolerance) {
@@ -1032,9 +1090,25 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             initialTools[1] = orientPunch(initialTools[1], *toolParameters);
             orientPunchSegments(initialSegments[1], *toolParameters);
         }
+        const auto &orientation = OcctDocumentAccess::sheetOrientation(*native);
+        const auto &nativeShape = OcctDocumentAccess::shape(*native);
+        const std::array<std::vector<SheetSide>, 2> flangeSides{
+            matchSheetSides(flanges[0], nativeShape, orientation),
+            matchSheetSides(flanges[1], nativeShape, orientation)};
+        const auto innerLabels =
+            matchSheetSides(faces(static_cast<int>(bend.innerFace)), nativeShape, orientation);
+        const auto innerSide = innerLabels.size() == 2 ? innerLabels[1] : SheetSide::Neutral;
+        const auto referenceFlange =
+            orientation.available
+                ? sheetReferenceRegion(orientation.reference, flanges, analysis.lengthToleranceMm)
+                : std::nullopt;
+        const auto displaySides = displaySource.IsNull() ? std::vector<SheetSide>{}
+                                  : !OcctDocumentAccess::routeSkin(*native).IsNull()
+                                      ? OcctDocumentAccess::routeSkinSides(*native)
+                                      : matchSheetSides(displaySource, nativeShape, orientation);
         const auto skin = multi && !displaySource.IsNull()
                               ? prepareWholePartSkin(displaySource, flanges, sourceSector,
-                                                     analysis.lengthToleranceMm, stop)
+                                                     analysis.lengthToleranceMm, stop, displaySides)
                               : WholePartSkin{};
         if (stop.stop_requested())
             return cancelled();
@@ -1250,8 +1324,10 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                                      section, stop);
                             else
                                 makeDisplay(frame, displaySource, model, sourceBasis, basis,
-                                            section, stop);
+                                            section, stop, displaySides);
                         }
+                        frameOrientation(frame, orientation, flangeSides, innerSide, basis, section,
+                                         referenceFlange);
                         buildCollisionHighlights(frame, evidence, model.thicknessMm, stop);
                         if (stop.stop_requested())
                             return cancelled();
@@ -1352,8 +1428,11 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                 if (multi)
                     makeWholePartDisplay(frame, skin, model, sourceBasis, basis, section, stop);
                 else
-                    makeDisplay(frame, displaySource, model, sourceBasis, basis, section, stop);
+                    makeDisplay(frame, displaySource, model, sourceBasis, basis, section, stop,
+                                displaySides);
             }
+            frameOrientation(frame, orientation, flangeSides, innerSide, basis, section,
+                             referenceFlange);
             BRepBndLib::Add(frame.shape, envelope);
             preview->machineConflicts.push_back({});
             preview->frames.push_back(std::move(frame));

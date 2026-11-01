@@ -2,6 +2,7 @@
 
 #include "BendRecognizer.h"
 #include "CadDocumentData.h"
+#include "SheetOrientation.h"
 #include "bending/cad/occt/DocumentAccess.h"
 
 #include <utility>
@@ -40,16 +41,25 @@ const TopoDS_Shape &OcctDocumentAccess::routeSkin(const CadDocument &document) {
 bool OcctDocumentAccess::isRouteState(const CadDocument &document) {
     return document.impl_->routeState;
 }
-std::shared_ptr<const CadDocument> OcctDocumentAccess::routeState(const CadDocument &original,
-                                                                  TopoDS_Shape shape,
-                                                                  TopoDS_Shape skin,
-                                                                  std::stop_token stop) {
+const SheetOrientationData &OcctDocumentAccess::sheetOrientation(const CadDocument &document) {
+    return document.impl_->orientation;
+}
+const std::vector<SheetSide> &OcctDocumentAccess::routeSkinSides(const CadDocument &document) {
+    return document.impl_->routeSkinSides;
+}
+std::shared_ptr<const CadDocument>
+OcctDocumentAccess::routeState(const CadDocument &original, TopoDS_Shape shape, TopoDS_Shape skin,
+                               std::stop_token stop, std::optional<SheetReference> reference,
+                               std::vector<SheetSide> sides) {
     auto data = std::make_unique<CadDocument::Impl>();
     data->metadata = original.metadata();
     data->metadata.bendAnalysis = recognizeBends(shape, data->metadata.maximumToleranceMm, stop);
     data->shape = std::move(shape);
     data->routeSkin = std::move(skin);
     data->routeState = true;
+    data->routeSkinSides = std::move(sides);
+    if (reference)
+        data->orientation = classifySheetOrientation(data->shape, data->metadata, stop, reference);
     return std::shared_ptr<const CadDocument>(new CadDocument(std::move(data)));
 }
 } // namespace bending::cad

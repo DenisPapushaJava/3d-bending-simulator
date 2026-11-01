@@ -429,6 +429,7 @@ class MainWindow::Impl {
             projectState->clear();
         }
         bendList->setEnabled(document && !controller->hasWork());
+        sheetSides->setVisible(document != nullptr);
         updateBendReviews();
         showSelectedBend(false);
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
@@ -2753,6 +2754,7 @@ class MainWindow::Impl {
     QPushButton *checkBend = nullptr;
     std::array<ProcessStepButton *, 3> processSteps{};
     QPushButton *partPrimary = nullptr;
+    QCheckBox *sheetSides = nullptr;
     QPushButton *changePartTools = nullptr;
     QPushButton *editBend = nullptr;
     QLabel *partName = nullptr;
@@ -3170,6 +3172,24 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->refreshPreview();
     });
     impl_->selection = label(QStringLiteral("faceProperties"));
+    impl_->sheetSides = new QCheckBox(QStringLiteral("Стороны A/B"), panel);
+    impl_->sheetSides->setObjectName(QStringLiteral("sheetSidesToggle"));
+    impl_->sheetSides->setMinimumHeight(32);
+    impl_->sheetSides->setToolTip(
+        QStringLiteral("Две стороны листа сохраняют цвет при гибке и развороте детали. Метка 1 "
+                       "показывает исходный край."));
+    impl_->sheetSides->setEnabled(false);
+    layout->addWidget(impl_->sheetSides);
+    if (auto *action = impl_->viewer->sheetOrientationAction()) {
+        const auto sync = [action, toggle = impl_->sheetSides] {
+            const QSignalBlocker blocked(toggle);
+            toggle->setChecked(action->isChecked());
+            toggle->setEnabled(action->isEnabled());
+        };
+        connect(action, &QAction::changed, this, sync);
+        connect(impl_->sheetSides, &QCheckBox::toggled, action, &QAction::setChecked);
+        sync();
+    }
     auto *measurementsToggle = new QToolButton(panel);
     impl_->measurementsToggle = measurementsToggle;
     measurementsToggle->setObjectName(QStringLiteral("measurementsToggle"));
@@ -3369,7 +3389,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->fixedSide = new QComboBox(operationPanel);
     impl_->fixedSide->setObjectName(QStringLiteral("fixedBendSide"));
     impl_->fixedSide->setAccessibleName(QStringLiteral("Неподвижная полка сгиба"));
-    impl_->fixedSide->addItems({QStringLiteral("Полка A"), QStringLiteral("Полка B")});
+    impl_->fixedSide->addItems({QStringLiteral("Полка 1"), QStringLiteral("Полка 2")});
 
     impl_->preparePreview = new QPushButton(QStringLiteral("Подготовить просмотр"), operationPanel);
     impl_->preparePreview->setObjectName(QStringLiteral("prepareBendPreview"));

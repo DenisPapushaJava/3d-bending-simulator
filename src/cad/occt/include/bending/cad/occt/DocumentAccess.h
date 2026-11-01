@@ -1,7 +1,9 @@
 #pragma once
 
 #include "bending/cad/CadDocument.h"
+#include "bending/cad/occt/SheetOrientation.h"
 #include <TopoDS_Shape.hxx>
+#include <optional>
 #include <stop_token>
 
 namespace bending::cad {
@@ -15,8 +17,11 @@ class OcctDocumentAccess final {
     simulationBends(const CadDocument &document);
     [[nodiscard]] static const TopoDS_Shape &routeSkin(const CadDocument &);
     [[nodiscard]] static bool isRouteState(const CadDocument &);
+    [[nodiscard]] static const SheetOrientationData &sheetOrientation(const CadDocument &);
+    [[nodiscard]] static const std::vector<SheetSide> &routeSkinSides(const CadDocument &);
     // Internal derived state, never published as the imported/session document.
     [[nodiscard]] static std::shared_ptr<const CadDocument>
-    routeState(const CadDocument &, TopoDS_Shape, TopoDS_Shape, std::stop_token);
+    routeState(const CadDocument &, TopoDS_Shape, TopoDS_Shape, std::stop_token,
+               std::optional<SheetReference> = {}, std::vector<SheetSide> = {});
 };
 } // namespace bending::cad

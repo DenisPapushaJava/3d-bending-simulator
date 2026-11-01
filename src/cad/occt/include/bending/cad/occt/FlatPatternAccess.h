@@ -1,5 +1,6 @@
 #pragma once
 #include "bending/application/FlatPattern.h"
+#include "bending/cad/occt/SheetOrientation.h"
 #include <TopoDS_Shape.hxx>
 #include <functional>
 #include <gp_Ax3.hxx>
@@ -41,5 +42,7 @@ class OcctFlatPatternAccess final {
     [[nodiscard]] static const std::vector<TopoDS_Shape> &
     bendLines(const application::FlatPattern &);
     [[nodiscard]] static const SheetLayout &layout(const application::FlatPattern &);
+    [[nodiscard]] static const SheetOrientationVisual &
+    orientation(const application::FlatPattern &);
 };
 } // namespace bending::cad

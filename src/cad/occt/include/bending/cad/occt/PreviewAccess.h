@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/SingleBendPreview.h"
+#include "bending/cad/occt/SheetOrientation.h"
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -49,6 +50,7 @@ struct CollisionHighlightPatch {
     std::optional<std::array<gp_Pnt, 2>> band;
 };
 struct PreviewFrame {
+    SheetOrientationVisual orientation;
     std::vector<CollisionHighlightPatch> collisionHighlights;
     std::vector<MachineDisplayComponent> machine;
     std::optional<FloorPlane> floor;

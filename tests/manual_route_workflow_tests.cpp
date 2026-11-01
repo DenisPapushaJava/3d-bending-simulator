@@ -9,6 +9,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QElapsedTimer>
@@ -756,6 +757,49 @@ x.XCloseDisplay(d)
         const auto draftsBeforeRefresh = builder->drafts.load();
         const auto searchesBeforeRefresh = builder->searches.load();
         if (viewer->isReady()) {
+            auto *sides = viewer->sheetOrientationAction();
+            const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+            auto *toggle = window.findChild<QCheckBox *>("sheetSidesToggle");
+            auto *legend = viewer->findChild<QWidget *>("sheetSideLegend");
+            auto *edge = viewer->findChild<QToolButton *>("nextSheetEdge");
+            require(sides && sides->isEnabled() && toggle && legend && edge,
+                    "Sheet orientation controls unavailable");
+            const auto beforeSides = viewer->captureImage(false);
+            sides->setChecked(true);
+            QApplication::processEvents();
+            require(toggle->isChecked() && legend->isVisible() &&
+                        viewer->captureImage(false) != beforeSides &&
+                        controller.routeDraft() == refreshedDraft &&
+                        controller.session().editRevision() == refreshedRevision &&
+                        builder->drafts == draftsBeforeRefresh &&
+                        builder->searches == searchesBeforeRefresh && slider->value() == 10 &&
+                        !controller.hasWork(),
+                    "Side visibility changed geometry, frame, camera or reports");
+            edge->click();
+            QApplication::processEvents();
+            require(controller.routeDraft() == refreshedDraft &&
+                        builder->drafts == draftsBeforeRefresh && !controller.hasWork(),
+                    "Changing the reference edge launched CAD");
+            if (!output.isEmpty())
+                require(viewer->captureImage(true).save(output + "-sides-press.png"),
+                        "Cannot capture side orientation");
+            window.findChild<QToolButton *>("processStage0")->click();
+            require(toggle->isVisible() && toggle->isChecked(),
+                    "Part checkbox lost orientation state");
+            toggle->click();
+            toggle->click();
+            require(sides->isChecked() && !controller.hasWork(), "Part toggle launched CAD");
+            if (!output.isEmpty())
+                require(viewer->captureImage(true).save(output + "-sides-part.png"),
+                        "Cannot capture marked source");
+            window.findChild<QToolButton *>("processStage2")->click();
+            require(controller.routeDraft() == refreshedDraft &&
+                        builder->drafts == draftsBeforeRefresh && slider->value() == 10 &&
+                        sides->isChecked(),
+                    "Stage transition lost marked geometry");
+            sides->setChecked(false);
+            QApplication::processEvents();
+            require(!toggle->isChecked() && !legend->isVisible(), "Side mode did not switch off");
             auto *refresh = viewer->findChild<QAction *>("refreshScene");
             require(refresh && refresh->isEnabled(), "Manual scene refresh is unavailable");
             const auto beforeRefresh = viewer->captureImage(false);
@@ -831,6 +875,8 @@ x.XCloseDisplay(d)
                    searchesBeforePlay = builder->searches.load();
         speed->setValue(speed->maximum());
         slider->setValue(0);
+        if (viewer->isReady())
+            viewer->sheetOrientationAction()->setChecked(true);
         require(play->isEnabled(), "Cannot replay a safe approach to the collision");
         play->click();
         wait([&] { return !playback->isActive(); });
@@ -846,6 +892,11 @@ x.XCloseDisplay(d)
                 "A colliding frame is presented as clear");
         if (auto *viewer = window.findChild<viewer::ViewerWidget *>();
             viewer && viewer->isReady()) {
+            auto *legend = viewer->findChild<QWidget *>("sheetSideLegend");
+            require(viewer->sheetOrientationAction()->isChecked() && legend &&
+                        legend->isVisible() &&
+                        legend->parentWidget()->rect().contains(legend->geometry()),
+                    "Side legend escaped or disappeared at collision");
             window.findChild<QAction *>("viewRight")->trigger();
             window.findChild<QAction *>("fitModel")->trigger();
             const auto image = viewer->captureImage(false).convertToFormat(QImage::Format_RGB32);

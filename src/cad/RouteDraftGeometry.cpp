@@ -3,6 +3,7 @@
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
 #include "RouteGeometry.h"
+#include "SheetOrientation.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/MachineAssembly.h"
 #include "bending/core/ToolGeometry.h"
@@ -18,7 +19,9 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -47,6 +50,7 @@ struct Face {
     TopAbs_Orientation orientation;
     std::vector<Node> nodes;
     std::size_t region;
+    SheetSide side = SheetSide::Neutral;
 };
 TopoDS_Compound compound() {
     TopoDS_Compound c;
@@ -94,6 +98,7 @@ struct RouteDraftBasis::Impl {
     std::vector<Face> faces;
     std::vector<std::uint32_t> nodeRegions;
     std::vector<bool> referenceReversed;
+    std::optional<std::size_t> referenceWall;
 };
 RouteDraftBasis::~RouteDraftBasis() = default;
 RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::FlatPatternPtr flat,
@@ -122,7 +127,25 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         add(b.solid);
     require(classifiers.size() <= std::numeric_limits<std::uint32_t>::max(),
             "Too many draft regions");
-    auto copy = BRepBuilderAPI_Copy(OcctDocumentAccess::shape(native), true, false).Shape();
+    const auto &orientation = OcctDocumentAccess::sheetOrientation(native);
+    std::vector<TopoDS_Shape> wallShapes;
+    for (const auto &wall : layout.walls)
+        wallShapes.push_back(wall.solid);
+    if (orientation.available)
+        impl_->referenceWall = sheetReferenceRegion(orientation.reference, wallShapes, tolerance);
+    BRepBuilderAPI_Copy copier(OcctDocumentAccess::shape(native), true, false);
+    auto copy = copier.Shape();
+    TopTools_IndexedMapOfShape sourceFaces, copiedFaces;
+    TopExp::MapShapes(OcctDocumentAccess::shape(native), TopAbs_FACE, sourceFaces);
+    TopExp::MapShapes(copy, TopAbs_FACE, copiedFaces);
+    std::vector<SheetSide> sideLabels(static_cast<std::size_t>(copiedFaces.Extent()) + 1,
+                                      SheetSide::Neutral);
+    if (orientation.available)
+        for (int i = 1; i <= sourceFaces.Extent(); ++i) {
+            const auto index = copiedFaces.FindIndex(copier.ModifiedShape(sourceFaces(i)));
+            if (index)
+                sideLabels[index] = orientation.faces[i];
+        }
     BRepMesh_IncrementalMesh mesher(copy, .03, false, .12, false);
     require(mesher.IsDone(), "Cannot mesh the original draft surface");
     for (TopExp_Explorer f(copy, TopAbs_FACE); f.More(); f.Next()) {
@@ -132,6 +155,7 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         const auto mesh = BRep_Tool::Triangulation(face, loc);
         require(!mesh.IsNull(), "Missing draft mesh");
         Face skin{mesh, face.Orientation(), {}, 0};
+        skin.side = sideLabels[copiedFaces.FindIndex(face)];
         std::vector<std::size_t> votes(classifiers.size());
         for (int i = 1; i <= mesh->NbNodes(); ++i) {
             if ((i & 255) == 0)
@@ -358,6 +382,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                 face.region ==
                     layout.walls.size() + static_cast<std::size_t>(link - layout.bends.begin());
             builder.Add(regions[selected ? 1 : 0], skin);
+            if (face.side != SheetSide::Neutral)
+                frame.orientation.sides[face.side == SheetSide::A ? 0 : 1].push_back(skin);
             if (face.region >= layout.walls.size())
                 builder.Add(
                     frame.bendZones[layout.bends[face.region - layout.walls.size()].bendIndex],
@@ -374,6 +400,14 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                 envelope.Add(box(t));
             }
         frame.displayShape = display;
+        if (impl_->referenceWall) {
+            const auto &reference = OcctDocumentAccess::sheetOrientation(
+                                        dynamic_cast<const CadDocument &>(*impl_->source))
+                                        .reference;
+            frame.orientation.edges =
+                movedSheetReference(reference, machine * placement.walls[*impl_->referenceWall])
+                    .edges;
+        }
         buildCollisionHighlights(frame, evidence, bend.thicknessMm, stop);
         cancelled(stop);
         visual->frames.push_back(std::move(frame));

@@ -4,6 +4,7 @@
 #include "GeometryCacheInternal.h"
 #include "RouteDraftGeometry.h"
 #include "RouteGeometry.h"
+#include "SheetOrientation.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -340,11 +341,24 @@ class RouteSearch {
         check(components.Extent() == 1 && std::abs(volume(geometry) - expectedVolume) <= budget,
               "Intermediate walls overlap or disconnect");
         TopoDS_Shape skin;
-        if (native->metadata().closedCutouts.status == ClosedCutoutStatus::Filled)
-            skin =
-                flatCutoutDisplay(OcctDocumentAccess::shape(*native), display, {}, tolerance, stop)
-                    .surface;
-        auto doc = OcctDocumentAccess::routeState(*native, geometry, skin, stop);
+        std::vector<SheetSide> skinSides;
+        const auto &orientation = OcctDocumentAccess::sheetOrientation(*native);
+        if (native->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
+            auto visible = flatCutoutDisplay(OcctDocumentAccess::shape(*native), display, {},
+                                             tolerance, stop, &orientation);
+            skin = std::move(visible.surface);
+            skinSides = std::move(visible.faceSides);
+        }
+        std::optional<SheetReference> reference;
+        if (orientation.available) {
+            std::vector<TopoDS_Shape> walls;
+            for (const auto &w : layout->walls)
+                walls.push_back(w.solid);
+            if (const auto at = sheetReferenceRegion(orientation.reference, walls, tolerance))
+                reference = movedSheetReference(orientation.reference, maps[*at]);
+        }
+        auto doc = OcctDocumentAccess::routeState(*native, geometry, skin, stop, reference,
+                                                  std::move(skinSides));
         const auto &recognized = OcctDocumentAccess::simulationBends(*doc);
         check(recognized.bends.size() == static_cast<std::size_t>(std::popcount(mask)) &&
                   recognized.interiorContourDiagnostics.empty(),

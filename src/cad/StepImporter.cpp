@@ -3,6 +3,7 @@
 #include "BendRecognizer.h"
 #include "CadDocumentData.h"
 #include "ClosedCutouts.h"
+#include "SheetOrientation.h"
 #include "ThicknessRecognizer.h"
 #include "bending/application/BendPreparation.h"
 #include "bending/cad/Kernel.h"
@@ -498,6 +499,7 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
         }
         data->metadata.thickness =
             recognizeThickness(data->shape, tolerance, stop, &data->metadata.bendAnalysis);
+        data->orientation = classifySheetOrientation(data->shape, data->metadata, stop);
         if (report(application::ImportPhase::Preparing)) {
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before presentation preparation");

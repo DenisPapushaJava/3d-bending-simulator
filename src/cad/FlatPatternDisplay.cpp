@@ -11,7 +11,9 @@
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <Poly_Triangulation.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <algorithm>
@@ -53,7 +55,8 @@ bool sameContour(const std::vector<gp_Pnt> &a, const std::vector<gp_Pnt> &b) {
 } // namespace
 FlatCutoutDisplay flatCutoutDisplay(const TopoDS_Shape &source,
                                     const std::vector<FlatDisplayRegion> &regions, gp_Vec shift,
-                                    double tolerance, std::stop_token stop) {
+                                    double tolerance, std::stop_token stop,
+                                    const SheetOrientationData *orientation) {
     const auto cancelled = [&] {
         if (stop.stop_requested())
             throw application::FlatPatternError{application::FlatPatternErrorCode::Cancelled,
@@ -85,10 +88,24 @@ FlatCutoutDisplay flatCutoutDisplay(const TopoDS_Shape &source,
         check(mapped.has_value(), "A source cutout surface is outside the unfolded regions");
         return *mapped;
     };
-    auto copy = BRepBuilderAPI_Copy(source, true, false).Shape();
+    BRepBuilderAPI_Copy copier(source, true, false);
+    auto copy = copier.Shape();
+    TopTools_IndexedMapOfShape sourceFaces, copiedFaces;
+    TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
+    TopExp::MapShapes(copy, TopAbs_FACE, copiedFaces);
+    std::vector<SheetSide> sides(static_cast<std::size_t>(copiedFaces.Extent()) + 1,
+                                 SheetSide::Neutral);
+    if (orientation && orientation->available &&
+        orientation->faces.size() == static_cast<std::size_t>(sourceFaces.Extent()) + 1)
+        for (int i = 1; i <= sourceFaces.Extent(); ++i) {
+            const auto index = copiedFaces.FindIndex(copier.ModifiedShape(sourceFaces(i)));
+            if (index)
+                sides[index] = orientation->faces[i];
+        }
     BRepMesh_IncrementalMesh mesher(copy, .02, false, .1, false);
     check(mesher.IsDone(), "Cannot mesh source cutouts for unfolding display");
     FlatCutoutDisplay result;
+    result.faceSides.push_back(SheetSide::Neutral);
     TopoDS_Compound skin;
     BRep_Builder builder;
     builder.MakeCompound(skin);
@@ -111,6 +128,7 @@ FlatCutoutDisplay flatCutoutDisplay(const TopoDS_Shape &source,
         builder.MakeFace(display, mesh);
         display.Orientation(face.Orientation());
         builder.Add(skin, display);
+        result.faceSides.push_back(sides[copiedFaces.FindIndex(face)]);
         const auto outer = BRepTools::OuterWire(face);
         for (TopExp_Explorer w(face, TopAbs_WIRE); w.More(); w.Next()) {
             if (w.Current().IsSame(outer))

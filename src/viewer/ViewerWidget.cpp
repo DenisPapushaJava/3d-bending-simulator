@@ -1,6 +1,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include "CollisionPresentation.h"
 #include "Dimensions.h"
+#include "SheetOrientationPresentation.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
@@ -254,6 +255,46 @@ class OcctCanvas final : public QWidget {
         connect(dimensionsAction_, &QAction::toggled, this,
                 [this](bool visible) { setDimensionsVisible(visible); });
         updateDimensionButton();
+        sideAction_ = navigationMenu_->addAction(QStringLiteral("Стороны A/B"));
+        sideAction_->setObjectName(QStringLiteral("showSheetSides"));
+        sideAction_->setCheckable(true);
+        sideAction_->setEnabled(false);
+        sideAction_->setToolTip(QStringLiteral("Две стороны листа и постоянная метка края 1"));
+        connect(sideAction_, &QAction::toggled, this, [this] {
+            if (preview_)
+                presentPreview(preview_, previewFrame_, revision_);
+            else if (flat_)
+                presentFlat(flat_, revision_);
+            else
+                setHighlights(highlights_, revision_);
+        });
+        sideLegend_ = new QWidget(this);
+        sideLegend_->setObjectName(QStringLiteral("sheetSideLegend"));
+        sideLegend_->setAttribute(Qt::WA_NativeWindow);
+        sideLegend_->setStyleSheet(
+            QStringLiteral("QWidget#sheetSideLegend {background:#202A36;border:1px solid "
+                           "#526171;border-radius:5px;}"
+                           "QLabel {color:#E1E7EE;background:transparent;}"));
+        auto *legendRow = new QHBoxLayout(sideLegend_);
+        legendRow->setContentsMargins(9, 4, 4, 4);
+        legendRow->setSpacing(10);
+        sideLegendText_ = new QLabel(sideLegend_);
+        legendRow->addWidget(sideLegendText_);
+        nextEdge_ = new QToolButton(sideLegend_);
+        nextEdge_->setObjectName(QStringLiteral("nextSheetEdge"));
+        nextEdge_->setText(QStringLiteral("Другой край"));
+        nextEdge_->setAccessibleName(QStringLiteral("Перенести метку 1 на другой край"));
+        nextEdge_->setToolTip(
+            QStringLiteral("Выбрать следующий свободный край базовой полки для метки 1"));
+        nextEdge_->setStyleSheet(controls_->styleSheet());
+        legendRow->addWidget(nextEdge_);
+        connect(nextEdge_, &QToolButton::clicked, this, [this] {
+            const auto &edges = sceneOrientation().edges;
+            if (!edges.empty())
+                edgeIndex_ = (edgeIndex_ + 1) % edges.size();
+            refreshOrientation();
+        });
+        sideLegend_->hide();
         orbitLockAction_ = navigationMenu_->addAction(QStringLiteral("Обход вокруг Y"));
         orbitLockAction_->setObjectName(QStringLiteral("lockPressVertical"));
         orbitLockAction_->setCheckable(true);
@@ -315,11 +356,17 @@ class OcctCanvas final : public QWidget {
     QMenu *navigationMenu() const {
         return navigationMenu_;
     }
+    QAction *sheetOrientationAction() const {
+        return sideAction_;
+    }
     void setBottomOverlay(QWidget *widget) {
         bottomOverlay_ = widget;
     }
     void setTopLeftOverlay(QWidget *widget) {
         topLeftOverlay_ = widget;
+    }
+    void layoutOrientationLegend() {
+        positionSideLegend();
     }
 
     bool ready() const {
@@ -338,6 +385,8 @@ class OcctCanvas final : public QWidget {
                     context_->RecomputePrsOnly(object, false, true);
             }
             for (const auto &object : dimensions_.objects)
+                context_->RecomputePrsOnly(object, false, true);
+            for (const auto &object : sideMarkers_)
                 context_->RecomputePrsOnly(object, false, true);
             view_->MustBeResized();
             view_->ZFitAll();
@@ -358,6 +407,18 @@ class OcctCanvas final : public QWidget {
             sceneCameras_ = {};
         TopTools_IndexedMapOfShape faces;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        cad::SheetOrientationVisual orientation;
+        if (const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(document)) {
+            const auto &data = cad::OcctDocumentAccess::sheetOrientation(*native);
+            if (data.available &&
+                data.faces.size() == static_cast<std::size_t>(faces.Extent()) + 1) {
+                for (int i = 1; i <= faces.Extent(); ++i)
+                    if (data.faces[i] != cad::SheetSide::Neutral)
+                        orientation.sides[data.faces[i] == cad::SheetSide::A ? 0 : 1].push_back(
+                            faces(i));
+                orientation.edges = data.reference.edges;
+            }
+        }
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
             try {
@@ -366,6 +427,8 @@ class OcctCanvas final : public QWidget {
                 candidate->Attributes()->SetAutoTriangulation(diagnostic);
                 context_->SetColor(candidate, Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
                                    false);
+                if (sideAction_->isChecked())
+                    applySheetSideColors(candidate, orientation);
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
                                                                            : AIS_Shaded,
@@ -400,6 +463,9 @@ class OcctCanvas final : public QWidget {
         document_ = std::move(document);
         revision_ = revision;
         diagnostic_ = diagnostic;
+        sourceOrientation_ = std::move(orientation);
+        if (!sameSource)
+            edgeIndex_ = 0;
         setHighlights(retainedHighlights, revision_);
         if (onSelection) {
             onSelection(revision_, 0);
@@ -459,10 +525,23 @@ class OcctCanvas final : public QWidget {
                     TopTools_IndexedMapOfShape regionFaces;
                     TopExp::MapShapes(regions[region], TopAbs_FACE, regionFaces);
                     for (int face = 1; face <= regionFaces.Extent(); ++face) {
-                        candidate->SetCustomColor(regionFaces(face), colors[region]);
+                        candidate->SetCustomColor(
+                            regionFaces(face),
+                            sideAction_->isChecked()
+                                ? Quantity_Color(.57, .61, .65, Quantity_TOC_sRGB)
+                                : colors[region]);
                         candidate->SetCustomTransparency(regionFaces(face), 0);
+                        if (sideAction_->isChecked() && region == 1) {
+                            const auto drawer = candidate->CustomAspects(regionFaces(face));
+                            drawer->SetFaceBoundaryDraw(true);
+                            drawer->SetFaceBoundaryAspect(new Prs3d_LineAspect(
+                                Quantity_Color(.95, .70, .27, Quantity_TOC_sRGB), Aspect_TOL_SOLID,
+                                2));
+                        }
                     }
                 }
+                if (sideAction_->isChecked())
+                    applySheetSideColors(candidate, frame.orientation);
                 if (hoverPreviewBend_ && *hoverPreviewBend_ < frame.bendZones.size()) {
                     TopTools_IndexedMapOfShape faces;
                     TopExp::MapShapes(frame.bendZones[*hoverPreviewBend_], TopAbs_FACE, faces);
@@ -547,6 +626,7 @@ class OcctCanvas final : public QWidget {
         flat_.reset();
         previewFrame_ = index;
         refreshDimensions();
+        refreshOrientation();
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -580,6 +660,8 @@ class OcctCanvas final : public QWidget {
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
                 candidate->SetColor(Quantity_Color(.25, .64, .73, Quantity_TOC_RGB));
+                if (sideAction_->isChecked())
+                    applySheetSideColors(candidate, cad::OcctFlatPatternAccess::orientation(*flat));
                 for (const auto &line : cad::OcctFlatPatternAccess::bendLines(*flat)) {
                     candidate->SetCustomColor(line, Quantity_Color(1., .45, .08, Quantity_TOC_RGB));
                     candidate->SetCustomWidth(line, 2.5);
@@ -612,6 +694,7 @@ class OcctCanvas final : public QWidget {
         preview_.reset();
         flat_ = std::move(flat);
         refreshDimensions();
+        refreshOrientation();
         if (onSelection)
             onSelection(revision_, 0);
         return {};
@@ -628,6 +711,8 @@ class OcctCanvas final : public QWidget {
         support_.Nullify();
         dimensions_.objects.clear();
         dimensions_.labels.clear();
+        sideMarkers_.clear();
+        sourceOrientation_ = {};
         highlights_ = {};
         shape_.Nullify();
         faces_.Clear();
@@ -638,6 +723,7 @@ class OcctCanvas final : public QWidget {
         sceneCameras_ = {};
         diagnostic_ = false;
         updateDimensionButton();
+        refreshOrientation();
         if (onSelection) {
             onSelection(revision_, 0);
         }
@@ -714,11 +800,14 @@ class OcctCanvas final : public QWidget {
             support_.Nullify();
             if (!presentation_.IsNull()) {
                 presentation_->ClearCustomAspects();
-                context_->SetColor(presentation_,
-                                   highlights_.bend
-                                       ? Quantity_Color(0.27, 0.35, 0.40, Quantity_TOC_RGB)
-                                       : Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
-                                   false);
+                context_->SetColor(
+                    presentation_,
+                    sideAction_->isChecked() ? Quantity_Color(.57, .61, .65, Quantity_TOC_sRGB)
+                    : highlights_.bend       ? Quantity_Color(0.27, 0.35, 0.40, Quantity_TOC_RGB)
+                                             : Quantity_Color(0.16, 0.62, 0.66, Quantity_TOC_RGB),
+                    false);
+                if (sideAction_->isChecked())
+                    applySheetSideColors(presentation_, sourceOrientation_);
                 if (highlights_.bend) {
                     for (const auto i : highlights_.primary) {
                         const auto &face = faces_(static_cast<int>(i));
@@ -759,13 +848,16 @@ class OcctCanvas final : public QWidget {
                 support_ = outline(highlights_.flanges,
                                    Quantity_Color(0.30, 0.50, 0.60, Quantity_TOC_RGB), 1.0);
             }
-            evidence_ = outline(highlights_.primary,
-                                highlights_.bend ? Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB)
-                                                 : Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
-                                3.0);
+            evidence_ =
+                outline(sideAction_->isChecked() && !highlights_.bend ? std::vector<std::size_t>{}
+                                                                      : highlights_.primary,
+                        highlights_.bend ? Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB)
+                                         : Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
+                        3.0);
             view_->Redraw();
         });
         refreshDimensions();
+        refreshOrientation();
     }
 
     void fitAll() {
@@ -861,6 +953,8 @@ class OcctCanvas final : public QWidget {
             painter.drawPixmap(controls_->pos(), controls_->grab());
             if (orbitLockButton_->isVisible())
                 painter.drawPixmap(orbitLockButton_->pos(), orbitLockButton_->grab());
+            if (sideLegend_->isVisible())
+                painter.drawPixmap(sideLegend_->pos(), sideLegend_->grab());
         }
         return result;
     }
@@ -1105,7 +1199,7 @@ class OcctCanvas final : public QWidget {
         const auto scope =
             flat_ ? QStringLiteral(
                         "Теоретическая развёртка: габариты и координаты линий гиба, не X упора.")
-            : preview_ ? QStringLiteral("Размеры текущего положения. A/B — прямые участки "
+            : preview_ ? QStringLiteral("Размеры текущего положения. П1/П2 — прямые участки "
                                         "полок от касания зоны, по их габаритам.")
                        : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
                                         "измерения исходной модели.");
@@ -1416,6 +1510,69 @@ class OcctCanvas final : public QWidget {
     }
 
   private:
+    cad::SheetOrientationVisual sourceOrientation_;
+    QAction *sideAction_ = nullptr;
+    QWidget *sideLegend_ = nullptr;
+    QLabel *sideLegendText_ = nullptr;
+    QToolButton *nextEdge_ = nullptr;
+    std::size_t edgeIndex_ = 0;
+    std::vector<Handle(AIS_InteractiveObject)> sideMarkers_;
+    const cad::SheetOrientationVisual &sceneOrientation() const {
+        if (preview_)
+            return cad::OcctPreviewAccess::frame(*preview_, previewFrame_).orientation;
+        if (flat_)
+            return cad::OcctFlatPatternAccess::orientation(*flat_);
+        return sourceOrientation_;
+    }
+    void positionSideLegend() {
+        if (!sideLegend_)
+            return;
+        sideLegend_->adjustSize();
+        const int bottom =
+            bottomOverlay_ && bottomOverlay_->isVisible() ? bottomOverlay_->y() : height();
+        sideLegend_->move(12, std::max(12, bottom - sideLegend_->height() - 12));
+        sideLegend_->raise();
+    }
+    void refreshOrientation() {
+        const bool available = document_ && !sourceOrientation_.sides[0].empty() &&
+                               !sourceOrientation_.sides[1].empty();
+        sideAction_->setEnabled(available || (document_ && sideAction_->isChecked()));
+        const bool removedMarkers = !sideMarkers_.empty();
+        if (ready_)
+            for (const auto &object : sideMarkers_)
+                context_->Remove(object, false);
+        sideMarkers_.clear();
+        const auto &data = sceneOrientation();
+        const bool visible = document_ && sideAction_->isChecked();
+        sideLegend_->setVisible(visible);
+        if (!visible) {
+            if (ready_ && removedMarkers)
+                view_->Redraw();
+            return;
+        }
+        const bool mapped = !data.sides[0].empty() && !data.sides[1].empty();
+        auto legend = QStringLiteral("<span style='color:#668AA6'>●</span> A &nbsp; <span "
+                                     "style='color:#AE756E'>●</span> B");
+        if (!data.edges.empty())
+            legend += QStringLiteral(" &nbsp; · &nbsp; край <b>1</b>");
+        sideLegendText_->setText(mapped ? legend
+                                        : QStringLiteral("Стороны в этом состоянии недоступны"));
+        nextEdge_->setVisible(mapped && !data.edges.empty());
+        nextEdge_->setEnabled(data.edges.size() > 1);
+        if (ready_ && mapped && !data.edges.empty()) {
+            try {
+                sideMarkers_ = sheetEdgeMarker(data.edges[edgeIndex_ % data.edges.size()],
+                                               14 * devicePixelRatioF());
+                for (const auto &object : sideMarkers_)
+                    context_->Display(object, 0, -1, false);
+            } catch (const Standard_Failure &) {
+                sideMarkers_.clear();
+            }
+        }
+        positionSideLegend();
+        if (ready_)
+            view_->Redraw();
+    }
     std::optional<std::size_t> hoverPreviewBend_;
     ToolSegmentColors segmentColors_;
     application::FlatPatternPtr flat_;
@@ -1447,6 +1604,7 @@ class OcctCanvas final : public QWidget {
         positionOrbitLock();
         orbitLockButton_->raise();
         orbitLockButton_->update();
+        positionSideLegend();
     }
 };
 
@@ -1606,6 +1764,8 @@ void ViewerWidget::layoutOverlays() {
         widget->raise();
         widget->update();
     }
+    if (impl_->canvas)
+        impl_->canvas->layoutOrientationLegend();
 }
 bool ViewerWidget::eventFilter(QObject *watched, QEvent *event) {
     const auto matches = [watched](const auto &widget) {
@@ -1621,6 +1781,9 @@ bool ViewerWidget::eventFilter(QObject *watched, QEvent *event) {
 
 QMenu *ViewerWidget::navigationMenu() const {
     return impl_->canvas ? impl_->canvas->navigationMenu() : nullptr;
+}
+QAction *ViewerWidget::sheetOrientationAction() const {
+    return impl_->canvas ? impl_->canvas->sheetOrientationAction() : nullptr;
 }
 
 void ViewerWidget::fitAll() {

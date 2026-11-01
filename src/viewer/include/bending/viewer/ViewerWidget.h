@@ -10,6 +10,7 @@
 #include <vector>
 
 class QMenu;
+class QAction;
 namespace bending::application {
 class Document;
 struct RecognizedBend;
@@ -33,6 +34,7 @@ class ViewerWidget final : public QWidget {
     [[nodiscard]] QString errorString() const;
     // Shared actions, owned by the viewer; null when the native backend is unavailable.
     [[nodiscard]] QMenu *navigationMenu() const;
+    [[nodiscard]] QAction *sheetOrientationAction() const;
     // Captures the OCCT framebuffer, including native surfaces QWidget::grab cannot capture.
     [[nodiscard]] QImage captureImage(bool includeControls = false);
     // Qt-only HUD attachment. The viewer owns positioning above its native canvas.

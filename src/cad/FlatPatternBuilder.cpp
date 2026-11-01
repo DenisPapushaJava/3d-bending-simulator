@@ -1,6 +1,7 @@
 #include "bending/cad/FlatPatternBuilder.h"
 #include "FlatPatternDisplay.h"
 #include "RouteGeometry.h"
+#include "SheetOrientation.h"
 #include "TrimmedBend.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -51,6 +52,7 @@ class CadFlatPattern final : public FlatPattern {
     std::vector<std::vector<PointMm>> contours;
     std::vector<TopoDS_Shape> lines;
     SheetLayout layout;
+    SheetOrientationVisual orientation;
     const FlatPatternInfo &info() const noexcept override {
         return data;
     }
@@ -253,6 +255,9 @@ const std::vector<TopoDS_Shape> &OcctFlatPatternAccess::bendLines(const FlatPatt
 }
 const SheetLayout &OcctFlatPatternAccess::layout(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).layout;
+}
+const SheetOrientationVisual &OcctFlatPatternAccess::orientation(const FlatPattern &p) {
+    return dynamic_cast<const CadFlatPattern &>(p).orientation;
 }
 FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternRequest request,
                                             std::stop_token stop) const {
@@ -575,15 +580,36 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             extruded(TopoDS::Face(TopExp_Explorer(flat, TopAbs_FACE).Current()), gp_Vec(0, 0, t));
         result->geometry = result->display;
         result->data.bounds = bounds(result->display);
+        const auto &orientation = OcctDocumentAccess::sheetOrientation(*native);
+        std::optional<SheetReference> flatReference;
+        if (orientation.available) {
+            std::vector<TopoDS_Shape> walls;
+            for (const auto &wall : result->layout.walls)
+                walls.push_back(wall.solid);
+            if (const auto at = sheetReferenceRegion(orientation.reference, walls, tolerance)) {
+                flatReference = movedSheetReference(orientation.reference,
+                                                    origin * result->layout.walls[*at].toFlat);
+                flatReference->thicknessMm = t;
+                result->orientation.edges = flatReference->edges;
+            }
+        }
         if (cutoutsIgnored) {
-            auto cutouts =
-                flatCutoutDisplay(OcctDocumentAccess::shape(*native), regions,
-                                  gp_Vec(-box.minimum.x, -box.minimum.y, 0), tolerance, stop);
+            auto cutouts = flatCutoutDisplay(OcctDocumentAccess::shape(*native), regions,
+                                             gp_Vec(-box.minimum.x, -box.minimum.y, 0), tolerance,
+                                             stop, &orientation);
             result->display = std::move(cutouts.surface);
             result->contours = std::move(cutouts.contours);
+            appendSheetSides(result->orientation, result->display, cutouts.faceSides);
         } else {
             BRepMesh_IncrementalMesh mesh(result->display, .08, false, .25, false);
             require(mesh.IsDone(), "Flat preview meshing failed");
+            if (flatReference) {
+                auto flatMetadata = native->metadata();
+                flatMetadata.bendAnalysis = {};
+                const auto tags =
+                    classifySheetOrientation(result->display, flatMetadata, stop, flatReference);
+                result->orientation = sheetOrientationVisual(result->display, tags);
+            }
         }
         TopoDS_Compound display;
         builder.MakeCompound(display);

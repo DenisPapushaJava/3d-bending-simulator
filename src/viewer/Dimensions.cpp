@@ -280,9 +280,9 @@ DimensionAnnotations previewDimensions(const cad::PreviewFrame &frame,
     }
     const auto &anchors = *frame.dimensions;
     length(result, anchors.fixed[0], anchors.fixed[1], -layout.right * 2.2 - layout.up * 0.6,
-           QStringLiteral("A прям. %1 мм").arg(number(model.fixedFlangeMm)), height);
+           QStringLiteral("П1 прям. %1 мм").arg(number(model.fixedFlangeMm)), height);
     length(result, anchors.moving[0], anchors.moving[1], layout.right * 2.2 - layout.up * 0.6,
-           QStringLiteral("B прям. %1 мм").arg(number(model.movingFlangeMm)), height);
+           QStringLiteral("П2 прям. %1 мм").arg(number(model.movingFlangeMm)), height);
     length(result, anchors.fixed[1], anchors.fixed[1].Translated(anchors.widthVector),
            -layout.up * 1.8, QStringLiteral("Ширина %1 мм").arg(number(model.widthMm)), height);
     callout(result, anchors.bendMiddle, layout.up * 1.8,
