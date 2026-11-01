@@ -74,9 +74,9 @@ std::vector<core::ToolSegment> referenceSections(core::ToolKind kind, int index)
 } // namespace
 ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
                                  std::function<QString(core::ToolPreset)> writer, QWidget *parent,
-                                 bool embedded)
+                                 bool embedded, std::vector<core::ToolSegment> reference)
     : QDialog(parent), catalog_(std::move(catalog)), writer_(std::move(writer)),
-      embedded_(embedded) {
+      embedded_(embedded), reference_(std::move(reference)) {
     if (embedded_)
         setWindowFlags(Qt::Widget);
     setObjectName("toolStockDialog");
@@ -306,8 +306,9 @@ void ToolStockDialog::load() {
         }))
         references.insert(references.begin(), {nominalLength, 0});
     if (embedded_ && !s)
-        references = nominalLength > 0 ? std::vector<core::ToolSegment>{{nominalLength, 0}}
-                                       : std::vector<core::ToolSegment>{};
+        references = !reference_.empty() ? reference_
+                     : nominalLength > 0 ? std::vector<core::ToolSegment>{{nominalLength, 0}}
+                                         : std::vector<core::ToolSegment>{};
     if (embedded_ && s)
         references.clear();
     for (const auto &r : references) {

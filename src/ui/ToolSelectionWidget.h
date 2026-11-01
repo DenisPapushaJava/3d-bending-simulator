@@ -69,7 +69,7 @@ class ToolSelectionWidget final : public QWidget {
     void setCheckedSearchState(bool busy, const QString &status = {}, bool resumable = false);
     void setToolProfileImport(ImportController &,
                               std::shared_ptr<const application::ToolProfileImporter>,
-                              application::ToolLibraryStorage);
+                              application::ToolLibraryStorage, core::ToolCatalog starter = {});
     std::function<std::variant<core::ToolCatalog, std::string>(const std::filesystem::path &)>
         loadCatalog;
     std::function<void(Change)> onChanged;

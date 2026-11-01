@@ -13,7 +13,7 @@ class ToolStockDialog final : public QDialog {
     Q_OBJECT
   public:
     ToolStockDialog(core::ToolCatalog, std::function<QString(core::ToolPreset)>, QWidget *,
-                    bool embedded = false);
+                    bool embedded = false, std::vector<core::ToolSegment> reference = {});
     std::function<void()> onColorsChanged;
     void selectTool(const std::string &id);
     void markDirty() {
@@ -50,5 +50,6 @@ class ToolStockDialog final : public QDialog {
     bool loading_ = false;
     bool inventoryEdited_ = false;
     bool embedded_ = false;
+    std::vector<core::ToolSegment> reference_;
 };
 } // namespace bending::ui

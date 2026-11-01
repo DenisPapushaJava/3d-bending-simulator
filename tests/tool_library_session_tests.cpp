@@ -127,6 +127,78 @@ int main() {
                     completeMatrix.openingsMm == matrix.openingsMm &&
                     completeMatrix.grooveSettings == matrix.grooveSettings,
                 "multi-groove completion changed working sides");
+
+        auto reference = pair.punch;
+        reference.segments = std::vector<core::ToolSegment>{{835, 9}, {415, 4}};
+        application::ToolLibrarySnapshot firstRun{{}, "missing", false};
+        int seedWrites = 0;
+        bool seedFailure = false;
+        application::ToolLibraryStorage seedStorage{
+            [&](const auto &) -> application::ToolLibraryResult { return firstRun; },
+            [&](const auto &, const auto &next,
+                const auto &revision) -> application::ToolLibraryResult {
+                ++seedWrites;
+                if (seedFailure || revision != firstRun.revision)
+                    return std::string("seed conflict or write failure");
+                firstRun = {next, "seeded" + std::to_string(seedWrites)};
+                return firstRun;
+            }};
+        application::ToolLibrary seeded({}, "new", seedStorage, {reference});
+        require(seeded.error().empty() && seedWrites == 1 && firstRun.exists &&
+                    seeded.data().tools.size() == 1 && !seeded.data().tools[0].segments &&
+                    seeded.data().tools[0].drawing == reference.drawing,
+                "First launch did not atomically seed the profile without stock");
+        auto renamedReference = seeded.data().tools[0];
+        renamedReference.code = "My name";
+        renamedReference.id = "different-id";
+        const auto rows = seeded.sectionTemplate(renamedReference);
+        require(rows.size() == 2 && rows[0].quantity == 0 && rows[1].quantity == 0,
+                "Reference sections are stock or depend on a mutable name/ID");
+        auto changedProfile = renamedReference;
+        changedProfile.drawing = core::rotateToolDrawing(*changedProfile.drawing, std::numbers::pi);
+        require(seeded.sectionTemplate(changedProfile).empty(),
+                "A changed profile inherited reference lengths by hash alone");
+        renamedReference.segments = std::vector<core::ToolSegment>{{50, 2}};
+        require(seeded.sectionTemplate(renamedReference).empty(),
+                "Known stock was replaced with a starter template");
+        application::ToolLibrary seededRestart(firstRun.data.tools, "new", seedStorage,
+                                               {reference, pair.die});
+        require(seedWrites == 1 && seededRestart.data().tools == firstRun.data.tools,
+                "An update silently merged starter entries into the workshop");
+        application::ToolLibrary lostSettings({}, "new", seedStorage, {reference, pair.die});
+        require(seedWrites == 1 && lostSettings.data().tools == firstRun.data.tools,
+                "Missing preferences hid an existing workshop");
+        require(seededRestart.archive(reference.id).empty(), "seed archive failed");
+        application::ToolLibrary afterRemoval({}, "new", seedStorage, {reference});
+        require(afterRemoval.data().tools.empty() && afterRemoval.data().archived.size() == 1 &&
+                    seedWrites == 2,
+                "Startup resurrected a removed profile");
+        require(afterRemoval.purge(reference.id).empty(), "seed purge failed");
+        application::ToolLibrary intentionallyEmpty({}, "new", seedStorage, {reference});
+        require(intentionallyEmpty.data().tools.empty() && seedWrites == 3,
+                "An intentionally empty existing library was reseeded");
+        firstRun = {{}, "missing", false};
+        seedFailure = true;
+        application::ToolLibrary denied({}, "new", seedStorage, {reference});
+        require(!denied.error().empty() && denied.data().tools.empty() && !firstRun.exists,
+                "Failed seed write published an in-memory library");
+        seedFailure = false;
+        application::ToolLibrary external({pair.die}, "new", seedStorage, {reference});
+        require(!firstRun.exists && external.data().tools == core::ToolCatalog{pair.die},
+                "Starter replaced an explicit external catalogue");
+        auto unsupportedReference = reference;
+        unsupportedReference.drawing.reset();
+        const int beforeInvalid = seedWrites;
+        application::ToolLibrary invalidStarter({}, "new", seedStorage, {unsupportedReference});
+        require(!invalidStarter.error().empty() && seedWrites == beforeInvalid,
+                "A parameter-only starter reached storage");
+        application::ToolLibrary unreadableSeed(
+            {}, "bad",
+            {[](const auto &) -> application::ToolLibraryResult { return std::string("bad"); },
+             seedStorage.write},
+            {reference});
+        require(!unreadableSeed.error().empty() && seedWrites == beforeInvalid,
+                "An unreadable workshop was overwritten by the starter");
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

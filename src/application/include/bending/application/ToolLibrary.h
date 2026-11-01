@@ -14,6 +14,7 @@ struct ToolLibraryData {
 struct ToolLibrarySnapshot {
     ToolLibraryData data;
     std::string revision;
+    bool exists = true; // An intentionally empty file is different from first launch.
 };
 using ToolLibraryResult = std::variant<ToolLibrarySnapshot, std::string>;
 struct ToolLibraryStorage {
@@ -30,7 +31,8 @@ struct ToolLibraryStorage {
 // Assignments are immutable copies, never live references into this library.
 class ToolLibrary final {
   public:
-    ToolLibrary(core::ToolCatalog initial, std::filesystem::path, ToolLibraryStorage);
+    ToolLibrary(core::ToolCatalog initial, std::filesystem::path, ToolLibraryStorage,
+                core::ToolCatalog starter = {});
     [[nodiscard]] const ToolLibraryData &data() const {
         return snapshot_.data;
     }
@@ -42,6 +44,8 @@ class ToolLibrary final {
     [[nodiscard]] std::string archive(const std::string &id);
     [[nodiscard]] std::string restore(const std::string &id);
     [[nodiscard]] std::string purge(const std::string &id);
+    // Reference lengths only, never available stock. Geometry, not a mutable name/ID, binds them.
+    [[nodiscard]] std::vector<core::ToolSegment> sectionTemplate(const core::ToolPreset &) const;
 
   private:
     std::string commit(ToolLibraryData);
@@ -49,5 +53,6 @@ class ToolLibrary final {
     std::filesystem::path path_;
     ToolLibraryStorage storage_;
     std::string error_;
+    core::ToolCatalog starter_;
 };
 } // namespace bending::application

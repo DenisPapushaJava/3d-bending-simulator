@@ -418,7 +418,7 @@ void ToolLibraryDialog::loadCard() {
             }
             return text(error);
         },
-        stockHost_, true);
+        stockHost_, true, library_.sectionTemplate(*t));
     stock_->setEnabled(!showingArchive_);
     stock_->onColorsChanged = [this] {
         if (onColorsChanged)

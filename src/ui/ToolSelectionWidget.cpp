@@ -1137,7 +1137,7 @@ void ToolSelectionWidget::importCatalog() {
 
 void ToolSelectionWidget::setToolProfileImport(
     ImportController &controller, std::shared_ptr<const application::ToolProfileImporter> importer,
-    application::ToolLibraryStorage writer) {
+    application::ToolLibraryStorage writer, core::ToolCatalog starter) {
     controller_ = &controller;
     profileImporter_ = std::move(importer);
     libraryStorage_ = std::move(writer);
@@ -1150,8 +1150,15 @@ void ToolSelectionWidget::setToolProfileImport(
 #endif
     library_ = std::make_unique<application::ToolLibrary>(
         core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_), native,
-        libraryStorage_);
+        libraryStorage_, std::move(starter));
+    if (library_->data().tools !=
+        core::ToolCatalog(catalog_.begin(), catalog_.begin() + workshopSize_))
+        refreshWorkshop();
     stock_->setEnabled(static_cast<bool>(libraryStorage_));
+    if (!library_->error().empty()) {
+        recommendation_->setText(text(library_->error()));
+        recommendation_->show();
+    }
 }
 void ToolSelectionWidget::importDxf(std::optional<core::ToolKind> initialKind) {
     showLibrary(initialKind, true);

@@ -52,8 +52,8 @@ bool validToolLibrary(const ToolLibraryData &data) {
     return true;
 }
 ToolLibrary::ToolLibrary(core::ToolCatalog initial, std::filesystem::path path,
-                         ToolLibraryStorage storage)
-    : path_(std::move(path)), storage_(std::move(storage)) {
+                         ToolLibraryStorage storage, core::ToolCatalog starter)
+    : path_(std::move(path)), storage_(std::move(storage)), starter_(std::move(starter)) {
     snapshot_.data.tools = std::move(initial);
     if (!storage_) {
         error_ = "Хранилище библиотеки недоступно.";
@@ -66,6 +66,11 @@ ToolLibrary::ToolLibrary(core::ToolCatalog initial, std::filesystem::path path,
     }
     auto saved = std::get<ToolLibrarySnapshot>(std::move(loaded));
     snapshot_.revision = std::move(saved.revision);
+    snapshot_.exists = saved.exists;
+    // Normal starter-enabled startup can recover the owned workshop even if
+    // preferences did not load it. An explicit external catalogue has no starter.
+    if (!starter_.empty() && saved.exists && snapshot_.data.tools.empty())
+        snapshot_.data.tools = std::move(saved.data.tools);
     snapshot_.data.archived = std::move(saved.data.archived);
     // An explicitly loaded external catalogue remains the current workshop until saved.
     // Opening a project never feeds its captured tools into this constructor.
@@ -73,6 +78,34 @@ ToolLibrary::ToolLibrary(core::ToolCatalog initial, std::filesystem::path path,
         return std::any_of(snapshot_.data.tools.begin(), snapshot_.data.tools.end(),
                            [&](const auto &active) { return active.id == tool.id; });
     });
+    if (!snapshot_.exists && snapshot_.data.tools.empty() && !starter_.empty()) {
+        if (!core::validToolCatalog(starter_) ||
+            std::any_of(starter_.begin(), starter_.end(), [](const auto &tool) {
+                return !tool.parametersConfirmed || tool.teaching || !supportedProfile(tool);
+            })) {
+            error_ = "Некорректная стартовая библиотека. Пользовательские данные не изменены.";
+            return;
+        }
+        auto tools = starter_;
+        for (auto &tool : tools)
+            tool.segments.reset(); // Unknown stock retains the nominal whole-tool mode.
+        error_ = commit({std::move(tools), {}});
+    }
+}
+std::vector<core::ToolSegment> ToolLibrary::sectionTemplate(const core::ToolPreset &tool) const {
+    if (!tool.drawing || tool.segments)
+        return {};
+    for (const auto &reference : starter_)
+        if (reference.kind == tool.kind && reference.drawing && reference.segments &&
+            reference.drawing->sha256 == tool.drawing->sha256 &&
+            reference.drawing->millimeters == tool.drawing->millimeters &&
+            reference.drawing->edges == tool.drawing->edges) {
+            auto rows = *reference.segments;
+            for (auto &row : rows)
+                row.quantity = 0;
+            return rows;
+        }
+    return {};
 }
 std::string ToolLibrary::commit(ToolLibraryData next) {
     if (!error_.empty())

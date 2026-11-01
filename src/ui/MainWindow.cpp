@@ -4124,9 +4124,10 @@ void MainWindow::setDrawingBuilder(
 }
 void MainWindow::setToolProfileImport(
     std::shared_ptr<const application::ToolProfileImporter> importer,
-    application::ToolLibraryStorage writer) {
+    application::ToolLibraryStorage writer, core::ToolCatalog starter) {
     impl_->toolSelection->setToolProfileImport(*impl_->controller, std::move(importer),
-                                               std::move(writer));
+                                               std::move(writer), std::move(starter));
+    impl_->refresh();
 }
 void MainWindow::setFlatPatternBuilder(
     std::shared_ptr<const application::FlatPatternBuilder> builder) {

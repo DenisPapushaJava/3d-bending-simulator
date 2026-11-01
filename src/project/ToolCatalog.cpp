@@ -7,9 +7,14 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLockFile>
+#include <QResource>
 #include <QSaveFile>
 #include <cmath>
 #include <limits>
+
+static void initStarterTools() {
+    Q_INIT_RESOURCE(starter_tools);
+}
 
 namespace bending::project {
 namespace {
@@ -365,6 +370,15 @@ ToolCatalogResult readToolCatalog(const std::filesystem::path &path) {
 #endif
     return readFile(file);
 }
+ToolCatalogResult readStarterToolCatalog() {
+    static const bool initialized = [] {
+        initStarterTools();
+        return true;
+    }();
+    (void)initialized;
+    QFile file(QStringLiteral(":/tools/starter-tools-v1.json"));
+    return readFile(file);
+}
 std::optional<std::string> writeToolCatalog(const std::filesystem::path &path,
                                             const core::ToolCatalog &catalog) {
     if (!core::validToolCatalog(catalog))
@@ -394,7 +408,7 @@ application::ToolLibraryResult readToolLibrary(const std::filesystem::path &path
     const auto name = QString::fromUtf8(path.string().c_str());
 #endif
     if (!QFileInfo::exists(name))
-        return application::ToolLibrarySnapshot{{}, "missing"};
+        return application::ToolLibrarySnapshot{{}, "missing", false};
     QFile file(name);
     QByteArray bytes;
     auto parsed = readFile(file, &bytes);

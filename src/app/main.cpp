@@ -170,9 +170,24 @@ int main(int argc, char *argv[]) {
     }
     const auto previewBuilder = std::make_shared<bending::cad::SingleBendPreviewBuilder>(toolCache);
     bending::core::ToolCatalog tools;
-    const auto savedCatalog = (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
-                                  ? QString{}
-                                  : bending::ui::toolCatalogPath();
+    bending::core::ToolCatalog starter;
+    auto bundled = bending::project::readStarterToolCatalog();
+    if (const auto *error = std::get_if<std::string>(&bundled)) {
+        qCritical() << "Starter tool library unavailable:" << QString::fromStdString(*error);
+        return 1;
+    }
+    // Startup probes and explicit catalogues stay isolated from workshop initialization.
+    if (!parser.isSet(smokeTest) && !parser.isSet(graphicsTest) && !parser.isSet(toolCatalogOption))
+        starter = std::get<bending::core::ToolCatalog>(std::move(bundled));
+    auto savedCatalog = (parser.isSet(smokeTest) || parser.isSet(graphicsTest))
+                            ? QString{}
+                            : bending::ui::toolCatalogPath();
+    if (savedCatalog.isEmpty() && !parser.isSet(smokeTest) && !parser.isSet(graphicsTest)) {
+        const auto existing =
+            QDir(bending::ui::toolLibraryDirectory()).filePath("tools/tool-catalog.json");
+        if (QFileInfo::exists(existing))
+            savedCatalog = existing;
+    }
     if (parser.isSet(toolCatalogOption) || !savedCatalog.isEmpty()) {
         const auto argument =
             parser.isSet(toolCatalogOption) ? parser.value(toolCatalogOption) : savedCatalog;
@@ -210,7 +225,8 @@ int main(int argc, char *argv[]) {
     window.setToolCatalogLoader(bending::project::readToolCatalog);
     window.setToolProfileImport(
         std::make_shared<bending::project::DxfToolImporter>(),
-        {bending::project::readToolLibrary, bending::project::writeToolLibrary});
+        {bending::project::readToolLibrary, bending::project::writeToolLibrary},
+        std::move(starter));
     window.setDrawingBuilder(std::make_shared<bending::cad::BendingDrawingBuilder>());
     window.setFlatPatternBuilder(std::make_shared<bending::cad::FlatPatternBuilder>());
     window.setUpdateClient(&updates);

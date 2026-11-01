@@ -85,3 +85,15 @@ The native bootstrap and extraction script are original MIT project code. Window
 and .NET are operating system prerequisites, not bundled dependencies. The bootstrap uses
 the MSVC toolchain static CRT; the GUI still has the existing separate Visual C++ runtime
 prerequisite. Local Postman/PowerShell 7 development tools are not shipped with the app.
+
+
+## Стартовые сечения гибочного инструмента — D128
+
+В runtime включён фиксированный набор технических DXF-снимков, предоставленный владельцем
+проекта для стартового комплекта: ST3408.dxf, ST3412.dxf, ST1405.dxf, ST1701.dxf,
+2067-1.dxf, TOP.205.85.R08.dxf и 1063.dxf. Сохраняются исходные имена/SHA и захваченные
+линии/дуги; исходные заводские DXF/PDF/DWG, изображения, личные пути и складские остатки
+не включены. Состав/происхождение перечислены в `src/project/data/README.md` исходного дерева.
+MIT приложения относится к собственному программному коду и не подменяет условия
+исходных материалов изготовителей. Эти снимки не являются новыми заводскими чертежами
+и не подтверждают нагрузку, наличие инструмента или пригодность конкретной установки.
