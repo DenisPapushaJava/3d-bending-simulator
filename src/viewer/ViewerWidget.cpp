@@ -409,14 +409,14 @@ class OcctCanvas final : public QWidget {
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
         cad::SheetOrientationVisual orientation;
         if (const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(document)) {
-            const auto &data = cad::OcctDocumentAccess::sheetOrientation(*native);
-            if (data.available &&
-                data.faces.size() == static_cast<std::size_t>(faces.Extent()) + 1) {
+            const auto &tags = cad::OcctDocumentAccess::sheetOrientation(*native);
+            if (tags.available &&
+                tags.faces.size() == static_cast<std::size_t>(faces.Extent()) + 1) {
                 for (int i = 1; i <= faces.Extent(); ++i)
-                    if (data.faces[i] != cad::SheetSide::Neutral)
-                        orientation.sides[data.faces[i] == cad::SheetSide::A ? 0 : 1].push_back(
+                    if (tags.faces[i] != cad::SheetSide::Neutral)
+                        orientation.sides[tags.faces[i] == cad::SheetSide::A ? 0 : 1].push_back(
                             faces(i));
-                orientation.edges = data.reference.edges;
+                orientation.edges = tags.reference.edges;
             }
         }
         Handle(AIS_ColoredShape) candidate;
@@ -1542,7 +1542,7 @@ class OcctCanvas final : public QWidget {
             for (const auto &object : sideMarkers_)
                 context_->Remove(object, false);
         sideMarkers_.clear();
-        const auto &data = sceneOrientation();
+        const auto &orientation = sceneOrientation();
         const bool visible = document_ && sideAction_->isChecked();
         sideLegend_->setVisible(visible);
         if (!visible) {
@@ -1550,19 +1550,20 @@ class OcctCanvas final : public QWidget {
                 view_->Redraw();
             return;
         }
-        const bool mapped = !data.sides[0].empty() && !data.sides[1].empty();
+        const bool mapped = !orientation.sides[0].empty() && !orientation.sides[1].empty();
         auto legend = QStringLiteral("<span style='color:#668AA6'>●</span> A &nbsp; <span "
                                      "style='color:#AE756E'>●</span> B");
-        if (!data.edges.empty())
+        if (!orientation.edges.empty())
             legend += QStringLiteral(" &nbsp; · &nbsp; край <b>1</b>");
         sideLegendText_->setText(mapped ? legend
                                         : QStringLiteral("Стороны в этом состоянии недоступны"));
-        nextEdge_->setVisible(mapped && !data.edges.empty());
-        nextEdge_->setEnabled(data.edges.size() > 1);
-        if (ready_ && mapped && !data.edges.empty()) {
+        nextEdge_->setVisible(mapped && !orientation.edges.empty());
+        nextEdge_->setEnabled(orientation.edges.size() > 1);
+        if (ready_ && mapped && !orientation.edges.empty()) {
             try {
-                sideMarkers_ = sheetEdgeMarker(data.edges[edgeIndex_ % data.edges.size()],
-                                               14 * devicePixelRatioF());
+                sideMarkers_ =
+                    sheetEdgeMarker(orientation.edges[edgeIndex_ % orientation.edges.size()],
+                                    14 * devicePixelRatioF());
                 for (const auto &object : sideMarkers_)
                     context_->Display(object, 0, -1, false);
             } catch (const Standard_Failure &) {
