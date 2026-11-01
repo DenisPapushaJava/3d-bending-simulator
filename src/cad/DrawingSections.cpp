@@ -1,5 +1,6 @@
 #include "DrawingSections.h"
 #include "DrawingProfiles.h"
+#include "DrawingRepeats.h"
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -340,6 +341,27 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             section.locations.push_back(std::move(*at));
         } catch (const Standard_Failure &) {
             // Optional real sections cannot discard the source views or simulation analysis.
+        }
+    }
+    if (drawing.profiles.size() == 1 && drawing.sections.size() == 1 && geometries.size() == 1) {
+        std::optional<RepeatedDrawingSection> repeat;
+        try {
+            repeat = repeatedDrawingSection(geometries[0].flat, geometries[0].view,
+                                            representatives[0], bends, tolerance, stop);
+        } catch (const Standard_Failure &) {
+            // Optional abbreviation must not discard the full valid section on SDK failure.
+        }
+        if (repeat) {
+            auto &overview = drawing.sections.front();
+            overview.view = std::move(repeat->overview);
+            overview.rotated = true;
+            DrawingSection unit;
+            unit.view = std::move(repeat->unit);
+            unit.normal = overview.normal;
+            unit.designation = overview.designation;
+            unit.repeatCount = repeat->count;
+            unit.rotated = true;
+            drawing.sections.push_back(std::move(unit));
         }
     }
     for (const auto &section : drawing.sections)

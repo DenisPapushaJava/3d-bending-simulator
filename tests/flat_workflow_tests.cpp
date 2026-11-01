@@ -11,6 +11,7 @@
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -249,6 +250,16 @@ int main(int argc, char **argv) {
               "Invalid material rule replaced document");
         // Legacy projects have no material; they must not inherit the previous document's rule.
         root.insert("version", 5);
+        auto legacyParameters = root.value("parameters").toObject();
+        legacyParameters.remove("unfold");
+        root.insert("parameters", legacyParameters);
+        auto legacyBends = root.value("bends").toArray();
+        for (qsizetype i = 0; i < legacyBends.size(); ++i) {
+            auto bend = legacyBends[i].toObject();
+            bend.remove("workpieceReversed"); // v14 field is invalid in a v5 fixture.
+            legacyBends[i] = bend;
+        }
+        root.insert("bends", legacyBends);
         check(saved.open(QIODevice::WriteOnly | QIODevice::Truncate),
               "Cannot write legacy project");
         saved.write(QJsonDocument(root).toJson());

@@ -1111,9 +1111,29 @@ double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt =
         const auto a = map({line[0].x, line[0].y}), end = map({line[1].x, line[1].y});
         pen(p, .25, Qt::DashDotLine);
         p.drawLine(a, end);
+    }
+    auto groups = flat.repeatedBendGroups;
+    if (groups.empty())
+        for (const auto &b : bends)
+            groups.push_back({b.bendIndex});
+    for (auto group : groups) {
+        if (group.empty())
+            throw std::runtime_error("Empty repeated bend group");
+        const auto found = std::find_if(bends.begin(), bends.end(), [&](const auto &b) {
+            return b.bendIndex == group.front();
+        });
+        if (found == bends.end())
+            throw std::runtime_error("Invalid repeated bend group");
+        const auto &b = *found;
+        const auto line = b.centreLine();
+        const auto a = map({line[0].x, line[0].y}), end = map({line[1].x, line[1].y});
+        std::sort(group.begin(), group.end());
+        QStringList ids;
+        for (auto id : group)
+            ids << QStringLiteral("%1").arg(id + 1, 2, 10, QLatin1Char('0'));
         const auto value =
             QStringLiteral("B%1 %2 %3°\nL=%4%5")
-                .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
+                .arg(ids.join(QStringLiteral(",")))
                 .arg(b.direction > 0 ? QStringLiteral("↑") : QStringLiteral("↓"),
                      number(180 - b.turnRadians * 180 / std::numbers::pi), number(b.lengthMm()),
                      sameK ? QString{} : QStringLiteral(" · K=%1").arg(number(b.k)));
@@ -1143,11 +1163,16 @@ bool classicalLayout(const BendingDrawing &d, const DrawingTitle &title) {
            d.variableProfile != DrawingVariableProfile::Measured;
 }
 double classicalLeftWidth(const BendingDrawing &d, bool flat = false) {
-    if (flat)
+    if (flat || std::any_of(d.sections.begin(), d.sections.end(),
+                            [](const auto &s) { return s.repeatCount != 0; }))
         return 183;
     return d.sections.size() == 1 ? 183 : 238;
 }
 double sectionScale(const BendingDrawing &d, std::size_t index) {
+    if (d.sections[index].repeatCount)
+        return fittedScale(d.sections[index].view, 162, 70);
+    if (d.sections.size() == 2 && d.sections[1].repeatCount)
+        return fittedScale(d.sections[index].view, 162, 35);
     const bool single = d.sections.size() == 1;
     return fittedScale(d.sections[index].view, index < 2 ? (single ? 162 : 87) : 130,
                        index < 2 ? (single ? 139 : 54) : 130);
@@ -1164,7 +1189,7 @@ std::vector<std::size_t> classicalDetails(const BendingDrawing &d) {
                               note.second) != d.sections[s].view.dimensionedBends.end()) {
                     covered = true;
                     const auto &b = d.bends[note.second];
-                    if (!d.details[i].fullProfile &&
+                    if (!d.sections[s].repeatCount && !d.details[i].fullProfile &&
                         (b.innerRadiusMm + b.thicknessMm) * sectionScale(d, s) < 1.5)
                         needed = true;
                 }
@@ -1270,11 +1295,16 @@ double classicalSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &
                         .value_or(sectionScale(d, index));
                 const auto name = QString::fromStdString(s.designation);
                 const auto caption =
-                    QStringLiteral("%1-%1 (%2)%3")
-                        .arg(name, scaleName(localScale),
+                    QStringLiteral("%1 (%2)%3%4")
+                        .arg(s.repeatCount ? QStringLiteral("Волна сечения %1-%1 · повторений: %2")
+                                                 .arg(name)
+                                                 .arg(s.repeatCount)
+                                           : QStringLiteral("%1-%1").arg(name),
+                             scaleName(localScale),
                              s.locations.size() > 1
                                  ? QStringLiteral(" · %1 места").arg(s.locations.size())
-                                 : QString{});
+                                 : QString{},
+                             s.rotated ? QStringLiteral(" · повёрнуто") : QString{});
                 view(trial, d, s.view, cell.center() + QPointF(0, 6), localScale, caption, false,
                      false, false, &occupied, true, cell, true);
             };
@@ -1302,7 +1332,10 @@ double classicalSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &
                          &occupied, false, left, true);
                 } else if (d.sections.size() == 1)
                     section(0, QRectF(x, 37, width, 175));
-                else {
+                else if (d.sections[1].repeatCount) {
+                    section(0, QRectF(x, 37, width, 65));
+                    section(1, QRectF(x, 108, width, 109));
+                } else {
                     section(0, QRectF(x, 37, width, 87.5));
                     section(1, QRectF(x, 129.5, width, 87.5));
                 }
@@ -1363,6 +1396,9 @@ double classicalSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &
     throw std::runtime_error(lastError);
 }
 bool inlineFlat(const BendingDrawing &d, const DrawingTitle &title) {
+    if (std::any_of(d.sections.begin(), d.sections.end(),
+                    [](const auto &s) { return s.repeatCount; }))
+        return false;
     if (!d.flatPattern || !classicalLayout(d, title) || d.sections.empty() || d.sections.size() > 2)
         return false;
     QImage scratch(420, 297, QImage::Format_RGB32);
@@ -1408,10 +1444,15 @@ void packedView(QPainter &p, const BendingDrawing &d, const PackedSupplement &pa
         full = true;
         const auto name = QString::fromStdString(s.designation);
         caption =
-            QStringLiteral("%1-%1 (%2)%3")
-                .arg(name, scaleName(scale),
+            QStringLiteral("%1 (%2)%3%4")
+                .arg(s.repeatCount ? QStringLiteral("Волна сечения %1-%1 · повторений: %2")
+                                         .arg(name)
+                                         .arg(s.repeatCount)
+                                   : QStringLiteral("%1-%1").arg(name),
+                     scaleName(scale),
                      s.locations.size() > 1 ? QStringLiteral(" · %1 места").arg(s.locations.size())
-                                            : QString{});
+                                            : QString{},
+                     s.rotated ? QStringLiteral(" · повёрнуто") : QString{});
     } else if (item.kind == SupplementKind::Auxiliary) {
         const auto &a = d.auxiliaryViews[item.index];
         v = classicalSource(d, a.view, a.projection);
@@ -1531,7 +1572,7 @@ packSupplements(const BendingDrawing &d, const std::vector<Supplement> &items, Q
                                                      1.5 / (bend.innerRadiusMm + bend.thicknessMm),
                                                      .75 / bend.thicknessMm});
                             }
-                            if (readable > 0)
+                            if (readable > 0 && !d.sections[item.index].repeatCount)
                                 minimum = std::min(preferred, readable);
                         } else if (item.kind == SupplementKind::Auxiliary) {
                             preferred = auxiliaryScale[i];

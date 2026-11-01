@@ -2,6 +2,7 @@
 #include "BendRecognizer.h"
 #include "DrawingOpenings.h"
 #include "DrawingProfiles.h"
+#include "DrawingRepeats.h"
 #include "DrawingSections.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/FlatPatternBuilder.h"
@@ -872,6 +873,7 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
             for (std::size_t i = 1; i < xs.size(); ++i)
                 v.axialDimensions.push_back(
                     {{xs[i - 1], hi.y}, {xs[i], hi.y}, xs[i] - xs[i - 1], ""});
+        compactRepeatedFlat(unfolded, 1e-5);
         // Witnesses attach to the actual flat contour at the measured coordinate.
         // This changes presentation anchors only, never the measured value.
         const auto witness = [&](DrawingPoint target, bool horizontal) {

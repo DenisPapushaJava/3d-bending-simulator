@@ -27,9 +27,15 @@ if(UNIX AND NOT APPLE)
         DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
         RENAME "3d-bending-simulator.svg")
 endif()
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/examples/"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/3d-bending-simulator/examples"
-    FILES_MATCHING PATTERN "*.step" PATTERN "*.stp" PATTERN "README.md")
+set(bending_example_assets ${BENDING_STARTER_EXAMPLE_FILES}
+    "${BENDING_EXAMPLE_SOURCE_DIR}/README.md")
+foreach(source IN LISTS bending_example_assets)
+    get_filename_component(name "${source}" NAME)
+    configure_file("${source}"
+        "${PROJECT_BINARY_DIR}/share/3d-bending-simulator/examples/${name}" COPYONLY)
+endforeach()
+install(FILES ${bending_example_assets}
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/3d-bending-simulator/examples")
 install(FILES "${PROJECT_SOURCE_DIR}/VERSION" "${PROJECT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
     "${PROJECT_SOURCE_DIR}/LICENSE" DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 install(FILES "${PROJECT_SOURCE_DIR}/src/ui/data/fonts/OFL.txt"

@@ -245,7 +245,7 @@ def main():
         font_probe.unlink()
     subprocess.run([str(executable), "--smoke-test"], env=environment, check=True, timeout=20)
     subprocess.run([str(executable), "--smoke-test",
-                    str(stage / "share/3d-bending-simulator/examples/plate-inch.stp")],
+                    str(stage / "share/3d-bending-simulator/examples/profiled-bend-6mm.step")],
                    env=environment, check=True, timeout=30)
     subprocess.run([str(executable), "--update-runtime-probe"], env=environment, check=True, timeout=20)
     configure_portable(stage, version, ROOT / "build/release/bin/3d-bending-launcher.exe")

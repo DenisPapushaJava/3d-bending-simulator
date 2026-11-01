@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "ProfileFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
@@ -1020,6 +1021,50 @@ void classicalDrawing(const QString &folder) {
     require(ui::DrawingSheet::writePdf(folder + "/classical-shallow-top.pdf", *tall, {}).isEmpty(),
             "A shallow projection has no room for its outside dimension number");
 }
+void repeatedWaveDrawing(const QString &folder) {
+    const auto shape = fixtures::foldedProfile(12, 83, .43, false, true);
+    const auto repeated = [&](const TopoDS_Shape &source, const QString &name) {
+        auto document = load(source, folder + "/" + name + ".step");
+        application::DrawingRequest request;
+        request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+        const auto drawing = build(document, request);
+        const auto unit = std::find_if(drawing->sections.begin(), drawing->sections.end(),
+                                       [](const auto &s) { return s.repeatCount; });
+        require(drawing->sections.size() == 2 && unit != drawing->sections.end() &&
+                    unit->repeatCount == 3 && unit->view.angles.size() == 4 &&
+                    unit->view.dimensions.size() == 5 && unit->view.dimensionedBends.size() == 12,
+                "The actual repeated wave lost its dimensions or bend coverage");
+        require(ui::DrawingSheet::coverage(*drawing).dimensioned == 12 && drawing->flatPattern &&
+                    drawing->flatPattern->repeatedBendGroups.size() == 4,
+                "The repeated flat line coordinates were not retained");
+        for (const auto &group : drawing->flatPattern->repeatedBendGroups)
+            require(group.size() == 3, "A repeated flat label lost a bend ID");
+        for (int page = 0; page < ui::DrawingSheet::pageCount(*drawing); ++page)
+            require(!ui::DrawingSheet::preview(*drawing, {}, page).isNull(),
+                    "Repeated wave sheet cannot be rendered");
+        return drawing;
+    };
+    repeated(shape, "wave");
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .73);
+    transform.SetTranslationPart(gp_Vec(17, -31, 62));
+    repeated(BRepBuilderAPI_Transform(shape, transform, true).Shape(), "moved-wave");
+    transform.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
+    repeated(BRepBuilderAPI_Transform(shape, transform, true).Shape(), "mirrored-wave");
+    for (const auto &source :
+         {fixtures::foldedProfile(12, 83, .43, true, true), fixtures::foldedProfile(12, 83, .43)}) {
+        const auto different = build(load(source, folder + "/different-wave.step"));
+        require(std::none_of(different->sections.begin(), different->sections.end(),
+                             [](const auto &s) { return s.repeatCount; }),
+                "Unequal waves or end flanges were silently replaced by a typical wave");
+    }
+    const auto notched =
+        BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(2, 0, -1), 3, 3, 85).Shape()).Shape();
+    const auto different = build(load(notched, folder + "/notched-wave.step"));
+    require(std::none_of(different->sections.begin(), different->sections.end(),
+                         [](const auto &s) { return s.repeatCount; }),
+            "A nonperiodic true section inherited the wave abbreviation");
+}
 void perforatedAngleDrawing(const QString &folder) {
     // Own geometry: long angle, a fractional regular row and separate end fasteners.
     const auto shape = [](bool irregular) {
@@ -1738,6 +1783,7 @@ int main(int argc, char **argv) {
         geometry(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
+        repeatedWaveDrawing(temp.path());
         perforatedAngleDrawing(temp.path());
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";

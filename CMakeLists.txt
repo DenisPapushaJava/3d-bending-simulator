@@ -31,6 +31,7 @@ add_subdirectory(src/simulation)
 add_subdirectory(src/application)
 
 if(BENDING_BUILD_CAD)
+    include(cmake/ExampleParts.cmake)
     add_subdirectory(src/cad)
 endif()
 if(BENDING_BUILD_APP)

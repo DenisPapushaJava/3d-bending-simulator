@@ -140,6 +140,9 @@ struct DrawingSection {
     PointMm normal{0, 0, 1};
     std::string designation;
     std::vector<DrawingSectionLocation> locations;
+    // A verified translated unit of this true section, not a claim of whole-body periodicity.
+    std::size_t repeatCount = 0;
+    bool rotated = false;
 };
 struct DrawingAuxiliaryView {
     DrawingView view;
@@ -165,6 +168,8 @@ struct DrawingRequest {
 struct DrawingFlatPattern {
     DrawingView view; // True flat contour, without HLR of the folded source.
     FlatPatternInfo info;
+    // Groups of actual bend IDs sharing one phase of verified periodic line coordinates.
+    std::vector<std::vector<std::size_t>> repeatedBendGroups;
 };
 struct BendingDrawing {
     std::array<DrawingView, 4> views; // Front, top, left: first-angle projection; isometric.
