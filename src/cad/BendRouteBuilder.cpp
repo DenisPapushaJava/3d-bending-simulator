@@ -763,7 +763,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         const auto &analysis = OcctDocumentAccess::simulationBends(*native);
         const auto n = analysis.bends.size();
         if (request.onProgress)
-            request.onProgress({BendRoutePhase::Preparing});
+            request.onProgress({BendRoutePhase::Preparing, 0, 0, 0, std::nullopt});
         if ((request.allowPartialEndSupport && !request.withTools) ||
             (request.maximumEndSupportLossMm &&
              (!request.allowPartialEndSupport ||
@@ -1005,7 +1005,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         }
         bool found = false;
         if (search.request.onProgress)
-            search.request.onProgress({BendRoutePhase::ToolCandidate});
+            search.request.onProgress({BendRoutePhase::ToolCandidate, 0, 0, 0, std::nullopt});
         try {
             found = search.search((Mask{1} << n) - 1);
         } catch (BendRouteError &e) {

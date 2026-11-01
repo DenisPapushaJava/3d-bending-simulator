@@ -46,7 +46,7 @@ void CollisionPresentation::Compute(const Handle(PrsMgr_PresentationManager) & m
     aspect->SetInteriorColor(Quantity_Color(Quantity_NOC_WHITE));
     aspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
     aspect->SetAlphaMode(Graphic3d_AlphaMode_Blend);
-    aspect->SetSuppressBackFaces(false);
+    aspect->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_DoubleSided);
     // Keep depth testing against other objects; offset just avoids surface z-fighting.
     aspect->SetPolygonOffsets(Aspect_POM_Fill, -1.f, -1.f);
     auto group = presentation->NewGroup();

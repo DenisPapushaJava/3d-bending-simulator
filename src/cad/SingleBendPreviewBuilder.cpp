@@ -1098,10 +1098,10 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
         const auto innerLabels =
             matchSheetSides(faces(static_cast<int>(bend.innerFace)), nativeShape, orientation);
         const auto innerSide = innerLabels.size() == 2 ? innerLabels[1] : SheetSide::Neutral;
-        const auto referenceFlange =
-            orientation.available
-                ? sheetReferenceRegion(orientation.reference, flanges, analysis.lengthToleranceMm)
-                : std::nullopt;
+        std::optional<std::size_t> referenceFlange;
+        if (orientation.available)
+            referenceFlange =
+                sheetReferenceRegion(orientation.reference, flanges, analysis.lengthToleranceMm);
         const auto displaySides = displaySource.IsNull() ? std::vector<SheetSide>{}
                                   : !OcctDocumentAccess::routeSkin(*native).IsNull()
                                       ? OcctDocumentAccess::routeSkinSides(*native)

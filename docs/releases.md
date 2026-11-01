@@ -47,7 +47,7 @@ git push origin v2026.1.0-alpha.1
 
 ### Проверка черновика перед публикацией
 
-- Скачать оба ZIP и `SHA256SUMS.txt`, сверить SHA-256 и целостность архивов. В Windows ZIP проверить EXE x64, три Qt DLL, OCCT DLL, `platforms/qwindows.dll`, ресурсы OCCT, учебные STEP, VERSION и лицензии, включая OFL шрифта в `share/doc/BendingSimulator/licenses/fonts`.
+- Скачать оба ZIP и `SHA256SUMS.txt`, сверить SHA-256 и целостность архивов. В Windows ZIP проверить EXE x64, Qt Core/Gui/Widgets/Network DLL, OCCT/FreeType DLL, `platforms/qwindows.dll`, `tls/qschannelbackend.dll`, ресурсы OCCT, учебные STEP, VERSION и лицензии, включая OFL шрифта в `share/doc/BendingSimulator/licenses/fonts`. Начиная с alpha.2 пути bin/share находятся внутри `runtime/<VERSION>`.
 - Проверить соответствующие источники: Qt base 6.8.3, OCCT 7.9.3 и FreeType 2.14.3 с патчами зафиксированных портов, рецепт vcpkg, triplet и уведомления. Пользовательские STEP, чертежи инструмента и локальные каталоги в архив не добавлять.
 - Проверить в логе тега оба запуска из упакованного каталога с очищенным PATH: окно и импорт учебного STEP. Это проверка загрузки комплекта offscreen, не интерактивного OpenGL.
 - Проверить отдельный font-probe из того же каталога: растеризация латиницы/кириллицы/знака градуса в обычном и жирном sans-serif без GPU. Временный EXE проверки удаляется перед архивацией; FreeType DLL и её уведомления остаются в поставке.

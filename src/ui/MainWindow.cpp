@@ -680,7 +680,9 @@ class MainWindow::Impl {
         const auto row = bendList->currentIndex().row();
         if (perBend && row < 0)
             return;
-        const auto target = perBend ? std::optional{static_cast<std::size_t>(row)} : std::nullopt;
+        std::optional<std::size_t> target;
+        if (perBend)
+            target = static_cast<std::size_t>(row);
         if (!checkedToolVariants.empty() && checkedToolDocument == session.revision() &&
             checkedToolEdit == session.editRevision() &&
             checkedToolVariants.front().bendIndex == target) {
@@ -689,8 +691,7 @@ class MainWindow::Impl {
         }
         std::vector<application::RouteToolVariant> variants;
         for (auto &a : toolSelection->checkedCandidates())
-            variants.push_back({std::move(a), perBend ? std::optional{static_cast<std::size_t>(row)}
-                                                      : std::nullopt});
+            variants.push_back({std::move(a), target});
         if (variants.empty()) {
             toolSelection->setCheckedSearchState(
                 false, QStringLiteral("Нет подходящих DXF-профилей. Доступен ручной выбор."));
@@ -1459,7 +1460,7 @@ class MainWindow::Impl {
         const auto index = selectedOperationIndex();
         const auto punchIndex = selectedPunchIndex();
         const auto *selected = punchIndex ? session.bend(*punchIndex) : nullptr;
-        const auto selectedTools = selected ? selected->tools : std::nullopt;
+        const auto *selectedTools = selected && selected->tools ? &*selected->tools : nullptr;
         if (reversePunchButton) {
             const QSignalBlocker block(reversePunchButton);
             reversePunchButton->setEnabled(punchIndex && selected && included(selected->review) &&
