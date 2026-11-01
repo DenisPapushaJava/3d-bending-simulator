@@ -98,7 +98,7 @@ repeatedDrawingSection(const TopoDS_Shape &flat, const DrawingView &actual,
             std::abs(bends[i].thicknessMm - first.thicknessMm) > tolerance ||
             std::abs(bends[i].lengthMm - first.lengthMm) > tolerance)
             return {}; // Common R/t/L remain explicit in the sheet header.
-    const auto near = [&](DrawingPoint a, DrawingPoint b) {
+    const auto samePoint = [&](DrawingPoint a, DrawingPoint b) {
         return std::hypot(a.x - b.x, a.y - b.y) <= tolerance;
     };
     for (std::size_t period = 2; period <= n / 2; ++period) {
@@ -119,8 +119,10 @@ repeatedDrawingSection(const TopoDS_Shape &flat, const DrawingView &actual,
             };
             const auto &a = profile.view.angles[phase], &b = profile.view.angles[i];
             same = profile.turnSigns[i] == profile.turnSigns[phase] &&
-                   std::abs(a.radians - b.radians) < 1e-7 && near(translated(a.vertex), b.vertex) &&
-                   near(translated(a.first), b.first) && near(translated(a.second), b.second);
+                   std::abs(a.radians - b.radians) < 1e-7 &&
+                   samePoint(translated(a.vertex), b.vertex) &&
+                   samePoint(translated(a.first), b.first) &&
+                   samePoint(translated(a.second), b.second);
         }
         for (std::size_t i = 1; i < n && same; ++i) {
             const auto reference = i % period ? i % period : period;

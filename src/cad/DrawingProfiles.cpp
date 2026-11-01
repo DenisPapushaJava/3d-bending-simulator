@@ -365,7 +365,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
         BRepAdaptor_Surface surface(faceAt(faces, bend.innerFace));
         double u0, u1, v0, v1;
         BRepTools::UVBounds(faceAt(faces, bend.innerFace), u0, u1, v0, v1);
-        const auto near = [tolerance](DrawingPoint a, DrawingPoint b) {
+        const auto samePoint = [tolerance](DrawingPoint a, DrawingPoint b) {
             return std::hypot(a.x - b.x, a.y - b.y) <= tolerance * 20;
         };
         DrawingPoint anchor;
@@ -379,12 +379,13 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
                 arc.points.push_back(project(point, frame));
             }
             const auto matches = [&](DrawingPoint a, DrawingPoint b) {
-                return std::any_of(
-                           contourEnds[k].begin(), contourEnds[k].end(),
-                           [&](const auto &ends) { return near(a, project(ends[1], frame)); }) &&
+                return std::any_of(contourEnds[k].begin(), contourEnds[k].end(),
+                                   [&](const auto &ends) {
+                                       return samePoint(a, project(ends[1], frame));
+                                   }) &&
                        std::any_of(
                            contourEnds[k + 1].begin(), contourEnds[k + 1].end(),
-                           [&](const auto &ends) { return near(b, project(ends[0], frame)); });
+                           [&](const auto &ends) { return samePoint(b, project(ends[0], frame)); });
             };
             if (!(matches(arc.points.front(), arc.points.back()) ||
                   matches(arc.points.back(), arc.points.front())))
