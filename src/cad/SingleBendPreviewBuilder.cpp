@@ -657,8 +657,8 @@ makeRouteDraftTools(const core::PressTools &tools,
                     const std::optional<core::ToolAssignment> &assignment, std::stop_token stop,
                     std::array<std::vector<ToolDisplaySegment>, 2> &segments) {
     std::array<TopoDS_Shape, 2> result;
-    const bool drawn = assignment && assignment->useDrawingGeometry;
-    const auto g = drawn ? core::drawingToolGeometry(*assignment) : std::nullopt;
+    const bool useDrawing = assignment && assignment->useDrawingGeometry;
+    const auto g = useDrawing ? core::drawingToolGeometry(*assignment) : std::nullopt;
     result = makeTools({tools, 0, 0, 0, 0, 0}, 0, {!g || !g->hasDie, !g || !g->hasPunch});
     if (assignment && assignment->useDrawingGeometry) {
         const auto geometry = core::drawingToolGeometry(*assignment);
@@ -1061,10 +1061,10 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
         std::array<TopoDS_Shape, 2> initialTools;
         std::array<std::vector<ToolDisplaySegment>, 2> initialSegments;
         if (preview->setup) {
-            const bool drawn = realTools && realTools->useDrawingGeometry;
-            initialTools =
-                makeTools(*preview->setup, model.thicknessMm,
-                          {!drawn || !toolGeometry->hasDie, !drawn || !toolGeometry->hasPunch});
+            const bool useDrawing = realTools && realTools->useDrawingGeometry;
+            initialTools = makeTools(
+                *preview->setup, model.thicknessMm,
+                {!useDrawing || !toolGeometry->hasDie, !useDrawing || !toolGeometry->hasPunch});
             if (realTools && realTools->useDrawingGeometry) {
                 const auto drawn = makeDrawingTools(
                     *realTools, *toolGeometry, model.thicknessMm + toolParameters->clearanceMm);
