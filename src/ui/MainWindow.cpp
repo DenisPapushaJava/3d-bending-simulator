@@ -775,7 +775,7 @@ class MainWindow::Impl {
                              core::hasCompleteDrawingToolGeometry(*assignment);
         if (!toolDraftChanged && current && current->tools && !upgrade)
             return true;
-        std::vector<application::BendToolUpdate> updates;
+        std::vector<application::BendToolUpdate> toolUpdates;
         for (const auto index : session.orderedBends()) {
             const auto *entry = session.bend(index);
             if (!entry || !included(entry->review) ||
@@ -819,13 +819,13 @@ class MainWindow::Impl {
             const auto parameters = actual ? core::toolParameters(*actual) : tools;
             if (!parameters)
                 return false;
-            updates.push_back({index, parameters, std::move(actual)});
+            toolUpdates.push_back({index, parameters, std::move(actual)});
         }
-        if (updates.empty())
+        if (toolUpdates.empty())
             return false;
         const bool wasDirty = toolDraftChanged;
         toolDraftChanged = false;
-        if (!controller->setBendToolAssignments(updates)) {
+        if (!controller->setBendToolAssignments(toolUpdates)) {
             toolDraftChanged = wasDirty;
             return false;
         }
@@ -984,13 +984,13 @@ class MainWindow::Impl {
         QString status;
         if (controller->isPreparingFlatPattern())
             status = QStringLiteral("Раскладываем стенки и проверяем полный контур…");
-        else if (const auto error = controller->flatPatternError()) {
-            status = error->code == FlatPatternErrorCode::ThicknessConflict
+        else if (const auto flatError = controller->flatPatternError()) {
+            status = flatError->code == FlatPatternErrorCode::ThicknessConflict
                          ? QStringLiteral("Толщина отличается от CAD.")
-                     : error->code == FlatPatternErrorCode::MissingMaterial
+                     : flatError->code == FlatPatternErrorCode::MissingMaterial
                          ? QStringLiteral("Выберите материал или свой K.")
                          : QStringLiteral("Развёртка этой формы пока не поддерживается.");
-            flatStatus->setToolTip(text(error->detail));
+            flatStatus->setToolTip(text(flatError->detail));
         } else if (flat) {
             const auto &info = flat->info();
             status = QStringLiteral(
@@ -1280,11 +1280,12 @@ class MainWindow::Impl {
         else if (!previewDisplayError.isEmpty())
             result = QStringLiteral("Не удалось показать положение.\n%1").arg(previewDisplayError);
         else if (viewingDraft && controller->routeDraftError()) {
-            const auto error = *controller->routeDraftError();
-            result = error.operationError == BendPreviewErrorCode::NarrowDieOpening
-                         ? QStringLiteral("Раскрытие V слишком мало для толщины детали. "
-                                          "Выберите другую матрицу; ориентир — около 8t.")
-                         : QStringLiteral("Положение не проверено.\n%1").arg(text(error.detail));
+            const auto draftError = *controller->routeDraftError();
+            result =
+                draftError.operationError == BendPreviewErrorCode::NarrowDieOpening
+                    ? QStringLiteral("Раскрытие V слишком мало для толщины детали. "
+                                     "Выберите другую матрицу; ориентир — около 8t.")
+                    : QStringLiteral("Положение не проверено.\n%1").arg(text(draftError.detail));
         } else if (machineCollision && machineCollision->secondId == "floor")
             result = QStringLiteral("Упор в пол.\nИзмените порядок или установку детали.");
         else if (machineCollision)
@@ -1397,10 +1398,11 @@ class MainWindow::Impl {
             else if (!lengths && (!stageSetupIssue.isEmpty() || !previewDisplayError.isEmpty() ||
                                   controller->routeDraftError() || controller->bendRouteError() ||
                                   controller->bendPreviewError())) {
-                const auto error = controller->bendRouteError();
+                const auto routeError = controller->bendRouteError();
                 const bool limited =
-                    error && (error->code == application::BendRouteErrorCode::SearchLimit ||
-                              error->code == application::BendRouteErrorCode::NoRoute);
+                    routeError &&
+                    (routeError->code == application::BendRouteErrorCode::SearchLimit ||
+                     routeError->code == application::BendRouteErrorCode::NoRoute);
                 messages.push_back(
                     {BendMessageKind::CheckIssue,
                      limited ? BendMessageSeverity::Warning : BendMessageSeverity::Error,
@@ -1411,7 +1413,7 @@ class MainWindow::Impl {
             if (lengths) {
                 const bool punchShort = lengths->punchLengthMm < lengths->bendLengthMm;
                 const bool dieShort = lengths->dieLengthMm < lengths->bendLengthMm;
-                const auto title =
+                const auto lengthTitle =
                     punchShort && dieShort ? QStringLiteral("Короткий пуансон и матрица")
                     : punchShort ? QStringLiteral("Пуансон короче на %1 мм")
                                        .arg(number(lengths->bendLengthMm - lengths->punchLengthMm))
@@ -1419,7 +1421,7 @@ class MainWindow::Impl {
                                        .arg(number(lengths->bendLengthMm - lengths->dieLengthMm));
                 messages.push_back(
                     {BendMessageKind::ToolLength,
-                     draft ? BendMessageSeverity::Warning : BendMessageSeverity::Error, title,
+                     draft ? BendMessageSeverity::Warning : BendMessageSeverity::Error, lengthTitle,
                      ToolSelectionWidget::lengthIssue(*lengths) +
                          (lengthPlaybackNotice.isEmpty()
                               ? QString{}
@@ -1846,8 +1848,9 @@ class MainWindow::Impl {
                 toolSelection->rememberChoice();
                 status = QStringLiteral("Проверенный порядок · %1 гибов").arg(route->steps.size());
             } else {
-                const auto error = controller->bendRouteError();
-                resumable = error && error->code == application::BendRouteErrorCode::SearchLimit;
+                const auto routeError = controller->bendRouteError();
+                resumable =
+                    routeError && routeError->code == application::BendRouteErrorCode::SearchLimit;
                 if (!resumable)
                     checkedToolVariants.clear();
                 status =
@@ -1860,15 +1863,15 @@ class MainWindow::Impl {
             }
             toolSelection->setCheckedSearchState(false, status, resumable);
         } else if (checkedToolJob) {
-            if (const auto progress = controller->bendRouteProgress()) {
+            if (const auto routeProgress = controller->bendRouteProgress()) {
                 QString tool;
-                if (progress->variant < checkedToolVariants.size()) {
-                    const auto &a = checkedToolVariants[progress->variant].assignment;
+                if (routeProgress->variant < checkedToolVariants.size()) {
+                    const auto &a = checkedToolVariants[routeProgress->variant].assignment;
                     tool = QString::fromStdString(a.punch.code + " / " + a.die.code);
                     if (a.groove < a.die.openingsMm.size())
                         tool += QStringLiteral(" · V %1 мм").arg(a.die.openingsMm[a.groove]);
                 }
-                checkedToolDialog->progress(*progress, tool);
+                checkedToolDialog->progress(*routeProgress, tool);
             }
         }
         assignBendTool->setEnabled(toolEditable && supported && matchingThickness &&
@@ -2645,9 +2648,9 @@ class MainWindow::Impl {
                                 "доступ к папке программы."));
             return;
         }
-        const auto error = updateInstaller(reopen);
-        if (!error.isEmpty()) {
-            stop(error);
+        const auto installError = updateInstaller(reopen);
+        if (!installError.isEmpty()) {
+            stop(installError);
             return;
         }
         updatePending = false;
