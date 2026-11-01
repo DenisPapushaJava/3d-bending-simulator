@@ -329,15 +329,15 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
             source.value(QStringLiteral("sha256")).toString().toLatin1()) {
         return invalid("Embedded STEP data is invalid or its SHA-256 does not match");
     }
-    const auto value = root.value(QStringLiteral("parameters"))
-                           .toObject()
-                           .value(QStringLiteral("manualThicknessMm"));
-    if (!value.isNull() && !value.isDouble()) {
+    const auto thicknessValue = root.value(QStringLiteral("parameters"))
+                                    .toObject()
+                                    .value(QStringLiteral("manualThicknessMm"));
+    if (!thicknessValue.isNull() && !thicknessValue.isDouble()) {
         return invalid("Missing or invalid manual thickness");
     }
     std::optional<double> manual;
-    if (value.isDouble()) {
-        manual = value.toDouble();
+    if (thicknessValue.isDouble()) {
+        manual = thicknessValue.toDouble();
     }
     if (manual && rejected(*manual, {})) {
         return invalid("Thickness is outside the supported range");

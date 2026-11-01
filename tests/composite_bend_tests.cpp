@@ -45,8 +45,9 @@ double volume(const TopoDS_Shape &s) {
 // Independently specified helicoidal ends: z=2*(1-4*u/pi) on the first half,
 // then z=0. Both radial boundaries use the same axial outline; no private CAD.
 TopoDS_Shape fixture() {
-    constexpr double a = std::numbers::pi / 2;
-    const std::array<gp_Pnt2d, 6> uv{{{0, 2}, {a / 2, 0}, {a, 0}, {a, 80}, {a / 2, 80}, {0, 78}}};
+    constexpr double angle = std::numbers::pi / 2;
+    const std::array<gp_Pnt2d, 6> uv{
+        {{0, 2}, {angle / 2, 0}, {angle, 0}, {angle, 80}, {angle / 2, 80}, {0, 78}}};
     std::array<std::array<TopoDS_Edge, 6>, 2> edges;
     BRepBuilderAPI_Sewing sew(1e-6);
     for (int side = 0; side < 2; ++side) {
@@ -122,11 +123,11 @@ void check(const application::DocumentPtr &doc) {
     const double expected = 2 * (80 * (60 + allowance) - 120 - allowance);
     require(std::abs(doc->metadata().volumeMm3 - expected) < .002,
             "Fixture disagrees with independent developed area");
-    const auto result =
+    const auto flatResult =
         cad::FlatPatternBuilder{}.build(doc, {{core::SheetMaterial::MildSteel, .5, 1}, {}}, {});
-    if (const auto *e = std::get_if<application::FlatPatternError>(&result))
+    if (const auto *e = std::get_if<application::FlatPatternError>(&flatResult))
         throw std::runtime_error(e->detail);
-    const auto flat = std::get<application::FlatPatternPtr>(result);
+    const auto flat = std::get<application::FlatPatternPtr>(flatResult);
     require(std::abs(volume(cad::OcctFlatPatternAccess::geometry(*flat)) - expected) < .002,
             "Flattening filled or lost a cut end");
     const auto &bend = bends[0];

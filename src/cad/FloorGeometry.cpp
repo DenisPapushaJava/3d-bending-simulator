@@ -26,7 +26,7 @@ FloorPlane makeFloorPlane(double y, double z) {
     auto face = BRepBuilderAPI_MakeFace(plane, -halfSize, halfSize, -halfSize, halfSize).Face();
     Handle(Poly_Triangulation) mesh =
         new Poly_Triangulation(count * count, 2 * (count - 1) * (count - 1), false, true);
-    const auto index = [](int x, int z) { return 1 + x + count * z; };
+    const auto index = [](int x, int row) { return 1 + x + count * row; };
     for (int j = 0; j < count; ++j)
         for (int i = 0; i < count; ++i) {
             mesh->SetNode(index(i, j),

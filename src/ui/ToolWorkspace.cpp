@@ -115,9 +115,9 @@ void ToolWorkspace::refresh() {
                 auto label = QStringLiteral("V %1").arg(number(die->openingsMm[index]));
                 if (std::count(die->openingsMm.begin(), die->openingsMm.end(),
                                die->openingsMm[index]) > 1) {
-                    if (const auto groove = core::dieGroove(*die, index))
+                    if (const auto workingGroove = core::dieGroove(*die, index))
                         label += QStringLiteral(" · %1°").arg(
-                            number(groove->angleRadians * 180 / std::numbers::pi));
+                            number(workingGroove->angleRadians * 180 / std::numbers::pi));
                     label += QStringLiteral(" · #%1").arg(index + 1);
                 }
                 button->setText(label);

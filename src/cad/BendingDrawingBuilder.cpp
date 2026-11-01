@@ -1113,12 +1113,12 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     const auto direction = classicalFrames[i].Direction();
                     const double dx = direction.Dot(classicalFrames[0].XDirection());
                     const double dy = direction.Dot(classicalFrames[0].YDirection());
-                    const DrawingPoint anchor{(main.minimum.x + main.maximum.x) / 2 -
-                                                  dx * (main.maximum.x - main.minimum.x) / 2,
-                                              (main.minimum.y + main.maximum.y) / 2 -
-                                                  dy * (main.maximum.y - main.minimum.y) / 2};
+                    const DrawingPoint viewAnchor{(main.minimum.x + main.maximum.x) / 2 -
+                                                      dx * (main.maximum.x - main.minimum.x) / 2,
+                                                  (main.minimum.y + main.maximum.y) / 2 -
+                                                      dy * (main.maximum.y - main.minimum.y) / 2};
                     (*drawing->classicalViews)[0].viewArrows.push_back(
-                        {anchor, {dx, dy}, drawing->auxiliaryViews.back().designation});
+                        {viewAnchor, {dx, dy}, drawing->auxiliaryViews.back().designation});
                 }
             }
         }
@@ -1489,10 +1489,10 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     for (auto adjacent : {segment.previousBend, segment.nextBend}) {
                         if (!adjacent)
                             continue;
-                        const auto &source = bendAnalysis.bends[*adjacent];
+                        const auto &adjacentBend = bendAnalysis.bends[*adjacent];
                         for (std::size_t sideIndex = 0; sideIndex < 2; ++sideIndex) {
-                            std::array pair{source.flangeFaces[sideIndex * 2],
-                                            source.flangeFaces[sideIndex * 2 + 1]};
+                            std::array pair{adjacentBend.flangeFaces[sideIndex * 2],
+                                            adjacentBend.flangeFaces[sideIndex * 2 + 1]};
                             std::sort(pair.begin(), pair.end());
                             if (pair == segment.wallFaces)
                                 drawing->bends[*adjacent].outerFlangeMm[sideIndex] =

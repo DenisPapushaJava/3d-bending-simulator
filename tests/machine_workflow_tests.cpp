@@ -84,8 +84,9 @@ int main(int argc, char **argv) {
                 "Legacy conditional choice enabled a new tool check or changed the machine");
         checkbox->setChecked(true);
         auto tang = tool_fixture::tangPair();
-        if (const auto path = qEnvironmentVariable("BENDING_PUNCH_CATALOG"); !path.isEmpty()) {
-            const auto loaded = project::readToolCatalog(path.toStdString());
+        if (const auto catalogPath = qEnvironmentVariable("BENDING_PUNCH_CATALOG");
+            !catalogPath.isEmpty()) {
+            const auto loaded = project::readToolCatalog(catalogPath.toStdString());
             require(std::holds_alternative<core::ToolCatalog>(loaded), "Private catalogue failed");
             const auto &catalogue = std::get<core::ToolCatalog>(loaded);
             const auto code = qEnvironmentVariable("BENDING_PUNCH_CODE");

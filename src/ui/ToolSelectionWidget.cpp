@@ -315,8 +315,8 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     });
     connect(groove_, &QComboBox::currentIndexChanged, this,
             [selected] { selected(core::ToolKind::Die); });
-    for (auto *combo : {punch_, die_, groove_})
-        connect(combo, &QComboBox::activated, this, [this] {
+    for (auto *selector : {punch_, die_, groove_})
+        connect(selector, &QComboBox::activated, this, [this] {
             if (!updating_ && chooseDrawingGeometry())
                 changed();
         });

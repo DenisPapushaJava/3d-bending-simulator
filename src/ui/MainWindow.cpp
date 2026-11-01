@@ -1019,12 +1019,13 @@ class MainWindow::Impl {
             if (checkFlatStatus)
                 checkFlatStatus->setToolTip(details);
             if (wantFlat && displayedFlat != flat) {
-                const auto error = viewer->presentFlatPattern(flat, s.revision());
-                if (error.isEmpty()) {
+                const auto displayError = viewer->presentFlatPattern(flat, s.revision());
+                if (displayError.isEmpty()) {
                     displayedFlat = flat;
                     viewer->setDimensionsVisible(true);
                 } else
-                    status = QStringLiteral("Развёртка рассчитана; ошибка показа: %1").arg(error);
+                    status =
+                        QStringLiteral("Развёртка рассчитана; ошибка показа: %1").arg(displayError);
             }
         } else
             status.clear();

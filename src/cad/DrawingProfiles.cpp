@@ -194,16 +194,16 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
     for (auto index : members)
         for (std::size_t side = 0; side < 2; ++side)
             graph[wallOf(bends[index], side)].push_back(index);
-    std::vector<Wall> ends;
+    std::vector<Wall> endWalls;
     for (const auto &[wall, neighbors] : graph) {
         if (neighbors.size() > 2)
             throw Unmeasured{};
         if (neighbors.size() == 1)
-            ends.push_back(wall);
+            endWalls.push_back(wall);
     }
-    if (ends.size() != 2)
+    if (endWalls.size() != 2)
         throw Unmeasured{}; // Closed/branched graphs need their own representation.
-    std::vector<Wall> walls{ends.front()};
+    std::vector<Wall> walls{endWalls.front()};
     std::vector<std::size_t> ordered;
     while (ordered.size() < members.size()) {
         const auto &neighbors = graph.at(walls.back());
@@ -217,7 +217,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
         ordered.push_back(*next);
         walls.push_back(wallOf(bend, 1 - side));
     }
-    if (walls.back() != ends.back())
+    if (walls.back() != endWalls.back())
         throw Unmeasured{};
     auto axis = axisOf(bends[ordered.front()]);
     for (auto direction : {reference.Direction(), reference.YDirection(), reference.XDirection()})

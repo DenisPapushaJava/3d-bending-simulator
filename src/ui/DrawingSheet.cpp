@@ -650,7 +650,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     }
     if (classical) {
         std::vector<double> diameters;
-        for (const auto &[center, diameter] : v.holeDiameters) {
+        for (const auto &[holeCenter, diameter] : v.holeDiameters) {
             if (std::any_of(diameters.begin(), diameters.end(),
                             [&](auto d) { return std::abs(d - diameter) < 1e-5; }))
                 continue;
@@ -660,8 +660,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                               [&](const auto &d) { return std::abs(d.second - diameter) < 1e-5; });
             const auto value = (count > 1 ? QStringLiteral("%1×").arg(count) : QString{}) +
                                QChar(0x2300) + number(diameter);
-            leaderNote(p, map({center.x, center.y + diameter / 2}), bounds, value, annotationArea,
-                       occupied, true);
+            leaderNote(p, map({holeCenter.x, holeCenter.y + diameter / 2}), bounds, value,
+                       annotationArea, occupied, true);
         }
     }
     for (const auto &marker : v.viewArrows) {

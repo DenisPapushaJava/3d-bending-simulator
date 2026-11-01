@@ -629,7 +629,6 @@ int main(int argc, char **argv) {
             if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
                 !output.isEmpty()) {
                 auto shot = window.grab().toImage();
-                auto *viewer = window.findChild<viewer::ViewerWidget *>();
                 QPainter p(&shot);
                 p.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
                 p.end();
@@ -817,7 +816,6 @@ x.XCloseDisplay(d)
         }
         if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
             auto shot = window.grab().toImage();
-            auto *viewer = window.findChild<viewer::ViewerWidget *>();
             if (viewer && viewer->isReady()) {
                 QPainter p(&shot);
                 p.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
@@ -890,8 +888,7 @@ x.XCloseDisplay(d)
                     ->text()
                     .contains(QStringLiteral("Столкновение"), Qt::CaseInsensitive),
                 "A colliding frame is presented as clear");
-        if (auto *viewer = window.findChild<viewer::ViewerWidget *>();
-            viewer && viewer->isReady()) {
+        if (viewer && viewer->isReady()) {
             auto *legend = viewer->findChild<QWidget *>("sheetSideLegend");
             require(viewer->sheetOrientationAction()->isChecked() && legend &&
                         legend->isVisible() &&
@@ -931,7 +928,6 @@ x.XCloseDisplay(d)
         }
         if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
             auto shot = window.grab().toImage();
-            auto *viewer = window.findChild<viewer::ViewerWidget *>();
             if (viewer && viewer->isReady()) {
                 QPainter p(&shot);
                 p.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));

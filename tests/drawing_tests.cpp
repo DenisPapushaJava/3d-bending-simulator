@@ -1372,13 +1372,13 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
             for (bool hidden : {true, false}) {
                 painter.setPen(QPen(hidden ? Qt::lightGray : Qt::black, hidden ? .7 : 1.2,
                                     hidden ? Qt::DashLine : Qt::SolidLine));
-                for (const auto &path : iso.paths) {
-                    if (path.hidden != hidden || path.points.empty())
+                for (const auto &contour : iso.paths) {
+                    if (contour.hidden != hidden || contour.points.empty())
                         continue;
                     QPainterPath outline;
-                    outline.moveTo(map(path.points.front()));
-                    for (std::size_t i = 1; i < path.points.size(); ++i)
-                        outline.lineTo(map(path.points[i]));
+                    outline.moveTo(map(contour.points.front()));
+                    for (std::size_t i = 1; i < contour.points.size(); ++i)
+                        outline.lineTo(map(contour.points[i]));
                     painter.drawPath(outline);
                 }
             }
@@ -1387,16 +1387,17 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
         }
         if (m.bendAnalysis.bends.size() == 1 && m.bendAnalysis.interiorContourDiagnostics.empty()) {
             const auto &b = m.bendAnalysis.bends.front();
-            const auto result = cad::SingleBendPreviewBuilder{}.build(
+            const auto previewResult = cad::SingleBendPreviewBuilder{}.build(
                 doc, 0, {b.angleRadians, b.innerRadiusMm}, false, {});
-            if (const auto *error = std::get_if<application::BendPreviewError>(&result)) {
+            if (const auto *error = std::get_if<application::BendPreviewError>(&previewResult)) {
                 report.insert("kinematicOk", false);
                 report.insert("kinematicError", QString::fromStdString(error->detail));
             } else {
                 report.insert("kinematicOk", true);
                 report.insert(
                     "kinematicFrames",
-                    static_cast<int>(std::get<application::BendPreviewPtr>(result)->frameCount()));
+                    static_cast<int>(
+                        std::get<application::BendPreviewPtr>(previewResult)->frameCount()));
             }
         }
     }
@@ -1692,7 +1693,6 @@ void workflow(const QString &folder) {
     require(closedDialog.isNull(), "Closed drawing window retained its widgets");
     require(inspected && pdf, "Dialog/quantity/PDF workflow failed");
     {
-        const auto output = qEnvironmentVariable("BENDING_DRAWING_OUTPUT");
         QFile file(output.isEmpty() ? folder + "/ui.pdf" : output);
         require(file.open(QIODevice::ReadOnly), "Cannot reopen exported PDF");
         const auto bytes = file.readAll();

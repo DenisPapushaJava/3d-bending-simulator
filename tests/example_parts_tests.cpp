@@ -31,10 +31,10 @@ std::filesystem::path native(const QString &s) {
 #endif
 }
 core::ToolPreset preset(const core::ToolCatalog &tools, const char *name) {
-    const auto t =
-        std::find_if(tools.begin(), tools.end(), [&](const auto &t) { return t.code == name; });
-    require(t != tools.end(), "Missing starter tool");
-    auto copy = *t;
+    const auto found = std::find_if(tools.begin(), tools.end(),
+                                    [&](const auto &tool) { return tool.code == name; });
+    require(found != tools.end(), "Missing starter tool");
+    auto copy = *found;
     copy.segments.reset();
     return copy;
 }
