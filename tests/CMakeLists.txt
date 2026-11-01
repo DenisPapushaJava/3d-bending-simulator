@@ -1,3 +1,13 @@
+if(BENDING_BUILD_APP)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_executable(portable_child_fixture portable_child_fixture.cpp)
+    target_link_libraries(portable_child_fixture PRIVATE bending_options)
+    add_test(NAME update.bootstrap COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/portable_launcher_tests.py"
+        $<TARGET_FILE:bending_portable_launcher> $<TARGET_FILE:portable_child_fixture>)
+    set_tests_properties(update.bootstrap PROPERTIES TIMEOUT 40 LABELS "integration")
+endif()
+
 add_executable(tool_catalog_tests tool_catalog_tests.cpp)
 target_link_libraries(tool_catalog_tests PRIVATE Bending::Core bending_options)
 add_test(NAME core.tool-catalog COMMAND tool_catalog_tests)
@@ -251,7 +261,6 @@ if(BENDING_BUILD_APP)
     target_link_libraries(dxf_block_tests PRIVATE Bending::Project Qt6::Core bending_options)
     add_test(NAME project.dxf-blocks COMMAND dxf_block_tests)
     set_tests_properties(project.dxf-blocks PROPERTIES TIMEOUT 30 LABELS "integration")
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(update_package_tests update_package_tests.cpp)
     target_include_directories(update_package_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/update")
     target_link_libraries(update_package_tests PRIVATE Bending::Update bending_options)
@@ -269,12 +278,6 @@ if(BENDING_BUILD_APP)
         "${CMAKE_CURRENT_SOURCE_DIR}/update_package_tests.py" $<TARGET_FILE:update_package_tests>
         "${PROJECT_SOURCE_DIR}/src/update/data/extract-package.ps1" "${bending_ps_argument}")
     set_tests_properties(update.package PROPERTIES TIMEOUT 90 LABELS "integration")
-    add_executable(portable_child_fixture portable_child_fixture.cpp)
-    target_link_libraries(portable_child_fixture PRIVATE bending_options)
-    add_test(NAME update.bootstrap COMMAND "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/portable_launcher_tests.py"
-        $<TARGET_FILE:bending_portable_launcher> $<TARGET_FILE:portable_child_fixture>)
-    set_tests_properties(update.bootstrap PROPERTIES TIMEOUT 40 LABELS "integration")
     add_executable(update_network_tests update_network_tests.cpp)
     target_link_libraries(update_network_tests PRIVATE Bending::Update Qt6::Network bending_options)
     add_test(NAME update.network COMMAND update_network_tests)

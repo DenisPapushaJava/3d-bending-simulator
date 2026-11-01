@@ -82,12 +82,14 @@ with tempfile.TemporaryDirectory(prefix='portable update ') as temp:
     (root / 'runtime' / new / '.ready').write_text(new + '\n')
     # Early startup failure automatically restores and restarts the old version.
     (root / 'runtime' / new / 'fixture-mode').write_text('fail')
-    result = subprocess.run([str(launcher), *activate(root)], timeout=8)
-    assert result.returncode != 0 and (root / 'current.txt').read_text().strip() == old
+    # Redirect handles for a headless Windows GUI-subsystem child: otherwise its
+    # expected rollback warning is an interactive MessageBox, not console output.
+    result = subprocess.run([str(launcher), *activate(root)], capture_output=True, timeout=8)
+    assert result.returncode != 0 and (root / 'current.txt').read_text().strip() == old, (result.stdout, result.stderr)
     preserved(root)
     (root / 'runtime' / new / 'fixture-mode').write_text('delay')
     # A second updater/launcher cannot act during the transaction.
-    running = subprocess.Popen([str(launcher), *activate(root)])
+    running = subprocess.Popen([str(launcher), *activate(root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     until(lambda: (root / '.updates/pending.txt').exists())
     assert call(root, '--version').returncode != 0
     assert running.wait(timeout=8) == 0
@@ -96,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='portable update ') as temp:
     parent = subprocess.Popen([str(root / 'runtime' / old / 'bin/3d-bending-simulator.exe'), '--hold'], cwd=root)
     parameters = activate(root)
     parameters[parameters.index('--wait-pid') + 1] = str(parent.pid)
-    running = subprocess.Popen([str(launcher), *parameters])
+    running = subprocess.Popen([str(launcher), *parameters], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     time.sleep(.2)
     assert running.poll() is None and (root / 'current.txt').read_text().strip() == old
     (root / 'end-hold').write_text('done')
