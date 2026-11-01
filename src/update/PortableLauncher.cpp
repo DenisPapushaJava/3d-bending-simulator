@@ -307,7 +307,10 @@ void recover(const fs::path &root) {
     const auto journal = root / ".updates/pending.txt";
     if (!fs::exists(journal))
         return;
-    const auto text = read(journal);
+    auto text = read(journal);
+    // Accept Windows text line endings, while CR inside a field remains invalid.
+    for (auto at = text.find("\r\n"); at != text.npos; at = text.find("\r\n", at))
+        text.erase(at, 1);
     const auto first = text.find('\n'),
                second = text.find('\n', first == text.npos ? first : first + 1);
     const auto old = text.substr(0, first);

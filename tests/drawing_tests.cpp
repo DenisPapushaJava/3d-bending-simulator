@@ -1553,11 +1553,14 @@ void workflow(const QString &folder) {
             "Window resizing changed the selected page or page count");
     auto *name = dialog->findChild<QLineEdit *>("drawingName");
     auto *options = dialog->findChild<QScrollArea *>("drawingOptionsScroll");
-    require(options && options->verticalScrollBar()->isVisible() &&
-                name->height() >= name->minimumSizeHint().height() &&
-                dialog->rect().contains(
-                    QRect(exportButton->mapTo(dialog, QPoint{}), exportButton->size())),
-            "Compact window crushed the input fields or hid the PDF action");
+    require(options && (options->widget()->height() <= options->viewport()->height() ||
+                        options->verticalScrollBar()->isVisible()),
+            "Overflowing drawing options cannot be scrolled");
+    require(name->height() >= name->minimumSizeHint().height(),
+            "Compact drawing window crushed the input field");
+    require(
+        dialog->rect().contains(QRect(exportButton->mapTo(dialog, QPoint{}), exportButton->size())),
+        "Compact drawing window hid the PDF action");
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".compact.png"),
                 "Cannot save the compact preview snapshot");

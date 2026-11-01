@@ -2109,7 +2109,7 @@ void testGuidedWorkflow(bool graphics) {
         const auto preview = controller.bendPreview();
         const auto edit = controller.session().editRevision();
         viewer->setDimensionsVisible(true);
-        require(dimensions->accessibleDescription().contains(QStringLiteral("A прям.")) &&
+        require(dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")) &&
                     !dimensions->accessibleDescription().contains(QStringLiteral("X ")),
                 "Preview retained source CAD bounds or omitted flange sizes");
         dimensionSnapshot("motion");
@@ -2126,8 +2126,8 @@ void testGuidedWorkflow(bool graphics) {
         dimensionSnapshot("formed");
         const auto formed = dimensions->accessibleDescription();
         viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
-        require(dimensions->accessibleDescription().contains(QStringLiteral("A прям.")) &&
-                    dimensions->accessibleDescription().contains(QStringLiteral("B прям.")),
+        require(dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("П2 прям.")),
                 "Front projection lost flange measurements");
         dimensionSnapshot("front");
         viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);

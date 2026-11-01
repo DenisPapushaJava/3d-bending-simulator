@@ -64,9 +64,9 @@ with tempfile.TemporaryDirectory(prefix='portable update ') as temp:
     result = call(root, '--activate', '../../outside', '--from', new, '--token', token)
     assert result.returncode != 0 and (root / 'current.txt').read_text().strip() == new
     # An interrupted switch is recovered before loading any Qt/OCCT runtime.
-    (root / '.updates/pending.txt').write_text(old + '\n' + new + '\n' + token + '\n')
+    (root / '.updates/pending.txt').write_bytes((old + '\r\n' + new + '\r\n' + token + '\r\n').encode('ascii'))
     result = call(root, '--version')
-    assert result.returncode == 0 and (root / 'current.txt').read_text().strip() == old
+    assert result.returncode == 0 and (root / 'current.txt').read_text().strip() == old, (result.stdout, result.stderr)
     preserved(root)
     # A confirmed start survives a helper interruption before journal cleanup.
     (root / 'current.txt').write_text(new + '\n')

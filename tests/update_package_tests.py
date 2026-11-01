@@ -98,8 +98,14 @@ with tempfile.TemporaryDirectory(prefix='package verification ') as folder:
         assert stage(out,target).returncode==0;preserved(target)
         for index,path in enumerate(['../escape.txt','runtime/'+version+'/bin/COM1.txt','bin\\evil.dll','/absolute.txt']):
             badzip=base/f'hostile{index}.zip'
-            with zipfile.ZipFile(badzip,'w') as z:z.writestr(prefix+'/'+path,b'bad')
-            assert extract(badzip,base/f'hostile{index}').returncode !=0
+            # ZipInfo's constructor normalizes os.sep on Windows. Keep the raw
+            # hostile name instead of accidentally testing a repaired ZIP entry.
+            entry=zipfile.ZipInfo()
+            entry.filename=prefix+'/'+path
+            with zipfile.ZipFile(badzip,'w') as z:z.writestr(entry,b'bad')
+            assert (prefix+'/'+path).encode('utf-8') in badzip.read_bytes()
+            rejected=extract(badzip,base/f'hostile{index}')
+            assert rejected.returncode !=0, (path, rejected.stdout, rejected.stderr)
         for kind in ['duplicate','symlink']:
             badzip=base/(kind+'.zip')
             with zipfile.ZipFile(badzip,'w') as z:

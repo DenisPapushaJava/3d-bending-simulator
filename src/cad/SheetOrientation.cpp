@@ -1,11 +1,13 @@
 #include "SheetOrientation.h"
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
+#include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -57,6 +59,17 @@ bool sharedInterior(const TopoDS_Face &target, const TopoDS_Face &source) {
                 return true;
         }
     return false;
+}
+Bnd_Box faceBounds(const TopoDS_Shape &face) {
+    Bnd_Box box;
+    try {
+        BRepBndLib::Add(face, box, false);
+        if (!box.IsVoid())
+            box.Enlarge(1e-5);
+    } catch (const Standard_Failure &) {
+        box.SetVoid(); // Unknown bounds cannot reject a possible correspondence.
+    }
+    return box;
 }
 } // namespace
 SheetOrientationData classifySheetOrientation(const TopoDS_Shape &shape,
@@ -304,9 +317,22 @@ std::vector<SheetSide> matchSheetSides(const TopoDS_Shape &shape, const TopoDS_S
                                   SheetSide::Neutral);
     if (!data.available || data.faces.size() != static_cast<std::size_t>(originals.Extent()) + 1)
         return result;
-    for (int i = 1; i <= targets.Extent(); ++i)
+    std::vector<Bnd_Box> originalBounds(static_cast<std::size_t>(originals.Extent()) + 1);
+    for (int j = 1; j <= originals.Extent(); ++j)
+        if (data.faces[j] != SheetSide::Neutral)
+            originalBounds[j] = faceBounds(originals(j));
+    for (int i = 1; i <= targets.Extent(); ++i) {
+        const auto original = originals.FindIndex(targets(i));
+        if (original && targets(i).Orientation() == originals(original).Orientation()) {
+            result[i] = data.faces[original];
+            continue;
+        }
+        const auto targetBounds = faceBounds(targets(i));
         for (int j = 1; j <= originals.Extent(); ++j)
             if (data.faces[j] != SheetSide::Neutral) {
+                if (!targetBounds.IsVoid() && !originalBounds[j].IsVoid() &&
+                    targetBounds.IsOut(originalBounds[j]))
+                    continue;
                 bool matches = false;
                 try {
                     matches =
@@ -322,6 +348,7 @@ std::vector<SheetSide> matchSheetSides(const TopoDS_Shape &shape, const TopoDS_S
                 }
                 result[i] = data.faces[j];
             }
+    }
     return result;
 }
 std::optional<std::size_t> sheetReferenceRegion(const SheetReference &reference,
