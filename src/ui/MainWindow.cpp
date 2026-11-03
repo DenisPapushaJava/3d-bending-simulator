@@ -1436,13 +1436,13 @@ class MainWindow::Impl {
                                                    "пригодность к изготовлению не подтверждены.")});
             if (preview && preview->backgauge()) {
                 const auto &g = *preview->backgauge();
-                QString title = QStringLiteral("База упора не найдена");
+                QString gaugeTitle = QStringLiteral("База упора не найдена");
                 QString detail = QString::fromStdString(g.detail);
                 if (g.placement) {
                     const auto &p = *g.placement;
-                    title = p.kind == core::GaugeReferenceKind::StraightEdge
-                                ? QStringLiteral("Упор по прямому краю")
-                                : QStringLiteral("Упор по стенке 90°");
+                    gaugeTitle = p.kind == core::GaugeReferenceKind::StraightEdge
+                                     ? QStringLiteral("Упор по прямому краю")
+                                     : QStringLiteral("Упор по стенке 90°");
                     detail = QStringLiteral("Ступень %1 · X %2 · R %3 · Z %4 / %5 мм\n%6")
                                  .arg(p.level)
                                  .arg(number(p.xMm))
@@ -1455,7 +1455,7 @@ class MainWindow::Impl {
                                     g.status == application::BackgaugeStatus::Checked
                                         ? BendMessageSeverity::Information
                                         : BendMessageSeverity::Warning,
-                                    title, detail});
+                                    gaugeTitle, detail});
             }
             if (preview && preview->ignoresClosedCutouts())
                 messages.push_back(
