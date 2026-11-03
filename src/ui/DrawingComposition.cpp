@@ -147,7 +147,9 @@ double minimumScale(const BendingDrawing &d, DrawingViewKey key, const DrawingVi
     return std::min(reference, readable > 0 ? readable : reference * .5);
 }
 std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item, QRectF area,
-                                       DrawingFlatSide side, int page) {
+                                       DrawingFlatSide side, int page,
+                                       drawing::LayoutContext &context) {
+    context.checkpoint();
     std::vector<DrawingPlacedView> placed;
     std::string lastError;
     const bool family = item.choices.front().key.kind == DrawingViewKind::Projection;
@@ -231,8 +233,11 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
                 std::vector<QRectF> occupied;
                 try {
                     for (auto &p : placed)
-                        drawing::paintPlaced(painter, d, p, side, occupied, &p.selectionBounds);
+                        drawing::paintPlaced(painter, d, p, side, occupied, &p.selectionBounds,
+                                             &context);
                     return placed;
+                } catch (const DrawingLayoutInterrupted &) {
+                    throw;
                 } catch (const std::runtime_error &e) {
                     lastError = e.what();
                     if (fixed && allocation == 1)
@@ -258,8 +263,10 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
             QPainter painter(&scratch);
             std::vector<QRectF> occupied;
             try {
-                drawing::paintPlaced(painter, d, at, side, occupied, &at.selectionBounds);
+                drawing::paintPlaced(painter, d, at, side, occupied, &at.selectionBounds, &context);
                 return {at};
+            } catch (const DrawingLayoutInterrupted &) {
+                throw;
             } catch (const std::runtime_error &e) {
                 lastError = e.what();
                 if (choice.scale)
@@ -314,7 +321,9 @@ std::vector<std::vector<QRectF>> cells(std::size_t count) {
 } // namespace
 std::shared_ptr<const DrawingSheetPlan>
 DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewChoice> &choices,
-                      DrawingFlatSide side) {
+                      DrawingFlatSide side, std::stop_token stop, DrawingLayoutLimits limits) {
+    drawing::LayoutContext context(stop, limits);
+    context.checkpoint();
     if (!source)
         throw std::runtime_error("Нет данных чертежа");
     const auto available = defaultViews(*source);
@@ -359,6 +368,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     }
     std::size_t begin = 0;
     while (begin < items.size()) {
+        context.checkpoint();
         bool packed = false;
         for (auto count = std::min(std::size_t{6}, items.size() - begin); count && !packed; --count)
             for (const auto &areas : cells(count)) {
@@ -367,8 +377,10 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
                 for (std::size_t i = 0; i < count; ++i)
                     for (std::size_t j = 0; j < count; ++j)
                         try {
-                            fits[i][j] =
-                                fitItem(*source, items[begin + i], areas[j], side, plan->pages);
+                            fits[i][j] = fitItem(*source, items[begin + i], areas[j], side,
+                                                 plan->pages, context);
+                        } catch (const DrawingLayoutInterrupted &) {
+                            throw;
                         } catch (const std::runtime_error &) {
                         }
                 std::vector<int> owner(count, -1);
@@ -404,7 +416,10 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
         if (!packed) {
             std::string reason;
             try {
-                (void)fitItem(*source, items[begin], drawing::contentArea, side, plan->pages);
+                (void)fitItem(*source, items[begin], drawing::contentArea, side, plan->pages,
+                              context);
+            } catch (const DrawingLayoutInterrupted &) {
+                throw;
             } catch (const std::runtime_error &e) {
                 reason = e.what();
             }
@@ -444,6 +459,9 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
             else
                 plan->coverage.missing.push_back(i);
         }
+    drawing::recordViews(*plan, context);
+    plan->dimensionProbes = context.probes;
+    plan->recordingBytes = context.bytes;
     return plan;
 }
 namespace drawing {
@@ -452,10 +470,9 @@ void paintComposition(QPainter &p, const BendingDrawing &d, const DrawingTitle &
     if (plan.source.get() != &d || page < 0 || page >= plan.pages)
         throw std::runtime_error("Устаревшая компоновка чертежа");
     paintCompositionFrame(p, d, title, plan, page);
-    std::vector<QRectF> occupied;
     for (const auto &at : plan.views)
         if (at.page == page)
-            paintPlaced(p, d, at, plan.flatSide, occupied);
+            paintRecorded(p, at, plan.flatSide);
 }
 } // namespace drawing
 } // namespace bending::ui

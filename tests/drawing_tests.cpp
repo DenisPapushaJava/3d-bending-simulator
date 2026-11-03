@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "DrawingLayoutChecks.h"
 #include "ProfileFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
@@ -1545,6 +1546,7 @@ void dimensionLayout(const QString &folder) {
     require(v.holeDimensions.size() == 7 && v.axialDimensions.size() == 2 &&
                 v.dimensions.size() == 2,
             "Dimension layout changed the source measurements");
+    verifyRecordedDimensions(*drawing, *title.plan);
 }
 void composition(const QString &folder) {
     dimensionLayout(folder);
@@ -2482,6 +2484,10 @@ int main(int argc, char **argv) {
             composition(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--layout-worker-only"))) {
+            drawingLayoutChecks();
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--dimension-bases-only"))) {
             dimensionBases(temp.path());
             return 0;
@@ -2505,6 +2511,7 @@ int main(int argc, char **argv) {
         }
         pdfDestinations(temp.path());
         flatDrawing(temp.path());
+        drawingLayoutChecks();
         composition(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());

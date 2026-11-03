@@ -139,8 +139,13 @@ int main(int argc, char **argv) {
         if (const auto error = controller.bendPreviewError())
             throw std::runtime_error(error->detail);
         const auto preview = controller.bendPreview();
-        require(preview && preview->frameCount() == 61, "No complete segmented tool preview");
-        for (std::size_t frameIndex : {0U, 30U, 60U}) {
+        require(preview && preview->pressMotion() && preview->backgauge() &&
+                    preview->backgauge()->addedRetractionPositions == 4 &&
+                    preview->backgauge()->checkedPositions == preview->frameCount() &&
+                    preview->frameCount() == 61 + preview->backgauge()->addedRetractionPositions,
+                "Segmented cycle lost motion or checked backgauge positions");
+        for (std::size_t frameIndex :
+             {std::size_t{0}, preview->frameCount() / 2, preview->frameCount() - 1}) {
             const auto &frame = cad::OcctPreviewAccess::frame(*preview, frameIndex);
             for (std::size_t tool = 0; tool < 2; ++tool) {
                 std::multiset<double> lengths;

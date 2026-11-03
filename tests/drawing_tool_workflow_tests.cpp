@@ -148,12 +148,19 @@ int main(int argc, char **argv) {
         require(json.open(QIODevice::ReadOnly), "Read saved");
         auto root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();
-        require(root.value("version").toInt() == 14, "Wrong version");
+        require(root.value("version").toInt() == 16, "Wrong current project version");
         {
             auto legacyBends = root["bends"].toArray();
             for (qsizetype i = 0; i < legacyBends.size(); ++i) {
                 auto legacyBend = legacyBends[i].toObject();
                 legacyBend.remove("workpieceReversed");
+                for (const auto *key : {"tools", "catalogTools"}) {
+                    if (!legacyBend.value(key).isObject())
+                        continue;
+                    auto legacyTools = legacyBend.value(key).toObject();
+                    legacyTools.remove("backgauge");
+                    legacyBend[key] = legacyTools;
+                }
                 legacyBends[i] = legacyBend;
             }
             root["bends"] = legacyBends;

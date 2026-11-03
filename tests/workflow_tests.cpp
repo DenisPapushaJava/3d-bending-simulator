@@ -2081,8 +2081,14 @@ void testGuidedWorkflow(bool graphics) {
     if (controller.bendPreviewError())
         throw std::runtime_error("Guided catalogue check: " +
                                  controller.bendPreviewError()->detail);
-    require(controller.bendPreview() && controller.bendPreview()->pressMotion() &&
-                play->isEnabled() && slider->maximum() == 60 &&
+    const auto guidedPreview = controller.bendPreview();
+    require(guidedPreview && guidedPreview->pressMotion() && guidedPreview->backgauge() &&
+                guidedPreview->backgauge()->addedRetractionPositions == 4 &&
+                guidedPreview->backgauge()->checkedPositions == guidedPreview->frameCount() &&
+                guidedPreview->frameCount() ==
+                    61 + guidedPreview->backgauge()->addedRetractionPositions &&
+                play->isEnabled() &&
+                slider->maximum() == static_cast<int>(guidedPreview->frameCount() - 1) &&
                 controller.session().bend(0)->catalogTools &&
                 controller.session().bend(0)->tools->lengthMm == 835 &&
                 core::punchLengthMm(*controller.session().bend(0)->tools) == 525 &&
@@ -2119,7 +2125,12 @@ void testGuidedWorkflow(bool graphics) {
                     !dimensions->accessibleDescription().contains(QStringLiteral("R 8 мм")),
                 "Flat frame retained final bend radius");
         dimensionSnapshot("flat");
-        slider->setValue(40);
+        std::size_t formedFrame = 0;
+        while (formedFrame < guidedPreview->frameCount() &&
+               guidedPreview->pressState(formedFrame)->phase != simulation::PressPhase::Retracting)
+            ++formedFrame;
+        require(formedFrame < guidedPreview->frameCount(), "Guided cycle lost punch return");
+        slider->setValue(static_cast<int>(formedFrame));
         require(dimensions->accessibleDescription() != bending &&
                     dimensions->accessibleDescription().contains(QStringLiteral("Поворот 90°")),
                 "Measurements did not follow forming state");
@@ -2133,7 +2144,7 @@ void testGuidedWorkflow(bool graphics) {
         viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
         dimensionSnapshot("top");
         viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
-        slider->setValue(60);
+        slider->setValue(slider->maximum());
         require(dimensions->accessibleDescription() == formed,
                 "Punch return changed formed-sheet dimensions");
         require(controller.bendPreview() == preview && controller.session().editRevision() == edit,

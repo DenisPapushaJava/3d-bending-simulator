@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 
 static void drawingResources() {
@@ -124,11 +125,14 @@ struct DimensionPlacement {
     std::array<int, 4> nextLane{}; // Top, right, bottom, left, in paper coordinates.
     std::vector<QLineF> lines;
     QRectF area;
+    drawing::LayoutContext *context = nullptr;
 };
 void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDimension &d,
                std::vector<QRectF> &occupied, DimensionPlacement *placement = nullptr,
                bool holePosition = false, std::optional<std::array<QPointF, 2>> witnesses = {},
                bool measureOnly = false, std::size_t alternative = 0, bool flexible = false) {
+    if (placement && placement->context)
+        placement->context->checkpoint(true);
     const auto firstWitness = witnesses ? (*witnesses)[0] : a;
     const auto secondWitness = witnesses ? (*witnesses)[1] : b;
     const double gap = witnesses ? .5 : .8;
@@ -165,6 +169,7 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
     if (angle >= 90 - 1e-8 || angle < -90)
         angle += 180;
     QPointF da, db, label;
+    QRectF acceptedText;
     double before = outside ? 6 : 0, after = before;
     bool found = false;
     std::size_t valid = 0;
@@ -219,6 +224,7 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
                     (placement ? placement->area : QRectF(25, 20, 385, 193)).contains(rect)) {
                     if (valid++ < alternative)
                         continue;
+                    acceptedText = rect;
                     occupied.push_back(rect);
                     if (placement) {
                         placement->nextLane[sideIndex] = lane + 1;
@@ -238,6 +244,17 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
                 .toStdString());
     if (measureOnly)
         return;
+    if (placement && placement->context && placement->context->dimensions) {
+        auto &context = *placement->context;
+        context.dimensions->push_back({context.source,
+                                       context.index,
+                                       d,
+                                       value,
+                                       acceptedText,
+                                       {QLineF(da - direction * before, db + direction * after),
+                                        QLineF(firstWitness + normal * gap, da + normal * 2),
+                                        QLineF(secondWitness + normal * gap, db + normal * 2)}});
+    }
     dimensionPen(p);
     p.drawLine(firstWitness + normal * gap, da + normal * 2);
     p.drawLine(secondWitness + normal * gap, db + normal * 2);
@@ -392,7 +409,10 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
           double scale, const QString &caption, bool isometric = false, bool circular = false,
           bool compact = false, std::vector<QRectF> *sheetOccupied = nullptr,
           bool fullProfile = false, std::optional<QRectF> cellArea = {}, bool classical = false,
-          std::vector<QLineF> *dimensionLines = nullptr, QRectF *selectionBounds = nullptr) {
+          std::vector<QLineF> *dimensionLines = nullptr, QRectF *selectionBounds = nullptr,
+          drawing::LayoutContext *context = nullptr) {
+    if (context)
+        context->checkpoint();
     const bool schematic = v.profileStart.has_value();
     const QPointF midpoint((v.minimum.x + v.maximum.x) / 2, (v.minimum.y + v.maximum.y) / 2);
     const double removed = v.omittedX ? (*v.omittedX)[1] - (*v.omittedX)[0] : 0;
@@ -415,6 +435,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         QPainterPath material;
         material.setFillRule(Qt::OddEvenFill);
         for (const auto &loop : v.sectionLoops) {
+            if (context)
+                context->checkpoint();
             if (loop.empty())
                 continue;
             material.moveTo(map(loop.front()));
@@ -433,10 +455,14 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     for (bool hidden : {true, false}) {
         pen(p, hidden ? .25 : .5, hidden ? Qt::DashLine : Qt::SolidLine);
         for (const auto &path : v.paths) {
+            if (context)
+                context->checkpoint();
             if (path.hidden != hidden || path.points.size() < 2)
                 continue;
             QPainterPath q;
             for (std::size_t i = 1; i < path.points.size(); ++i) {
+                if (context && i % 1024 == 0)
+                    context->checkpoint();
                 const auto a = path.points[i - 1], b = path.points[i];
                 const auto piece = [&](double low, double high) {
                     double from = 0, to = 1;
@@ -535,6 +561,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         occupied.push_back(captionBox);
     const auto firstAnnotation = occupied.size();
     DimensionPlacement placement;
+    placement.context = context;
     const auto witnesses =
         [&](const DrawingDimension &dimension) -> std::optional<std::array<QPointF, 2>> {
         if (!dimension.witnesses)
@@ -544,24 +571,29 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     placement.area =
         cellArea ? annotationArea
                  : annotationArea.adjusted(0, -10, 0, 7).intersected(QRectF(25, 20, 385, 193));
-    auto dimensions = v.dimensions;
+    std::vector<std::size_t> dimensionOrder(v.dimensions.size());
+    std::iota(dimensionOrder.begin(), dimensionOrder.end(), 0);
     if (paired && fullProfile)
-        std::stable_sort(dimensions.begin(), dimensions.end(),
-                         [](const auto &a, const auto &b) { return a.valueMm < b.valueMm; });
+        std::stable_sort(dimensionOrder.begin(), dimensionOrder.end(), [&](auto a, auto b) {
+            return v.dimensions[a].valueMm < v.dimensions[b].valueMm;
+        });
     struct LinearRequest {
         const DrawingDimension *dimension;
         bool position;
-        bool chain = false;
+        bool chain;
+        DrawingDimensionSource source;
+        std::size_t index;
     };
     std::vector<LinearRequest> requests;
-    for (const auto &d : v.axialDimensions)
-        requests.push_back({&d, false, true});
-    for (const auto &d : v.holeDimensions)
-        requests.push_back({&d, true});
-    for (const auto &d : v.sectionDimensions)
-        requests.push_back({&d, true});
-    for (const auto &d : dimensions)
-        requests.push_back({&d, false});
+    for (std::size_t i = 0; i < v.axialDimensions.size(); ++i)
+        requests.push_back({&v.axialDimensions[i], false, true, DrawingDimensionSource::Axial, i});
+    for (std::size_t i = 0; i < v.holeDimensions.size(); ++i)
+        requests.push_back({&v.holeDimensions[i], true, false, DrawingDimensionSource::Hole, i});
+    for (std::size_t i = 0; i < v.sectionDimensions.size(); ++i)
+        requests.push_back(
+            {&v.sectionDimensions[i], true, false, DrawingDimensionSource::Section, i});
+    for (auto i : dimensionOrder)
+        requests.push_back({&v.dimensions[i], false, false, DrawingDimensionSource::Overall, i});
     const auto initialOccupied = occupied;
     std::array<int, 4> chainLanes{};
     bool flexible = false;
@@ -575,6 +607,10 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     const auto place = [&](std::size_t index, bool measureOnly, std::size_t alternative) {
         const auto &request = requests[index];
         const auto &d = *request.dimension;
+        if (context) {
+            context->source = request.source;
+            context->index = request.index;
+        }
         if (request.chain)
             placement.nextLane.fill(0); // Adjacent spans share one chain dimension line.
         dimension(p, map(d.start), map(d.end), bounds, d, occupied,
@@ -593,6 +629,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         try {
             for (std::size_t i = 0; i < requests.size(); ++i)
                 place(i, true, 0);
+        } catch (const DrawingLayoutInterrupted &) {
+            throw;
         } catch (const std::runtime_error &) {
             flexible = true;
             reset();
@@ -602,7 +640,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             };
             std::size_t rows = 0;
             const std::array<const std::vector<DrawingDimension> *, 3> lists{
-                &v.holeDimensions, &v.sectionDimensions, &dimensions};
+                &v.holeDimensions, &v.sectionDimensions, &v.dimensions};
             for (const auto *list : lists)
                 rows += std::count_if(list->begin(), list->end(), horizontal);
             rows += std::any_of(v.axialDimensions.begin(), v.axialDimensions.end(), horizontal);
@@ -645,6 +683,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                             ++probes;
                             try {
                                 place(next, true, count);
+                            } catch (const DrawingLayoutInterrupted &) {
+                                throw;
                             } catch (const std::runtime_error &) {
                                 break;
                             }
@@ -666,6 +706,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                     ++probes;
                     try {
                         place(index, true, alternative);
+                    } catch (const DrawingLayoutInterrupted &) {
+                        throw;
                     } catch (const std::runtime_error &) {
                         break;
                     }
@@ -1205,7 +1247,8 @@ QString flatMaterial(core::SheetMaterial material) {
 }
 double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt = 0,
                 DrawingFlatSide side = DrawingFlatSide::Automatic,
-                std::optional<double> requestedScale = {}, QRectF *selectionBounds = nullptr) {
+                std::optional<double> requestedScale = {}, QRectF *selectionBounds = nullptr,
+                drawing::LayoutContext *context = nullptr) {
     const auto &flat = *d.flatPattern;
     const auto &info = flat.info;
     auto v = flat.view;
@@ -1271,7 +1314,7 @@ double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt =
     std::vector<QRectF> occupied;
     std::vector<QLineF> dimensionLines;
     view(p, d, v, center, *scale, {}, false, false, false, &occupied, false, area, true,
-         &dimensionLines, selectionBounds);
+         &dimensionLines, selectionBounds, context);
     const auto mapView = [&](DrawingPoint point) {
         return center +
                QPointF((point.x - v.maximum.x / 2) * *scale, -(point.y - v.maximum.y / 2) * *scale);
@@ -1938,6 +1981,9 @@ int sourcePages(const BendingDrawing &d, const DrawingTitle &title) {
 }
 } // namespace
 namespace drawing {
+void initializeFont() {
+    (void)family();
+}
 std::vector<std::size_t> requiredDetails(const BendingDrawing &d) {
     return classicalDetails(d);
 }
@@ -1981,9 +2027,12 @@ DrawingView preparedView(const BendingDrawing &d, DrawingViewKey key) {
     throw std::runtime_error("Unknown view kind");
 }
 void paintPlaced(QPainter &p, const BendingDrawing &d, const DrawingPlacedView &at,
-                 DrawingFlatSide side, std::vector<QRectF> &occupied, QRectF *selectionBounds) {
+                 DrawingFlatSide side, std::vector<QRectF> &occupied, QRectF *selectionBounds,
+                 LayoutContext *context) {
+    if (context)
+        context->checkpoint();
     if (at.key.kind == DrawingViewKind::Flat) {
-        flatView(p, d, at.area, 0, side, at.scale, selectionBounds);
+        flatView(p, d, at.area, 0, side, at.scale, selectionBounds, context);
         return;
     }
     const auto v = preparedView(d, at.key);
@@ -2000,7 +2049,7 @@ void paintPlaced(QPainter &p, const BendingDrawing &d, const DrawingPlacedView &
          DrawingSheet::viewName(d, at.key) + QStringLiteral(" (%1)").arg(scaleName(at.scale)),
          at.key.kind == DrawingViewKind::Isometric, at.key.kind == DrawingViewKind::Detail && !full,
          false, &occupied, full, at.area, at.key.kind != DrawingViewKind::Profile, nullptr,
-         selectionBounds);
+         selectionBounds, context);
 }
 void paintCompositionFrame(QPainter &p, const BendingDrawing &d, const DrawingTitle &title,
                            const DrawingSheetPlan &plan, int page) {

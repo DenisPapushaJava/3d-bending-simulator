@@ -1,8 +1,12 @@
 #pragma once
 #include "bending/application/BendingDrawing.h"
 #include <QImage>
+#include <QLineF>
 #include <QRectF>
 #include <QString>
+#include <chrono>
+#include <stdexcept>
+#include <stop_token>
 
 class QPainter;
 namespace bending::ui {
@@ -24,6 +28,16 @@ struct DrawingFlatOrientation {
     std::optional<bool> sideA = {};
     std::size_t up = 0, down = 0;
 };
+enum class DrawingDimensionSource { Axial, Hole, Section, Overall };
+struct DrawingPlacedDimension {
+    DrawingDimensionSource source;
+    std::size_t index;
+    application::DrawingDimension measurement;
+    QString text;
+    QRectF textBounds;
+    std::array<QLineF, 3> lines;
+};
+struct DrawingViewRecording;
 struct DrawingPlacedView {
     DrawingViewKey key;
     int page = 0;
@@ -31,6 +45,20 @@ struct DrawingPlacedView {
     QPointF centre;
     double scale = 1;
     QRectF selectionBounds = {}; // Body and annotations; independent of allocated layout cell.
+    std::vector<DrawingPlacedDimension> dimensions = {};
+    std::shared_ptr<const DrawingViewRecording> recording = {};
+};
+struct DrawingLayoutLimits {
+    std::chrono::milliseconds maximumTime{30000};
+    std::size_t maximumDimensionProbes = 1000000;
+    std::size_t maximumRecordingBytes = 64 * 1024 * 1024;
+};
+enum class DrawingLayoutInterruption { Cancelled, LimitExceeded };
+class DrawingLayoutInterrupted final : public std::runtime_error {
+  public:
+    DrawingLayoutInterrupted(DrawingLayoutInterruption reason, const char *message)
+        : std::runtime_error(message), reason(reason) {}
+    DrawingLayoutInterruption reason;
 };
 struct DrawingSheetPlan {
     application::BendingDrawingPtr source;
@@ -39,6 +67,8 @@ struct DrawingSheetPlan {
     std::vector<DrawingPlacedView> views;
     int pages = 0;
     application::DrawingMeasurementCoverage coverage;
+    std::size_t dimensionProbes = 0;
+    std::size_t recordingBytes = 0;
 };
 struct DrawingTitle {
     QString name;
@@ -62,7 +92,8 @@ class DrawingSheet final {
     // Numeric paper layout, bound to an immutable drawing; no CAD/GPU calls.
     [[nodiscard]] static std::shared_ptr<const DrawingSheetPlan>
     compose(application::BendingDrawingPtr, const std::vector<DrawingViewChoice> &,
-            DrawingFlatSide = DrawingFlatSide::Automatic);
+            DrawingFlatSide = DrawingFlatSide::Automatic, std::stop_token = {},
+            DrawingLayoutLimits = {});
     [[nodiscard]] static int pageCount(const application::BendingDrawing &drawing,
                                        const DrawingTitle &title = {});
     [[nodiscard]] static application::DrawingMeasurementCoverage

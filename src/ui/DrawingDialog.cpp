@@ -1,4 +1,5 @@
 #include "DrawingDialog.h"
+#include "DrawingLayoutController.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/Preferences.h"
@@ -445,6 +446,8 @@ class DrawingDialog::Impl {
     DrawingPreviewArea *preview;
     QTimer *refit;
     QTimer *layoutTimer;
+    std::unique_ptr<DrawingLayoutController> layouts;
+    bool layoutBusy = false;
     QLabel *image;
     QLabel *status;
     QPushButton *prepare;
@@ -473,8 +476,9 @@ class DrawingDialog::Impl {
                 DrawingLayout::Classical,
                 plan};
     }
-    void ensurePlan(const application::BendingDrawingPtr &drawing) {
+    bool ensurePlan(const application::BendingDrawingPtr &drawing) {
         if (compositionSource != drawing) {
+            cancelLayout();
             compositionSource = drawing;
             choices = DrawingSheet::defaultViews(*drawing);
             plan.reset();
@@ -498,12 +502,34 @@ class DrawingDialog::Impl {
         }
         selectionControls();
         if (!plan) {
-            plan = DrawingSheet::compose(drawing, choices,
-                                         static_cast<DrawingFlatSide>(flatSide->currentIndex()));
-            preview->setPageCount(plan->pages);
-            followSelection();
+            if (!layoutBusy) {
+                layoutBusy = true;
+                showLayoutProgress();
+                layouts->request(drawing, choices,
+                                 static_cast<DrawingFlatSide>(flatSide->currentIndex()));
+            }
+            return false;
         }
         selectionControls();
+        return true;
+    }
+    void cancelLayout() {
+        if (layouts)
+            layouts->cancel();
+        layoutBusy = false;
+    }
+    void showLayoutProgress() {
+        exportPdf->setEnabled(false);
+        image->clear();
+        status->setText(QStringLiteral("Компоновка листов…"));
+        status->setToolTip({});
+        preview->showState(QStringLiteral("Компоновка листов"),
+                           QStringLiteral("Размещаем виды и размеры…"), true,
+                           QStringLiteral("Отменить"), [this] {
+                               cancelLayout();
+                               layoutTimer->stop();
+                               showLayoutError(QStringLiteral("Компоновка отменена"));
+                           });
     }
     void selectionControls() {
         const QSignalBlocker block(viewScale), blockViews(views);
@@ -562,33 +588,38 @@ class DrawingDialog::Impl {
         render();
     }
     void scheduleLayout() {
+        cancelLayout();
         plan.reset();
         layoutError.clear();
         exportPdf->setEnabled(false);
         image->clear();
         selectionControls();
-        status->setText(QStringLiteral("Компоновка листов…"));
-        preview->showState(QStringLiteral("Компоновка листов"),
-                           QStringLiteral("Размещаем виды и размеры…"), true);
+        showLayoutProgress();
         layoutTimer->start();
     }
     void showLayoutError(const QString &detail) {
+        layoutBusy = false;
         layoutError = detail;
         exportPdf->setEnabled(false);
         image->clear();
-        status->setText(QStringLiteral("Виды не размещены"));
+        const bool cancelled = detail == QStringLiteral("Компоновка отменена");
+        status->setText(cancelled ? detail : QStringLiteral("Виды не размещены"));
         status->setToolTip(detail);
         auto reason = detail;
         const auto end = reason.indexOf(QStringLiteral("меньший масштаб."));
         if (end >= 0)
             reason = reason.left(end + QStringLiteral("меньший масштаб.").size());
-        preview->showState(QStringLiteral("Не удалось разместить виды"), reason, false,
-                           QStringLiteral("Автокомпоновка"), [this] {
-                               compositionSource.reset();
-                               scheduleLayout();
-                           });
+        preview->showState(
+            cancelled ? detail : QStringLiteral("Не удалось разместить виды"), reason, false,
+            cancelled ? QStringLiteral("Повторить") : QStringLiteral("Автокомпоновка"),
+            [this, cancelled] {
+                if (!cancelled)
+                    compositionSource.reset();
+                scheduleLayout();
+            });
     }
     void invalidate() {
+        cancelLayout();
         settingsChanged = true;
         exportPdf->setEnabled(false);
         status->setText(QStringLiteral("Ориентация изменена. Нажмите «Сформировать виды»."));
@@ -600,12 +631,13 @@ class DrawingDialog::Impl {
     }
     void render(bool contentChanged = true) {
         const auto drawing = controller.drawing();
-        if (!drawing || settingsChanged || controller.isPreparingDrawing() ||
+        if (!drawing || settingsChanged || controller.isPreparingDrawing() || layoutBusy ||
             layoutTimer->isActive() || !layoutError.isEmpty() ||
             controller.session().revision() != revision)
             return;
         try {
-            ensurePlan(drawing);
+            if (!ensurePlan(drawing))
+                return;
             if (contentChanged) {
                 const auto previousPage = page->value();
                 preview->setPageCount(DrawingSheet::pageCount(*drawing, title()));
@@ -647,6 +679,8 @@ class DrawingDialog::Impl {
         const bool same =
             revision == controller.session().revision() && controller.session().document();
         const bool busy = controller.hasWork();
+        if (!same || controller.isPreparingDrawing() || settingsChanged)
+            cancelLayout();
         for (auto *w : {static_cast<QWidget *>(base), static_cast<QWidget *>(turn),
                         static_cast<QWidget *>(reverse), static_cast<QWidget *>(breaks)})
             w->setEnabled(same && !busy);
@@ -654,7 +688,8 @@ class DrawingDialog::Impl {
         const auto drawing = controller.drawing();
         views->setEnabled(same && !busy && drawing && !settingsChanged);
         flatSide->setEnabled(same && !busy && drawing && !settingsChanged);
-        exportPdf->setEnabled(same && !busy && drawing && !settingsChanged);
+        exportPdf->setEnabled(same && !busy && drawing && !settingsChanged && plan && !layoutBusy &&
+                              !layoutTimer->isActive() && layoutError.isEmpty());
         if (!same) {
             image->clear();
             preview->showState(QStringLiteral("Документ изменился"),
@@ -683,7 +718,8 @@ class DrawingDialog::Impl {
                 return;
             }
             try {
-                ensurePlan(drawing);
+                if (!ensurePlan(drawing))
+                    return;
             } catch (const std::exception &e) {
                 showLayoutError(QString::fromUtf8(e.what()));
                 return;
@@ -772,6 +808,7 @@ class DrawingDialog::Impl {
         request.allowBreaks = breaks->isChecked();
         settingsChanged = false;
         layoutError.clear();
+        cancelLayout();
         layoutTimer->stop();
         exportPdf->setEnabled(false);
         image->clear();
@@ -949,6 +986,27 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->layoutTimer->setSingleShot(true);
     impl_->layoutTimer->setInterval(16);
     connect(impl_->layoutTimer, &QTimer::timeout, this, [this] { impl_->refresh(); });
+    impl_->layouts = std::make_unique<DrawingLayoutController>();
+    connect(impl_->layouts.get(), &DrawingLayoutController::ready, this,
+            [this](std::shared_ptr<const DrawingSheetPlan> plan) {
+                if (!impl_->layoutBusy || impl_->settingsChanged ||
+                    impl_->controller.session().revision() != impl_->revision ||
+                    plan->source != impl_->controller.drawing())
+                    return;
+                impl_->layoutBusy = false;
+                impl_->plan = std::move(plan);
+                impl_->layoutError.clear();
+                impl_->preview->setPageCount(impl_->plan->pages);
+                impl_->followSelection();
+                impl_->refresh();
+            });
+    connect(impl_->layouts.get(), &DrawingLayoutController::failed, this,
+            [this](const QString &detail) {
+                if (impl_->layoutBusy && !impl_->settingsChanged &&
+                    impl_->controller.session().revision() == impl_->revision &&
+                    impl_->compositionSource == impl_->controller.drawing())
+                    impl_->showLayoutError(detail);
+            });
     scroll->viewChanged = [this] { impl_->refit->start(); };
     scroll->paperClicked = [this](QPointF point) {
         if (!impl_->plan)
@@ -1072,6 +1130,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     QTimer::singleShot(0, this, [this] { impl_->build(); });
 }
 void DrawingDialog::done(int result) {
+    impl_->cancelLayout();
     impl_->refit->stop();
     impl_->layoutTimer->stop();
     const bool cancel = impl_->started && impl_->controller.isPreparingDrawing() &&
@@ -1081,5 +1140,7 @@ void DrawingDialog::done(int result) {
         impl_->controller.cancelDrawing();
     QDialog::done(result);
 }
-DrawingDialog::~DrawingDialog() = default;
+DrawingDialog::~DrawingDialog() {
+    impl_->cancelLayout();
+}
 } // namespace bending::ui
