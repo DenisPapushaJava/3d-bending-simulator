@@ -711,13 +711,12 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
         }
     return gp_Dir(axis);
 }
-application::BendPreviewResult
-buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
-                   bool fixedSecond, std::stop_token stop,
-                   std::optional<core::PressTools> toolParameters, bool withMotion,
-                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-                   std::optional<double> maximumEndSupportLossMm,
-                   std::optional<gp_Dir> referenceAxis, bool prepareDiagnostic) {
+application::BendPreviewResult buildBendOperation(
+    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
+    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
+    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis,
+    bool prepareDiagnostic, BackgaugeSearchStatistics *gaugeStatistics) {
     const bool requestedReversed = fixedSecond;
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
@@ -1363,7 +1362,8 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                 diagnostic->envelope.minimum.z, diagnostic->envelope.maximum.x,
                                 diagnostic->envelope.maximum.y, diagnostic->envelope.maximum.z);
                         diagnostic->frames.push_back(std::move(frame));
-                        prepareBackgauge(*diagnostic, analysis.lengthToleranceMm, stop);
+                        prepareBackgauge(*diagnostic, analysis.lengthToleranceMm, stop,
+                                         gaugeStatistics);
                         for (std::size_t f = 0; f < diagnostic->frameCount(); ++f)
                             if (diagnostic->collisionAtFrame(f) ||
                                 diagnostic->machineCollisionAtFrame(f)) {
@@ -1456,7 +1456,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                         preview->frames.front(), *preview->setup->tools.backgauge,
                         model.thicknessMm, preview->setup->tools.lengthMm / 2,
                         withMotion ? preview->setup->tools.backgauge->retractMm : 0,
-                        preview->filledCutouts, analysis.lengthToleranceMm, stop))
+                        preview->filledCutouts, analysis.lengthToleranceMm, stop, gaugeStatistics))
                     return BendPreviewError{BendPreviewErrorCode::BackgaugeUnavailable, *issue};
         }
         if (stop.stop_requested()) {
@@ -1469,7 +1469,7 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
         envelope.Get(preview->envelope.minimum.x, preview->envelope.minimum.y,
                      preview->envelope.minimum.z, preview->envelope.maximum.x,
                      preview->envelope.maximum.y, preview->envelope.maximum.z);
-        prepareBackgauge(*preview, analysis.lengthToleranceMm, stop);
+        prepareBackgauge(*preview, analysis.lengthToleranceMm, stop, gaugeStatistics);
         if (preview->gauging && preview->gauging->status != BackgaugeStatus::Checked) {
             std::optional<std::size_t> failed;
             for (std::size_t f = 0; f < preview->frames.size(); ++f)

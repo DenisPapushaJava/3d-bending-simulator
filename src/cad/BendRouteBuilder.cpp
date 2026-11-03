@@ -227,6 +227,8 @@ bool stableRejection(BendPreviewErrorCode code) {
     case BendPreviewErrorCode::ContactLost:
     case BendPreviewErrorCode::RetractionNotProven:
     case BendPreviewErrorCode::UnsupportedToolGeometry:
+    // Memoizes this bounded solver's exact-input answer, not manufacturing impossibility.
+    case BendPreviewErrorCode::BackgaugeUnavailable:
         return true;
     default:
         return false;
@@ -443,6 +445,8 @@ class RouteSearch {
             if (const auto *verdict = cache->verdicts.find(wanted); verdict && *verdict) {
                 ++statistics.reusedTransitions;
                 ++statistics.reusedRejections;
+                if ((**verdict).code == BendPreviewErrorCode::BackgaugeUnavailable)
+                    ++statistics.backgauge.reusedNoReferenceTransitions;
                 return **verdict;
             }
         }
@@ -461,8 +465,10 @@ class RouteSearch {
             after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
             request.withTools ? op.tools : std::nullopt, request.withTools,
             request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
-            request.maximumEndSupportLossMm, reference, false);
+            request.maximumEndSupportLossMm, reference, false, &statistics.backgauge);
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
+            if (failure->code == BendPreviewErrorCode::BackgaugeUnavailable)
+                ++statistics.backgauge.noReferenceTransitions;
             if (stableRejection(failure->code))
                 remember(wanted, preview);
             return preview;
@@ -800,6 +806,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.reusedFlatPattern |= s.reusedFlatPattern;
                 totals.usedProfilePriority |= s.usedProfilePriority;
                 totals.gaugePrunedToolVariants += s.gaugePrunedToolVariants;
+                totals.backgauge += s.backgauge;
             };
             for (std::size_t choice = 0; choice < request.toolVariants.size(); ++choice) {
                 cancelled(stop);

@@ -1,4 +1,5 @@
 #pragma once
+#include "bending/application/Backgauge.h"
 #include "bending/application/Document.h"
 #include "bending/application/FlatPattern.h"
 #include "bending/core/BendTarget.h"
@@ -64,6 +65,7 @@ struct BendRouteStatistics {
     bool usedProfilePriority = false;
     std::size_t testedToolVariants = 0;
     std::size_t gaugePrunedToolVariants = 0; // Proven axial-span rejection; no contact cycle.
+    BackgaugeSearchStatistics backgauge;
 };
 struct BendRouteStep {
     std::string id;

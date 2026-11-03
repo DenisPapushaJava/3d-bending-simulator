@@ -20,12 +20,29 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <gp_Ax3.hxx>
 #include <stdexcept>
 
 namespace bending::cad {
 namespace {
+using Statistics = application::BackgaugeSearchStatistics;
+class WorkTimer {
+    using Clock = std::chrono::steady_clock;
+    std::uint64_t *total_;
+    Clock::time_point start_;
+
+  public:
+    explicit WorkTimer(std::uint64_t *total)
+        : total_(total), start_(total ? Clock::now() : Clock::time_point{}) {}
+    ~WorkTimer() {
+        if (total_)
+            *total_ += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start_)
+                    .count());
+    }
+};
 void cancelled(std::stop_token stop) {
     if (stop.stop_requested())
         throw std::runtime_error("Backgauge cancelled");
@@ -90,8 +107,30 @@ Skin contactSkin(const PreviewFrame &frame, bool filled, double thickness, std::
         }
     return result;
 }
+struct Contacts {
+    Skin skin;
+    std::vector<core::BackgaugePlacement> candidates;
+};
+Contacts findContacts(const PreviewFrame &frame, bool filled, double thickness, double centre,
+                      const core::BackgaugeSetup &setup, std::stop_token stop, Statistics *stats) {
+    WorkTimer timer(stats ? &stats->contactTimeUs : nullptr);
+    if (stats)
+        ++stats->contactSearches;
+    Contacts result;
+    result.skin = contactSkin(frame, filled, thickness, stop);
+    result.candidates =
+        core::backgaugeCandidates(result.skin.patches, setup, thickness, centre, stop);
+    if (stats)
+        stats->candidates += result.candidates.size();
+    cancelled(stop);
+    return result;
+}
 // Reject a contact inside a closed cutout: its rearward ray reaches material.
-bool exposed(const Skin &skin, const core::BackgaugePlacement &p, double tolerance) {
+bool exposed(const Skin &skin, const core::BackgaugePlacement &p, double tolerance,
+             Statistics *stats) {
+    WorkTimer timer(stats ? &stats->contactTimeUs : nullptr);
+    if (stats)
+        ++stats->exposureChecks;
     for (const auto z : p.contactZmm)
         for (const auto &t : skin.triangles) {
             const double ay = t[1].Y() - t[0].Y(), az = t[1].Z() - t[0].Z();
@@ -175,6 +214,14 @@ PreviewFrame checkingFrame(const PreviewFrame &source) {
     frame.floor = source.floor;
     return frame;
 }
+std::vector<MachineCollisionEvidence> checkGauges(const PreviewFrame &frame, double tolerance,
+                                                  std::stop_token stop, RigidClearanceCache *cache,
+                                                  Statistics *stats) {
+    WorkTimer timer(stats ? &stats->collisionTimeUs : nullptr);
+    if (stats)
+        ++stats->collisionChecks;
+    return MachineAssembly::backgaugeCollisions(frame, tolerance, stop, cache);
+}
 } // namespace
 std::optional<double> backgaugeInvariantSpan(const CadDocument &doc, std::stop_token stop) {
     const auto &bends = OcctDocumentAccess::simulationBends(doc).bends;
@@ -210,26 +257,24 @@ std::optional<std::string> backgaugeContactIssue(const PreviewFrame &frame,
                                                  const core::BackgaugeSetup &setup,
                                                  double thickness, double centre, double withdrawal,
                                                  bool filled, double tolerance,
-                                                 std::stop_token stop) {
-    const auto skin = contactSkin(frame, filled, thickness, stop);
-    const auto candidates = core::backgaugeCandidates(skin.patches, setup, thickness, centre, stop);
-    cancelled(stop);
-    for (const auto &p : candidates)
-        if (p.xMm + withdrawal <= setup.xMaxMm && exposed(skin, p, tolerance))
+                                                 std::stop_token stop, Statistics *stats) {
+    const auto contacts = findContacts(frame, filled, thickness, centre, setup, stop, stats);
+    for (const auto &p : contacts.candidates)
+        if (p.xMm + withdrawal <= setup.xMaxMm && exposed(contacts.skin, p, tolerance, stats))
             return {};
     return "В начальном положении не найдены два физических контакта упора "
            "в заданных пределах X/R/Z с учётом отвода. Проверьте настройки упора.";
 }
-void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token stop) {
+void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token stop,
+                      Statistics *stats) {
     if (!preview.setup || !preview.setup->tools.backgauge || preview.frames.empty())
         return;
     const auto setup = *preview.setup->tools.backgauge;
     preview.gauging = application::BackgaugeReport{setup};
-    const auto skin = contactSkin(preview.frames.front(), preview.filledCutouts,
-                                  preview.geometry.thicknessMm, stop);
-    const auto candidates = core::backgaugeCandidates(
-        skin.patches, setup, preview.geometry.thicknessMm, preview.setup->tools.lengthMm / 2, stop);
-    cancelled(stop);
+    const auto contacts =
+        findContacts(preview.frames.front(), preview.filledCutouts, preview.geometry.thicknessMm,
+                     preview.setup->tools.lengthMm / 2, setup, stop, stats);
+    const auto &candidates = contacts.candidates;
     const auto prototype = candidates.empty() ? TopoDS_Shape{} : fingerBody(setup.fingerWidthMm);
     std::size_t hold = 0;
     bool movement = preview.frames.size() > 1 && setup.retractMm > 0;
@@ -267,8 +312,11 @@ void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token sto
     bool clear = false;
     for (const auto &p : candidates) {
         cancelled(stop);
-        if ((movement && p.xMm + setup.retractMm > setup.xMaxMm) || !exposed(skin, p, tolerance))
+        if ((movement && p.xMm + setup.retractMm > setup.xMaxMm) ||
+            !exposed(contacts.skin, p, tolerance, stats))
             continue;
+        if (stats)
+            ++stats->placementTrials;
         RigidClearanceCache cache;
         std::array<std::vector<MachineDisplayComponent>, 5> samples;
         for (std::size_t j = 0; j < samples.size(); ++j)
@@ -280,7 +328,7 @@ void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token sto
             auto frame = checkingFrame(preview.frames[pose.source]);
             const auto &bodies = samples[static_cast<std::size_t>(pose.fraction * 4)];
             frame.machine.insert(frame.machine.end(), bodies.begin(), bodies.end());
-            checked.push_back(MachineAssembly::backgaugeCollisions(frame, tolerance, stop, &cache));
+            checked.push_back(checkGauges(frame, tolerance, stop, &cache, stats));
             if (!checked.back().empty())
                 break;
             ++prefix;
@@ -345,8 +393,7 @@ void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token sto
         frame.machine.insert(frame.machine.end(), bodies.begin(), bodies.end());
         const auto hits = i < chosenHits.size()
                               ? std::move(chosenHits[i])
-                              : MachineAssembly::backgaugeCollisions(checkingFrame(frame),
-                                                                     tolerance, stop, &cache);
+                              : checkGauges(checkingFrame(frame), tolerance, stop, &cache, stats);
         ++report.checkedPositions;
         if (!hits.empty()) {
             if (!preview.machineConflicts[i])
