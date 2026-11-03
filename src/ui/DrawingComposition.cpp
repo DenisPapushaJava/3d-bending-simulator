@@ -113,6 +113,21 @@ double width(const DrawingView &v) {
 double height(const DrawingView &v) {
     return v.maximum.y - v.minimum.y;
 }
+double dimensionPadding(const std::optional<DrawingView> &view, bool verticalSpace) {
+    if (!view)
+        return 44;
+    std::size_t count = 0;
+    const auto usesSpace = [verticalSpace](const DrawingDimension &d) {
+        return (std::abs(d.end.x - d.start.x) >= std::abs(d.end.y - d.start.y)) == verticalSpace;
+    };
+    for (const auto *dimensions :
+         {&view->dimensions, &view->holeDimensions, &view->sectionDimensions})
+        count += std::count_if(dimensions->begin(), dimensions->end(), usesSpace);
+    // Axial spans share a chain line. Other dimensions need individual lanes,
+    // distributed over two sides; this is only an allocation hint, never a fit proof.
+    count += std::any_of(view->axialDimensions.begin(), view->axialDimensions.end(), usesSpace);
+    return 44 + count * 7.;
+}
 double minimumScale(const BendingDrawing &d, DrawingViewKey key, const DrawingView &v) {
     if (key.kind == DrawingViewKind::Projection)
         return .01;
@@ -172,43 +187,57 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
         for (int attempt = 0; attempt < 7 && scale && *scale + 1.e-9 >= minimum; ++attempt) {
             if (*scale > fit + 1.e-9)
                 throw std::runtime_error("Связанные виды не помещаются в выбранном масштабе");
-            // Share spare paper space too: thin long views may need many dimension lanes.
-            const double sideW = lateral ? (area.width() - gap) *
-                                               (width(*views[2]) * *scale + 2 * margin) /
-                                               (rawW * *scale + 4 * margin)
-                                         : 0;
-            const double topH = top ? (area.height() - gap) *
-                                          (height(*views[1]) * *scale + 2 * margin) /
-                                          (rawH * *scale + 4 * margin)
-                                    : 0;
-            const bool sideLeft = lateral && views[2]->reverseProjection;
-            const bool topAbove = top && views[1]->reverseProjection;
-            QRectF main(area.left() + (sideLeft ? sideW + gap : 0),
-                        area.top() + (topAbove ? topH + gap : 0),
-                        area.width() - (lateral ? sideW + gap : 0),
-                        area.height() - (top ? topH + gap : 0));
-            placed.clear();
-            for (const auto &choice : item.choices) {
-                auto cell = main;
-                if (choice.key.index == 1 && top)
-                    cell = {main.left(), topAbove ? area.top() : main.bottom() + gap, main.width(),
-                            topH};
-                if (choice.key.index == 2 && lateral)
-                    cell = {sideLeft ? area.left() : main.right() + gap, main.top(), sideW,
-                            main.height()};
-                placed.push_back({choice.key, page, cell, cell.center(), *scale});
-            }
-            QImage scratch(420, 297, QImage::Format_RGB32);
-            QPainter painter(&scratch);
-            std::vector<QRectF> occupied;
-            try {
-                for (auto &p : placed)
-                    drawing::paintPlaced(painter, d, p, side, occupied, &p.selectionBounds);
-                return placed;
-            } catch (const std::runtime_error &e) {
-                lastError = e.what();
-                if (fixed)
-                    throw;
+            // Keep the established split first. If it fails, account for dimension
+            // density before reducing scale: short/thin views can reserve paper
+            // that the heavily dimensioned main view actually needs.
+            for (int allocation = 0; allocation < 2; ++allocation) {
+                const double mainW = allocation ? std::max(dimensionPadding(views[0], false),
+                                                           dimensionPadding(views[1], false))
+                                                : 2 * margin;
+                const double mainH = allocation ? std::max(dimensionPadding(views[0], true),
+                                                           dimensionPadding(views[2], true))
+                                                : 2 * margin;
+                const double sidePadding =
+                    allocation ? dimensionPadding(views[2], false) : 2 * margin;
+                const double topPadding =
+                    allocation ? dimensionPadding(views[1], true) : 2 * margin;
+                const double sideW = lateral ? (area.width() - gap) *
+                                                   (width(*views[2]) * *scale + sidePadding) /
+                                                   (rawW * *scale + mainW + sidePadding)
+                                             : 0;
+                const double topH = top ? (area.height() - gap) *
+                                              (height(*views[1]) * *scale + topPadding) /
+                                              (rawH * *scale + mainH + topPadding)
+                                        : 0;
+                const bool sideLeft = lateral && views[2]->reverseProjection;
+                const bool topAbove = top && views[1]->reverseProjection;
+                QRectF main(area.left() + (sideLeft ? sideW + gap : 0),
+                            area.top() + (topAbove ? topH + gap : 0),
+                            area.width() - (lateral ? sideW + gap : 0),
+                            area.height() - (top ? topH + gap : 0));
+                placed.clear();
+                for (const auto &choice : item.choices) {
+                    auto cell = main;
+                    if (choice.key.index == 1 && top)
+                        cell = {main.left(), topAbove ? area.top() : main.bottom() + gap,
+                                main.width(), topH};
+                    if (choice.key.index == 2 && lateral)
+                        cell = {sideLeft ? area.left() : main.right() + gap, main.top(), sideW,
+                                main.height()};
+                    placed.push_back({choice.key, page, cell, cell.center(), *scale});
+                }
+                QImage scratch(420, 297, QImage::Format_RGB32);
+                QPainter painter(&scratch);
+                std::vector<QRectF> occupied;
+                try {
+                    for (auto &p : placed)
+                        drawing::paintPlaced(painter, d, p, side, occupied, &p.selectionBounds);
+                    return placed;
+                } catch (const std::runtime_error &e) {
+                    lastError = e.what();
+                    if (fixed && allocation == 1)
+                        throw;
+                }
             }
             scale = standardDrawingScale(*scale * .8);
         }

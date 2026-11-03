@@ -827,6 +827,48 @@ TopoDS_Shape crossAxisPart() {
     unify.Build();
     return unify.Shape();
 }
+void dimensionBases(const QString &folder) {
+    // Tangent lengths are 20 mm, outer radius is 6 mm. Each 45-degree
+    // adjacent bend adds 6*tan(22.5 degrees) to an outside virtual-corner size.
+    // The profile includes both same-direction and reverse bends.
+    const double setback = 6 * std::tan(std::numbers::pi / 8);
+    const auto check = [&](const TopoDS_Shape &shape, const QString &name) {
+        const auto d = build(load(shape, folder + name));
+        require(d->profiles.size() == 1 && d->profiles[0].segments.size() == 5,
+                "Dimension-base fixture lost its complete profile");
+        const auto &segments = d->profiles[0].segments;
+        for (std::size_t i = 0; i < segments.size(); ++i) {
+            const double expected = 20 + setback * (i == 0 || i + 1 == segments.size() ? 1 : 2);
+            require(std::abs(segments[i].dimension.valueMm - expected) < 1e-4,
+                    "Outside profile dimension does not use virtual corners");
+        }
+        std::size_t checked = 0;
+        for (const auto &detail : d->details)
+            for (const auto &dimension : detail.view.dimensions) {
+                if (dimension.label != "H1" && dimension.label != "H2")
+                    continue;
+                const auto side = dimension.label == "H1" ? 0 : 1;
+                const auto &size = d->bends.at(detail.bendIndex).outerFlangeMm[side];
+                require(size && std::abs(*size - dimension.valueMm) < 1e-4,
+                        "Local detail and complete profile use different dimension bases");
+                require(std::abs(std::hypot(dimension.end.x - dimension.start.x,
+                                            dimension.end.y - dimension.start.y) -
+                                 dimension.valueMm) < 1e-4,
+                        "Local detail text differs from its dimension endpoints");
+                ++checked;
+            }
+        require(checked >= 4, "Dimension-base fixture no longer checks local wall dimensions");
+    };
+    const auto shape = fixtures::foldedProfile(4, 80, std::numbers::pi / 4);
+    check(shape, "/dimension-bases.step");
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .734);
+    transform.SetTranslationPart(gp_Vec(117, -53, 82));
+    check(BRepBuilderAPI_Transform(shape, transform, true).Shape(), "/dimension-bases-moved.step");
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
+    check(BRepBuilderAPI_Transform(shape, mirror, true).Shape(), "/dimension-bases-mirror.step");
+}
 void operatorProfiles(const QString &folder) {
     const auto check = [&](const application::BendingDrawing &d, std::vector<double> sizes,
                            bool reverse) {
@@ -1460,7 +1502,52 @@ void flatDrawing(const QString &folder) {
     require(ui::DrawingSheet::pageCount(*result) == 1,
             "Simple blank was unnecessarily split from the folded shape");
 }
+void dimensionLayout(const QString &folder) {
+    // Synthetic orthogonal views with short hole offsets and a chain dimension.
+    // An early outside label lies across a later extension line: shrinking alone
+    // cannot repair that choice. Keep every dimension at the requested scale.
+    auto drawing = std::make_shared<application::BendingDrawing>();
+    auto &v = drawing->views[0];
+    v.minimum = {0, 0};
+    v.maximum = {200, 100};
+    v.paths.push_back({{{0, 0}, {200, 0}, {200, 100}, {0, 100}, {0, 0}}, false});
+    v.axialDimensions = {{{0, 0}, {90, 0}, 90, ""}, {{90, 0}, {200, 0}, 110, ""}};
+    v.dimensions = {{{0, 0}, {200, 0}, 200, ""}, {{0, 0}, {0, 100}, 100, ""}};
+    for (const auto point : {application::DrawingPoint{12, 20}, {44, 60}, {76, 20}, {180, 60}})
+        v.holeDimensions.push_back({{0, point.y}, point, point.x, ""});
+    for (const auto point : {application::DrawingPoint{12, 20}, {44, 60}, {12, 85}})
+        v.holeDimensions.push_back({{point.x, 0}, point, point.y, ""});
+    drawing->views[1] = v;
+    drawing->views[2] = v;
+    for (auto &other : {&drawing->views[1], &drawing->views[2]}) {
+        other->axialDimensions.clear();
+        other->holeDimensions.clear();
+        other->dimensions.clear();
+    }
+    drawing->views[1].maximum.y = 30;
+    drawing->views[1].paths = {{{{0, 0}, {200, 0}, {200, 30}, {0, 30}, {0, 0}}, false}};
+    drawing->views[2].maximum.x = 30;
+    drawing->views[2].paths = {{{{0, 0}, {30, 0}, {30, 100}, {0, 100}, {0, 0}}, false}};
+    const std::vector<ui::DrawingViewChoice> choices{
+        {{ui::DrawingViewKind::Projection, 0}, true, .4},
+        {{ui::DrawingViewKind::Projection, 1}, true, .4},
+        {{ui::DrawingViewKind::Projection, 2}, true, .4}};
+    ui::DrawingTitle title;
+    title.plan = ui::DrawingSheet::compose(drawing, choices);
+    require(title.plan->views.size() == 3 && title.plan->pages == 1 &&
+                std::all_of(title.plan->views.begin(), title.plan->views.end(),
+                            [](const auto &placed) { return placed.scale == .4; }),
+            "Dense dimensions changed the requested scale or dropped a view");
+    require(
+        !ui::DrawingSheet::preview(*drawing, title).isNull() &&
+            ui::DrawingSheet::writePdf(folder + "/dimension-layout.pdf", *drawing, title).isEmpty(),
+        "The dimension layout probe differs from preview or PDF rendering");
+    require(v.holeDimensions.size() == 7 && v.axialDimensions.size() == 2 &&
+                v.dimensions.size() == 2,
+            "Dimension layout changed the source measurements");
+}
 void composition(const QString &folder) {
+    dimensionLayout(folder);
     application::DrawingRequest request;
     request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
     const auto d = build(load(fixtures::profiledBend(), folder + "/composition.step"), request);
@@ -2395,6 +2482,10 @@ int main(int argc, char **argv) {
             composition(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--dimension-bases-only"))) {
+            dimensionBases(temp.path());
+            return 0;
+        }
         if (app.arguments().size() == 5 && app.arguments().at(1) == "--audit-sample") {
             auditSample(app.arguments().at(2), app.arguments().at(3), app.arguments().at(4));
             return 0;
@@ -2422,6 +2513,7 @@ int main(int argc, char **argv) {
         geometry(temp.path());
         basicProjectionDimensions(temp.path());
         localRadiusCallouts(temp.path());
+        dimensionBases(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
         automaticDrawingOrientation(temp.path());

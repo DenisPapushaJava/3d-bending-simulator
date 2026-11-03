@@ -127,7 +127,8 @@ struct DimensionPlacement {
 };
 void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDimension &d,
                std::vector<QRectF> &occupied, DimensionPlacement *placement = nullptr,
-               bool holePosition = false, std::optional<std::array<QPointF, 2>> witnesses = {}) {
+               bool holePosition = false, std::optional<std::array<QPointF, 2>> witnesses = {},
+               bool measureOnly = false, std::size_t alternative = 0, bool flexible = false) {
     const auto firstWitness = witnesses ? (*witnesses)[0] : a;
     const auto secondWitness = witnesses ? (*witnesses)[1] : b;
     const double gap = witnesses ? .5 : .8;
@@ -164,7 +165,9 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
     if (angle >= 90 - 1e-8 || angle < -90)
         angle += 180;
     QPointF da, db, label;
+    double before = outside ? 6 : 0, after = before;
     bool found = false;
+    std::size_t valid = 0;
     for (int side = 0; side < 2 && !found; ++side) {
         if (side)
             normal = -normal;
@@ -180,14 +183,17 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
             const double offset = std::max(10.0, maximum + 10) + lane * 7;
             da = a + normal * offset;
             db = b + normal * offset;
-            const std::array<QLineF, 3> segments{
-                QLineF(da - direction * (outside ? 6 : 0), db + direction * (outside ? 6 : 0)),
-                QLineF(firstWitness + normal * gap, da + normal * 2),
-                QLineF(secondWitness + normal * gap, db + normal * 2)};
-            for (int position = 0; position < (outside ? 2 : 3); ++position) {
+            for (int position = 0; position < (outside ? (flexible ? 8 : 2) : 3); ++position) {
+                const double extension = outside ? (position / 2) * 7. : 0;
+                before = outside ? 6 + (position % 2 ? extension : 0) : 0;
+                after = outside ? 6 + (position % 2 ? 0 : extension) : 0;
+                const std::array<QLineF, 3> segments{
+                    QLineF(da - direction * before, db + direction * after),
+                    QLineF(firstWitness + normal * gap, da + normal * 2),
+                    QLineF(secondWitness + normal * gap, db + normal * 2)};
                 label = outside
-                            ? (position == 0 ? db + direction * (textWidth / 2 + 5)
-                                             : da - direction * (textWidth / 2 + 5))
+                            ? (position % 2 == 0 ? db + direction * (textWidth / 2 + 5 + extension)
+                                                 : da - direction * (textWidth / 2 + 5 + extension))
                             : (da + db) / 2 +
                                   direction * (position == 0
                                                    ? 0
@@ -211,6 +217,8 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
                      }));
                 if (!crosses && !overlaps(rect, occupied) &&
                     (placement ? placement->area : QRectF(25, 20, 385, 193)).contains(rect)) {
+                    if (valid++ < alternative)
+                        continue;
                     occupied.push_back(rect);
                     if (placement) {
                         placement->nextLane[sideIndex] = lane + 1;
@@ -228,10 +236,12 @@ void dimension(QPainter &p, QPointF a, QPointF b, QRectF bounds, const DrawingDi
             QStringLiteral("Не удалось разместить размер %1. Измените ориентацию.")
                 .arg(value)
                 .toStdString());
+    if (measureOnly)
+        return;
     dimensionPen(p);
     p.drawLine(firstWitness + normal * gap, da + normal * 2);
     p.drawLine(secondWitness + normal * gap, db + normal * 2);
-    p.drawLine(da - direction * (outside ? 6 : 0), db + direction * (outside ? 6 : 0));
+    p.drawLine(da - direction * before, db + direction * after);
     arrow(p, da, outside ? da - direction * 4 : db, dimensionColor);
     arrow(p, db, outside ? db + direction * 4 : da, dimensionColor);
     p.save();
@@ -534,30 +544,146 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     placement.area =
         cellArea ? annotationArea
                  : annotationArea.adjusted(0, -10, 0, 7).intersected(QRectF(25, 20, 385, 193));
-    std::array<int, 4> chainLanes{};
-    for (const auto &d : v.axialDimensions) {
-        placement.nextLane.fill(0); // Adjacent spans share one chain dimension line.
-        dimension(p, map(d.start), map(d.end), bounds, d, occupied, &placement, false,
-                  witnesses(d));
-        for (std::size_t i = 0; i < chainLanes.size(); ++i)
-            chainLanes[i] = std::max(chainLanes[i], placement.nextLane[i]);
-    }
-    placement.nextLane = chainLanes;
-    for (const auto &d : v.holeDimensions)
-        dimension(p, map(d.start), map(d.end), bounds, d, occupied, &placement, true, witnesses(d));
-    for (const auto &d : v.sectionDimensions)
-        dimension(p, map(d.start), map(d.end), bounds, d, occupied, &placement, true, witnesses(d));
     auto dimensions = v.dimensions;
     if (paired && fullProfile)
         std::stable_sort(dimensions.begin(), dimensions.end(),
                          [](const auto &a, const auto &b) { return a.valueMm < b.valueMm; });
+    struct LinearRequest {
+        const DrawingDimension *dimension;
+        bool position;
+        bool chain = false;
+    };
+    std::vector<LinearRequest> requests;
+    for (const auto &d : v.axialDimensions)
+        requests.push_back({&d, false, true});
+    for (const auto &d : v.holeDimensions)
+        requests.push_back({&d, true});
+    for (const auto &d : v.sectionDimensions)
+        requests.push_back({&d, true});
     for (const auto &d : dimensions)
+        requests.push_back({&d, false});
+    const auto initialOccupied = occupied;
+    std::array<int, 4> chainLanes{};
+    bool flexible = false;
+    std::vector<std::size_t> alternatives(requests.size());
+    const auto reset = [&] {
+        occupied = initialOccupied;
+        placement.nextLane.fill(0);
+        placement.lines.clear();
+        chainLanes.fill(0);
+    };
+    const auto place = [&](std::size_t index, bool measureOnly, std::size_t alternative) {
+        const auto &request = requests[index];
+        const auto &d = *request.dimension;
+        if (request.chain)
+            placement.nextLane.fill(0); // Adjacent spans share one chain dimension line.
         dimension(p, map(d.start), map(d.end), bounds, d, occupied,
-                  !cellArea && v.holeDimensions.empty() && v.sectionDimensions.empty() &&
-                          !(paired && fullProfile)
+                  !request.chain && !cellArea && v.holeDimensions.empty() &&
+                          v.sectionDimensions.empty() && !(paired && fullProfile)
                       ? nullptr
                       : &placement,
-                  false, witnesses(d));
+                  request.position, witnesses(d), measureOnly, alternative, flexible);
+        if (request.chain) {
+            for (std::size_t i = 0; i < chainLanes.size(); ++i)
+                chainLanes[i] = std::max(chainLanes[i], placement.nextLane[i]);
+            placement.nextLane = chainLanes;
+        }
+    };
+    if (cellArea) {
+        try {
+            for (std::size_t i = 0; i < requests.size(); ++i)
+                place(i, true, 0);
+        } catch (const std::runtime_error &) {
+            flexible = true;
+            reset();
+            const auto horizontal = [](const DrawingDimension &d) {
+                const double dx = std::abs(d.end.x - d.start.x);
+                return dx > 1e-7 && std::abs(d.end.y - d.start.y) < dx * 1e-7;
+            };
+            std::size_t rows = 0;
+            const std::array<const std::vector<DrawingDimension> *, 3> lists{
+                &v.holeDimensions, &v.sectionDimensions, &dimensions};
+            for (const auto *list : lists)
+                rows += std::count_if(list->begin(), list->end(), horizontal);
+            rows += std::any_of(v.axialDimensions.begin(), v.axialDimensions.end(), horizontal);
+            const auto laneCapacity = [](double gap, double first) -> std::size_t {
+                return gap + 1e-7 < first
+                           ? 0
+                           : 1 + static_cast<std::size_t>(std::floor((gap - first + 1e-7) / 7));
+            };
+            // Necessary bound for this renderer's separate 7-mm lanes: labels
+            // above need 15 mm, extension lines below need 12 mm. This only skips
+            // a futile layout retry; it says nothing about part manufacturability.
+            if (rows > laneCapacity(bounds.top() - placement.area.top(), 15) +
+                           laneCapacity(placement.area.bottom() - bounds.bottom(), 12))
+                throw;
+            // A greedy label can block every later extension line. Revisit its
+            // side/lane/text position, keeping the same dimensions and witnesses.
+            // Most-constrained-first ordering avoids enumerating unrelated labels.
+            // The fallback is limited to 4096 numeric probes and 128 dimensions;
+            // no CAD calls, painter rollback or exhaustive permutation search.
+            std::size_t probes = 0;
+            const auto search = [&](auto &&self, std::size_t index) -> bool {
+                if (index == requests.size())
+                    return true;
+                const auto savedOccupied = occupied;
+                const auto savedPlacement = placement;
+                const auto savedChain = chainLanes;
+                const auto restore = [&] {
+                    occupied = savedOccupied;
+                    placement = savedPlacement;
+                    chainLanes = savedChain;
+                };
+                std::size_t selected = index, fewest = 5;
+                if (!requests[index].chain) {
+                    for (std::size_t next = index; next < requests.size(); ++next) {
+                        std::size_t count = 0;
+                        for (; count < 4; ++count) {
+                            restore();
+                            if (probes >= 4096)
+                                return false;
+                            ++probes;
+                            try {
+                                place(next, true, count);
+                            } catch (const std::runtime_error &) {
+                                break;
+                            }
+                        }
+                        if (count == 0) {
+                            restore();
+                            return false;
+                        }
+                        if (count < fewest) {
+                            selected = next;
+                            fewest = count;
+                        }
+                    }
+                }
+                std::swap(requests[index], requests[selected]);
+                for (std::size_t alternative = 0; alternative < 48 && probes < 4096;
+                     ++alternative) {
+                    restore();
+                    ++probes;
+                    try {
+                        place(index, true, alternative);
+                    } catch (const std::runtime_error &) {
+                        break;
+                    }
+                    alternatives[index] = alternative;
+                    if (self(self, index + 1))
+                        return true;
+                }
+                std::swap(requests[index], requests[selected]);
+                restore();
+                return false;
+            };
+            if (requests.size() > 128 || !search(search, 0))
+                throw;
+        }
+    }
+    reset();
+    for (std::size_t i = 0; i < requests.size(); ++i)
+        place(i, false, alternatives[i]);
     for (const auto &angle : v.angles)
         angularDimension(p, map(angle.vertex), map(angle.first), map(angle.second), angle, scale,
                          annotationArea, occupied, fullProfile && !schematic, classical);

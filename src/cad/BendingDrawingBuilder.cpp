@@ -503,8 +503,12 @@ gp_Dir preferredAxis(const std::vector<RecognizedBend> &bends, std::size_t base,
 }
 void extendToAdjacentBend(FlangeSize &measured, std::size_t faceIndex, std::size_t current,
                           const std::vector<RecognizedBend> &bends,
-                          const TopTools_IndexedMapOfShape &faces, gp_Dir axis, double tolerance) {
+                          const TopTools_IndexedMapOfShape &faces, gp_Dir axis, gp_Pnt station,
+                          double tolerance) {
     const gp_Dir direction(gp_Vec(measured.corner, measured.end));
+    const auto plane =
+        BRepAdaptor_Surface(TopoDS::Face(faces(static_cast<int>(faceIndex)))).Plane();
+    const gp_Vec normal(plane.Axis().Direction());
     std::optional<FlangeSize> extended;
     for (std::size_t j = 0; j < bends.size(); ++j) {
         if (j == current)
@@ -515,22 +519,34 @@ void extendToAdjacentBend(FlangeSize &measured, std::size_t faceIndex, std::size
         if (!axis.IsParallel(otherAxis, 1e-7))
             continue;
         for (std::size_t k = 0; k < 2; ++k) {
-            if (bend.flangeFaces[k * 2 + 1] != faceIndex)
+            if (bend.flangeFaces[k * 2] != faceIndex && bend.flangeFaces[k * 2 + 1] != faceIndex)
                 continue;
             const auto otherFace =
                 TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[(1 - k) * 2 + 1])));
             BRepAdaptor_Surface surface(otherFace);
             if (surface.GetType() != GeomAbs_Plane)
                 continue;
+            // A reverse bend uses the other skin of this wall as its outside.
+            // Locate that bend's own outside virtual corner, then project it onto
+            // the measured wall. Intersecting the current skin with the other
+            // outer plane would shift an oblique dimension by thickness*cot(angle).
             const auto opposite =
-                flangeSize(TopoDS::Face(faces(static_cast<int>(faceIndex))), surface.Plane(), axis);
+                flangeSize(TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[k * 2 + 1]))),
+                           surface.Plane(), axis);
             if (!opposite)
                 continue;
-            const double length = gp_Vec(measured.corner, opposite->corner).Dot(gp_Vec(direction));
+            const auto end = opposite->corner.Translated(
+                -normal * gp_Vec(plane.Location(), opposite->corner).Dot(normal));
+            const double length = gp_Vec(measured.corner, end).Dot(gp_Vec(direction));
             const double setback =
                 (bend.innerRadiusMm + bend.thicknessMm) * std::tan(bend.angleRadians / 2);
             if (length <= measured.value || std::abs(length - measured.value - setback) > tolerance)
                 continue;
+            const auto innerFace = TopoDS::Face(faces(static_cast<int>(bend.innerFace)));
+            BRepClass_FaceClassifier onSection(innerFace, bendSurfacePoint(bend, faces, station),
+                                               1e-5);
+            if (onSection.State() != TopAbs_IN && onSection.State() != TopAbs_ON)
+                continue; // A shorter adjacent bend may not reach this local section.
             if (extended)
                 return; // An ambiguous shared face is not extended.
             extended = FlangeSize{
@@ -1237,6 +1253,14 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 const auto angular = drawingBendCorner(bend, faces, at);
                 if (angular)
                     row.interiorAngleRadians = angular->interior;
+                const bool grouped =
+                    profileGroup &&
+                    std::find(profileGroup->members.begin(), profileGroup->members.end(),
+                              drawing->bends.size()) != profileGroup->members.end();
+                const gp_Pnt station =
+                    grouped ? profileGroup->station
+                            : gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z)
+                                  .Translated(axisVector * .5);
                 std::array<std::optional<FlangeSize>, 2> measured;
                 for (std::size_t i = 0; i < 2; ++i) {
                     const auto other =
@@ -1249,7 +1273,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     if (measured[i]) {
                         extendToAdjacentBend(*measured[i], bend.flangeFaces[i * 2 + 1],
                                              drawing->bends.size(), bendAnalysis.bends, faces, axis,
-                                             bendAnalysis.lengthToleranceMm);
+                                             station, bendAnalysis.lengthToleranceMm);
                         row.outerFlangeMm[i] = measured[i]->value;
                     }
                 }
@@ -1257,16 +1281,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 const bool enlarged = row.interiorAngleRadians &&
                                       ((bend.innerRadiusMm + bend.thicknessMm) * baseScale < 1.5 ||
                                        !trueProfile || bendAnalysis.bends.size() > 1);
-                const bool grouped =
-                    profileGroup &&
-                    std::find(profileGroup->members.begin(), profileGroup->members.end(),
-                              drawing->bends.size()) != profileGroup->members.end();
                 auto profileFrame = grouped ? profileGroup->frame : frames[best];
                 std::optional<DrawingView> detail;
-                const gp_Pnt station =
-                    grouped ? profileGroup->station
-                            : gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z)
-                                  .Translated(axisVector * .5);
                 if (enlarged && measured[0] && measured[1]) {
                     if (drawing->details.size() >= 24)
                         throw std::runtime_error("At most 24 enlarged bend profiles are supported");
