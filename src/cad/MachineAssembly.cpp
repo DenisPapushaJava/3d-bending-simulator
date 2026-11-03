@@ -204,10 +204,11 @@ std::vector<MachineDisplayComponent> MachineAssembly::at(double lift) const {
 namespace {
 std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &frame, double tolerance,
                                                         std::stop_token stop, bool firstOnly,
-                                                        RigidClearanceCache *cache = nullptr) {
+                                                        RigidClearanceCache *cache = nullptr,
+                                                        bool gaugesOnly = false) {
     std::vector<MachineCollisionEvidence> result;
     std::optional<Bnd_Box> sheetBounds;
-    if (frame.floor) {
+    if (frame.floor && !gaugesOnly) {
         sheetBounds = bounds(frame.shape);
         const auto overlap =
             floorOverlap(frame.shape, *sheetBounds, frame.floor->yMm, tolerance, stop);
@@ -247,6 +248,17 @@ std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &fram
     };
     for (std::size_t i = 0; i < frame.machine.size(); ++i) {
         const auto &c = frame.machine[i];
+        if (gaugesOnly && !c.gauging)
+            continue;
+        if (c.gauging && frame.floor) {
+            const auto overlap =
+                floorOverlap(c.shape, boxes[i + 3], frame.floor->yMm, tolerance, stop);
+            if (!overlap.IsNull()) {
+                result.push_back({{c.id, c.name, "floor", "Пол"}, overlap});
+                if (firstOnly)
+                    return result;
+            }
+        }
         if (test(0, i + 3, {"sheet", "Деталь", c.id, c.name}))
             return result;
         for (std::size_t t = 0; t < 2; ++t) {
@@ -261,10 +273,21 @@ std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &fram
     for (std::size_t a = 0; a < frame.machine.size(); ++a)
         if (frame.machine[a].moving)
             for (std::size_t b = 0; b < frame.machine.size(); ++b)
-                if (!frame.machine[b].moving && test(a + 3, b + 3,
-                                                     {frame.machine[a].id, frame.machine[a].name,
-                                                      frame.machine[b].id, frame.machine[b].name}))
+                if (!frame.machine[b].moving &&
+                    (!gaugesOnly || frame.machine[a].gauging || frame.machine[b].gauging) &&
+                    test(a + 3, b + 3,
+                         {frame.machine[a].id, frame.machine[a].name, frame.machine[b].id,
+                          frame.machine[b].name}))
                     return result;
+    for (std::size_t a = 0; a < frame.machine.size(); ++a)
+        for (std::size_t b = a + 1; b < frame.machine.size(); ++b)
+            if (!frame.machine[a].moving && !frame.machine[b].moving &&
+                (frame.machine[a].gauging || frame.machine[b].gauging) &&
+                test(a + 3, b + 3,
+                     {frame.machine[a].id, frame.machine[a].name, frame.machine[b].id,
+                      frame.machine[b].name},
+                     true))
+                return result;
     return result;
 }
 } // namespace
@@ -282,5 +305,10 @@ std::vector<MachineCollisionEvidence> MachineAssembly::collisions(const PreviewF
                                                                   std::stop_token stop,
                                                                   RigidClearanceCache *cache) {
     return collectCollisions(frame, tolerance, stop, false, cache);
+}
+std::vector<MachineCollisionEvidence>
+MachineAssembly::backgaugeCollisions(const PreviewFrame &frame, double tolerance,
+                                     std::stop_token stop, RigidClearanceCache *cache) {
+    return collectCollisions(frame, tolerance, stop, false, cache, true);
 }
 } // namespace bending::cad

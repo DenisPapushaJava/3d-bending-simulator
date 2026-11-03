@@ -67,6 +67,7 @@ struct ToolAssignment {
     std::optional<ToolAssembly> dieAssembly = std::nullopt;
     MachineModel machineModel = MachineModel::None;
     bool punchReversed = false;
+    std::optional<BackgaugeSetup> backgauge = std::nullopt;
     bool operator==(const ToolAssignment &) const = default;
 };
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);

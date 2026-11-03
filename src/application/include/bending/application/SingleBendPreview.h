@@ -1,4 +1,5 @@
 #pragma once
+#include "bending/application/Backgauge.h"
 
 #include "bending/application/BendRoute.h"
 #include "bending/application/Document.h"
@@ -28,6 +29,9 @@ struct MachineCollision {
 class SingleBendPreview {
   public:
     virtual ~SingleBendPreview() = default;
+    [[nodiscard]] virtual const BackgaugeReport *backgauge() const noexcept {
+        return nullptr;
+    }
     [[nodiscard]] virtual bool workpieceReversed() const noexcept {
         return false;
     }
@@ -115,7 +119,8 @@ enum class BendPreviewErrorCode {
     RetractionNotProven,
     Cancelled,
     Failed,
-    EndSupportLimitExceeded
+    EndSupportLimitExceeded,
+    BackgaugeUnavailable
 };
 struct BendPreviewError {
     BendPreviewErrorCode code;

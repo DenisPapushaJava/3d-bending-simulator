@@ -70,6 +70,7 @@ QJsonValue toolsJson(const std::optional<core::PressTools> &tools) {
     }
     return QJsonObject{{QStringLiteral("machineModel"), machineModelJson(tools->machineModel)},
                        {QStringLiteral("punchReversed"), tools->punchReversed},
+                       {QStringLiteral("backgauge"), backgaugeJson(tools->backgauge)},
                        {QStringLiteral("openingMm"), tools->openingMm},
                        {QStringLiteral("dieAngleRadians"), tools->dieAngleRadians},
                        {QStringLiteral("punchAngleRadians"), tools->punchAngleRadians},
@@ -90,6 +91,8 @@ bool readTools(const QJsonValue &value, std::optional<core::PressTools> &tools,
     }
     const auto parameters = value.toObject();
     core::PressTools candidate{};
+    if (!readBackgauge(parameters.value("backgauge"), candidate.backgauge))
+        return false;
     if (!readMachineModel(parameters.value(QStringLiteral("machineModel")), candidate.machineModel))
         return false;
     if (parameters.contains("punchReversed") && !parameters.value("punchReversed").isBool())
@@ -226,6 +229,9 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
                 : object.contains(QStringLiteral("catalogTools"))) {
             return false;
         }
+        if (version < 15 && ((bend.tools && bend.tools->backgauge) ||
+                             (bend.catalogTools && bend.catalogTools->backgauge)))
+            return false;
         if (version < 13 &&
             ((bend.tools && bend.tools->machineModel == core::MachineModel::DemoPressV3) ||
              (bend.catalogTools &&
@@ -300,9 +306,9 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
          version.toDouble() != 4.0 && version.toDouble() != 5.0 && version.toDouble() != 6.0 &&
          version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0 &&
          version.toDouble() != 10.0 && version.toDouble() != 11.0 && version.toDouble() != 12.0 &&
-         version.toDouble() != 13.0 && version.toDouble() != 14.0)) {
+         version.toDouble() != 13.0 && version.toDouble() != 14.0 && version.toDouble() != 15.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 14",
+                           "Supported project format versions are 1 through 15",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -427,7 +433,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 14},
+        {QStringLiteral("version"), 15},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},

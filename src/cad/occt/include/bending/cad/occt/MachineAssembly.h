@@ -28,6 +28,9 @@ class MachineAssembly {
     [[nodiscard]] static std::vector<MachineCollisionEvidence>
     collisions(const PreviewFrame &, double toleranceMm, std::stop_token,
                RigidClearanceCache * = nullptr);
+    [[nodiscard]] static std::vector<MachineCollisionEvidence>
+    backgaugeCollisions(const PreviewFrame &, double toleranceMm, std::stop_token,
+                        RigidClearanceCache * = nullptr);
 
   private:
     std::vector<MachineDisplayComponent> components_;

@@ -1,4 +1,5 @@
 #include "RouteDraftGeometry.h"
+#include "Backgauge.h"
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
@@ -415,6 +416,9 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     require(!envelope.IsVoid(), "Empty draft display");
     const auto lo = envelope.CornerMin(), hi = envelope.CornerMax();
     visual->envelope = {{lo.X(), lo.Y(), lo.Z()}, {hi.X(), hi.Y(), hi.Z()}};
+    prepareBackgauge(*visual, analysis.lengthToleranceMm, stop);
+    if (withTools && visual->gauging)
+        result->checkedToolPositions += visual->gauging->addedRetractionPositions;
     result->visual = visual;
     cancelled(stop);
     return result;

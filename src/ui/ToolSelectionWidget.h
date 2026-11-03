@@ -135,6 +135,8 @@ class ToolSelectionWidget final : public QWidget {
     double lengthToleranceMm_ = 1.e-5;
     QDoubleSpinBox *clearance_;
     QDoubleSpinBox *endSupportLimit_;
+    QCheckBox *backgauge_;
+    core::BackgaugeSetup backgaugeSetup_;
     std::vector<Pair> favoritePairs_;
     bool updating_ = false;
     QPointer<QDialog> picker_;

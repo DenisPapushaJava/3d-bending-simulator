@@ -537,6 +537,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                 message += QStringLiteral(" Столкновение с узлом демонстрационного станка: %1.")
                                .arg(QString::fromStdString(error->detail));
                 break;
+            case Code::BackgaugeUnavailable:
+                message += QStringLiteral(" Не найдена база заднего упора.");
+                break;
             case Code::SheetIntersection:
                 message += QStringLiteral(" Стенки детали пересекаются при движении.");
                 break;

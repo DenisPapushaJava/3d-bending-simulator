@@ -12,7 +12,8 @@ bool validPressTools(const PressTools &t) noexcept {
         return std::isfinite(v) && v >= low && v <= high;
     };
     constexpr double degree = std::numbers::pi / 180.0;
-    return (t.machineModel == MachineModel::None || t.machineModel == MachineModel::DemoPressV1 ||
+    return (!t.backgauge || validBackgaugeSetup(*t.backgauge)) &&
+           (t.machineModel == MachineModel::None || t.machineModel == MachineModel::DemoPressV1 ||
             t.machineModel == MachineModel::DemoPressV2 ||
             t.machineModel == MachineModel::DemoPressV3) &&
            in(t.openingMm, 1.0, 1000.0) && in(t.dieAngleRadians, 30.0 * degree, 120.0 * degree) &&

@@ -802,6 +802,7 @@ class MainWindow::Impl {
                 copyChanged(&core::ToolAssignment::useDrawingGeometry);
                 copyChanged(&core::ToolAssignment::machineModel);
                 copyChanged(&core::ToolAssignment::punchReversed);
+                copyChanged(&core::ToolAssignment::backgauge);
                 // A different profile cannot retain sections belonging to the old profile.
                 if (toolDraftPunchSelected || assignment->punch != shownAssignment->punch) {
                     actual->punch = assignment->punch;
@@ -1433,6 +1434,29 @@ class MainWindow::Impl {
                                     QStringLiteral("У торца отсутствует часть опоры. Доступен "
                                                    "геометрический просмотр; устойчивость и "
                                                    "пригодность к изготовлению не подтверждены.")});
+            if (preview && preview->backgauge()) {
+                const auto &g = *preview->backgauge();
+                QString title = QStringLiteral("База упора не найдена");
+                QString detail = QString::fromStdString(g.detail);
+                if (g.placement) {
+                    const auto &p = *g.placement;
+                    title = p.kind == core::GaugeReferenceKind::StraightEdge
+                                ? QStringLiteral("Упор по прямому краю")
+                                : QStringLiteral("Упор по стенке 90°");
+                    detail = QStringLiteral("Ступень %1 · X %2 · R %3 · Z %4 / %5 мм\n%6")
+                                 .arg(p.level)
+                                 .arg(number(p.xMm))
+                                 .arg(number(p.rMm))
+                                 .arg(number(p.zMm[0]))
+                                 .arg(number(p.zMm[1]))
+                                 .arg(detail);
+                }
+                messages.push_back({BendMessageKind::Backgauge,
+                                    g.status == application::BackgaugeStatus::Checked
+                                        ? BendMessageSeverity::Information
+                                        : BendMessageSeverity::Warning,
+                                    title, detail});
+            }
             if (preview && preview->ignoresClosedCutouts())
                 messages.push_back(
                     {BendMessageKind::Approximation, BendMessageSeverity::Warning,
