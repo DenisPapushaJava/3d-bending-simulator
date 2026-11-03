@@ -750,6 +750,7 @@ class MainWindow::Impl {
     }
 
     void showSource() {
+        controller->cancelRouteDraftPrefetch();
         stopPlayback();
         previewReplacement.reset();
         draftAutoPlay = false;
@@ -1130,6 +1131,21 @@ class MainWindow::Impl {
         playback->stop();
         playBend->setText(QStringLiteral("Воспроизвести"));
     }
+    void prefetchDraftStep() {
+        if (!viewingDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
+            !playback->isActive() || shortToolPlaybackBlocked())
+            return;
+        if (const auto draft = controller->routeDraft(); !draft || draft->toolLengths)
+            return; // Explicit short-tool diagnostics are local to the selected operation.
+        const auto preview = scenePreview();
+        if (!preview)
+            return;
+        // A known stop cannot reach the next step. Do not spend CAD time past that stop.
+        for (std::size_t frame = 0; frame < preview->frameCount(); ++frame)
+            if (collisionAt(preview, frame))
+                return;
+        controller->prefetchNextRouteDraft(previewBuilder);
+    }
     bool shortToolPlaybackBlocked() const {
         const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
         return draft && draft->toolLengths && shortToolDiagnosticDraft.lock() != draft;
@@ -1141,6 +1157,7 @@ class MainWindow::Impl {
     void refreshPlaybackAvailability(const application::BendPreviewPtr &preview) {
         const bool lengthBlocked = shortToolPlaybackBlocked();
         if (lengthBlocked) {
+            controller->cancelRouteDraftPrefetch();
             stopPlayback();
             draftAutoPlay = false;
         }
@@ -1655,6 +1672,7 @@ class MainWindow::Impl {
         previewReplacement.reset();
         previewDisplayError.clear();
         if (collisionAt(preview, index)) {
+            controller->cancelRouteDraftPrefetch();
             stopPlayback();
             draftAutoPlay = false;
         }
@@ -2305,6 +2323,7 @@ class MainWindow::Impl {
             if (playBend->isEnabled()) {
                 playBend->setText(QStringLiteral("Пауза"));
                 playback->start();
+                prefetchDraftStep();
             }
         }
         refreshWorkflow();
@@ -3828,6 +3847,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         if (impl_->shortToolPlaybackBlocked() ||
             Impl::collisionAt(impl_->scenePreview(),
                               static_cast<std::size_t>(impl_->bendFrame->value()))) {
+            impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
             return;
         }
@@ -3856,6 +3876,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     });
     connect(impl_->playBend, &QPushButton::clicked, this, [this] {
         if (impl_->playback->isActive()) {
+            impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
             return;
         }
@@ -3875,6 +3896,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             return;
         impl_->playBend->setText(QStringLiteral("Пауза"));
         impl_->playback->start();
+        impl_->prefetchDraftStep();
     });
     connect(impl_->returnToCad, &QPushButton::clicked, this, [this] {
         impl_->showSource();
@@ -4030,10 +4052,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->propertyTabs, &QTabWidget::currentChanged, this, [this, processGroup](int page) {
         const int stage = page == 3 ? 1 : page == 2 ? 2 : 0;
         processGroup->button(stage)->setChecked(true);
-        if (page != 2)
+        if (page != 2) {
+            impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
-        if (page != 2)
             impl_->pendingBendStage.reset();
+        }
         impl_->workspaceStack->setCurrentIndex(page == 3 ? 1 : 0);
         if (stage == 0)
             impl_->showSource();

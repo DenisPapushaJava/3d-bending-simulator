@@ -36,7 +36,7 @@ class ImportController::Impl {
         }
         const auto request = *pending;
         pending.reset();
-        stop = std::stop_source{};
+        beginForeground();
         const auto token = stop.get_token();
         running = true;
         // Only this task executes in the worker. Session and presentation stay in the GUI thread.
@@ -109,9 +109,9 @@ class ImportController::Impl {
     DocumentSession session;
     QThread thread;
     QObject *worker = nullptr;
-    std::stop_source stop;
+    std::stop_source stop; // Foreground cancellation; read-ahead has its own source.
     std::optional<ImportRequest> pending;
-    bool running = false;
+    bool running = false; // Foreground queued/running; speculative work has its own slot.
     bool stopping = false;
     bool saving = false;
     bool preparingToolProfile = false;
@@ -138,8 +138,32 @@ class ImportController::Impl {
         std::uint64_t id, revision, edit;
     };
     std::optional<DraftJob> pendingDraft;
+    struct DraftPrefetch {
+        DraftJob job;
+        std::stop_source stop;
+    };
+    std::shared_ptr<DraftPrefetch> activePrefetch;
+    std::optional<DraftJob> pendingPrefetch;
+    std::shared_ptr<const DraftPrefetch> completedPrefetch;
+    static bool sameDraft(const DraftJob &a, const DraftJob &b) {
+        return a.document == b.document && a.builder == b.builder && a.revision == b.revision &&
+               a.edit == b.edit && a.request == b.request;
+    }
+    void cancelPrefetch(const DraftJob *keep = nullptr) {
+        pendingPrefetch.reset();
+        completedPrefetch.reset();
+        if (activePrefetch && (!keep || !sameDraft(activePrefetch->job, *keep)))
+            activePrefetch->stop.request_stop();
+    }
+    void beginForeground(const DraftJob *keep = nullptr) {
+        cancelPrefetch(keep);
+        stop = std::stop_source{};
+    }
+    void dispatchPrefetch();
     void dispatchDraft();
-    void invalidateDraft() {
+    void invalidateDraft(bool keepPrefetch = false) {
+        if (!keepPrefetch)
+            cancelPrefetch();
         ++draftId;
         draft.reset();
         draftError.reset();
@@ -149,6 +173,8 @@ class ImportController::Impl {
     }
     std::weak_ptr<const SingleBendPreviewBuilder> routeBuilder;
     void discardRouteCache() {
+        // Stop before clearing: a late warm-up must not repopulate an invalidated cache.
+        cancelPrefetch();
         if (const auto builder = routeBuilder.lock())
             builder->discardRouteCache();
     }
@@ -194,6 +220,7 @@ class ImportController::Impl {
         }
     }
     void invalidatePreview() {
+        cancelPrefetch();
         ++previewId;
         preview.reset();
         previewError.reset();
@@ -204,12 +231,54 @@ class ImportController::Impl {
     }
 };
 
+void ImportController::Impl::dispatchPrefetch() {
+    if (stopping || running || pending || pendingDraft || activePrefetch || !pendingPrefetch)
+        return;
+    auto job = std::move(*pendingPrefetch);
+    pendingPrefetch.reset();
+    if (job.document != session.document() || job.revision != session.revision() ||
+        job.edit != session.editRevision() || session.activeRequest()) {
+        return;
+    }
+    auto work = std::make_shared<DraftPrefetch>(DraftPrefetch{std::move(job), {}});
+    activePrefetch = work;
+    const auto token = work->stop.get_token();
+    QMetaObject::invokeMethod(
+        worker,
+        [this, work, token] {
+            // The same serialized CAD worker warms its bounded cache. No result bypasses
+            // dispatchDraft's validation, and even a failed speculation stays invisible.
+            try {
+                if (!token.stop_requested())
+                    (void)work->job.builder->buildRouteDraft(work->job.document, work->job.request,
+                                                             token);
+            } catch (...) {
+                // An explicit request will report its own preparation failure normally.
+            }
+            QMetaObject::invokeMethod(
+                owner,
+                [this, work, token] {
+                    if (activePrefetch == work)
+                        activePrefetch.reset();
+                    if (stopping)
+                        return;
+                    if (!token.stop_requested() && work->job.document == session.document() &&
+                        work->job.revision == session.revision() &&
+                        work->job.edit == session.editRevision())
+                        completedPrefetch = work;
+                    dispatchPrefetch();
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
+}
+
 void ImportController::Impl::dispatchDraft() {
     if (stopping || running || !pendingDraft)
         return;
     auto job = std::move(*pendingDraft);
     pendingDraft.reset();
-    stop = std::stop_source{};
+    beginForeground(&job);
     const auto token = stop.get_token();
     running = runningDraft = true;
     QMetaObject::invokeMethod(
@@ -356,12 +425,14 @@ void ImportController::shutdown() {
         return;
     }
     impl_->stopping = true;
+    impl_->cancelPrefetch();
     impl_->stop.request_stop();
     impl_->pending.reset();
     impl_->session.cancel();
     // No terminate(): a non-interruptible OCCT call must finish before its dependencies die.
     impl_->thread.quit();
     impl_->thread.wait();
+    impl_->activePrefetch.reset();
     impl_->discardRouteCache();
 }
 
@@ -380,7 +451,7 @@ bool ImportController::prepareToolProfile(ToolProfileInput input,
         return false;
     auto *s = impl_.get();
     const auto id = ++s->toolProfileId;
-    s->stop = std::stop_source{};
+    s->beginForeground();
     const auto stop = s->stop.get_token();
     s->running = s->preparingToolProfile = true;
     QMetaObject::invokeMethod(
@@ -588,7 +659,7 @@ void ImportController::saveProject(std::filesystem::path path,
     const auto bends = state->session.bends();
     const auto revision = state->session.editRevision();
     const auto id = ++state->saveId;
-    state->stop = std::stop_source{};
+    state->beginForeground();
     const auto stop = state->stop.get_token();
     state->running = true;
     state->saving = true;
@@ -671,7 +742,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
     const auto target = *state->session.bendTarget(recognizedIndex);
     const auto tools = mode == BendPreviewMode::Kinematic ? std::nullopt : entry->tools;
     const auto assignment = mode == BendPreviewMode::Kinematic ? std::nullopt : entry->catalogTools;
-    state->stop = std::stop_source{};
+    state->beginForeground();
     const auto stop = state->stop.get_token();
     state->running = true;
     state->preparingPreview = true;
@@ -915,17 +986,49 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
         emit stateChanged();
         return true;
     }
+    Impl::DraftJob wanted{session.document(), std::move(request),    builder, 0,
+                          session.revision(), session.editRevision()};
+    s->cancelPrefetch(&wanted);
     if (previous && previous != builder)
         previous->discardRouteCache();
     s->routeBuilder = builder;
-    s->invalidateDraft();
+    s->invalidateDraft(true);
     s->routeError.reset();
-    s->pendingDraft =
-        Impl::DraftJob{session.document(), std::move(request), std::move(builder),
-                       s->draftId,         session.revision(), session.editRevision()};
+    wanted.id = s->draftId;
+    s->pendingDraft = std::move(wanted);
     s->dispatchDraft();
     emit stateChanged();
     return true;
+}
+bool ImportController::prefetchNextRouteDraft(
+    std::shared_ptr<const SingleBendPreviewBuilder> builder) {
+    auto *s = impl_.get();
+    if (s->stopping || hasWork() || !builder || !s->draft || s->routeBuilder.lock() != builder ||
+        s->session.activeRequest() || s->draft->source != s->session.document() ||
+        s->draft->request.step >= s->draft->request.operations.size())
+        return false;
+    auto request = s->draft->request;
+    ++request.step;
+    Impl::DraftJob job{s->session.document(), std::move(request),       std::move(builder), 0,
+                       s->session.revision(), s->session.editRevision()};
+    if ((s->activePrefetch && !s->activePrefetch->stop.stop_requested() &&
+         Impl::sameDraft(s->activePrefetch->job, job)) ||
+        (s->pendingPrefetch && Impl::sameDraft(*s->pendingPrefetch, job)) ||
+        (s->completedPrefetch && Impl::sameDraft(s->completedPrefetch->job, job)))
+        return true;
+    s->cancelPrefetch();
+    s->pendingPrefetch = std::move(job);
+    s->dispatchPrefetch();
+    return true;
+}
+void ImportController::cancelRouteDraftPrefetch() {
+    // A matching warm-up may already be feeding an explicit queued draft request.
+    // Only normal invalidation/cancel may abort that foreground prerequisite.
+    if (!impl_->runningDraft)
+        impl_->cancelPrefetch();
+}
+bool ImportController::isPrefetchingRouteDraft() const {
+    return impl_->activePrefetch || impl_->pendingPrefetch.has_value();
 }
 bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         std::shared_ptr<const SingleBendPreviewBuilder> builder) {
@@ -956,6 +1059,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
         }
     }
     auto *s = impl_.get();
+    s->cancelPrefetch();
     if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
         previous->discardRouteCache();
     s->routeBuilder = builder;
@@ -963,7 +1067,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     s->invalidatePreview();
     const auto id = s->routeId, revision = session.revision(), edit = session.editRevision();
     const auto document = session.document();
-    s->stop = std::stop_source{};
+    s->beginForeground();
     const auto stop = s->stop.get_token();
     s->running = s->preparingRoute = true;
     s->routeProgress = BendRouteProgress{};
@@ -1191,7 +1295,7 @@ bool ImportController::prepareDrawing(
     const auto revision = state->session.revision();
     const auto editRevision = state->session.editRevision();
     request.manualThicknessMm = state->session.manualThicknessMm();
-    state->stop = std::stop_source{};
+    state->beginForeground();
     const auto stop = state->stop.get_token();
     state->running = true;
     state->preparingDrawing = true;
@@ -1301,7 +1405,7 @@ bool ImportController::prepareFlatPattern(
     s->flatRequest = request;
     const auto id = s->flatId, revision = s->session.revision();
     const auto document = s->session.document();
-    s->stop = std::stop_source{};
+    s->beginForeground();
     const auto stop = s->stop.get_token();
     s->running = true;
     s->preparingFlat = true;
