@@ -470,6 +470,105 @@ void variableProfile(const QString &folder) {
     require(moved->views[1].visibleOpeningCount == 2, "World rotation hid oval centers");
 }
 
+void basicProjectionDimensions(const QString &folder) {
+    const auto shape = BRepPrimAPI_MakeBox(100, 80, 6).Shape();
+    const auto document = load(shape, folder + "/basic-box.step");
+    const std::string bytes(document->sourceStep());
+    const auto checkBox = [&](const application::BendingDrawing &d, bool quarterTurn) {
+        const std::array<std::array<double, 2>, 3> expected =
+            quarterTurn ? std::array<std::array<double, 2>, 3>{{{80, 100}, {80, 6}, {6, 100}}}
+                        : std::array<std::array<double, 2>, 3>{{{100, 80}, {100, 6}, {6, 80}}};
+        require(d.classicalViews.has_value(), "Box lost orthographic projections");
+        for (std::size_t i = 0; i < 3; ++i)
+            for (const auto *view : {&d.views[i], &(*d.classicalViews)[i]}) {
+                require(view->dimensions.size() == 2,
+                        "Basic projection dimensions are missing or repeated");
+                for (int axis = 0; axis < 2; ++axis) {
+                    const auto &dimension = view->dimensions[axis];
+                    require(std::abs(dimension.valueMm - expected[i][axis]) < 1e-4 &&
+                                dimension.witnesses.has_value(),
+                            "Wrong basic size or missing contour attachment");
+                    for (const auto point : *dimension.witnesses)
+                        require(point.x >= view->minimum.x - 1e-4 &&
+                                    point.x <= view->maximum.x + 1e-4 &&
+                                    point.y >= view->minimum.y - 1e-4 &&
+                                    point.y <= view->maximum.y + 1e-4,
+                                "Overall dimension references another projection frame");
+                }
+            }
+    };
+    application::DrawingRequest request;
+    request.quarterTurns = 0;
+    checkBox(*build(document, request), false);
+    request.reverseView = true;
+    checkBox(*build(document, request), false);
+    request.quarterTurns = 1;
+    checkBox(*build(document, request), true);
+    gp_Trsf move;
+    move.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .734);
+    move.SetTranslationPart(gp_Vec(117, -53, 82));
+    request.quarterTurns = 0;
+    request.reverseView = false;
+    checkBox(*build(load(BRepBuilderAPI_Transform(shape, move, true).Shape(),
+                         folder + "/basic-moved.step"),
+                    request),
+             false);
+    require(document->sourceStep() == bytes, "Dimensions modified the imported STEP");
+    const auto channel = build(load(fixtures::channel(300), folder + "/basic-channel.step"));
+    require(channel->classicalViews.has_value(), "Channel lost classical views");
+    auto sizes = std::vector<double>{};
+    for (const auto &dimension : (*channel->classicalViews)[2].dimensions) {
+        sizes.push_back(dimension.valueMm);
+        require(dimension.witnesses.has_value(), "Side view lost contour-based witnesses");
+    }
+    std::sort(sizes.begin(), sizes.end());
+    require(sizes.size() == 2 && std::abs(sizes[0] - 40) < 1e-4 && std::abs(sizes[1] - 92) < 1e-4,
+            "A channel's side view lost its 40 x 92 mm basic sizes");
+    auto choices = ui::DrawingSheet::defaultViews(*channel);
+    for (auto &choice : choices)
+        if (choice.key.kind == ui::DrawingViewKind::Projection)
+            choice.scale = .5;
+    ui::DrawingTitle title;
+    title.name = QStringLiteral("Швеллер");
+    title.plan = ui::DrawingSheet::compose(channel, choices);
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_BASIC_OUTPUT");
+    require(ui::DrawingSheet::writePdf(output.isEmpty() ? folder + "/basic-channel.pdf" : output,
+                                       *channel, title)
+                .isEmpty(),
+            "Basic side dimensions could not be placed in PDF");
+}
+void localRadiusCallouts(const QString &folder) {
+    const auto source =
+        load(fixtures::foldedProfile(4, 80, .43, true), folder + "/different-radii.step");
+    application::DrawingRequest request;
+    request.quarterTurns = 0;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto d = build(source, request);
+    require(d->bends.size() == 4 && d->flatPattern,
+            "Different radii lost recognition or flat pattern");
+    std::vector<double> radii;
+    for (const auto &bend : d->bends)
+        radii.push_back(bend.innerRadiusMm);
+    std::sort(radii.begin(), radii.end());
+    const std::array expected{4., 4.5, 4.5, 5.};
+    for (std::size_t i = 0; i < radii.size(); ++i)
+        require(std::abs(radii[i] - expected[i]) < 1e-4,
+                "CAD radii were replaced by one common radius");
+    for (const auto &section : d->sections)
+        for (const auto &note : section.view.groupedBendNotes)
+            for (auto i : note.bends)
+                require(std::abs(d->bends[i].innerRadiusMm -
+                                 d->bends[note.bends.front()].innerRadiusMm) < 1e-5,
+                        "One radius callout groups bends of different curvature");
+    ui::DrawingTitle title;
+    title.name = QStringLiteral("Разные радиусы");
+    title.plan = ui::DrawingSheet::compose(d, ui::DrawingSheet::defaultViews(*d));
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_RADII_OUTPUT");
+    require(ui::DrawingSheet::writePdf(output.isEmpty() ? folder + "/local-radii.pdf" : output, *d,
+                                       title)
+                .isEmpty(),
+            "Local radii did not fit the drawing");
+}
 void geometry(const QString &folder) {
     const auto source = fixtures::bentStrip(8, 6);
     const auto document = load(source, folder + "/base.step");
@@ -1336,6 +1435,12 @@ void composition(const QString &folder) {
         }
     require(commonScale && *commonScale >= .5,
             "Projection readability was sacrificed for one page");
+    for (const auto &at : plan->views) {
+        require(!at.selectionBounds.isEmpty(), "View has no prepared selection bounds");
+        require(at.selectionBounds.width() < at.area.width() ||
+                    at.selectionBounds.height() < at.area.height(),
+                "View selection still uses the entire allocated cell");
+    }
     auto edited = choices;
     for (auto &choice : edited) {
         if (choice.key.kind == ui::DrawingViewKind::Projection)
@@ -1816,9 +1921,10 @@ void workflow(const QString &folder) {
     require(flatPlacement != initialPlan->views.end(),
             "Flat view missing from paper selection fixture");
     page->setValue(flatPlacement->page + 1);
-    const auto paperPoint = QPoint(
-        qRound(flatPlacement->area.center().x() / ui::DrawingSheet::widthMm * preview->width()),
-        qRound(flatPlacement->area.center().y() / ui::DrawingSheet::heightMm * preview->height()));
+    const auto paperPoint = QPoint(qRound(flatPlacement->selectionBounds.center().x() /
+                                          ui::DrawingSheet::widthMm * preview->width()),
+                                   qRound(flatPlacement->selectionBounds.center().y() /
+                                          ui::DrawingSheet::heightMm * preview->height()));
     for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
         QMouseEvent event(
             type, QPointF(paperPoint), QPointF(preview->mapToGlobal(paperPoint)), Qt::LeftButton,
@@ -2195,6 +2301,14 @@ int main(int argc, char **argv) {
             previewStates();
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--basic-dimensions-only"))) {
+            basicProjectionDimensions(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--radius-callouts-only"))) {
+            localRadiusCallouts(temp.path());
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--composition-only"))) {
             composition(temp.path());
             return 0;
@@ -2224,6 +2338,8 @@ int main(int argc, char **argv) {
         holePositions(temp.path());
         ovalVisibility(temp.path());
         geometry(temp.path());
+        basicProjectionDimensions(temp.path());
+        localRadiusCallouts(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
         repeatedWaveDrawing(temp.path());

@@ -30,6 +30,7 @@ struct DrawingPlacedView {
     QRectF area;
     QPointF centre;
     double scale = 1;
+    QRectF selectionBounds = {}; // Body and annotations; independent of allocated layout cell.
 };
 struct DrawingSheetPlan {
     application::BendingDrawingPtr source;

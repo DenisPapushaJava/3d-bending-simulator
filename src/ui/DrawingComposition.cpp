@@ -202,8 +202,8 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
             QPainter painter(&scratch);
             std::vector<QRectF> occupied;
             try {
-                for (const auto &p : placed)
-                    drawing::paintPlaced(painter, d, p, side, occupied);
+                for (auto &p : placed)
+                    drawing::paintPlaced(painter, d, p, side, occupied, &p.selectionBounds);
                 return placed;
             } catch (const std::runtime_error &e) {
                 lastError = e.what();
@@ -229,7 +229,7 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
             QPainter painter(&scratch);
             std::vector<QRectF> occupied;
             try {
-                drawing::paintPlaced(painter, d, at, side, occupied);
+                drawing::paintPlaced(painter, d, at, side, occupied, &at.selectionBounds);
                 return {at};
             } catch (const std::runtime_error &e) {
                 lastError = e.what();
@@ -395,6 +395,11 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
             if (!scale || *scale > fit + 1.e-9)
                 throw std::runtime_error("Изометрия не помещается в выбранном масштабе");
             plan->views.push_back({iso->key, page, area, area.center() + QPointF(0, 4), *scale});
+            auto &at = plan->views.back();
+            const QSizeF size(width(v) * *scale, height(v) * *scale);
+            at.selectionBounds =
+                QRectF(at.centre - QPointF(size.width() / 2, size.height() / 2), size)
+                    .adjusted(-2, -2, 2, 2);
         }
     std::set<std::size_t> covered;
     for (const auto &at : plan->views)

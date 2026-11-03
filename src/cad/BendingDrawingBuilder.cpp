@@ -122,6 +122,46 @@ void overallWitnesses(const TopoDS_Shape &shape, const Frame &frame, DrawingDime
         // Keep the measured projection if this optional contour attachment is unavailable.
     }
 }
+void overallDimensions(const TopoDS_Shape &shape, const Frame &frame, DrawingView &view,
+                       std::stop_token stop, const DrawingView *prepared = nullptr) {
+    for (bool horizontal : {true, false}) {
+        const double span =
+            horizontal ? view.maximum.x - view.minimum.x : view.maximum.y - view.minimum.y;
+        if (!std::isfinite(span) || span <= 1e-7)
+            continue;
+        const auto equivalent = [&](const DrawingDimension &d) {
+            if (std::abs(d.valueMm - span) > 1e-5)
+                return false;
+            const double first = horizontal ? d.start.x : d.start.y;
+            const double last = horizontal ? d.end.x : d.end.y;
+            const double low = horizontal ? view.minimum.x : view.minimum.y;
+            const double high = horizontal ? view.maximum.x : view.maximum.y;
+            return std::abs(horizontal ? d.start.y - d.end.y : d.start.x - d.end.x) < 1e-5 &&
+                   std::abs(std::min(first, last) - low) < 1e-5 &&
+                   std::abs(std::max(first, last) - high) < 1e-5;
+        };
+        if (std::any_of(view.dimensions.begin(), view.dimensions.end(), equivalent))
+            continue;
+        DrawingDimension dimension{view.minimum,
+                                   horizontal ? DrawingPoint{view.maximum.x, view.minimum.y}
+                                              : DrawingPoint{view.minimum.x, view.maximum.y},
+                                   span,
+                                   {}};
+        if (prepared) {
+            const auto found =
+                std::find_if(prepared->dimensions.begin(), prepared->dimensions.end(),
+                             [&](const auto &d) { return d.witnesses && equivalent(d); });
+            if (found != prepared->dimensions.end()) {
+                dimension.witnesses = found->witnesses;
+                if ((horizontal ? found->start.x > found->end.x : found->start.y > found->end.y))
+                    std::swap((*dimension.witnesses)[0], (*dimension.witnesses)[1]);
+            }
+        }
+        if (!dimension.witnesses)
+            overallWitnesses(shape, frame, dimension, horizontal, stop);
+        view.dimensions.push_back(std::move(dimension));
+    }
+}
 struct CircleArcs {
     DrawingPoint center;
     double radius;
@@ -1100,9 +1140,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             if (i > 0 && i < 3 && std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
                     return o.normal.IsParallel(frames[i].normal, 1e-7);
                 })) {
-                auto opposite = viewOf(
-                    shape, {frames[i].u, frames[i].v.Reversed(), frames[i].normal.Reversed()},
-                    budget, stop, &openings);
+                const Frame oppositeFrame{frames[i].u, frames[i].v.Reversed(),
+                                          frames[i].normal.Reversed()};
+                auto opposite = viewOf(shape, oppositeFrame, budget, stop, &openings);
                 if (opposite.visibleOpeningCount > drawing->views[i].visibleOpeningCount) {
                     frames[i].v.Reverse();
                     frames[i].normal.Reverse();
@@ -1136,33 +1176,6 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             (*drawing->classicalViews)[0].omittedX = gap;
             (*drawing->classicalViews)[1].omittedX = gap;
         }
-        auto &front = drawing->views[0];
-        front.dimensions.push_back({{front.minimum.x, front.minimum.y},
-                                    {front.maximum.x, front.minimum.y},
-                                    front.maximum.x - front.minimum.x,
-                                    ""});
-        front.dimensions.push_back({{front.minimum.x, front.minimum.y},
-                                    {front.minimum.x, front.maximum.y},
-                                    front.maximum.y - front.minimum.y,
-                                    ""});
-        auto &top = drawing->views[1];
-        top.dimensions.push_back({{top.minimum.x, top.minimum.y},
-                                  {top.minimum.x, top.maximum.y},
-                                  top.maximum.y - top.minimum.y,
-                                  ""});
-        overallWitnesses(shape, frames[0], front.dimensions[0], true, stop);
-        overallWitnesses(shape, frames[0], front.dimensions[1], false, stop);
-        overallWitnesses(shape, frames[1], top.dimensions[0], false, stop);
-        (*drawing->classicalViews)[0].dimensions = front.dimensions;
-        auto &classicalTop = (*drawing->classicalViews)[1];
-        classicalTop.dimensions.push_back({{classicalTop.minimum.x, classicalTop.minimum.y},
-                                           {classicalTop.minimum.x, classicalTop.maximum.y},
-                                           classicalTop.maximum.y - classicalTop.minimum.y,
-                                           {}});
-        const Frame classicalTopFrame{classicalFrames[1].XDirection(),
-                                      classicalFrames[1].YDirection(),
-                                      classicalFrames[1].Direction()};
-        overallWitnesses(shape, classicalTopFrame, classicalTop.dimensions[0], false, stop);
         const double baseScale = drawingScale(*drawing).value_or(1);
         const auto addBend = [&](const RecognizedBend &bend, bool diagnostic) {
             const gp_Vec axisVector(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
@@ -1519,6 +1532,29 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         const double arrow = std::max(5.0, std::min(30.0, longest * .2));
         drawing->views[3].sideAnchor = project(anchor, frames[3]);
         drawing->views[3].sideTip = project(anchor.Translated(gp_Vec(side) * arrow), frames[3]);
+        for (std::size_t i = 0; i < 3; ++i) {
+            overallDimensions(shape, frames[i], drawing->views[i], stop);
+            const Frame frame{classicalFrames[i].XDirection(), classicalFrames[i].YDirection(),
+                              classicalFrames[i].Direction()};
+            const auto &source = drawing->views[i];
+            overallDimensions(shape, frame, (*drawing->classicalViews)[i], stop,
+                              source.reverseProjection ==
+                                      (*drawing->classicalViews)[i].reverseProjection
+                                  ? &source
+                                  : nullptr);
+        }
+        for (auto &auxiliary : drawing->auxiliaryViews) {
+            auto frame = frames.at(auxiliary.projection);
+            if (auxiliary.view.reverseProjection !=
+                drawing->views[auxiliary.projection].reverseProjection) {
+                frame.v.Reverse();
+                frame.normal.Reverse();
+            }
+            const auto &source = drawing->views[auxiliary.projection];
+            overallDimensions(
+                shape, frame, auxiliary.view, stop,
+                source.reverseProjection == auxiliary.view.reverseProjection ? &source : nullptr);
+        }
         if (drawing->variableProfile != DrawingVariableProfile::Measured)
             prepareClassicalDrawing(shape, faces, bendAnalysis.bends, classicalFrames, *drawing,
                                     bendAnalysis.lengthToleranceMm, budget, stop);

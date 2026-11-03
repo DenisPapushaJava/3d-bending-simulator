@@ -599,7 +599,7 @@ class DrawingDialog::Impl {
                 marker.setBrush(Qt::NoBrush);
                 for (const auto &at : plan->views)
                     if (at.page == page->value() - 1 && at.key == choices[selectedRow].key)
-                        marker.drawRect(at.area.adjusted(1, 1, -1, -1));
+                        marker.drawRect(at.selectionBounds);
             }
             raster.setDevicePixelRatio(ratio);
             image->setPixmap(QPixmap::fromImage(raster));
@@ -921,7 +921,11 @@ DrawingDialog::DrawingDialog(ImportController &c,
         if (!impl_->plan)
             return;
         for (const auto &at : impl_->plan->views)
-            if (at.page == impl_->page->value() - 1 && at.area.contains(point)) {
+            if (at.page == impl_->page->value() - 1 &&
+                (at.selectionBounds.contains(point) ||
+                 QRectF(at.area.topLeft(),
+                        QSizeF(at.area.width(), at.key.kind == DrawingViewKind::Flat ? 14 : 7))
+                     .contains(point))) {
                 for (std::size_t i = 0; i < impl_->choices.size(); ++i)
                     if (impl_->choices[i].key == at.key) {
                         impl_->views->setCurrentRow(static_cast<int>(i));

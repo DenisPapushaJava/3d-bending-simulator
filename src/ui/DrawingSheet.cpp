@@ -22,12 +22,12 @@ namespace {
 using namespace application;
 QString bendId(const BendingDrawing &d, std::size_t index);
 double fittedScale(const DrawingView &v, double width, double height);
-std::optional<double> commonBendValue(const BendingDrawing &d, bool length) {
+std::optional<double> commonBendLength(const BendingDrawing &d) {
     std::optional<double> value;
     for (const auto &b : d.bends) {
         if (b.diagnostic)
             continue;
-        const auto candidate = length ? b.axialLengthMm : b.innerRadiusMm;
+        const auto candidate = b.axialLengthMm;
         if (value && std::abs(*value - candidate) > 1e-5)
             return {};
         value = candidate;
@@ -382,7 +382,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
           double scale, const QString &caption, bool isometric = false, bool circular = false,
           bool compact = false, std::vector<QRectF> *sheetOccupied = nullptr,
           bool fullProfile = false, std::optional<QRectF> cellArea = {}, bool classical = false,
-          std::vector<QLineF> *dimensionLines = nullptr) {
+          std::vector<QLineF> *dimensionLines = nullptr, QRectF *selectionBounds = nullptr) {
     const bool schematic = v.profileStart.has_value();
     const QPointF midpoint((v.minimum.x + v.maximum.x) / 2, (v.minimum.y + v.maximum.y) / 2);
     const double removed = v.omittedX ? (*v.omittedX)[1] - (*v.omittedX)[0] : 0;
@@ -523,6 +523,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     auto &occupied = sheetOccupied ? *sheetOccupied : localOccupied;
     if (!caption.isEmpty())
         occupied.push_back(captionBox);
+    const auto firstAnnotation = occupied.size();
     DimensionPlacement placement;
     const auto witnesses =
         [&](const DrawingDimension &dimension) -> std::optional<std::array<QPointF, 2>> {
@@ -619,10 +620,9 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                                  bend.trimmedEnds ? QStringLiteral("!") : QString{},
                                  bend.diagnostic ? QStringLiteral(" (кандидат)") : QString{});
         if (schematic) {
-            value = bendId(drawing, index);
-            if (!commonBendValue(drawing, false))
-                value += QStringLiteral(" · R%1").arg(number(bend.innerRadiusMm));
-            if (!commonBendValue(drawing, true))
+            value =
+                bendId(drawing, index) + QStringLiteral(" · R%1").arg(number(bend.innerRadiusMm));
+            if (!commonBendLength(drawing))
                 value += QStringLiteral("\nL=%1").arg(number(bend.axialLengthMm));
             if (bend.trimmedEnds)
                 value += QStringLiteral("!");
@@ -641,10 +641,11 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             ids << bendId(drawing, index);
         const auto &bend = drawing.bends[note.bends.front()];
         QString value = ids.join(QStringLiteral(", "));
-        if (!commonBendValue(drawing, false))
-            value += QStringLiteral(" · R%1").arg(number(bend.innerRadiusMm));
-        if (!commonBendValue(drawing, true))
-            value += QStringLiteral("\nL=%1").arg(number(bend.axialLengthMm));
+        value += (ids.size() > 1 ? QStringLiteral("\nR%1") : QStringLiteral(" · R%1"))
+                     .arg(number(bend.innerRadiusMm));
+        if (!commonBendLength(drawing))
+            value += (ids.size() > 1 ? QStringLiteral(" · L=%1") : QStringLiteral("\nL=%1"))
+                         .arg(number(bend.axialLengthMm));
         if (bend.trimmedEnds)
             value += QStringLiteral("!");
         leaderNote(p, map(note.anchor), bounds, value, annotationArea, occupied, true);
@@ -761,6 +762,15 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     if (dimensionLines)
         dimensionLines->insert(dimensionLines->end(), placement.lines.begin(),
                                placement.lines.end());
+    if (selectionBounds) {
+        auto selected = bounds;
+        for (std::size_t i = firstAnnotation; i < occupied.size(); ++i)
+            selected = selected.united(occupied[i]);
+        for (const auto &line : placement.lines)
+            selected = selected.united(
+                QRectF(line.p1(), line.p2()).normalized().adjusted(-.2, -.2, .2, .2));
+        *selectionBounds = selected.adjusted(-2, -2, 2, 2);
+    }
 }
 void titleBlock(QPainter &p, const DrawingTitle &t, double scale, int page, int pages) {
     p.save();
@@ -958,9 +968,7 @@ void operatorSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &tit
         std::abs(*d.thicknessMm - *d.declaredThicknessMm) > 1e-5)
         parameters
             << QStringLiteral("Вручную t = %1 (расхождение)").arg(number(*d.declaredThicknessMm));
-    if (const auto r = commonBendValue(d, false))
-        parameters << QStringLiteral("Ri = %1 мм").arg(number(*r));
-    if (const auto length = commonBendValue(d, true))
+    if (const auto length = commonBendLength(d))
         parameters << QStringLiteral("Длина зон гиба L = %1 мм").arg(number(*length));
     else
         parameters << QStringLiteral("Длина зоны L — у каждого гиба");
@@ -1071,7 +1079,7 @@ QString flatMaterial(core::SheetMaterial material) {
 }
 double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt = 0,
                 DrawingFlatSide side = DrawingFlatSide::Automatic,
-                std::optional<double> requestedScale = {}) {
+                std::optional<double> requestedScale = {}, QRectF *selectionBounds = nullptr) {
     const auto &flat = *d.flatPattern;
     const auto &info = flat.info;
     auto v = flat.view;
@@ -1137,7 +1145,7 @@ double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt =
     std::vector<QRectF> occupied;
     std::vector<QLineF> dimensionLines;
     view(p, d, v, center, *scale, {}, false, false, false, &occupied, false, area, true,
-         &dimensionLines);
+         &dimensionLines, selectionBounds);
     const auto mapView = [&](DrawingPoint point) {
         return center +
                QPointF((point.x - v.maximum.x / 2) * *scale, -(point.y - v.maximum.y / 2) * *scale);
@@ -1176,14 +1184,18 @@ double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt =
         for (auto id : group)
             ids << QStringLiteral("%1").arg(id + 1, 2, 10, QLatin1Char('0'));
         const auto value =
-            QStringLiteral("B%1 %2 %3°\nL=%4%5")
+            QStringLiteral("B%1 %2 %3°\nR%4 · L=%5%6")
                 .arg(ids.join(QStringLiteral(",")))
                 .arg((b.direction > 0) != orientation.reversed ? QStringLiteral("ВВЕРХ")
                                                                : QStringLiteral("ВНИЗ"),
-                     number(180 - b.turnRadians * 180 / std::numbers::pi), number(b.lengthMm()),
+                     number(180 - b.turnRadians * 180 / std::numbers::pi), number(b.radiusMm),
+                     number(b.lengthMm()),
                      sameK ? QString{} : QStringLiteral(" · K=%1").arg(number(b.k)));
         leaderNote(p, (a + end) / 2, bounds, value, area, occupied, true, &dimensionLines);
     }
+    if (selectionBounds)
+        for (const auto &box : occupied)
+            *selectionBounds = selectionBounds->united(box.adjusted(-2, -2, 2, 2));
     return *scale;
 }
 void compactOrientation(QPainter &p, const BendingDrawing &drawing) {
@@ -1306,9 +1318,7 @@ void classicalParameters(QPainter &p, const BendingDrawing &d, const DrawingTitl
         values << QStringLiteral("t = %1 мм%2")
                       .arg(number(*d.thicknessMm),
                            d.manualThickness ? QStringLiteral(" (вручную)") : QString{});
-    if (const auto r = commonBendValue(d, false))
-        values << QStringLiteral("Ri = %1 мм").arg(number(*r));
-    if (const auto l = commonBendValue(d, true))
+    if (const auto l = commonBendLength(d))
         values << QStringLiteral("Длина зон гиба L = %1 мм").arg(number(*l));
     else if (!d.bends.empty())
         values << QStringLiteral("L — у соответствующих гибов");
@@ -1829,9 +1839,9 @@ DrawingView preparedView(const BendingDrawing &d, DrawingViewKey key) {
     throw std::runtime_error("Unknown view kind");
 }
 void paintPlaced(QPainter &p, const BendingDrawing &d, const DrawingPlacedView &at,
-                 DrawingFlatSide side, std::vector<QRectF> &occupied) {
+                 DrawingFlatSide side, std::vector<QRectF> &occupied, QRectF *selectionBounds) {
     if (at.key.kind == DrawingViewKind::Flat) {
-        flatView(p, d, at.area, 0, side, at.scale);
+        flatView(p, d, at.area, 0, side, at.scale, selectionBounds);
         return;
     }
     const auto v = preparedView(d, at.key);
@@ -1847,7 +1857,8 @@ void paintPlaced(QPainter &p, const BendingDrawing &d, const DrawingPlacedView &
     view(p, d, v, at.centre, at.scale,
          DrawingSheet::viewName(d, at.key) + QStringLiteral(" (%1)").arg(scaleName(at.scale)),
          at.key.kind == DrawingViewKind::Isometric, at.key.kind == DrawingViewKind::Detail && !full,
-         false, &occupied, full, at.area, at.key.kind != DrawingViewKind::Profile);
+         false, &occupied, full, at.area, at.key.kind != DrawingViewKind::Profile, nullptr,
+         selectionBounds);
 }
 void paintCompositionFrame(QPainter &p, const BendingDrawing &d, const DrawingTitle &title,
                            const DrawingSheetPlan &plan, int page) {
