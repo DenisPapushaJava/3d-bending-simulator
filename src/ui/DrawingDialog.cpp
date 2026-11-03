@@ -11,6 +11,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
@@ -18,6 +19,8 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -35,6 +38,31 @@
 
 namespace bending::ui {
 namespace {
+QIcon fitPageIcon() {
+    QIcon icon;
+    for (int ratio : {1, 2})
+        for (auto state : {QIcon::Off, QIcon::On}) {
+            QPixmap pixmap(24 * ratio, 24 * ratio);
+            pixmap.setDevicePixelRatio(ratio);
+            pixmap.fill(Qt::transparent);
+            QPainter painter(&pixmap);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(QPen(QColor(state == QIcon::On ? "#087F83" : "#334155"), 1.6,
+                                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            QPainterPath corners;
+            for (const auto corner :
+                 {QPointF(3, 3), QPointF(21, 3), QPointF(3, 21), QPointF(21, 21)}) {
+                corners.moveTo(corner + QPointF(corner.x() < 12 ? 4 : -4, 0));
+                corners.lineTo(corner);
+                corners.lineTo(corner + QPointF(0, corner.y() < 12 ? 4 : -4));
+            }
+            painter.drawPath(corners);
+            painter.drawRoundedRect(QRectF(8, 6, 8, 12), .7, .7);
+            painter.end();
+            icon.addPixmap(pixmap, QIcon::Normal, state);
+        }
+    return icon;
+}
 QString scaleLabel(double scale) {
     return scale >= 1 ? QStringLiteral("%1:1").arg(scale, 0, 'g', 4)
                       : QStringLiteral("1:%1").arg(1 / scale, 0, 'g', 4);
@@ -140,13 +168,18 @@ class DrawingPreviewArea final : public QScrollArea {
         zoomLabel_->setMinimumWidth(48);
         zoomLabel_->setToolTip(QStringLiteral("Масштаб предпросмотра. Изменяется колёсиком мыши."));
         bar->addWidget(zoomLabel_);
-        fit_ =
-            action(QStringLiteral("Вписать"), "fitDrawingPage", QKeySequence(Qt::CTRL | Qt::Key_0));
+        fit_ = action(QStringLiteral("Показать лист целиком"), "fitDrawingPage",
+                      QKeySequence(Qt::CTRL | Qt::Key_0));
+        fit_->setIcon(fitPageIcon());
         fit_->setCheckable(true);
         auto *fitButton = new QToolButton(footer_);
         fitButton->setObjectName(QStringLiteral("fitDrawingPageButton"));
         fitButton->setDefaultAction(fit_);
-        fitButton->setMinimumHeight(32);
+        fitButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        fitButton->setIconSize(QSize(24, 24));
+        fitButton->setAccessibleName(fit_->text());
+        fitButton->setFocusPolicy(Qt::StrongFocus);
+        fitButton->setFixedSize(32, 32);
         bar->addWidget(fitButton);
         connect(fit_, &QAction::triggered, this, [this] {
             fitToWindow_ = true;
@@ -163,7 +196,7 @@ class DrawingPreviewArea final : public QScrollArea {
         connect(zoomOut, &QAction::triggered, this,
                 [this] { zoomAt(1 / 1.2, viewport()->rect().center()); });
         viewport()->setToolTip(QStringLiteral("Колесо — масштаб · перетаскивание — перемещение · "
-                                              "Ctrl+0 — вписать лист"));
+                                              "Ctrl+0 — показать лист целиком"));
         viewport()->installEventFilter(this);
         state_ = new QWidget(viewport());
         state_->setObjectName(QStringLiteral("drawingPreviewState"));
