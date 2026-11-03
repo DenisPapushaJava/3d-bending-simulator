@@ -112,13 +112,14 @@ inline bending::core::ToolAssignment tangPair() {
 }
 } // namespace tool_fixture
 namespace tool_fixture {
-inline bending::core::ToolPreset fourWayDie(std::vector<double> openings = {12, 18, 24, 30}) {
+inline bending::core::ToolPreset fourWayDie(std::vector<double> openings = {12, 18, 24, 30},
+                                            double halfWidth = 35) {
     using namespace bending::core;
     constexpr double pi = std::numbers::pi;
     auto t = pair().die;
     t.id = "own-four-way";
     t.code = "Own four-way";
-    t.heightMm = 70;
+    t.heightMm = 2 * halfWidth;
     t.openingsMm = std::move(openings);
     t.angleRadians = pi / 3;
     ToolDrawing drawing{"own-four-way.dxf", std::string(64, 'c'), true, {}};
@@ -132,18 +133,18 @@ inline bending::core::ToolPreset fourWayDie(std::vector<double> openings = {12, 
             };
             return DrawingEdge{at(angle), at(angle + sweep), centre, sweep};
         };
-        const auto l = arc({-c, 35 - r}, pi / 2, -tilt),
-                   right = arc({c, 35 - r}, pi / 2 + tilt, -tilt);
+        const auto l = arc({-c, halfWidth - r}, pi / 2, -tilt),
+                   right = arc({c, halfWidth - r}, pi / 2 + tilt, -tilt);
         const DrawingPoint bottom{0, l.end.y + l.end.x * std::tan(tilt)};
         ToolDrawing side{"own.dxf",
                          std::string(64, 'd'),
                          true,
-                         {{{-35, 35}, l.start, {}, 0},
+                         {{{-halfWidth, halfWidth}, l.start, {}, 0},
                           l,
                           {l.end, bottom, {}, 0},
                           {bottom, right.start, {}, 0},
                           right,
-                          {right.end, {35, 35}, {}, 0}}};
+                          {right.end, {halfWidth, halfWidth}, {}, 0}}};
         const double turn = i == 3 ? pi / 2 : -static_cast<double>(i) * pi / 2;
         const auto placed = rotateToolDrawing(side, turn);
         drawing.edges.insert(drawing.edges.end(), placed.edges.begin(), placed.edges.end());

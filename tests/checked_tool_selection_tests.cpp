@@ -158,7 +158,10 @@ int main(int argc, char **argv) {
             throw std::runtime_error("Checked selection: " + e->detail);
         const auto route = c.bendRoute();
         check(route && route->steps.size() == 2 && route->selectedToolVariant &&
-                  *route->selectedToolVariant >= 2 && route->statistics.testedToolVariants >= 3,
+                  *route->selectedToolVariant < builder->last.toolVariants.size() &&
+                  builder->last.toolVariants[*route->selectedToolVariant].assignment.punch.id ==
+                      pass.punch.id &&
+                  route->statistics.testedToolVariants >= 1,
               "Blocked profiles were not replaced by a checked candidate");
         for (const auto &step : route->steps) {
             const auto *entry = c.session().bend(step.bendIndex);

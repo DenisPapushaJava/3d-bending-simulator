@@ -45,6 +45,7 @@ struct BendRouteRequest {
     // Diagnostic/reference switches; the UI uses both optimizations.
     bool allowWorkpieceRotation = true; // False: check exactly the requested installations.
     bool rankCandidates = true;
+    bool rankToolShapes = true; // Soft source-profile ranking; no feasibility pruning.
     bool reuseCalculations = true;
     std::optional<double> maximumEndSupportLossMm =
         std::nullopt; // Null: legacy explicitly unbounded preview.
@@ -66,6 +67,8 @@ struct BendRouteStatistics {
     std::size_t testedToolVariants = 0;
     std::size_t gaugePrunedToolVariants = 0; // Proven axial-span rejection; no contact cycle.
     BackgaugeSearchStatistics backgauge;
+    std::size_t shapeRankedToolVariants = 0;
+    std::uint64_t toolShapeRankingUs = 0;
 };
 struct BendRouteStep {
     std::string id;

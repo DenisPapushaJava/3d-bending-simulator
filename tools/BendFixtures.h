@@ -156,8 +156,9 @@ inline TopoDS_Shape cornerTrimmedChannel() {
     return BRepAlgoAPI_Cut(channel(), below).Shape();
 }
 // Own Z-profile with a long return flange; one bend order crosses the floor.
-inline TopoDS_Shape floorClearanceProfile() {
-    constexpr double pi = std::numbers::pi, height = 100;
+inline TopoDS_Shape floorClearanceProfile(double height = 100, double leftFlange = 1600,
+                                          double rightFlange = 30, double length = 80) {
+    constexpr double pi = std::numbers::pi;
     BRepBuilderAPI_MakeWire wire;
     const auto line = [&](gp_Pnt a, gp_Pnt b) { wire.Add(BRepBuilderAPI_MakeEdge(a, b)); };
     const auto arc = [&](double x, double y, double r, double a, double b) {
@@ -166,18 +167,19 @@ inline TopoDS_Shape floorClearanceProfile() {
                                                             fixtures::polar(r, b, x, y))
                                              .Value()));
     };
-    line({-1600, 0, 0}, {0, 0, 0});
+    line({-leftFlange, 0, 0}, {0, 0, 0});
     arc(0, 6, 6, -pi / 2, 0);
     line({6, 6, 0}, {6, height - 6, 0});
     arc(10, height - 6, 4, pi, pi / 2);
-    line({10, height - 2, 0}, {40, height - 2, 0});
-    line({40, height - 2, 0}, {40, height, 0});
-    line({40, height, 0}, {10, height, 0});
+    line({10, height - 2, 0}, {10 + rightFlange, height - 2, 0});
+    line({10 + rightFlange, height - 2, 0}, {10 + rightFlange, height, 0});
+    line({10 + rightFlange, height, 0}, {10, height, 0});
     arc(10, height - 6, 6, pi / 2, pi);
     line({4, height - 6, 0}, {4, 6, 0});
     arc(0, 6, 4, 0, -pi / 2);
-    line({0, 2, 0}, {-1600, 2, 0});
-    line({-1600, 2, 0}, {-1600, 0, 0});
-    return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, 80)).Shape();
+    line({0, 2, 0}, {-leftFlange, 2, 0});
+    line({-leftFlange, 2, 0}, {-leftFlange, 0, 0});
+    return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, length))
+        .Shape();
 }
 } // namespace bending::fixtures

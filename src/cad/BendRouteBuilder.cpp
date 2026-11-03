@@ -796,6 +796,58 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             std::size_t attempts = 0;
             BendRouteError last{BendRouteErrorCode::NoRoute, "No checked tooling variant passed"};
             std::optional<double> invariantGaugeSpan;
+            std::vector<std::size_t> toolOrder;
+            std::vector<std::pair<double, std::size_t>> shapeRanks;
+            const auto rankStarted = std::chrono::steady_clock::now();
+            bool attemptedShapeRanking = false;
+            for (std::size_t choice = 0; choice < request.toolVariants.size(); ++choice) {
+                cancelled(stop);
+                toolOrder.push_back(choice);
+                if (!request.rankToolShapes)
+                    continue;
+                const auto &variant = request.toolVariants[choice];
+                std::vector<core::ToolFlangeHint> hints;
+                for (const auto &hint : document->metadata().toolShapeHints) {
+                    if (variant.bendIndex && *variant.bendIndex != hint.bendIndex)
+                        continue;
+                    const auto present = [&](std::size_t id) {
+                        return id < analysis.bends.size() &&
+                               std::any_of(
+                                   request.operations.begin(), request.operations.end(),
+                                   [&](const auto &op) {
+                                       const auto &b = analysis.bends[id];
+                                       return op.bendIndex == id &&
+                                              std::abs(op.target.angleRadians - b.angleRadians) <=
+                                                  analysis.angleToleranceRadians &&
+                                              std::abs(op.target.innerRadiusMm - b.innerRadiusMm) <=
+                                                  analysis.lengthToleranceMm;
+                                   });
+                    };
+                    if (present(hint.bendIndex) && present(hint.neighbourBendIndex))
+                        hints.push_back(hint);
+                }
+                const double thickness =
+                    request.manualThicknessMm.value_or(analysis.bends.front().thicknessMm);
+                attemptedShapeRanking |= !hints.empty();
+                if (const auto risk =
+                        core::toolShapeRisk(variant.assignment, hints, thickness, stop))
+                    shapeRanks.emplace_back(*risk, choice);
+            }
+            std::stable_sort(shapeRanks.begin(), shapeRanks.end(),
+                             [](auto a, auto b) { return a.first < b.first; });
+            std::vector<std::size_t> knownSlots;
+            for (const auto &rank : shapeRanks)
+                knownSlots.push_back(rank.second);
+            std::sort(knownSlots.begin(), knownSlots.end());
+            for (std::size_t i = 0; i < knownSlots.size(); ++i)
+                toolOrder[knownSlots[i]] = shapeRanks[i].second;
+            totals.shapeRankedToolVariants = shapeRanks.size();
+            totals.toolShapeRankingUs =
+                attemptedShapeRanking ? static_cast<std::uint64_t>(
+                                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - rankStarted)
+                                                .count())
+                                      : 0;
             const auto add = [&](const BendRouteStatistics &s) {
                 totals.builtStates += s.builtStates;
                 totals.reusedStates += s.reusedStates;
@@ -807,8 +859,10 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.usedProfilePriority |= s.usedProfilePriority;
                 totals.gaugePrunedToolVariants += s.gaugePrunedToolVariants;
                 totals.backgauge += s.backgauge;
+                totals.shapeRankedToolVariants += s.shapeRankedToolVariants;
+                totals.toolShapeRankingUs += s.toolShapeRankingUs;
             };
-            for (std::size_t choice = 0; choice < request.toolVariants.size(); ++choice) {
+            for (const auto choice : toolOrder) {
                 cancelled(stop);
                 const auto spent = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now() - started)

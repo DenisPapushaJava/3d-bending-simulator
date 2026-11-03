@@ -1808,6 +1808,30 @@ class MainWindow::Impl {
                             std::min(selectionRequest->innerRadiusMm, target->innerRadiusMm);
                     }
             }
+            if (selectionRequest) {
+                const auto &analysis = document->metadata().bendAnalysis;
+                for (const auto &hint : document->metadata().toolShapeHints) {
+                    if ((!allBends && hint.bendIndex != static_cast<std::size_t>(row)) ||
+                        hint.bendIndex >= analysis.bends.size() ||
+                        hint.neighbourBendIndex >= analysis.bends.size())
+                        continue;
+                    const auto *active = session.bend(hint.bendIndex);
+                    const auto *neighbour = session.bend(hint.neighbourBendIndex);
+                    const auto matchesCad = [&](std::size_t index) {
+                        const auto target = session.bendTarget(index);
+                        const auto &measured = analysis.bends[index];
+                        return target &&
+                               std::abs(target->angleRadians - measured.angleRadians) <=
+                                   analysis.angleToleranceRadians &&
+                               std::abs(target->innerRadiusMm - measured.innerRadiusMm) <=
+                                   analysis.lengthToleranceMm;
+                    };
+                    if (active && neighbour && included(active->review) &&
+                        included(neighbour->review) && matchesCad(hint.bendIndex) &&
+                        matchesCad(hint.neighbourBendIndex))
+                        selectionRequest->shapeHints.push_back(hint);
+                }
+            }
         }
         toolSelection->setSelectionRequest(
             selectionRequest, allBends,
