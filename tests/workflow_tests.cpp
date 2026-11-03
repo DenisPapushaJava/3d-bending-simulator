@@ -849,7 +849,7 @@ void testSingleBendWorkflow(bool graphics) {
     require(prepare && status && slider && side && play && returnToCad && !prepare->isEnabled() &&
                 !slider->isEnabled(),
             "Missing or active empty operation controls");
-    require(speed && speedValue && playback && !speed->isEnabled() &&
+    require(speed && speedValue && playback && !speed->isEnabled() && playback->interval() == 50 &&
                 speedValue->text() == QStringLiteral("1×"),
             "Missing speed control or incorrect initial speed");
     window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/bend-90-6mm.step"));
@@ -942,7 +942,7 @@ void testSingleBendWorkflow(bool graphics) {
     const auto previewBeforeSpeedChange = controller.bendPreview();
     const auto editBeforeSpeedChange = controller.session().editRevision();
     speed->setValue(4);
-    require(slider->value() == 10 && !playback->isActive() && playback->interval() == 75 &&
+    require(slider->value() == 10 && !playback->isActive() && playback->interval() == 25 &&
                 speedValue->text() == QStringLiteral("2×"),
             "Paused speed change started playback or changed position");
     int previousFrame = slider->value();
@@ -957,16 +957,16 @@ void testSingleBendWorkflow(bool graphics) {
     speed->setFocus();
     QKeyEvent fastest(QEvent::KeyPress, Qt::Key_End, Qt::NoModifier);
     QApplication::sendEvent(speed, &fastest);
-    require(playback->isActive() && slider->value() == runningFrame && playback->interval() == 50 &&
-                speedValue->text() == QStringLiteral("3×"),
-            "Live speed change paused/restarted the animation or did not reach 3x");
+    require(playback->isActive() && slider->value() == runningFrame && playback->interval() == 5 &&
+                speedValue->text() == QStringLiteral("10×"),
+            "Live speed change paused/restarted the animation or did not reach 10x");
     waitUntil([&] { return slider->value() > runningFrame; });
     play->click();
     QObject::disconnect(frameConnection);
     const auto pausedFrame = slider->value();
     speed->setValue(0);
     require(play->text() == QStringLiteral("Воспроизвести"), "Playback did not pause");
-    require(orderedFrames && !playback->isActive() && playback->interval() == 150 &&
+    require(orderedFrames && !playback->isActive() && playback->interval() == 50 &&
                 slider->value() == pausedFrame && speedValue->text() == QStringLiteral("1×") &&
                 controller.bendPreview() == previewBeforeSpeedChange &&
                 controller.session().editRevision() == editBeforeSpeedChange &&
@@ -2237,6 +2237,11 @@ int main(int argc, char *argv[]) {
     app.setQuitOnLastWindowClosed(false);
     try {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
+        if (app.arguments().contains(QStringLiteral("--single-bend-only"))) {
+            testSingleBendWorkflow(graphics);
+            std::cout << "Single-bend playback and tool motion passed\n";
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--press-orbit-only"))) {
             testPressOrbit();
             std::cout << "Fixed Y orbit, free rotation and press-scene lifecycle passed\n";

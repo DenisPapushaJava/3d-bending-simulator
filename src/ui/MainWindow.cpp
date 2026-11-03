@@ -3790,7 +3790,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->playbackSpeed = new QSlider(Qt::Horizontal, impl_->playbackSpeedControls);
     impl_->playbackSpeed->setObjectName(QStringLiteral("bendPlaybackSpeed"));
     impl_->playbackSpeed->setAccessibleName(QStringLiteral("Скорость воспроизведения"));
-    impl_->playbackSpeed->setRange(0, 8); // 1x to 3x, in quarter steps.
+    impl_->playbackSpeed->setRange(0, 36); // 1x to 10x, in quarter steps.
     impl_->playbackSpeed->setPageStep(2);
     impl_->playbackSpeed->setTickPosition(QSlider::NoTicks);
     impl_->playbackSpeed->setTickInterval(1);
@@ -3809,13 +3809,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     sequenceLayout->addLayout(playLayout);
     impl_->playback = new QTimer(this);
     impl_->playback->setObjectName(QStringLiteral("bendPlaybackTimer"));
-    impl_->playback->setInterval(150);
+    impl_->playback->setInterval(50); // New 1x equals the former 3x.
     const auto updatePlaybackSpeed = [this](int step) {
         const double multiplier = 1.0 + static_cast<double>(step) / 4.0;
         const auto value = number(multiplier) + QStringLiteral("×");
-        impl_->playback->setInterval(qRound(150.0 / multiplier));
+        impl_->playback->setInterval(qRound(50.0 / multiplier));
         impl_->playbackSpeedValue->setText(value);
-        const auto description = QStringLiteral("Скорость показа %1. Диапазон 1×–3×, шаг 0,25×. "
+        const auto description = QStringLiteral("Скорость показа %1. Диапазон 1×–10×, шаг 0,25×. "
                                                 "Скорость пресса не рассчитывается.")
                                      .arg(value);
         impl_->playbackSpeed->setToolTip(description);

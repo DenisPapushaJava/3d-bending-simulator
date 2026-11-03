@@ -872,6 +872,7 @@ x.XCloseDisplay(d)
         const auto draftsBeforePlay = builder->drafts.load(),
                    searchesBeforePlay = builder->searches.load();
         speed->setValue(speed->maximum());
+        require(playback->interval() == 5, "Maximum playback speed did not reach 10x");
         slider->setValue(0);
         if (viewer->isReady())
             viewer->sheetOrientationAction()->setChecked(true);
@@ -880,7 +881,7 @@ x.XCloseDisplay(d)
         wait([&] { return !playback->isActive(); });
         require(slider->value() == static_cast<int>(*collisionFrame) && !play->isEnabled() &&
                     builder->drafts == draftsBeforePlay && builder->searches == searchesBeforePlay,
-                "3x playback passed a collision, failed to stop or recalculated CAD");
+                "10x playback passed a collision, failed to stop or recalculated CAD");
         slider->setValue(static_cast<int>(*collisionFrame) - 1);
         require(play->isEnabled(), "Scrubbing back to a safe frame did not restore playback");
         slider->setValue(static_cast<int>(*collisionFrame));
