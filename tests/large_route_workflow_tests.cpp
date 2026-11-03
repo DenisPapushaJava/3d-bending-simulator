@@ -14,8 +14,10 @@
 #include <QScrollBar>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <STEPControl_Writer.hxx>
+#include <algorithm>
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
@@ -39,6 +41,7 @@ class Builder final : public application::SingleBendPreviewBuilder {
   public:
     mutable cad::SingleBendPreviewBuilder impl;
     mutable std::atomic<unsigned> searches = 0;
+    mutable std::atomic<qint64> lastDraftNs = 0;
     application::BendRouteResult buildRoute(application::DocumentPtr d,
                                             application::BendRouteRequest r,
                                             std::stop_token s) const override {
@@ -48,7 +51,11 @@ class Builder final : public application::SingleBendPreviewBuilder {
     application::RouteDraftResult buildRouteDraft(application::DocumentPtr d,
                                                   application::RouteDraftRequest r,
                                                   std::stop_token s) const override {
-        return impl.buildRouteDraft(std::move(d), std::move(r), s);
+        QElapsedTimer timer;
+        timer.start();
+        auto result = impl.buildRouteDraft(std::move(d), std::move(r), s);
+        lastDraftNs = timer.nsecsElapsed();
+        return result;
     }
     void discardRouteCache() const override {
         impl.discardRouteCache();
@@ -134,6 +141,33 @@ int main(int argc, char **argv) {
                   !panel->findChild<QPushButton *>("routeMoveEarlier")->isEnabled() &&
                   builder->searches == 0,
               "Flat step became reorderable");
+        if (app.arguments().contains("--audit-transitions")) {
+            QElapsedTimer heartbeat, total;
+            QTimer pulse;
+            pulse.setInterval(10);
+            qint64 maxGuiGapMs = 0;
+            QObject::connect(&pulse, &QTimer::timeout,
+                             [&] { maxGuiGapMs = std::max(maxGuiGapMs, heartbeat.restart()); });
+            for (const int step : {1, 2, 3, 2, 3}) {
+                maxGuiGapMs = 0;
+                heartbeat.start();
+                total.start();
+                pulse.start();
+                panel->select(step);
+                const auto selectNs = total.nsecsElapsed();
+                wait([&] { return !c.hasWork(); });
+                const auto totalNs = total.nsecsElapsed();
+                pulse.stop();
+                check(c.routeDraft() &&
+                          c.routeDraft()->request.step == static_cast<std::size_t>(step),
+                      "Audited step was not prepared");
+                std::cout << "transition step=" << step
+                          << " selectMs=" << static_cast<double>(selectNs) / 1.e6
+                          << " workerMs=" << static_cast<double>(builder->lastDraftNs.load()) / 1.e6
+                          << " totalMs=" << static_cast<double>(totalNs) / 1.e6
+                          << " maxGuiGapMs=" << maxGuiGapMs << '\n';
+            }
+        }
         c.shutdown();
         std::cout << "32-step strip, scroll, identity and checked tool frames passed\n";
     } catch (const std::exception &e) {
