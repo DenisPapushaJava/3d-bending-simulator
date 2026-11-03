@@ -86,25 +86,34 @@ ToolLibrary::ToolLibrary(core::ToolCatalog initial, std::filesystem::path path,
             error_ = "Некорректная стартовая библиотека. Пользовательские данные не изменены.";
             return;
         }
-        auto tools = starter_;
-        for (auto &tool : tools)
-            tool.segments.reset(); // Unknown stock retains the nominal whole-tool mode.
-        error_ = commit({std::move(tools), {}});
+        error_ = commit({starter_, {}});
     }
 }
-std::vector<core::ToolSegment> ToolLibrary::sectionTemplate(const core::ToolPreset &tool) const {
-    if (!tool.drawing || tool.segments)
-        return {};
+const core::ToolPreset *ToolLibrary::starterProfile(const core::ToolPreset &tool) const {
+    if (!tool.drawing)
+        return nullptr;
     for (const auto &reference : starter_)
         if (reference.kind == tool.kind && reference.drawing && reference.segments &&
             reference.drawing->sha256 == tool.drawing->sha256 &&
             reference.drawing->millimeters == tool.drawing->millimeters &&
-            reference.drawing->edges == tool.drawing->edges) {
-            auto rows = *reference.segments;
-            for (auto &row : rows)
-                row.quantity = 0;
-            return rows;
-        }
+            reference.drawing->edges == tool.drawing->edges)
+            return &reference;
+    return nullptr;
+}
+bool ToolLibrary::usesStarterSections(const core::ToolPreset &tool) const {
+    const auto *reference = starterProfile(tool);
+    return reference && tool.segments && !tool.segments->empty() &&
+           tool.segments == reference->segments;
+}
+std::vector<core::ToolSegment> ToolLibrary::sectionTemplate(const core::ToolPreset &tool) const {
+    if (tool.segments)
+        return {};
+    if (const auto *reference = starterProfile(tool)) {
+        auto rows = *reference->segments;
+        for (auto &row : rows)
+            row.quantity = 0;
+        return rows;
+    }
     return {};
 }
 std::string ToolLibrary::commit(ToolLibraryData next) {

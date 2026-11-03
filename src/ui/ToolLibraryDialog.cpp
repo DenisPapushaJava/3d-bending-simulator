@@ -183,6 +183,11 @@ ToolLibraryDialog::ToolLibraryDialog(
         detailToggle->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
     });
     body->addWidget(new QLabel(QStringLiteral("Длины и количество секций"), card_));
+    starterSections_ = new QLabel(
+        QStringLiteral("Типовой стартовый набор. Укажите фактическое количество секций."), card_);
+    starterSections_->setObjectName("libraryStarterSections");
+    starterSections_->setWordWrap(true);
+    body->addWidget(starterSections_);
     stockHost_ = new QWidget(card_);
     stockLayout_ = new QVBoxLayout(stockHost_);
     stockLayout_->setContentsMargins(0, 0, 0, 0);
@@ -373,6 +378,7 @@ void ToolLibraryDialog::loadCard() {
     card_->setEnabled(t.has_value());
     use_->setEnabled(false);
     if (!t) {
+        starterSections_->hide();
         name_->clear();
         drawing_->setDrawing({});
         status_->setText(QStringLiteral("Выберите профиль или добавьте DXF."));
@@ -380,6 +386,7 @@ void ToolLibraryDialog::loadCard() {
         return;
     }
     name_->setText(text(t->code));
+    starterSections_->setVisible(library_.usesStarterSections(*t));
     manufacturer_->setText(text(t->manufacturer));
     length_->setValue(t->lengthMm);
     name_->setReadOnly(showingArchive_);

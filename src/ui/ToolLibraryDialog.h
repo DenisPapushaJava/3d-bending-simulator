@@ -60,7 +60,7 @@ class ToolLibraryDialog final : public QDialog {
     QDoubleSpinBox *length_;
     QComboBox *filter_, *groove_;
     QCheckBox *archive_;
-    QLabel *status_, *source_, *parameters_;
+    QLabel *status_, *source_, *parameters_, *starterSections_;
     QPushButton *use_, *remove_, *replace_;
     QStackedWidget *pages_;
     QWidget *card_, *stockHost_;
