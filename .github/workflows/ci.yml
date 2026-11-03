@@ -107,9 +107,9 @@ jobs:
           cmake --preset release "-DCMAKE_TOOLCHAIN_FILE=$pwd/.deps/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-release "-DVCPKG_OVERLAY_TRIPLETS=$pwd/cmake/triplets" "-DVCPKG_INSTALLED_DIR=$pwd/vcpkg_installed"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build
-        run: cmake --build --preset release --parallel 2 -- -k 0
+        run: cmake --build --preset release --parallel 4 -- -k 0
       - name: Test core, OCCT and app startup
-        run: ctest --preset release --stop-on-failure
+        run: ctest --preset release --parallel 2 --stop-on-failure
       - name: Package Windows and corresponding sources
         if: runner.os == 'Windows' && needs.quality.outputs.package == 'true'
         shell: pwsh
