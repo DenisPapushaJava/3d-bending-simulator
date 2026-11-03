@@ -4,7 +4,7 @@
 
 Экспериментальный выпуск для Windows 10/11 x64. Основные изменения — задние упоры, подбор инструмента по форме детали и более управляемые чертежи.
 
-**Скачать и запустить:** распакуйте весь `3d-bending-simulator-2026.1.0-alpha.3-windows-x86_64.zip` в отдельную папку и запустите `3d-bending-simulator.exe` в корне. При необходимости установите Microsoft Visual C++ 2015–2022 x64 Runtime. Исходники зависимостей и SHA256SUMS — отдельные материалы, для запуска нужен Windows ZIP.
+**Скачать и запустить:** распакуйте весь [3d-bending-simulator-2026.1.0-alpha.3-windows-x86_64.zip](https://github.com/DenisPapushaJava/3d-bending-simulator/releases/download/v2026.1.0-alpha.3/3d-bending-simulator-2026.1.0-alpha.3-windows-x86_64.zip) в отдельную папку и запустите `3d-bending-simulator.exe` в корне. При необходимости установите Microsoft Visual C++ 2015–2022 x64 Runtime. Исходники зависимостей и SHA256SUMS — отдельные материалы, для запуска нужен Windows ZIP.
 
 Изменения относительно alpha.2:
 
