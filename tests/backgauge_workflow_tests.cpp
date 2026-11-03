@@ -199,8 +199,13 @@ int main(int argc, char **argv) {
         window.openStep(part);
         auto &controller = window.importController();
         wait(controller);
-        require(controller.setBendToolAssignment(0, pair), "UI assignment failed");
         auto *check = window.findChild<QCheckBox *>("backgaugeEnabled");
+        require(check && check->isChecked(), "New part did not enable backgauge by default");
+        auto legacy = pair;
+        legacy.backgauge.reset();
+        require(controller.setBendToolAssignment(0, legacy) && !check->isChecked(),
+                "Legacy assignment silently enabled backgauge");
+        require(controller.setBendToolAssignment(0, pair), "UI assignment failed");
         require(check && check->isChecked(), "UI did not restore backgauge snapshot");
         auto uiDraft = draft;
         uiDraft.operations.front().id = controller.session().bend(0)->id;

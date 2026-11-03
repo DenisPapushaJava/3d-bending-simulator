@@ -290,7 +290,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     backgaugeSetup_ = gaugePreferences();
     backgauge_ = new QCheckBox(QStringLiteral("Проверять задний упор"), setup);
     backgauge_->setObjectName("backgaugeEnabled");
-    backgauge_->setChecked(preferences()->value("backgauge/enabled", false).toBool());
+    backgauge_->setChecked(preferences()->value("backgauge/enabled", true).toBool());
     backgauge_->setToolTip(QStringLiteral(
         "Два упрощённых пальца, три ступени, общая X и высота R. "
         "Прямой край предпочтителен; затем стенка 90°. Перед гибкой пальцы отводятся по X. "
@@ -750,7 +750,7 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
     } else {
         // New/unassigned bend: use workshop stock, never a previous project's captured stock.
         backgaugeSetup_ = gaugePreferences();
-        backgauge_->setChecked(preferences()->value("backgauge/enabled", false).toBool());
+        backgauge_->setChecked(preferences()->value("backgauge/enabled", true).toBool());
         machineModel_ = core::MachineModel::DemoPressV3;
         punchReversed_ = false;
         demoMachine_->setChecked(true);

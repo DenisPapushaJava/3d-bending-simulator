@@ -148,6 +148,8 @@ int main(int argc, char **argv) {
                       .contains(QStringLiteral("Предварительный")),
               "Initial tool proposal ran a route or committed an assignment");
         window.findChild<QCheckBox *>("demoMachine")->setChecked(false);
+        // This fixture isolates tooling/sequence checks; gauging has its own workflow test.
+        window.findChild<QCheckBox *>("backgaugeEnabled")->setChecked(false);
         auto *recommend = window.findChild<QPushButton *>("recommendTools");
         check(recommend && recommend->isEnabled(), "No checked selection button");
         recommend->click();
