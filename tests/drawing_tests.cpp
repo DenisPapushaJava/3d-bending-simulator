@@ -30,6 +30,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -1039,6 +1040,16 @@ void repeatedWaveDrawing(const QString &folder) {
                 "The repeated flat line coordinates were not retained");
         for (const auto &group : drawing->flatPattern->repeatedBendGroups)
             require(group.size() == 3, "A repeated flat label lost a bend ID");
+        const auto choices = ui::DrawingSheet::defaultViews(*drawing);
+        require(std::none_of(choices.begin(), choices.end(),
+                             [](const auto &choice) {
+                                 return choice.visible &&
+                                        choice.key.kind == ui::DrawingViewKind::Detail;
+                             }),
+                "Verified wave unnecessarily retained a detail for every bend");
+        const auto plan = ui::DrawingSheet::compose(drawing, choices);
+        require(plan->coverage.dimensioned == 12 && plan->pages <= 2,
+                "View selection lost D130 wave compaction or dimensions");
         for (int page = 0; page < ui::DrawingSheet::pageCount(*drawing); ++page)
             require(!ui::DrawingSheet::preview(*drawing, {}, page).isNull(),
                     "Repeated wave sheet cannot be rendered");
@@ -1271,6 +1282,97 @@ void flatDrawing(const QString &folder) {
     require(ui::DrawingSheet::pageCount(*result) == 1,
             "Simple blank was unnecessarily split from the folded shape");
 }
+void composition(const QString &folder) {
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto d = build(load(fixtures::profiledBend(), folder + "/composition.step"), request);
+    require(d->flatPattern && d->flatPattern->info.positiveZIsSideA.has_value(),
+            "Unfolding lost the source material side");
+    auto info = d->flatPattern->info;
+    info.bends.resize(3, info.bends.front());
+    info.bends[0].direction = 1;
+    info.bends[1].direction = info.bends[2].direction = -1;
+    info.positiveZIsSideA = true;
+    const auto automatic = ui::DrawingSheet::flatOrientation(info);
+    require(automatic.reversed && automatic.up == 2 && automatic.down == 1 &&
+                automatic.sideA == false,
+            "Auto side did not count actual bends or renamed source sides");
+    const auto first = ui::DrawingSheet::flatOrientation(info, ui::DrawingFlatSide::First);
+    const auto opposite = ui::DrawingSheet::flatOrientation(info, ui::DrawingFlatSide::Opposite);
+    require(!first.reversed && first.sideA == true && opposite.reversed && opposite.sideA == false,
+            "Explicit flat side did not override majority");
+    info.bends.resize(2);
+    info.positiveZIsSideA = false;
+    require(ui::DrawingSheet::flatOrientation(info).reversed &&
+                ui::DrawingSheet::flatOrientation(info).sideA == true,
+            "Tied directions did not retain physical side A");
+    info.positiveZIsSideA.reset();
+    require(!ui::DrawingSheet::flatOrientation(info).reversed &&
+                !ui::DrawingSheet::flatOrientation(info).sideA.has_value(),
+            "Unknown source side was assigned an invented A/B identity");
+    info.bends.front().direction = 0;
+    bool invalid = false;
+    try {
+        (void)ui::DrawingSheet::flatOrientation(info);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "Invalid direction silently became DOWN");
+    auto choices = ui::DrawingSheet::defaultViews(*d);
+    auto plan = ui::DrawingSheet::compose(d, choices);
+    require(plan->coverage.missing.empty() && plan->pages == 1,
+            "Simple dimensioned views and flat pattern were lost or split unnecessarily");
+    std::optional<double> commonScale;
+    for (const auto &at : plan->views)
+        if (at.key.kind == ui::DrawingViewKind::Projection) {
+            require(!commonScale || *commonScale == at.scale,
+                    "Linked projections have different scales");
+            commonScale = at.scale;
+        }
+    require(commonScale && *commonScale >= .5,
+            "Projection readability was sacrificed for one page");
+    ui::DrawingTitle title;
+    title.plan = plan;
+    const auto sourceStart = d->flatPattern->view.paths.front().points.front();
+    require(ui::DrawingSheet::writePdf(folder + "/composition.pdf", *d, title).isEmpty(),
+            "Composed PDF differs from validated preview");
+    title.plan = ui::DrawingSheet::compose(d, choices, ui::DrawingFlatSide::Opposite);
+    (void)ui::DrawingSheet::preview(*d, title);
+    require(d->flatPattern->view.paths.front().points.front().x == sourceStart.x &&
+                d->flatPattern->view.paths.front().points.front().y == sourceStart.y,
+            "Paper reflection modified source geometry");
+    const auto other = std::make_shared<application::BendingDrawing>(*d);
+    invalid = false;
+    try {
+        (void)ui::DrawingSheet::preview(*other, title);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "Another drawing accepted a stale composition");
+    for (auto &choice : choices) {
+        choice.visible = choice.key.kind == ui::DrawingViewKind::Flat;
+        if (choice.visible)
+            choice.scale = 100.;
+    }
+    invalid = false;
+    try {
+        (void)ui::DrawingSheet::compose(d, choices);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "An impossible explicit scale silently shrank or dropped the view");
+    for (auto &choice : choices) {
+        choice.scale.reset();
+        choice.visible = false;
+    }
+    invalid = false;
+    try {
+        (void)ui::DrawingSheet::compose(d, choices);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "An empty sheet was considered exportable");
+}
 void auditSample(const QString &path, const QString &reportPath, const QString &pdfPath) {
     QElapsedTimer timer;
     timer.start();
@@ -1333,11 +1435,32 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
             report.insert("missingBends", missing);
             ui::DrawingTitle title;
             title.name = QFileInfo(path).completeBaseName();
-            const auto exportError = ui::DrawingSheet::writePdf(pdfPath, d, title);
+            if (qEnvironmentVariableIsSet("BENDING_DRAWING_COMPOSITION")) {
+                try {
+                    const auto source = std::get<application::BendingDrawingPtr>(result);
+                    QElapsedTimer layoutTimer;
+                    layoutTimer.start();
+                    title.plan =
+                        ui::DrawingSheet::compose(source, ui::DrawingSheet::defaultViews(d));
+                    report.insert("compositionMs", static_cast<double>(layoutTimer.elapsed()));
+                    report.insert("dimensionedBends",
+                                  static_cast<int>(title.plan->coverage.dimensioned));
+                    QJsonArray missingPlaced;
+                    for (auto i : title.plan->coverage.missing)
+                        missingPlaced.append(static_cast<int>(i + 1));
+                    report.insert("missingBends", missingPlaced);
+                } catch (const std::exception &e) {
+                    report.insert("compositionError", QString::fromUtf8(e.what()));
+                }
+            }
+            const auto exportError = report.contains("compositionError")
+                                         ? report.value("compositionError").toString()
+                                         : ui::DrawingSheet::writePdf(pdfPath, d, title);
             report.insert("pdfOk", exportError.isEmpty());
             if (!exportError.isEmpty())
                 report.insert("pdfError", exportError);
-            report.insert("pages", ui::DrawingSheet::pageCount(d));
+            report.insert("pages",
+                          exportError.isEmpty() ? ui::DrawingSheet::pageCount(d, title) : 0);
             QJsonArray views;
             const auto &projections =
                 d.classicalViews
@@ -1439,6 +1562,10 @@ void workflow(const QString &folder) {
     auto *exportButton = dialog->findChild<QPushButton *>("exportDrawingPdf");
     require(exportButton, "Missing PDF action");
     wait([&] { return !c.hasWork() && exportButton->isEnabled(); });
+    const auto initialSnapshot = qEnvironmentVariable("BENDING_DRAWING_DIALOG_SNAPSHOT");
+    if (!initialSnapshot.isEmpty())
+        require(dialog->grab().save(initialSnapshot + ".default.png"),
+                "Cannot save default drawing workspace");
     dialog->showMinimized();
     action->trigger();
     QApplication::processEvents();
@@ -1456,8 +1583,32 @@ void workflow(const QString &folder) {
     const auto oldDrawing = c.drawing();
     require(oldDrawing && oldDrawing->flatPattern,
             "Dialog did not automatically prepare the blank");
-    auto *layout = dialog->findChild<QComboBox *>("drawingLayout");
-    require(layout && layout->currentIndex() == 0, "Classical layout is not the default");
+    auto *viewList = dialog->findChild<QListWidget *>("drawingViews");
+    auto *viewScale = dialog->findChild<QComboBox *>("drawingViewScale");
+    auto *flatSide = dialog->findChild<QComboBox *>("drawingFlatSide");
+    auto *resetViews = dialog->findChild<QPushButton *>("resetDrawingComposition");
+    require(viewList && viewScale && flatSide && resetViews && viewList->count() >= 5,
+            "Drawing view controls are missing");
+    for (int row = 0; row < viewList->count(); ++row)
+        if (viewList->item(row)->text().startsWith(QStringLiteral("Развёртка"))) {
+            viewList->setCurrentRow(row);
+            require(flatSide->isVisible(), "Flat side control is hidden for the flat view");
+            const auto before =
+                dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().toImage();
+            flatSide->setCurrentIndex(2);
+            require(exportButton->isEnabled() && !c.hasWork() && c.drawing() == oldDrawing &&
+                        dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().toImage() !=
+                            before,
+                    "Changing flat side failed or recomputed CAD");
+            break;
+        }
+    resetViews->click();
+    viewList->setCurrentRow(0);
+    viewScale->setCurrentIndex(1); // 10:1 cannot fit the linked projections on A3.
+    require(!exportButton->isEnabled() && c.drawing() == oldDrawing && !c.hasWork(),
+            "An impossible paper scale remained exportable or started CAD work");
+    resetViews->click();
+    require(exportButton->isEnabled(), "Autocomposition did not recover after invalid scale");
     auto *page = dialog->findChild<QSpinBox *>("drawingPage");
     auto *navigation = dialog->findChild<QWidget *>("drawingPageNavigation");
     auto *controls = dialog->findChild<QWidget *>("drawingPreviewControls");
@@ -1467,10 +1618,34 @@ void workflow(const QString &folder) {
     auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
     require(page && navigation && controls && previous && next && scroll && preview,
             "Missing page navigation controls");
+    const auto initialPlan =
+        ui::DrawingSheet::compose(oldDrawing, ui::DrawingSheet::defaultViews(*oldDrawing));
+    const auto flatPlacement =
+        std::find_if(initialPlan->views.begin(), initialPlan->views.end(),
+                     [](const auto &at) { return at.key.kind == ui::DrawingViewKind::Flat; });
+    require(flatPlacement != initialPlan->views.end(),
+            "Flat view missing from paper selection fixture");
+    page->setValue(flatPlacement->page + 1);
+    const auto paperPoint = QPoint(
+        qRound(flatPlacement->area.center().x() / ui::DrawingSheet::widthMm * preview->width()),
+        qRound(flatPlacement->area.center().y() / ui::DrawingSheet::heightMm * preview->height()));
+    for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+        QMouseEvent event(
+            type, QPointF(paperPoint), QPointF(preview->mapToGlobal(paperPoint)), Qt::LeftButton,
+            type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(preview, &event);
+    }
+    require(viewList->currentItem()->text().startsWith(QStringLiteral("Развёртка")) &&
+                flatSide->isVisible(),
+            "Clicking a paper view did not select its controls");
+    resetViews->click();
     const auto basePages = page->maximum();
     require(navigation->isVisible() == (basePages > 1),
             "Single-page navigation visibility is wrong");
-    layout->setCurrentIndex(1);
+    // Request all prepared local views as well: a readable composition needs continuation.
+    for (int row = 0; row < viewList->count(); ++row)
+        viewList->item(row)->setCheckState(Qt::Checked);
+    page->setValue(1);
     QApplication::processEvents();
     require(page->maximum() > 1 && navigation->isVisible() && page->value() == 1 &&
                 !previous->isEnabled() && next->isEnabled(),
@@ -1545,6 +1720,9 @@ void workflow(const QString &folder) {
         require(dialog->grab().save(snapshot + ".expanded.png"),
                 "Cannot save the expanded preview snapshot");
     dialog->resize(900, 560);
+    auto *titleOptions = dialog->findChild<QToolButton *>("drawingTitleOptions");
+    require(titleOptions, "Missing title-block editor disclosure");
+    titleOptions->setChecked(true);
     const auto compactPaper = fittedPaper();
     require(compactPaper.width() < originalPaper.width() &&
                 compactPaper.height() < originalPaper.height(),
@@ -1567,7 +1745,7 @@ void workflow(const QString &folder) {
     next->click();
     fittedPaper();
     dialog->resize(normal);
-    layout->setCurrentIndex(0);
+    resetViews->click();
     fittedPaper();
     require(page->maximum() == basePages && page->value() <= basePages &&
                 navigation->isVisible() == (basePages > 1),
@@ -1665,7 +1843,8 @@ void workflow(const QString &folder) {
         QApplication::processEvents();
         inspected = inspected && dialog->grab().save(snapshot);
     }
-    layout->setCurrentIndex(1);
+    for (int row = 0; row < viewList->count(); ++row)
+        viewList->item(row)->setCheckState(Qt::Checked);
     page->setValue(page->maximum());
     exportedPages = page->maximum();
     require(exportedPages > 1 && c.drawing() == oldDrawing && !c.hasWork() &&
@@ -1761,6 +1940,10 @@ int main(int argc, char **argv) {
             workflow(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--composition-only"))) {
+            composition(temp.path());
+            return 0;
+        }
         if (app.arguments().size() == 5 && app.arguments().at(1) == "--audit-sample") {
             auditSample(app.arguments().at(2), app.arguments().at(3), app.arguments().at(4));
             return 0;
@@ -1779,6 +1962,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         flatDrawing(temp.path());
+        composition(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());
         holePositions(temp.path());

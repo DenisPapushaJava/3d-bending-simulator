@@ -32,6 +32,8 @@ struct FlatPatternInfo {
     BoundsMm bounds{};
     std::vector<FlatBend> bends;
     bool cutoutsIgnored = false;
+    // Source material side A after unfolding; unknown must not invent a side.
+    std::optional<bool> positiveZIsSideA = {};
 };
 class FlatPattern {
   public:
