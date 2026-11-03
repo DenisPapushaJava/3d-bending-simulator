@@ -219,19 +219,25 @@ int main(int argc, char **argv) {
         wait([&] { return builder->entered.load(); });
         auto *progress = window.findChild<QDialog *>("checkedToolProgress");
         auto *indicator = window.findChild<QProgressBar *>("checkedToolBusy");
-        check(progress && progress->isVisible() && !progress->isModal() && window.isEnabled() &&
-                  indicator && indicator->minimum() == 0 && indicator->maximum() == 0 &&
-                  c.bendRouteProgress() && c.bendRouteProgress()->phase == BendRoutePhase::Checking,
-              "Live progress blocked the app or invented a percentage");
+        check(progress && progress->isVisible() && progress->windowModality() == Qt::WindowModal &&
+                  QApplication::activeModalWidget() == progress && indicator &&
+                  indicator->minimum() == 0 && indicator->maximum() == 0 && c.bendRouteProgress() &&
+                  c.bendRouteProgress()->phase == BendRoutePhase::Checking,
+              "Live progress did not block the parent or invented a percentage");
+        check((progress->frameGeometry().center() - window.frameGeometry().center())
+                      .manhattanLength() <= 4,
+              "Progress dialog was not centred on its parent");
         if (!snapshot.isEmpty())
             check(progress->grab().save(snapshot + ".progress.png"), "Progress snapshot failed");
-        auto *quick = window.findChild<QAction *>("recommendToolsQuick");
-        auto *options = window.findChild<QToolButton *>("recommendToolsOptions");
-        check(quick && quick->isEnabled() && options->isEnabled() && punch->isEnabled(),
-              "Background selection disabled quick/manual alternatives");
+        auto *quick = progress->findChild<QAction *>("checkedToolQuick");
+        auto *manual = progress->findChild<QAction *>("checkedToolManual");
+        check(quick && quick->isEnabled() && manual && manual->isEnabled(),
+              "Modal progress disabled quick/manual alternatives");
         quick->trigger();
         wait([&] { return builder->stopObserved.load(); });
-        check(c.hasWork() && !progress->isVisible() && punch->currentText().contains("Blocked") &&
+        check(c.hasWork() && !progress->isVisible() &&
+                  QApplication::activeModalWidget() != progress &&
+                  punch->currentText().contains("Blocked") &&
                   c.session().bend(0)->catalogTools == saved,
               "Quick fallback waited for CAD or changed confirmed assignments");
         builder->release = true;
@@ -248,13 +254,19 @@ int main(int argc, char **argv) {
         wait([&] { return !c.hasWork(); });
         check(punch->currentData() == profile, "Re-entering tools overwrote a manual draft");
         builder->entered = builder->release = builder->stopObserved = false;
+        window.move(window.pos() + QPoint(21, 17));
         recommend->click();
         wait([&] { return builder->entered.load(); });
+        check(QApplication::activeModalWidget() == progress &&
+                  (progress->frameGeometry().center() - window.frameGeometry().center())
+                          .manhattanLength() <= 4,
+              "Reopened progress did not follow the moved parent");
         auto *cancel = window.findChild<QAction *>("cancelImportAction");
         check(cancel && cancel->isEnabled(), "Global cancellation is unavailable");
         cancel->trigger();
         wait([&] { return builder->stopObserved.load(); });
-        check(!progress->isVisible() && c.hasWork(),
+        check(!progress->isVisible() && QApplication::activeModalWidget() != progress &&
+                  c.hasWork(),
               "Global cancellation left progress blocking the app");
         builder->release = true;
         wait([&] { return !c.hasWork(); });
