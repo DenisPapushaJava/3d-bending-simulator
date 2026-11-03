@@ -1857,9 +1857,17 @@ void pdfDestinations(const QString &folder) {
     require(ui::suggestedDrawingPdfPath(source) == first &&
                 ui::preferences()->value("drawing/lastPdfDirectory").toString() == saved,
             "An unavailable export folder prevented fallback or erased the preference");
-    require(QFileInfo(ui::suggestedDrawingPdfPath("A:B?C.stp")).fileName() ==
+    // Keep ':' inside the filename: a leading "A:" is a drive on Windows.
+    require(QFileInfo(ui::suggestedDrawingPdfPath(models + "/A:B?C.stp")).fileName() ==
                 QStringLiteral("A_B_C — чертёж.pdf"),
             "Windows-invalid filename characters survived");
+#ifdef Q_OS_WIN
+    require(QFileInfo(ui::suggestedDrawingPdfPath("C:/drawing.part.stp")).fileName() ==
+                    QStringLiteral("drawing.part — чертёж.pdf") &&
+                QFileInfo(ui::suggestedDrawingPdfPath("C:drawing.part.stp")).fileName() ==
+                    QStringLiteral("drawing.part — чертёж.pdf"),
+            "A Windows drive prefix became part of the PDF filename");
+#endif
     ui::preferences()->remove("drawing/lastPdfDirectory");
 }
 class ControlledDrawingBuilder final : public application::BendingDrawingBuilder {
