@@ -57,6 +57,52 @@ struct Frame {
     gp_Dir v;
     gp_Dir normal;
 };
+std::size_t automaticBaseFace(const TopTools_IndexedMapOfShape &faces, std::stop_token stop) {
+    struct Family {
+        gp_Dir normal;
+        double area;
+        double largestArea;
+        std::size_t face;
+    };
+    std::vector<Family> families;
+    const auto greater = [](double a, double b) {
+        return a > b + std::max(1e-8, std::max(a, b) * 1e-9);
+    };
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const auto face = TopoDS::Face(faces(i));
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane)
+            continue;
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        const double area = properties.Mass();
+        if (!std::isfinite(area) || area <= 0)
+            continue;
+        const auto normal = surface.Plane().Axis().Direction();
+        auto family = std::find_if(families.begin(), families.end(), [&](const auto &f) {
+            return normal.IsParallel(f.normal, 1e-7);
+        });
+        if (family == families.end()) {
+            families.push_back({normal, area, area, static_cast<std::size_t>(i)});
+        } else {
+            family->area += area;
+            if (greater(area, family->largestArea)) {
+                family->largestArea = area;
+                family->face = static_cast<std::size_t>(i);
+            }
+        }
+    }
+    // A corrugated sheet can have a sloping facet larger than any single flat.
+    // Prefer its predominant real plane family; never invent a bounding-box plane.
+    const Family *best = nullptr;
+    for (const auto &family : families)
+        if (!best || greater(family.area, best->area) ||
+            (!greater(best->area, family.area) && greater(family.largestArea, best->largestArea)))
+            best = &family;
+    return best ? best->face : 0;
+}
 DrawingPoint project(gp_Pnt p, const Frame &f) {
     const gp_Vec v(gp_Pnt(0, 0, 0), p);
     return {v.Dot(gp_Vec(f.u)), v.Dot(gp_Vec(f.v))};
@@ -120,6 +166,46 @@ void overallWitnesses(const TopoDS_Shape &shape, const Frame &frame, DrawingDime
         dimension.witnesses = points;
     } catch (const Standard_Failure &) {
         // Keep the measured projection if this optional contour attachment is unavailable.
+    }
+}
+void overallDimensions(const TopoDS_Shape &shape, const Frame &frame, DrawingView &view,
+                       std::stop_token stop, const DrawingView *prepared = nullptr) {
+    for (bool horizontal : {true, false}) {
+        const double span =
+            horizontal ? view.maximum.x - view.minimum.x : view.maximum.y - view.minimum.y;
+        if (!std::isfinite(span) || span <= 1e-7)
+            continue;
+        const auto equivalent = [&](const DrawingDimension &d) {
+            if (std::abs(d.valueMm - span) > 1e-5)
+                return false;
+            const double first = horizontal ? d.start.x : d.start.y;
+            const double last = horizontal ? d.end.x : d.end.y;
+            const double low = horizontal ? view.minimum.x : view.minimum.y;
+            const double high = horizontal ? view.maximum.x : view.maximum.y;
+            return std::abs(horizontal ? d.start.y - d.end.y : d.start.x - d.end.x) < 1e-5 &&
+                   std::abs(std::min(first, last) - low) < 1e-5 &&
+                   std::abs(std::max(first, last) - high) < 1e-5;
+        };
+        if (std::any_of(view.dimensions.begin(), view.dimensions.end(), equivalent))
+            continue;
+        DrawingDimension dimension{view.minimum,
+                                   horizontal ? DrawingPoint{view.maximum.x, view.minimum.y}
+                                              : DrawingPoint{view.minimum.x, view.maximum.y},
+                                   span,
+                                   {}};
+        if (prepared) {
+            const auto found =
+                std::find_if(prepared->dimensions.begin(), prepared->dimensions.end(),
+                             [&](const auto &d) { return d.witnesses && equivalent(d); });
+            if (found != prepared->dimensions.end()) {
+                dimension.witnesses = found->witnesses;
+                if ((horizontal ? found->start.x > found->end.x : found->start.y > found->end.y))
+                    std::swap((*dimension.witnesses)[0], (*dimension.witnesses)[1]);
+            }
+        }
+        if (!dimension.witnesses)
+            overallWitnesses(shape, frame, dimension, horizontal, stop);
+        view.dimensions.push_back(std::move(dimension));
     }
 }
 struct CircleArcs {
@@ -417,8 +503,12 @@ gp_Dir preferredAxis(const std::vector<RecognizedBend> &bends, std::size_t base,
 }
 void extendToAdjacentBend(FlangeSize &measured, std::size_t faceIndex, std::size_t current,
                           const std::vector<RecognizedBend> &bends,
-                          const TopTools_IndexedMapOfShape &faces, gp_Dir axis, double tolerance) {
+                          const TopTools_IndexedMapOfShape &faces, gp_Dir axis, gp_Pnt station,
+                          double tolerance) {
     const gp_Dir direction(gp_Vec(measured.corner, measured.end));
+    const auto plane =
+        BRepAdaptor_Surface(TopoDS::Face(faces(static_cast<int>(faceIndex)))).Plane();
+    const gp_Vec normal(plane.Axis().Direction());
     std::optional<FlangeSize> extended;
     for (std::size_t j = 0; j < bends.size(); ++j) {
         if (j == current)
@@ -429,22 +519,34 @@ void extendToAdjacentBend(FlangeSize &measured, std::size_t faceIndex, std::size
         if (!axis.IsParallel(otherAxis, 1e-7))
             continue;
         for (std::size_t k = 0; k < 2; ++k) {
-            if (bend.flangeFaces[k * 2 + 1] != faceIndex)
+            if (bend.flangeFaces[k * 2] != faceIndex && bend.flangeFaces[k * 2 + 1] != faceIndex)
                 continue;
             const auto otherFace =
                 TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[(1 - k) * 2 + 1])));
             BRepAdaptor_Surface surface(otherFace);
             if (surface.GetType() != GeomAbs_Plane)
                 continue;
+            // A reverse bend uses the other skin of this wall as its outside.
+            // Locate that bend's own outside virtual corner, then project it onto
+            // the measured wall. Intersecting the current skin with the other
+            // outer plane would shift an oblique dimension by thickness*cot(angle).
             const auto opposite =
-                flangeSize(TopoDS::Face(faces(static_cast<int>(faceIndex))), surface.Plane(), axis);
+                flangeSize(TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[k * 2 + 1]))),
+                           surface.Plane(), axis);
             if (!opposite)
                 continue;
-            const double length = gp_Vec(measured.corner, opposite->corner).Dot(gp_Vec(direction));
+            const auto end = opposite->corner.Translated(
+                -normal * gp_Vec(plane.Location(), opposite->corner).Dot(normal));
+            const double length = gp_Vec(measured.corner, end).Dot(gp_Vec(direction));
             const double setback =
                 (bend.innerRadiusMm + bend.thicknessMm) * std::tan(bend.angleRadians / 2);
             if (length <= measured.value || std::abs(length - measured.value - setback) > tolerance)
                 continue;
+            const auto innerFace = TopoDS::Face(faces(static_cast<int>(bend.innerFace)));
+            BRepClass_FaceClassifier onSection(innerFace, bendSurfacePoint(bend, faces, station),
+                                               1e-5);
+            if (onSection.State() != TopAbs_IN && onSection.State() != TopAbs_ON)
+                continue; // A shorter adjacent bend may not reach this local section.
             if (extended)
                 return; // An ambiguous shared face is not extended.
             extended = FlangeSize{
@@ -946,20 +1048,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         std::size_t base = request.baseFace.value_or(0);
         if (base > static_cast<std::size_t>(faces.Extent()))
             return DrawingError{"Selected face belongs to another document"};
-        if (!base) {
-            double maximum = 0;
-            for (int i = 1; i <= faces.Extent(); ++i) {
-                const auto face = TopoDS::Face(faces(i));
-                if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane)
-                    continue;
-                GProp_GProps area;
-                BRepGProp::SurfaceProperties(face, area);
-                if (area.Mass() > maximum + std::max(1e-8, maximum * 1e-9)) {
-                    maximum = area.Mass();
-                    base = static_cast<std::size_t>(i);
-                }
-            }
-        }
+        if (!base)
+            base = automaticBaseFace(faces, stop);
         if (!base)
             return DrawingError{"Choose a planar base face for the drawing"};
         const auto face = TopoDS::Face(faces(static_cast<int>(base)));
@@ -1100,9 +1190,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             if (i > 0 && i < 3 && std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
                     return o.normal.IsParallel(frames[i].normal, 1e-7);
                 })) {
-                auto opposite = viewOf(
-                    shape, {frames[i].u, frames[i].v.Reversed(), frames[i].normal.Reversed()},
-                    budget, stop, &openings);
+                const Frame oppositeFrame{frames[i].u, frames[i].v.Reversed(),
+                                          frames[i].normal.Reversed()};
+                auto opposite = viewOf(shape, oppositeFrame, budget, stop, &openings);
                 if (opposite.visibleOpeningCount > drawing->views[i].visibleOpeningCount) {
                     frames[i].v.Reverse();
                     frames[i].normal.Reverse();
@@ -1136,33 +1226,6 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             (*drawing->classicalViews)[0].omittedX = gap;
             (*drawing->classicalViews)[1].omittedX = gap;
         }
-        auto &front = drawing->views[0];
-        front.dimensions.push_back({{front.minimum.x, front.minimum.y},
-                                    {front.maximum.x, front.minimum.y},
-                                    front.maximum.x - front.minimum.x,
-                                    ""});
-        front.dimensions.push_back({{front.minimum.x, front.minimum.y},
-                                    {front.minimum.x, front.maximum.y},
-                                    front.maximum.y - front.minimum.y,
-                                    ""});
-        auto &top = drawing->views[1];
-        top.dimensions.push_back({{top.minimum.x, top.minimum.y},
-                                  {top.minimum.x, top.maximum.y},
-                                  top.maximum.y - top.minimum.y,
-                                  ""});
-        overallWitnesses(shape, frames[0], front.dimensions[0], true, stop);
-        overallWitnesses(shape, frames[0], front.dimensions[1], false, stop);
-        overallWitnesses(shape, frames[1], top.dimensions[0], false, stop);
-        (*drawing->classicalViews)[0].dimensions = front.dimensions;
-        auto &classicalTop = (*drawing->classicalViews)[1];
-        classicalTop.dimensions.push_back({{classicalTop.minimum.x, classicalTop.minimum.y},
-                                           {classicalTop.minimum.x, classicalTop.maximum.y},
-                                           classicalTop.maximum.y - classicalTop.minimum.y,
-                                           {}});
-        const Frame classicalTopFrame{classicalFrames[1].XDirection(),
-                                      classicalFrames[1].YDirection(),
-                                      classicalFrames[1].Direction()};
-        overallWitnesses(shape, classicalTopFrame, classicalTop.dimensions[0], false, stop);
         const double baseScale = drawingScale(*drawing).value_or(1);
         const auto addBend = [&](const RecognizedBend &bend, bool diagnostic) {
             const gp_Vec axisVector(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
@@ -1190,6 +1253,14 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 const auto angular = drawingBendCorner(bend, faces, at);
                 if (angular)
                     row.interiorAngleRadians = angular->interior;
+                const bool grouped =
+                    profileGroup &&
+                    std::find(profileGroup->members.begin(), profileGroup->members.end(),
+                              drawing->bends.size()) != profileGroup->members.end();
+                const gp_Pnt station =
+                    grouped ? profileGroup->station
+                            : gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z)
+                                  .Translated(axisVector * .5);
                 std::array<std::optional<FlangeSize>, 2> measured;
                 for (std::size_t i = 0; i < 2; ++i) {
                     const auto other =
@@ -1202,7 +1273,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     if (measured[i]) {
                         extendToAdjacentBend(*measured[i], bend.flangeFaces[i * 2 + 1],
                                              drawing->bends.size(), bendAnalysis.bends, faces, axis,
-                                             bendAnalysis.lengthToleranceMm);
+                                             station, bendAnalysis.lengthToleranceMm);
                         row.outerFlangeMm[i] = measured[i]->value;
                     }
                 }
@@ -1210,16 +1281,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 const bool enlarged = row.interiorAngleRadians &&
                                       ((bend.innerRadiusMm + bend.thicknessMm) * baseScale < 1.5 ||
                                        !trueProfile || bendAnalysis.bends.size() > 1);
-                const bool grouped =
-                    profileGroup &&
-                    std::find(profileGroup->members.begin(), profileGroup->members.end(),
-                              drawing->bends.size()) != profileGroup->members.end();
                 auto profileFrame = grouped ? profileGroup->frame : frames[best];
                 std::optional<DrawingView> detail;
-                const gp_Pnt station =
-                    grouped ? profileGroup->station
-                            : gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z)
-                                  .Translated(axisVector * .5);
                 if (enlarged && measured[0] && measured[1]) {
                     if (drawing->details.size() >= 24)
                         throw std::runtime_error("At most 24 enlarged bend profiles are supported");
@@ -1519,6 +1582,30 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         const double arrow = std::max(5.0, std::min(30.0, longest * .2));
         drawing->views[3].sideAnchor = project(anchor, frames[3]);
         drawing->views[3].sideTip = project(anchor.Translated(gp_Vec(side) * arrow), frames[3]);
+        for (std::size_t i = 0; i < 3; ++i) {
+            overallDimensions(shape, frames[i], drawing->views[i], stop);
+            const Frame frame{classicalFrames[i].XDirection(), classicalFrames[i].YDirection(),
+                              classicalFrames[i].Direction()};
+            const auto &projection = drawing->views[i];
+            overallDimensions(shape, frame, (*drawing->classicalViews)[i], stop,
+                              projection.reverseProjection ==
+                                      (*drawing->classicalViews)[i].reverseProjection
+                                  ? &projection
+                                  : nullptr);
+        }
+        for (auto &auxiliary : drawing->auxiliaryViews) {
+            auto frame = frames.at(auxiliary.projection);
+            if (auxiliary.view.reverseProjection !=
+                drawing->views[auxiliary.projection].reverseProjection) {
+                frame.v.Reverse();
+                frame.normal.Reverse();
+            }
+            const auto &projection = drawing->views[auxiliary.projection];
+            overallDimensions(shape, frame, auxiliary.view, stop,
+                              projection.reverseProjection == auxiliary.view.reverseProjection
+                                  ? &projection
+                                  : nullptr);
+        }
         if (drawing->variableProfile != DrawingVariableProfile::Measured)
             prepareClassicalDrawing(shape, faces, bendAnalysis.bends, classicalFrames, *drawing,
                                     bendAnalysis.lengthToleranceMm, budget, stop);

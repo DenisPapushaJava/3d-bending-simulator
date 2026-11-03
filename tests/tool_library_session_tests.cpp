@@ -145,12 +145,18 @@ int main() {
             }};
         application::ToolLibrary seeded({}, "new", seedStorage, {reference});
         require(seeded.error().empty() && seedWrites == 1 && firstRun.exists &&
-                    seeded.data().tools.size() == 1 && !seeded.data().tools[0].segments &&
+                    seeded.data().tools.size() == 1 &&
+                    seeded.data().tools[0].segments == reference.segments &&
                     seeded.data().tools[0].drawing == reference.drawing,
-                "First launch did not atomically seed the profile without stock");
+                "First launch did not atomically seed the profile and starting sections");
         auto renamedReference = seeded.data().tools[0];
         renamedReference.code = "My name";
         renamedReference.id = "different-id";
+        require(seeded.usesStarterSections(renamedReference),
+                "Renaming hid the starting section set");
+        renamedReference.segments.reset();
+        require(!seeded.usesStarterSections(renamedReference),
+                "Unknown stock was marked as a starting set");
         const auto rows = seeded.sectionTemplate(renamedReference);
         require(rows.size() == 2 && rows[0].quantity == 0 && rows[1].quantity == 0,
                 "Reference sections are stock or depend on a mutable name/ID");
@@ -158,8 +164,12 @@ int main() {
         changedProfile.drawing = core::rotateToolDrawing(*changedProfile.drawing, std::numbers::pi);
         require(seeded.sectionTemplate(changedProfile).empty(),
                 "A changed profile inherited reference lengths by hash alone");
+        changedProfile.segments = reference.segments;
+        require(!seeded.usesStarterSections(changedProfile),
+                "A changed profile inherited the starting-set hint by hash alone");
         renamedReference.segments = std::vector<core::ToolSegment>{{50, 2}};
-        require(seeded.sectionTemplate(renamedReference).empty(),
+        require(seeded.sectionTemplate(renamedReference).empty() &&
+                    !seeded.usesStarterSections(renamedReference),
                 "Known stock was replaced with a starter template");
         application::ToolLibrary seededRestart(firstRun.data.tools, "new", seedStorage,
                                                {reference, pair.die});

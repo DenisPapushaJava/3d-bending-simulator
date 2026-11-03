@@ -10,6 +10,7 @@
 #include "bending/ui/Preferences.h"
 #include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -30,6 +31,25 @@
 
 namespace bending::ui {
 namespace {
+const std::array<std::pair<const char *, double core::BackgaugeSetup::*>, 9> gaugeFields{
+    {{"xMinMm", &core::BackgaugeSetup::xMinMm},
+     {"xMaxMm", &core::BackgaugeSetup::xMaxMm},
+     {"rMinMm", &core::BackgaugeSetup::rMinMm},
+     {"rMaxMm", &core::BackgaugeSetup::rMaxMm},
+     {"zMinMm", &core::BackgaugeSetup::zMinMm},
+     {"zMaxMm", &core::BackgaugeSetup::zMaxMm},
+     {"fingerWidthMm", &core::BackgaugeSetup::fingerWidthMm},
+     {"minimumSpacingMm", &core::BackgaugeSetup::minimumSpacingMm},
+     {"retractMm", &core::BackgaugeSetup::retractMm}}};
+core::BackgaugeSetup gaugePreferences() {
+    core::BackgaugeSetup s;
+    auto settings = preferences();
+    s.allowOffsetContacts = settings->value("backgauge/allowOffsetContacts", true).toBool();
+    for (const auto &[key, field] : gaugeFields)
+        s.*field =
+            settings->value(QStringLiteral("backgauge/") + QLatin1String(key), s.*field).toDouble();
+    return core::validBackgaugeSetup(s) ? s : core::BackgaugeSetup{};
+}
 QString text(const std::string &s) {
     return QString::fromStdString(s);
 }
@@ -268,6 +288,88 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     auto *setupLayout = new QVBoxLayout(setup);
     setupLayout->setContentsMargins(0, 0, 0, 0);
     setupLayout->addLayout(clearanceForm);
+    backgaugeSetup_ = gaugePreferences();
+    backgauge_ = new QCheckBox(QStringLiteral("Проверять задний упор"), setup);
+    backgauge_->setObjectName("backgaugeEnabled");
+    backgauge_->setChecked(preferences()->value("backgauge/enabled", true).toBool());
+    backgauge_->setToolTip(QStringLiteral(
+        "Два упрощённых пальца, три ступени, общая X и высота R. "
+        "Прямой край предпочтителен; затем стенка 90°. Перед гибкой пальцы отводятся по X. "
+        "Проверка относится к абстрактному станку и подготовленным положениям."));
+    setupLayout->addWidget(backgauge_);
+    auto *gaugeOptions = new QPushButton(QStringLiteral("Настроить упор…"), setup);
+    gaugeOptions->setObjectName("backgaugeOptions");
+    setupLayout->addWidget(gaugeOptions);
+    connect(backgauge_, &QCheckBox::toggled, this, [this](bool on) {
+        if (!updating_)
+            preferences()->setValue("backgauge/enabled", on);
+        changed();
+    });
+    connect(gaugeOptions, &QPushButton::clicked, this, [this] {
+        QDialog dialog(this);
+        dialog.setWindowTitle(QStringLiteral("Задний упор · абстрактный станок"));
+        auto *form = new QFormLayout(&dialog);
+        auto *note = wrapped(&dialog);
+        note->setText(
+            QStringLiteral("Три ступени: 0 / 28,8 / 65,9 мм; высоты 10,5 / 21 / 25,5 мм. "
+                           "X — первый носик, R — низ пальца; Z — относительно центра инструмента. "
+                           "Нули и корпус демонстрационные. Это не координаты для ЧПУ."));
+        note->setMinimumWidth(420);
+        form->addRow(note);
+        const std::array<QString, 9> labels{
+            QStringLiteral("X от:"),          QStringLiteral("X до:"),
+            QStringLiteral("R от:"),          QStringLiteral("R до:"),
+            QStringLiteral("Z от:"),          QStringLiteral("Z до:"),
+            QStringLiteral("Ширина пальца:"), QStringLiteral("Разнос контактов не менее:"),
+            QStringLiteral("Отвод по X:")};
+        std::array<QDoubleSpinBox *, 9> inputs{};
+        for (std::size_t i = 0; i < inputs.size(); ++i) {
+            auto *input = inputs[i] = new QDoubleSpinBox(&dialog);
+            input->setRange(-10000, 10000);
+            input->setDecimals(2);
+            input->setSuffix(QStringLiteral(" мм"));
+            input->setValue(backgaugeSetup_.*gaugeFields[i].second);
+            input->setKeyboardTracking(false);
+            input->setObjectName(QStringLiteral("backgauge_") +
+                                 QLatin1String(gaugeFields[i].first));
+            form->addRow(labels[i], input);
+        }
+        auto *shared = new QCheckBox(QStringLiteral("Контакты по всей ширине пальцев"), &dialog);
+        shared->setChecked(backgaugeSetup_.allowOffsetContacts);
+        shared->setToolTip(QStringLiteral(
+            "Контакт может находиться вне центра пальца. Оба пальца остаются в проверке "
+            "столкновений. 0 мм — без дополнительного минимума разноса контактов."));
+        form->addRow(shared);
+        auto *buttons =
+            new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        form->addRow(buttons);
+        const auto read = [&] {
+            core::BackgaugeSetup s;
+            s.allowOffsetContacts = shared->isChecked();
+            for (std::size_t i = 0; i < inputs.size(); ++i)
+                s.*gaugeFields[i].second = inputs[i]->value();
+            return s;
+        };
+        const auto validate = [&] {
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(core::validBackgaugeSetup(read()));
+        };
+        for (auto *input : inputs)
+            connect(input, &QDoubleSpinBox::valueChanged, &dialog, validate);
+        connect(shared, &QCheckBox::toggled, &dialog, validate);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        validate();
+        if (dialog.exec() == QDialog::Accepted && backgaugeSetup_ != read()) {
+            backgaugeSetup_ = read();
+            auto settings = preferences();
+            settings->setValue("backgauge/allowOffsetContacts",
+                               backgaugeSetup_.allowOffsetContacts);
+            for (const auto &[key, field] : gaugeFields)
+                settings->setValue(QStringLiteral("backgauge/") + QLatin1String(key),
+                                   backgaugeSetup_.*field);
+            changed();
+        }
+    });
     auto *setupToggle = new QToolButton(this);
     setupToggle->setText(QStringLiteral("Параметры установки ▸"));
     setupToggle->setObjectName(QStringLiteral("toolSetupOptionsToggle"));
@@ -413,6 +515,7 @@ std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
     a.dieAssembly = dieAssembly_;
     a.machineModel = demoMachine_->isChecked() ? machineModel_ : core::MachineModel::None;
     a.punchReversed = punchReversed_;
+    a.backgauge = backgauge_->isChecked() ? std::optional{backgaugeSetup_} : std::nullopt;
     return core::toolParameters(a) ? std::optional{a} : std::nullopt;
 }
 std::optional<core::PressTools> ToolSelectionWidget::parameters() const {
@@ -627,6 +730,8 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         picker_->reject();
     updating_ = true;
     if (a) {
+        backgauge_->setChecked(a->backgauge.has_value());
+        backgaugeSetup_ = a->backgauge.value_or(gaugePreferences());
         machineModel_ = a->machineModel;
         punchReversed_ = a->punchReversed;
         demoMachine_->setChecked(a->machineModel != core::MachineModel::None);
@@ -640,6 +745,8 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         realGeometry_->setChecked(a->useDrawingGeometry);
         mode_->setCurrentIndex(0);
     } else if (tools) {
+        backgauge_->setChecked(tools->backgauge.has_value());
+        backgaugeSetup_ = tools->backgauge.value_or(gaugePreferences());
         machineModel_ = tools->machineModel;
         punchReversed_ = tools->punchReversed;
         demoMachine_->setChecked(tools->machineModel != core::MachineModel::None);
@@ -653,6 +760,8 @@ void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools
         mode_->setCurrentIndex(1);
     } else {
         // New/unassigned bend: use workshop stock, never a previous project's captured stock.
+        backgaugeSetup_ = gaugePreferences();
+        backgauge_->setChecked(preferences()->value("backgauge/enabled", true).toBool());
         machineModel_ = core::MachineModel::DemoPressV3;
         punchReversed_ = false;
         demoMachine_->setChecked(true);
@@ -906,6 +1015,7 @@ std::vector<core::ToolAssignment> ToolSelectionWidget::checkedCandidates() const
         a.punchAssembly = c.punchAssembly ? std::optional{*c.punchAssembly} : std::nullopt;
         a.dieAssembly = c.dieAssembly ? std::optional{*c.dieAssembly} : std::nullopt;
         a.machineModel = demoMachine_->isChecked() ? machineModel_ : core::MachineModel::None;
+        a.backgauge = backgauge_->isChecked() ? std::optional{backgaugeSetup_} : std::nullopt;
         a.punchReversed = current && current->id == a.punch.id
                               ? punchReversed_
                               : core::defaultPunchOrientation(a.punch).value_or(false);

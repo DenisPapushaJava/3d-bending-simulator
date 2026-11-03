@@ -3,6 +3,8 @@
 #include <QJsonObject>
 
 namespace bending::project {
+QJsonValue backgaugeJson(const std::optional<core::BackgaugeSetup> &);
+bool readBackgauge(const QJsonValue &, std::optional<core::BackgaugeSetup> &);
 QString machineModelJson(core::MachineModel);
 bool readMachineModel(const QJsonValue &, core::MachineModel &);
 QJsonObject presetJson(const core::ToolPreset &preset);

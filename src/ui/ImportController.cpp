@@ -235,13 +235,18 @@ void ImportController::Impl::dispatchDraft() {
                         !session.activeRequest() && !token.stop_requested()) {
                         if (const auto *value = std::get_if<RouteDraftPtr>(&result)) {
                             const auto p = *value ? (*value)->visual : nullptr;
-                            bool valid = *value && (*value)->source == job.document &&
-                                         (*value)->request == job.request && p &&
-                                         p->unverifiedDraft() && !p->punchRetraction() &&
-                                         !p->pressMotion() &&
-                                         p->frameCount() == (job.request.step ? 21u : 1u) &&
-                                         (!p->toolSetup() ||
-                                          (*value)->checkedToolPositions == p->frameCount());
+                            bool valid =
+                                *value && (*value)->source == job.document &&
+                                (*value)->request == job.request && p && p->unverifiedDraft() &&
+                                !p->punchRetraction() && !p->pressMotion() &&
+                                (!p->backgauge() ||
+                                 p->backgauge()->addedRetractionPositions <= 4) &&
+                                p->frameCount() ==
+                                    (job.request.step ? 21u : 1u) +
+                                        (p->backgauge() ? p->backgauge()->addedRetractionPositions
+                                                        : 0) &&
+                                (!p->toolSetup() ||
+                                 (*value)->checkedToolPositions == p->frameCount());
                             if (valid && !job.request.operations.empty()) {
                                 const auto &op =
                                     job.request
@@ -254,6 +259,9 @@ void ImportController::Impl::dispatchDraft() {
                                     valid =
                                         valid && p->toolSetup() &&
                                         p->toolSetup()->tools == *op.tools &&
+                                        (!op.tools->backgauge ||
+                                         (p->backgauge() &&
+                                          p->backgauge()->setup == *op.tools->backgauge)) &&
                                         p->machineModel() == op.tools->machineModel &&
                                         p->floorChecked() == (op.tools->machineModel ==
                                                               core::MachineModel::DemoPressV3) &&
@@ -703,6 +711,7 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                  expectedDie = assignment && assignment->useDrawingGeometry &&
                                assignment->die.drawing.has_value(),
                  expectedMachine = tools ? tools->machineModel : core::MachineModel::None,
+                 expectedGauge = tools ? tools->backgauge : std::nullopt,
                  expectedReversed = tools && tools->punchReversed, workpieceReversed,
                  result = std::move(result)] {
                     state->running = false;
@@ -722,10 +731,17 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                 (*preview)->floorChecked() ==
                                     (expectedMachine == core::MachineModel::DemoPressV3) &&
                                 (!(*preview)->toolSetup() ||
-                                 (*preview)->toolSetup()->tools.punchReversed ==
-                                     expectedReversed) &&
+                                 ((*preview)->toolSetup()->tools.punchReversed ==
+                                      expectedReversed &&
+                                  (*preview)->toolSetup()->tools.backgauge == expectedGauge)) &&
                                 (*preview)->usesDrawingPunch() == expectedPunch &&
                                 (*preview)->usesDrawingDie() == expectedDie &&
+                                (!expectedGauge ||
+                                 ((*preview)->toolSetup() &&
+                                  (*preview)->toolSetup()->tools.backgauge == expectedGauge &&
+                                  (*preview)->backgauge() &&
+                                  (*preview)->backgauge()->setup == *expectedGauge &&
+                                  (*preview)->backgauge()->status == BackgaugeStatus::Checked)) &&
                                 (mode == BendPreviewMode::ToolSetup
                                      ? (*preview)->toolSetup() && !(*preview)->pressMotion() &&
                                            (*preview)->frameCount() == 1
@@ -776,7 +792,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                     (error.code == BendPreviewErrorCode::MachineIntersection &&
                                      error.diagnostic->machineCollisionAtFrame(last));
                                 bool prefix = count == 1;
-                                if (count > 1 && count <= 61 &&
+                                const auto gauge = error.diagnostic->backgauge();
+                                const auto added = gauge ? gauge->addedRetractionPositions : 0;
+                                if (count > 1 && added <= 4 && count <= 61 + added &&
                                     mode == BendPreviewMode::ToolMotion &&
                                     error.frameIndex == last && error.diagnostic->pressMotion() &&
                                     !error.diagnostic->punchRetraction()) {
@@ -804,7 +822,8 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                     error.diagnostic->floorChecked() !=
                                         (expectedMachine == core::MachineModel::DemoPressV3) ||
                                     error.diagnostic->toolSetup()->tools.punchReversed !=
-                                        expectedReversed)
+                                        expectedReversed ||
+                                    error.diagnostic->toolSetup()->tools.backgauge != expectedGauge)
                                     state->previewError->diagnostic.reset();
                             }
                         }
@@ -1078,6 +1097,12 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         for (std::size_t f = 0; f < p->frameCount(); ++f)
                                             valid &= !p->machineCollisionAtFrame(f);
                                         if (request.withTools) {
+                                            valid &= !found->tools->backgauge ||
+                                                     (p->backgauge() &&
+                                                      p->backgauge()->setup ==
+                                                          *found->tools->backgauge &&
+                                                      p->backgauge()->status ==
+                                                          BackgaugeStatus::Checked);
                                             const auto *ret = p->punchRetraction();
                                             valid &= p->frameCount() >= 2 && p->toolSetup() &&
                                                      p->toolSetup()->tools == *found->tools &&

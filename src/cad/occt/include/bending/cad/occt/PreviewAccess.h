@@ -30,6 +30,7 @@ struct MachineDisplayComponent {
     bool moving = false;
     bool allowPunchContact = false; // Legacy V1 only; V2 models the open pocket explicitly.
     bool allowDieContact = false;
+    bool gauging = false; // Independently positioned, including checks against static machine.
 };
 // Finite drawing only; the checked floor is the infinite half-space below yMm.
 struct FloorPlane {
@@ -54,7 +55,8 @@ struct PreviewFrame {
     std::vector<CollisionHighlightPatch> collisionHighlights;
     std::vector<MachineDisplayComponent> machine;
     std::optional<FloorPlane> floor;
-    std::vector<gp_Pnt> floorContacts; // Confirmed cut-plane contacts, visible even edge-on.
+    std::vector<gp_Pnt> floorContacts;     // Confirmed cut-plane contacts, visible even edge-on.
+    std::vector<gp_Pnt> backgaugeContacts; // Physical contacts only in the pre-bend frame.
     TopoDS_Shape shape;
     std::array<TopoDS_Shape, 2> tools; // Die, punch; null in the kinematic preview.
     std::array<std::vector<ToolDisplaySegment>, 2> toolSegments;

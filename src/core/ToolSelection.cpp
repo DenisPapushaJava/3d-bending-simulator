@@ -106,6 +106,18 @@ ToolSelectionResult selectTools(const ToolCatalog &catalog, const ToolSelectionR
                     std::abs(std::log(ratio / 8.0)) +
                     .1 * (r.innerRadiusMm - *catalog[p].noseRadiusMm) / r.innerRadiusMm;
                 result.candidates.push_back({p, d, g, score, ratio, assemblies[p], assemblies[d]});
+                if (!r.shapeHints.empty()) {
+                    ToolAssignment assignment{catalog[p], catalog[d], g, 10, "", true};
+                    assignment.punchAssembly =
+                        assemblies[p] ? std::optional{*assemblies[p]} : std::nullopt;
+                    assignment.dieAssembly =
+                        assemblies[d] ? std::optional{*assemblies[d]} : std::nullopt;
+                    const auto normal = toolShapeRisk(assignment, r.shapeHints, r.thicknessMm);
+                    assignment.punchReversed = true;
+                    const auto reverse = toolShapeRisk(assignment, r.shapeHints, r.thicknessMm);
+                    if (normal && reverse)
+                        result.candidates.back().shapeRisk = std::min(*normal, *reverse);
+                }
             }
         }
     }
@@ -114,6 +126,19 @@ ToolSelectionResult selectTools(const ToolCatalog &catalog, const ToolSelectionR
                   return std::tuple{a.score, catalog[a.punch].id, catalog[a.die].id, a.groove} <
                          std::tuple{b.score, catalog[b.punch].id, catalog[b.die].id, b.groove};
               });
+    // Unknown geometry keeps its original slot. Only supported hints reorder known
+    // candidates; no approximate overlap becomes a rejection or a claimed clearance.
+    std::vector<ToolCandidate> ranked;
+    for (const auto &candidate : result.candidates)
+        if (candidate.shapeRisk)
+            ranked.push_back(candidate);
+    std::stable_sort(ranked.begin(), ranked.end(),
+                     [](const auto &a, const auto &b) { return *a.shapeRisk < *b.shapeRisk; });
+    std::size_t next = 0;
+    for (auto &candidate : result.candidates)
+        if (candidate.shapeRisk)
+            candidate = ranked[next++];
+    result.shapeRanked = !ranked.empty();
     return result;
 }
 } // namespace bending::core

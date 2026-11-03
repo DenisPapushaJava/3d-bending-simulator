@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/Thickness.h"
+#include "bending/core/ToolSelection.h"
 
 #include <array>
 #include <cstddef>
@@ -87,6 +88,8 @@ struct DocumentMetadata {
     ThicknessAnalysis thickness{};
     BendAnalysis bendAnalysis{};
     ClosedCutouts closedCutouts{};
+    // Prepared source-only hints; bend IDs belong to this import's bendAnalysis.
+    std::vector<core::ToolFlangeHint> toolShapeHints{};
 };
 
 // Immutable snapshot shared by the session and its presenter after worker preparation ends.

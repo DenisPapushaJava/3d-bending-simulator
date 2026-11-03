@@ -1,4 +1,5 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "Backgauge.h"
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
@@ -710,13 +711,12 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
         }
     return gp_Dir(axis);
 }
-application::BendPreviewResult
-buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
-                   bool fixedSecond, std::stop_token stop,
-                   std::optional<core::PressTools> toolParameters, bool withMotion,
-                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-                   std::optional<double> maximumEndSupportLossMm,
-                   std::optional<gp_Dir> referenceAxis, bool prepareDiagnostic) {
+application::BendPreviewResult buildBendOperation(
+    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
+    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
+    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis,
+    bool prepareDiagnostic, BackgaugeSearchStatistics *gaugeStatistics) {
     const bool requestedReversed = fixedSecond;
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
@@ -1301,7 +1301,8 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                 pair == pairs.size() ? machineConflict->firstName + " — " +
                                                            machineConflict->secondName
                                                      : "Tool and material volumes intersect",
-                                i, std::move(diagnostic)};
+                                diagnostic ? diagnostic->frameCount() - 1 : i,
+                                std::move(diagnostic)};
                         };
                         // Full-route search consumes a compact rejection, never this unused
                         // visual. Manual/isolated cycles retain every contact overlay/prefix.
@@ -1361,6 +1362,20 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
                                 diagnostic->envelope.minimum.z, diagnostic->envelope.maximum.x,
                                 diagnostic->envelope.maximum.y, diagnostic->envelope.maximum.z);
                         diagnostic->frames.push_back(std::move(frame));
+                        prepareBackgauge(*diagnostic, analysis.lengthToleranceMm, stop,
+                                         gaugeStatistics);
+                        for (std::size_t f = 0; f < diagnostic->frameCount(); ++f)
+                            if (diagnostic->collisionAtFrame(f) ||
+                                diagnostic->machineCollisionAtFrame(f)) {
+                                const auto hit = diagnostic->machineCollisionAtFrame(f);
+                                truncateCollisionPreview(*diagnostic, f);
+                                if (hit)
+                                    return BendPreviewError{
+                                        BendPreviewErrorCode::MachineIntersection,
+                                        hit->firstName + " — " + hit->secondName, f,
+                                        BendPreviewPtr(diagnostic)};
+                                break;
+                            }
                         return failure(BendPreviewPtr(diagnostic));
                     }
                 }
@@ -1436,6 +1451,13 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             BRepBndLib::Add(frame.shape, envelope);
             preview->machineConflicts.push_back({});
             preview->frames.push_back(std::move(frame));
+            if (i == 0 && intervals > 0 && preview->setup && preview->setup->tools.backgauge)
+                if (const auto issue = backgaugeContactIssue(
+                        preview->frames.front(), *preview->setup->tools.backgauge,
+                        model.thicknessMm, preview->setup->tools.lengthMm / 2,
+                        withMotion ? preview->setup->tools.backgauge->retractMm : 0,
+                        preview->filledCutouts, analysis.lengthToleranceMm, stop, gaugeStatistics))
+                    return BendPreviewError{BendPreviewErrorCode::BackgaugeUnavailable, *issue};
         }
         if (stop.stop_requested()) {
             return cancelled();
@@ -1447,6 +1469,25 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
         envelope.Get(preview->envelope.minimum.x, preview->envelope.minimum.y,
                      preview->envelope.minimum.z, preview->envelope.maximum.x,
                      preview->envelope.maximum.y, preview->envelope.maximum.z);
+        prepareBackgauge(*preview, analysis.lengthToleranceMm, stop, gaugeStatistics);
+        if (preview->gauging && preview->gauging->status != BackgaugeStatus::Checked) {
+            std::optional<std::size_t> failed;
+            for (std::size_t f = 0; f < preview->frames.size(); ++f)
+                if (preview->machineConflicts[f]) {
+                    failed = f;
+                    break;
+                }
+            if (failed && prepareDiagnostic)
+                truncateCollisionPreview(*preview, *failed);
+            const auto detail = failed ? preview->machineConflicts[*failed]->firstName + " — " +
+                                             preview->machineConflicts[*failed]->secondName
+                                       : preview->gauging->detail;
+            return BendPreviewError{failed ? BendPreviewErrorCode::MachineIntersection
+                                           : BendPreviewErrorCode::BackgaugeUnavailable,
+                                    detail, failed,
+                                    prepareDiagnostic && failed ? BendPreviewPtr(preview)
+                                                                : BendPreviewPtr{}};
+        }
         return BendPreviewPtr(std::move(preview));
     } catch (const TrimmedBendError &error) {
         if (stop.stop_requested())

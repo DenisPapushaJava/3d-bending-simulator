@@ -46,8 +46,11 @@ class ToolLibrary final {
     [[nodiscard]] std::string purge(const std::string &id);
     // Reference lengths only, never available stock. Geometry, not a mutable name/ID, binds them.
     [[nodiscard]] std::vector<core::ToolSegment> sectionTemplate(const core::ToolPreset &) const;
+    // UI hint only: the profile and section rows still match the bundled starting set.
+    [[nodiscard]] bool usesStarterSections(const core::ToolPreset &) const;
 
   private:
+    const core::ToolPreset *starterProfile(const core::ToolPreset &) const;
     std::string commit(ToolLibraryData);
     ToolLibrarySnapshot snapshot_;
     std::filesystem::path path_;

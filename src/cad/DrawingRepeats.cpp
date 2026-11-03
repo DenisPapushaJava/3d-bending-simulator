@@ -234,7 +234,9 @@ repeatedDrawingSection(const TopoDS_Shape &flat, const DrawingView &actual,
                                 {}};
         extent.pitchIntervals = count;
         extent.pitchMm = pitch;
-        result.overview.dimensions.push_back(extent);
+        // Reserve the overall witnesses before short end dimensions put their
+        // outside numbers across them; otherwise a level overview can be unplaceable.
+        result.overview.dimensions.insert(result.overview.dimensions.begin(), extent);
         return result;
     }
     return {};

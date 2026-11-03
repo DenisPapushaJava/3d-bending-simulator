@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/core/Backgauge.h"
 #include <optional>
 
 namespace bending::core {
@@ -16,6 +17,7 @@ struct PressTools {
     std::optional<double> punchLengthMm = std::nullopt; // Null keeps legacy equal lengths.
     MachineModel machineModel = MachineModel::None;
     bool punchReversed = false; // Physical half-turn about Y through the working axis.
+    std::optional<BackgaugeSetup> backgauge = std::nullopt;
     bool operator==(const PressTools &) const = default;
 };
 [[nodiscard]] double punchLengthMm(const PressTools &tools) noexcept;

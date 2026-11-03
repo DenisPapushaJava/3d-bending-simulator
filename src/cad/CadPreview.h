@@ -5,6 +5,10 @@ namespace bending::cad {
 using namespace application;
 class CadPreview : public SingleBendPreview {
   public:
+    std::optional<BackgaugeReport> gauging;
+    const BackgaugeReport *backgauge() const noexcept override {
+        return gauging ? &*gauging : nullptr;
+    }
     bool draft = false;
     bool reversed = false;
     bool workpieceReversed() const noexcept override {

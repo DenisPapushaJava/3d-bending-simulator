@@ -6,7 +6,15 @@ class QLabel;
 class QScrollArea;
 class QToolButton;
 namespace bending::ui {
-enum class BendMessageKind { Collision, ToolLength, Support, CheckIssue, Approximation, Scope };
+enum class BendMessageKind {
+    Collision,
+    ToolLength,
+    Support,
+    CheckIssue,
+    Approximation,
+    Scope,
+    Backgauge
+};
 enum class BendMessageSeverity { Information, Warning, Error };
 struct BendMessage {
     BendMessageKind kind;

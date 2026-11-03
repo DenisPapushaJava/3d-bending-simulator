@@ -10,6 +10,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFile>
+#include <QLabel>
 #include <QLockFile>
 #include <QPushButton>
 #include <QSpinBox>
@@ -55,9 +56,14 @@ int main(int argc, char **argv) {
                         tool.source.find("/home/") == std::string::npos,
                     "Private source path leaked");
             require(tool.segments && !tool.segments->empty(),
-                    tool.code + ": missing reference lengths");
+                    tool.code + ": missing starting sections");
             for (const auto &s : *tool.segments)
-                require(s.quantity == 0, "Private stock leaked");
+                require(s.quantity > 0 && s.shape == core::SegmentShape::Straight,
+                        "Starting sections are unavailable or need unsupported horn geometry");
+            const auto assembly = core::planToolSegments(*tool.segments, 1000);
+            require(assembly.status == core::SegmentPlanStatus::Complete &&
+                        assembly.lengthMm >= 1000,
+                    tool.code + ": starting sections cannot cover a 1000 mm example");
             const auto checked = importer.run(*tool.drawing, {});
             if (const auto *e = std::get_if<application::ToolProfileError>(&checked))
                 throw std::runtime_error(tool.code + ": " + e->message);
@@ -95,8 +101,7 @@ int main(int argc, char **argv) {
         require(std::holds_alternative<core::ToolCatalog>(loaded), "First-run library unreadable");
         auto local = std::get<core::ToolCatalog>(loaded);
         require(local.size() == starter.size(), "Starter not populated in GUI");
-        for (const auto &t : local)
-            require(!t.segments, "Unknown stock became zero available inventory");
+        require(local == starter, "First run changed the bundled starting sections or profiles");
         auto *punch = selection.findChild<QComboBox *>("punchPreset");
         auto *die = selection.findChild<QComboBox *>("diePreset");
         require(punch->count() == 5 && die->count() == 4,
@@ -108,6 +113,7 @@ int main(int argc, char **argv) {
         const auto d = std::find_if(local.begin(), local.end(),
                                     [](const auto &t) { return t.code == "2067-1"; });
         require(p != local.end() && d != local.end(), "Expected profiles missing");
+        selection.setSelectionRequest(core::ToolSelectionRequest{1.5, std::acos(0.), 4, 1000});
         selection.chooseTool(*p, 0);
         selection.chooseTool(*d, 0);
         require(selection.assignment() && selection.parameters() &&
@@ -120,20 +126,24 @@ int main(int argc, char **argv) {
                     "A bundled four-way groove cannot use the captured body");
         }
         application::ToolLibrary library(local, native(path), storage, starter);
-        const auto refs = library.sectionTemplate(*p);
+        auto unknown = *p;
+        unknown.segments.reset();
+        const auto refs = library.sectionTemplate(unknown);
         require(refs.size() > 1, "Profile-specific section template missing");
         ui::ToolLibraryDialog dialog(
             library, controller, std::make_shared<project::DxfToolImporter>(),
             [](const auto &, auto) { return QString{}; }, nullptr, {}, p->id);
         auto *enabled = dialog.findChild<QCheckBox *>("stockEnabled");
         auto *rows = dialog.findChild<QTableWidget *>("stockRows");
-        require(enabled && !enabled->isChecked() &&
-                    rows->rowCount() == static_cast<int>(refs.size()),
-                "Reference template is absent or treated as known stock");
+        const auto *notice = dialog.findChild<QLabel *>("libraryStarterSections");
+        require(enabled && enabled->isChecked() && notice && !notice->isHidden() &&
+                    rows->rowCount() == static_cast<int>(p->segments->size()),
+                "Starting sections are disabled, absent or missing their hint");
         for (int i = 0; i < rows->rowCount(); ++i) {
             const auto *q = qobject_cast<QSpinBox *>(rows->cellWidget(i, 1));
-            require(q && q->value() == 0 && !q->isEnabled(),
-                    "Template quantities are active inventory");
+            require(q && q->value() == static_cast<int>((*p->segments)[i].quantity) &&
+                        q->isEnabled(),
+                    "Starting quantities are not editable inventory");
         }
         if (const auto image = qEnvironmentVariable("BENDING_STARTER_SNAPSHOT"); !image.isEmpty()) {
             dialog.show();
@@ -142,7 +152,19 @@ int main(int argc, char **argv) {
         }
         dialog.reject();
         require(bytes(path) == first, "Opening reference sections rewrote the workshop");
-        auto renamed = *p;
+        ui::ToolLibraryDialog editor(
+            library, controller, std::make_shared<project::DxfToolImporter>(),
+            [](const auto &, auto) { return QString{}; }, nullptr, {}, p->id);
+        auto *editRows = editor.findChild<QTableWidget *>("stockRows");
+        auto *quantity = qobject_cast<QSpinBox *>(editRows->cellWidget(0, 1));
+        const auto newQuantity = quantity->value() + 1;
+        quantity->setValue(newQuantity);
+        editor.reject();
+        auto renamed = *std::find_if(library.data().tools.begin(), library.data().tools.end(),
+                                     [&](const auto &t) { return t.id == p->id; });
+        require(renamed.segments->front().quantity == static_cast<unsigned>(newQuantity) &&
+                    !library.usesStarterSections(renamed),
+                "Editing a starting quantity was not saved or retained the starting-set hint");
         renamed.code = "My own tool";
         require(library.upsert(renamed).empty(), "Rename failed");
         const auto edited = bytes(path);
@@ -178,7 +200,7 @@ int main(int argc, char **argv) {
         require(!damaged.error().empty() && bytes(brokenPath) == "broken",
                 "Starter replaced an unreadable existing file");
         controller.shutdown();
-        std::cout << "Starter profiles, solids, first-run seed, unknown stock, templates and "
+        std::cout << "Starter profiles, solids, first-run sections, editable stock, templates and "
                      "preservation passed\n";
         return 0;
     } catch (const std::exception &e) {

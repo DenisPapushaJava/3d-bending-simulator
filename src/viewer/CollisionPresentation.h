@@ -9,7 +9,8 @@ class CollisionPresentation final : public AIS_ColoredShape {
   public:
     CollisionPresentation(const TopoDS_Shape &, const std::vector<cad::CollisionHighlightPatch> &,
                           bool machineVisible, bool floorVisible,
-                          const std::vector<gp_Pnt> &floorContacts);
+                          const std::vector<gp_Pnt> &floorContacts,
+                          const std::vector<gp_Pnt> &backgaugeContacts);
 
   protected:
     void Compute(const Handle(PrsMgr_PresentationManager) &, const Handle(Prs3d_Presentation) &,
@@ -18,5 +19,6 @@ class CollisionPresentation final : public AIS_ColoredShape {
   private:
     std::vector<Handle(Graphic3d_ArrayOfTriangles)> patches_;
     Handle(Graphic3d_ArrayOfPoints) floorContacts_;
+    Handle(Graphic3d_ArrayOfPoints) gaugeContacts_;
 };
 } // namespace bending::viewer

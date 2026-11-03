@@ -15,7 +15,7 @@
       "setupCommands": [
         { "text": "-enable-pretty-printing", "ignoreFailures": true }
       ],
-      "preLaunchTask": "Linux: собрать dev"
+      "preLaunchTask": "Linux: собрать приложение"
     }
   ]
 }

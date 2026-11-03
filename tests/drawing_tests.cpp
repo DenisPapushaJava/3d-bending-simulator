@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "DrawingLayoutChecks.h"
 #include "ProfileFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
@@ -10,6 +11,8 @@
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -20,6 +23,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
@@ -30,10 +34,13 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -49,6 +56,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <gp_Circ.hxx>
 #include <iostream>
@@ -464,6 +472,105 @@ void variableProfile(const QString &folder) {
     require(moved->views[1].visibleOpeningCount == 2, "World rotation hid oval centers");
 }
 
+void basicProjectionDimensions(const QString &folder) {
+    const auto shape = BRepPrimAPI_MakeBox(100, 80, 6).Shape();
+    const auto document = load(shape, folder + "/basic-box.step");
+    const std::string bytes(document->sourceStep());
+    const auto checkBox = [&](const application::BendingDrawing &d, bool quarterTurn) {
+        const std::array<std::array<double, 2>, 3> expected =
+            quarterTurn ? std::array<std::array<double, 2>, 3>{{{80, 100}, {80, 6}, {6, 100}}}
+                        : std::array<std::array<double, 2>, 3>{{{100, 80}, {100, 6}, {6, 80}}};
+        require(d.classicalViews.has_value(), "Box lost orthographic projections");
+        for (std::size_t i = 0; i < 3; ++i)
+            for (const auto *view : {&d.views[i], &(*d.classicalViews)[i]}) {
+                require(view->dimensions.size() == 2,
+                        "Basic projection dimensions are missing or repeated");
+                for (int axis = 0; axis < 2; ++axis) {
+                    const auto &dimension = view->dimensions[axis];
+                    require(std::abs(dimension.valueMm - expected[i][axis]) < 1e-4 &&
+                                dimension.witnesses.has_value(),
+                            "Wrong basic size or missing contour attachment");
+                    for (const auto point : *dimension.witnesses)
+                        require(point.x >= view->minimum.x - 1e-4 &&
+                                    point.x <= view->maximum.x + 1e-4 &&
+                                    point.y >= view->minimum.y - 1e-4 &&
+                                    point.y <= view->maximum.y + 1e-4,
+                                "Overall dimension references another projection frame");
+                }
+            }
+    };
+    application::DrawingRequest request;
+    request.quarterTurns = 0;
+    checkBox(*build(document, request), false);
+    request.reverseView = true;
+    checkBox(*build(document, request), false);
+    request.quarterTurns = 1;
+    checkBox(*build(document, request), true);
+    gp_Trsf move;
+    move.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .734);
+    move.SetTranslationPart(gp_Vec(117, -53, 82));
+    request.quarterTurns = 0;
+    request.reverseView = false;
+    checkBox(*build(load(BRepBuilderAPI_Transform(shape, move, true).Shape(),
+                         folder + "/basic-moved.step"),
+                    request),
+             false);
+    require(document->sourceStep() == bytes, "Dimensions modified the imported STEP");
+    const auto channel = build(load(fixtures::channel(300), folder + "/basic-channel.step"));
+    require(channel->classicalViews.has_value(), "Channel lost classical views");
+    auto sizes = std::vector<double>{};
+    for (const auto &dimension : (*channel->classicalViews)[2].dimensions) {
+        sizes.push_back(dimension.valueMm);
+        require(dimension.witnesses.has_value(), "Side view lost contour-based witnesses");
+    }
+    std::sort(sizes.begin(), sizes.end());
+    require(sizes.size() == 2 && std::abs(sizes[0] - 40) < 1e-4 && std::abs(sizes[1] - 92) < 1e-4,
+            "A channel's side view lost its 40 x 92 mm basic sizes");
+    auto choices = ui::DrawingSheet::defaultViews(*channel);
+    for (auto &choice : choices)
+        if (choice.key.kind == ui::DrawingViewKind::Projection)
+            choice.scale = .5;
+    ui::DrawingTitle title;
+    title.name = QStringLiteral("Швеллер");
+    title.plan = ui::DrawingSheet::compose(channel, choices);
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_BASIC_OUTPUT");
+    require(ui::DrawingSheet::writePdf(output.isEmpty() ? folder + "/basic-channel.pdf" : output,
+                                       *channel, title)
+                .isEmpty(),
+            "Basic side dimensions could not be placed in PDF");
+}
+void localRadiusCallouts(const QString &folder) {
+    const auto source =
+        load(fixtures::foldedProfile(4, 80, .43, true), folder + "/different-radii.step");
+    application::DrawingRequest request;
+    request.quarterTurns = 0;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto d = build(source, request);
+    require(d->bends.size() == 4 && d->flatPattern,
+            "Different radii lost recognition or flat pattern");
+    std::vector<double> radii;
+    for (const auto &bend : d->bends)
+        radii.push_back(bend.innerRadiusMm);
+    std::sort(radii.begin(), radii.end());
+    const std::array expected{4., 4.5, 4.5, 5.};
+    for (std::size_t i = 0; i < radii.size(); ++i)
+        require(std::abs(radii[i] - expected[i]) < 1e-4,
+                "CAD radii were replaced by one common radius");
+    for (const auto &section : d->sections)
+        for (const auto &note : section.view.groupedBendNotes)
+            for (auto i : note.bends)
+                require(std::abs(d->bends[i].innerRadiusMm -
+                                 d->bends[note.bends.front()].innerRadiusMm) < 1e-5,
+                        "One radius callout groups bends of different curvature");
+    ui::DrawingTitle title;
+    title.name = QStringLiteral("Разные радиусы");
+    title.plan = ui::DrawingSheet::compose(d, ui::DrawingSheet::defaultViews(*d));
+    const auto output = qEnvironmentVariable("BENDING_DRAWING_RADII_OUTPUT");
+    require(ui::DrawingSheet::writePdf(output.isEmpty() ? folder + "/local-radii.pdf" : output, *d,
+                                       title)
+                .isEmpty(),
+            "Local radii did not fit the drawing");
+}
 void geometry(const QString &folder) {
     const auto source = fixtures::bentStrip(8, 6);
     const auto document = load(source, folder + "/base.step");
@@ -721,6 +828,48 @@ TopoDS_Shape crossAxisPart() {
     unify.Build();
     return unify.Shape();
 }
+void dimensionBases(const QString &folder) {
+    // Tangent lengths are 20 mm, outer radius is 6 mm. Each 45-degree
+    // adjacent bend adds 6*tan(22.5 degrees) to an outside virtual-corner size.
+    // The profile includes both same-direction and reverse bends.
+    const double setback = 6 * std::tan(std::numbers::pi / 8);
+    const auto check = [&](const TopoDS_Shape &shape, const QString &name) {
+        const auto d = build(load(shape, folder + name));
+        require(d->profiles.size() == 1 && d->profiles[0].segments.size() == 5,
+                "Dimension-base fixture lost its complete profile");
+        const auto &segments = d->profiles[0].segments;
+        for (std::size_t i = 0; i < segments.size(); ++i) {
+            const double expected = 20 + setback * (i == 0 || i + 1 == segments.size() ? 1 : 2);
+            require(std::abs(segments[i].dimension.valueMm - expected) < 1e-4,
+                    "Outside profile dimension does not use virtual corners");
+        }
+        std::size_t checked = 0;
+        for (const auto &detail : d->details)
+            for (const auto &dimension : detail.view.dimensions) {
+                if (dimension.label != "H1" && dimension.label != "H2")
+                    continue;
+                const auto side = dimension.label == "H1" ? 0 : 1;
+                const auto &size = d->bends.at(detail.bendIndex).outerFlangeMm[side];
+                require(size && std::abs(*size - dimension.valueMm) < 1e-4,
+                        "Local detail and complete profile use different dimension bases");
+                require(std::abs(std::hypot(dimension.end.x - dimension.start.x,
+                                            dimension.end.y - dimension.start.y) -
+                                 dimension.valueMm) < 1e-4,
+                        "Local detail text differs from its dimension endpoints");
+                ++checked;
+            }
+        require(checked >= 4, "Dimension-base fixture no longer checks local wall dimensions");
+    };
+    const auto shape = fixtures::foldedProfile(4, 80, std::numbers::pi / 4);
+    check(shape, "/dimension-bases.step");
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .734);
+    transform.SetTranslationPart(gp_Vec(117, -53, 82));
+    check(BRepBuilderAPI_Transform(shape, transform, true).Shape(), "/dimension-bases-moved.step");
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
+    check(BRepBuilderAPI_Transform(shape, mirror, true).Shape(), "/dimension-bases-mirror.step");
+}
 void operatorProfiles(const QString &folder) {
     const auto check = [&](const application::BendingDrawing &d, std::vector<double> sizes,
                            bool reverse) {
@@ -904,12 +1053,16 @@ void classicalDrawing(const QString &folder) {
     for (std::size_t i = 0; i < expected.size(); ++i)
         require(std::abs(views[0].axialDimensions[i].valueMm - expected[i]) < 1e-5,
                 "Axial dimensions do not describe the occupied intervals and gaps");
-    require(std::count_if(views[0].holeDimensions.begin(), views[0].holeDimensions.end(),
-                          [](const auto &x) {
-                              return x.pitchIntervals == 5 && std::abs(x.pitchMm - 50) < 1e-5 &&
-                                     std::abs(x.valueMm - 250) < 1e-5;
-                          }) == 1 &&
-                views[0].holeDiameters.size() == 12,
+    require(std::any_of(views.begin(), views.end(),
+                        [](const auto &v) {
+                            return v.holeDiameters.size() == 12 &&
+                                   std::count_if(v.holeDimensions.begin(), v.holeDimensions.end(),
+                                                 [](const auto &x) {
+                                                     return x.pitchIntervals == 5 &&
+                                                            std::abs(x.pitchMm - 50) < 1e-5 &&
+                                                            std::abs(x.valueMm - 250) < 1e-5;
+                                                 }) == 1;
+                        }),
             "A verified hole pitch or diameter lost its measured source geometry");
     const auto coverage = ui::DrawingSheet::coverage(*d);
     require(coverage.total == 6 && coverage.dimensioned == 6 &&
@@ -1021,6 +1174,71 @@ void classicalDrawing(const QString &folder) {
     require(ui::DrawingSheet::writePdf(folder + "/classical-shallow-top.pdf", *tall, {}).isEmpty(),
             "A shallow projection has no room for its outside dimension number");
 }
+void automaticDrawingOrientation(const QString &folder) {
+    // Each sloping facet is larger than a flat, but the parallel flats dominate
+    // together. The drawing must follow this real plane family, in any STEP frame.
+    const auto shape = fixtures::foldedProfile(12, 83, .43, false, true, 1.1);
+    const auto check = [&](const TopoDS_Shape &source, gp_Dir expected, const QString &name,
+                           bool manual) {
+        const auto document = load(source, folder + "/" + name + ".step");
+        const auto nativeDocument = std::dynamic_pointer_cast<const cad::CadDocument>(document);
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(cad::OcctDocumentAccess::shape(*nativeDocument), TopAbs_FACE, faces);
+        application::DrawingRequest request;
+        request.quarterTurns = 0;
+        const auto drawing = build(document, request);
+        const auto normal = [&](std::size_t index) {
+            return BRepAdaptor_Surface(TopoDS::Face(faces(static_cast<int>(index))))
+                .Plane()
+                .Axis()
+                .Direction();
+        };
+        require(drawing->automaticBase && normal(drawing->baseFace).IsParallel(expected, 1e-7),
+                "A single inclined facet tilted the whole corrugated drawing");
+        require(drawing->views[2].maximum.x - drawing->views[2].minimum.x < 30,
+                "The side projection is oblique to the predominant profile plane");
+        if (manual) {
+            double maximum = 0;
+            std::size_t largest = 0;
+            for (int i = 1; i <= faces.Extent(); ++i) {
+                const auto face = TopoDS::Face(faces(i));
+                if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane)
+                    continue;
+                GProp_GProps area;
+                BRepGProp::SurfaceProperties(face, area);
+                if (area.Mass() > maximum) {
+                    maximum = area.Mass();
+                    largest = static_cast<std::size_t>(i);
+                }
+            }
+            require(largest && !normal(largest).IsParallel(expected, 1e-7),
+                    "The regression fixture has no larger inclined facet");
+            request.baseFace = largest;
+            const auto selected = build(document, request);
+            require(!selected->automaticBase && selected->baseFace == largest &&
+                        selected->views[2].maximum.x - selected->views[2].minimum.x > 60,
+                    "Automatic orientation overrode the user's explicit base face");
+        }
+        return drawing;
+    };
+    const auto original = check(shape, gp_Dir(0, 1, 0), "orientation", true);
+    const auto sameViews = [&](const auto &drawing) {
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto &a = drawing->views[i], &b = original->views[i];
+            require(std::abs((a.maximum.x - a.minimum.x) - (b.maximum.x - b.minimum.x)) < 1e-4 &&
+                        std::abs((a.maximum.y - a.minimum.y) - (b.maximum.y - b.minimum.y)) < 1e-4,
+                    "STEP placement changed the automatic orthogonal projection sizes");
+        }
+    };
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .73);
+    transform.SetTranslationPart(gp_Vec(17, -31, 62));
+    sameViews(check(BRepBuilderAPI_Transform(shape, transform, true).Shape(),
+                    gp_Dir(0, 1, 0).Transformed(transform), "orientation-moved", false));
+    transform.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
+    sameViews(check(BRepBuilderAPI_Transform(shape, transform, true).Shape(),
+                    gp_Dir(0, 1, 0).Transformed(transform), "orientation-mirrored", false));
+}
 void repeatedWaveDrawing(const QString &folder) {
     const auto shape = fixtures::foldedProfile(12, 83, .43, false, true);
     const auto repeated = [&](const TopoDS_Shape &source, const QString &name) {
@@ -1039,9 +1257,23 @@ void repeatedWaveDrawing(const QString &folder) {
                 "The repeated flat line coordinates were not retained");
         for (const auto &group : drawing->flatPattern->repeatedBendGroups)
             require(group.size() == 3, "A repeated flat label lost a bend ID");
+        const auto choices = ui::DrawingSheet::defaultViews(*drawing);
+        require(std::none_of(choices.begin(), choices.end(),
+                             [](const auto &choice) {
+                                 return choice.visible &&
+                                        choice.key.kind == ui::DrawingViewKind::Detail;
+                             }),
+                "Verified wave unnecessarily retained a detail for every bend");
+        const auto plan = ui::DrawingSheet::compose(drawing, choices);
+        require(plan->coverage.dimensioned == 12 && plan->pages <= 2,
+                "View selection lost D130 wave compaction or dimensions");
         for (int page = 0; page < ui::DrawingSheet::pageCount(*drawing); ++page)
             require(!ui::DrawingSheet::preview(*drawing, {}, page).isNull(),
                     "Repeated wave sheet cannot be rendered");
+        const auto output = qEnvironmentVariable("BENDING_DRAWING_WAVE_OUTPUT");
+        if (!output.isEmpty() && name == "wave")
+            require(ui::DrawingSheet::writePdf(output, *drawing, {}).isEmpty(),
+                    "Repeated wave sample export failed");
         return drawing;
     };
     repeated(shape, "wave");
@@ -1271,6 +1503,177 @@ void flatDrawing(const QString &folder) {
     require(ui::DrawingSheet::pageCount(*result) == 1,
             "Simple blank was unnecessarily split from the folded shape");
 }
+void dimensionLayout(const QString &folder) {
+    // Synthetic orthogonal views with short hole offsets and a chain dimension.
+    // An early outside label lies across a later extension line: shrinking alone
+    // cannot repair that choice. Keep every dimension at the requested scale.
+    auto drawing = std::make_shared<application::BendingDrawing>();
+    auto &v = drawing->views[0];
+    v.minimum = {0, 0};
+    v.maximum = {200, 100};
+    v.paths.push_back({{{0, 0}, {200, 0}, {200, 100}, {0, 100}, {0, 0}}, false});
+    v.axialDimensions = {{{0, 0}, {90, 0}, 90, ""}, {{90, 0}, {200, 0}, 110, ""}};
+    v.dimensions = {{{0, 0}, {200, 0}, 200, ""}, {{0, 0}, {0, 100}, 100, ""}};
+    for (const auto point : {application::DrawingPoint{12, 20}, {44, 60}, {76, 20}, {180, 60}})
+        v.holeDimensions.push_back({{0, point.y}, point, point.x, ""});
+    for (const auto point : {application::DrawingPoint{12, 20}, {44, 60}, {12, 85}})
+        v.holeDimensions.push_back({{point.x, 0}, point, point.y, ""});
+    drawing->views[1] = v;
+    drawing->views[2] = v;
+    for (auto &other : {&drawing->views[1], &drawing->views[2]}) {
+        other->axialDimensions.clear();
+        other->holeDimensions.clear();
+        other->dimensions.clear();
+    }
+    drawing->views[1].maximum.y = 30;
+    drawing->views[1].paths = {{{{0, 0}, {200, 0}, {200, 30}, {0, 30}, {0, 0}}, false}};
+    drawing->views[2].maximum.x = 30;
+    drawing->views[2].paths = {{{{0, 0}, {30, 0}, {30, 100}, {0, 100}, {0, 0}}, false}};
+    const std::vector<ui::DrawingViewChoice> choices{
+        {{ui::DrawingViewKind::Projection, 0}, true, .4},
+        {{ui::DrawingViewKind::Projection, 1}, true, .4},
+        {{ui::DrawingViewKind::Projection, 2}, true, .4}};
+    ui::DrawingTitle title;
+    title.plan = ui::DrawingSheet::compose(drawing, choices);
+    require(title.plan->views.size() == 3 && title.plan->pages == 1 &&
+                std::all_of(title.plan->views.begin(), title.plan->views.end(),
+                            [](const auto &placed) { return placed.scale == .4; }),
+            "Dense dimensions changed the requested scale or dropped a view");
+    require(
+        !ui::DrawingSheet::preview(*drawing, title).isNull() &&
+            ui::DrawingSheet::writePdf(folder + "/dimension-layout.pdf", *drawing, title).isEmpty(),
+        "The dimension layout probe differs from preview or PDF rendering");
+    require(v.holeDimensions.size() == 7 && v.axialDimensions.size() == 2 &&
+                v.dimensions.size() == 2,
+            "Dimension layout changed the source measurements");
+    verifyRecordedDimensions(*drawing, *title.plan);
+}
+void composition(const QString &folder) {
+    dimensionLayout(folder);
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto d = build(load(fixtures::profiledBend(), folder + "/composition.step"), request);
+    require(d->flatPattern && d->flatPattern->info.positiveZIsSideA.has_value(),
+            "Unfolding lost the source material side");
+    auto info = d->flatPattern->info;
+    info.bends.resize(3, info.bends.front());
+    info.bends[0].direction = 1;
+    info.bends[1].direction = info.bends[2].direction = -1;
+    info.positiveZIsSideA = true;
+    const auto automatic = ui::DrawingSheet::flatOrientation(info);
+    require(automatic.reversed && automatic.up == 2 && automatic.down == 1 &&
+                automatic.sideA == false,
+            "Auto side did not count actual bends or renamed source sides");
+    const auto first = ui::DrawingSheet::flatOrientation(info, ui::DrawingFlatSide::First);
+    const auto opposite = ui::DrawingSheet::flatOrientation(info, ui::DrawingFlatSide::Opposite);
+    require(!first.reversed && first.sideA == true && opposite.reversed && opposite.sideA == false,
+            "Explicit flat side did not override majority");
+    info.bends.resize(2);
+    info.positiveZIsSideA = false;
+    require(ui::DrawingSheet::flatOrientation(info).reversed &&
+                ui::DrawingSheet::flatOrientation(info).sideA == true,
+            "Tied directions did not retain physical side A");
+    info.positiveZIsSideA.reset();
+    require(!ui::DrawingSheet::flatOrientation(info).reversed &&
+                !ui::DrawingSheet::flatOrientation(info).sideA.has_value(),
+            "Unknown source side was assigned an invented A/B identity");
+    info.bends.front().direction = 0;
+    bool invalid = false;
+    try {
+        (void)ui::DrawingSheet::flatOrientation(info);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "Invalid direction silently became DOWN");
+    auto choices = ui::DrawingSheet::defaultViews(*d);
+    auto plan = ui::DrawingSheet::compose(d, choices);
+    require(plan->coverage.missing.empty() && plan->pages == 1,
+            "Simple dimensioned views and flat pattern were lost or split unnecessarily");
+    std::optional<double> commonScale;
+    for (const auto &at : plan->views)
+        if (at.key.kind == ui::DrawingViewKind::Projection) {
+            require(!commonScale || *commonScale == at.scale,
+                    "Linked projections have different scales");
+            commonScale = at.scale;
+        }
+    require(commonScale && *commonScale >= .5,
+            "Projection readability was sacrificed for one page");
+    for (const auto &at : plan->views) {
+        require(!at.selectionBounds.isEmpty(), "View has no prepared selection bounds");
+        require(at.selectionBounds.width() < at.area.width() ||
+                    at.selectionBounds.height() < at.area.height(),
+                "View selection still uses the entire allocated cell");
+    }
+    auto edited = choices;
+    for (auto &choice : edited) {
+        if (choice.key.kind == ui::DrawingViewKind::Projection)
+            choice.scale = .5;
+        if (choice.key.kind == ui::DrawingViewKind::Flat)
+            choice.scale = 1.;
+        if (choice.key.kind == ui::DrawingViewKind::Isometric)
+            choice.scale = 2.;
+    }
+    const auto enlarged = ui::DrawingSheet::compose(d, edited);
+    for (const auto &at : enlarged->views) {
+        if (at.key.kind == ui::DrawingViewKind::Projection)
+            require(at.scale == .5, "Projection scale changed with another view");
+        if (at.key.kind == ui::DrawingViewKind::Flat)
+            require(at.scale == 1., "Flat scale changed with another view");
+        if (at.key.kind == ui::DrawingViewKind::Isometric)
+            require(at.scale == 2. && at.area.top() < 237 && at.area.height() > 38,
+                    "Larger isometric view stayed locked to the small footer");
+    }
+    ui::DrawingTitle enlargedTitle;
+    enlargedTitle.plan = enlarged;
+    for (int page = 0; page < enlarged->pages; ++page)
+        require(!ui::DrawingSheet::preview(*d, enlargedTitle, page).isNull(),
+                "Repacked large isometric view did not render");
+    const auto enlargedOutput = qEnvironmentVariable("BENDING_DRAWING_ENLARGED_OUTPUT");
+    if (!enlargedOutput.isEmpty())
+        require(ui::DrawingSheet::writePdf(enlargedOutput, *d, enlargedTitle).isEmpty(),
+                "Enlarged isometric PDF export failed");
+    ui::DrawingTitle title;
+    title.plan = plan;
+    const auto sourceStart = d->flatPattern->view.paths.front().points.front();
+    require(ui::DrawingSheet::writePdf(folder + "/composition.pdf", *d, title).isEmpty(),
+            "Composed PDF differs from validated preview");
+    title.plan = ui::DrawingSheet::compose(d, choices, ui::DrawingFlatSide::Opposite);
+    (void)ui::DrawingSheet::preview(*d, title);
+    require(d->flatPattern->view.paths.front().points.front().x == sourceStart.x &&
+                d->flatPattern->view.paths.front().points.front().y == sourceStart.y,
+            "Paper reflection modified source geometry");
+    const auto other = std::make_shared<application::BendingDrawing>(*d);
+    invalid = false;
+    try {
+        (void)ui::DrawingSheet::preview(*other, title);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "Another drawing accepted a stale composition");
+    for (auto &choice : choices) {
+        choice.visible = choice.key.kind == ui::DrawingViewKind::Flat;
+        if (choice.visible)
+            choice.scale = 100.;
+    }
+    invalid = false;
+    try {
+        (void)ui::DrawingSheet::compose(d, choices);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "An impossible explicit scale silently shrank or dropped the view");
+    for (auto &choice : choices) {
+        choice.scale.reset();
+        choice.visible = false;
+    }
+    invalid = false;
+    try {
+        (void)ui::DrawingSheet::compose(d, choices);
+    } catch (const std::runtime_error &) {
+        invalid = true;
+    }
+    require(invalid, "An empty sheet was considered exportable");
+}
 void auditSample(const QString &path, const QString &reportPath, const QString &pdfPath) {
     QElapsedTimer timer;
     timer.start();
@@ -1333,11 +1736,32 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
             report.insert("missingBends", missing);
             ui::DrawingTitle title;
             title.name = QFileInfo(path).completeBaseName();
-            const auto exportError = ui::DrawingSheet::writePdf(pdfPath, d, title);
+            if (qEnvironmentVariableIsSet("BENDING_DRAWING_COMPOSITION")) {
+                try {
+                    const auto source = std::get<application::BendingDrawingPtr>(result);
+                    QElapsedTimer layoutTimer;
+                    layoutTimer.start();
+                    title.plan =
+                        ui::DrawingSheet::compose(source, ui::DrawingSheet::defaultViews(d));
+                    report.insert("compositionMs", static_cast<double>(layoutTimer.elapsed()));
+                    report.insert("dimensionedBends",
+                                  static_cast<int>(title.plan->coverage.dimensioned));
+                    QJsonArray missingPlaced;
+                    for (auto i : title.plan->coverage.missing)
+                        missingPlaced.append(static_cast<int>(i + 1));
+                    report.insert("missingBends", missingPlaced);
+                } catch (const std::exception &e) {
+                    report.insert("compositionError", QString::fromUtf8(e.what()));
+                }
+            }
+            const auto exportError = report.contains("compositionError")
+                                         ? report.value("compositionError").toString()
+                                         : ui::DrawingSheet::writePdf(pdfPath, d, title);
             report.insert("pdfOk", exportError.isEmpty());
             if (!exportError.isEmpty())
                 report.insert("pdfError", exportError);
-            report.insert("pages", ui::DrawingSheet::pageCount(d));
+            report.insert("pages",
+                          exportError.isEmpty() ? ui::DrawingSheet::pageCount(d, title) : 0);
             QJsonArray views;
             const auto &projections =
                 d.classicalViews
@@ -1406,6 +1830,112 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
     require(output.open(QIODevice::WriteOnly), "Cannot write sample audit");
     require(output.write(QJsonDocument(report).toJson()) > 0, "Cannot save sample audit");
 }
+void pdfDestinations(const QString &folder) {
+    const auto models = folder + QStringLiteral("/модели");
+    const auto saved = folder + QStringLiteral("/чертежи");
+    require(QDir().mkpath(models) && QDir().mkpath(saved), "Cannot prepare export folders");
+    const auto source = models + QStringLiteral("/КСР.001 версия 2.stp");
+    const auto first = ui::suggestedDrawingPdfPath(source);
+    require(QFileInfo(first).fileName() == QStringLiteral("КСР.001 версия 2 — чертёж.pdf") &&
+                QFileInfo(first).absolutePath() == models,
+            "PDF default lost model name, Unicode, revision dots or initial source folder");
+    ui::rememberDrawingPdfDirectory(saved + "/failed.pdf");
+    require(ui::suggestedDrawingPdfPath(source) == first, "A failed export changed the folder");
+    QFile pdf(saved + "/saved.pdf");
+    require(pdf.open(QIODevice::WriteOnly), "Cannot prepare saved file");
+    pdf.write("test");
+    pdf.close();
+    ui::rememberDrawingPdfDirectory(pdf.fileName());
+    QSettings reloaded(ui::preferences()->fileName(), QSettings::IniFormat);
+    require(reloaded.value("drawing/lastPdfDirectory").toString() == saved,
+            "Export folder was not persisted to disk");
+    const auto next = ui::suggestedDrawingPdfPath(models + "/another.part.STEP");
+    require(QFileInfo(next).absolutePath() == saved &&
+                QFileInfo(next).fileName() == QStringLiteral("another.part — чертёж.pdf"),
+            "The next model reused a filename or lost the last saved folder");
+    require(QDir(saved).removeRecursively(), "Cannot remove the temporary export folder");
+    require(ui::suggestedDrawingPdfPath(source) == first &&
+                ui::preferences()->value("drawing/lastPdfDirectory").toString() == saved,
+            "An unavailable export folder prevented fallback or erased the preference");
+    // Keep ':' inside the filename: a leading "A:" is a drive on Windows.
+    require(QFileInfo(ui::suggestedDrawingPdfPath(models + "/A:B?C.stp")).fileName() ==
+                QStringLiteral("A_B_C — чертёж.pdf"),
+            "Windows-invalid filename characters survived");
+#ifdef Q_OS_WIN
+    require(QFileInfo(ui::suggestedDrawingPdfPath("C:/drawing.part.stp")).fileName() ==
+                    QStringLiteral("drawing.part — чертёж.pdf") &&
+                QFileInfo(ui::suggestedDrawingPdfPath("C:drawing.part.stp")).fileName() ==
+                    QStringLiteral("drawing.part — чертёж.pdf"),
+            "A Windows drive prefix became part of the PDF filename");
+#endif
+    ui::preferences()->remove("drawing/lastPdfDirectory");
+}
+class ControlledDrawingBuilder final : public application::BendingDrawingBuilder {
+  public:
+    std::atomic_bool hold{true}, fail{true};
+    application::DrawingResult build(application::DocumentPtr doc,
+                                     application::DrawingRequest request,
+                                     std::stop_token stop) const override {
+        while (hold.load() && !stop.stop_requested())
+            QThread::msleep(1);
+        if (stop.stop_requested())
+            return application::DrawingError{"Cancelled", true};
+        if (fail.load())
+            return application::DrawingError{"Choose a planar base face for the drawing"};
+        return cad::BendingDrawingBuilder{}.build(std::move(doc), std::move(request), stop);
+    }
+};
+void previewStates() {
+    auto builder = std::make_shared<ControlledDrawingBuilder>();
+    ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
+    window.setAutomaticPartInputPrompt(false);
+    window.setDrawingBuilder(builder);
+    window.show();
+    auto &c = window.importController();
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step");
+    wait([&] { return !c.hasWork(); });
+    window.findChild<QAction *>("bendingDrawingAction")->trigger();
+    auto *dialog = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(dialog, "Cannot open preview-state fixture");
+    auto *state = dialog->findChild<QWidget *>("drawingPreviewState");
+    auto *progress = dialog->findChild<QProgressBar *>("drawingPreviewBusy");
+    auto *reason = dialog->findChild<QLabel *>("drawingPreviewStateText");
+    auto *retry = dialog->findChild<QPushButton *>("drawingPreviewRetry");
+    auto *exportPdf = dialog->findChild<QPushButton *>("exportDrawingPdf");
+    auto *image = dialog->findChild<QLabel *>("drawingPreviewImage");
+    wait([&] { return c.isPreparingDrawing(); });
+    require(state && state->isVisible() && progress && progress->isVisible() &&
+                progress->minimum() == 0 && progress->maximum() == 0 && !exportPdf->isEnabled(),
+            "CAD preparation did not show an indeterminate loader inside preview");
+    const auto snapshot = qEnvironmentVariable("BENDING_DRAWING_STATE_SNAPSHOT");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".loading.png"), "Cannot save loading state");
+    builder->hold = false;
+    wait([&] { return !c.hasWork(); });
+    require(state->isVisible() && !progress->isVisible() && retry->isVisible() &&
+                reason->text().contains(QStringLiteral("плоская грань")) &&
+                image->pixmap().isNull() && !exportPdf->isEnabled(),
+            "Failed CAD preparation left blank or stale paper");
+    require(reason->height() >= reason->heightForWidth(reason->width()),
+            "Preview failure text is clipped");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".failed.png"), "Cannot save failure state");
+    builder->fail = false;
+    retry->click();
+    wait([&] { return !c.hasWork() && exportPdf->isEnabled(); });
+    require(!state->isVisible() && !image->pixmap().isNull(),
+            "Retry did not replace failure with drawing");
+    builder->hold = true;
+    dialog->findChild<QComboBox *>("drawingOrientation")->setCurrentIndex(1);
+    dialog->findChild<QPushButton *>("prepareDrawing")->click();
+    require(c.isPreparingDrawing(), "Cannot restart loader before close");
+    QPointer<QDialog> closing = dialog;
+    dialog->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    wait([&] { return !c.hasWork(); });
+    require(closing.isNull() && !c.drawing(), "Closing loading preview published a late drawing");
+    window.close();
+}
 void workflow(const QString &folder) {
     auto importer = std::make_shared<cad::StepImporter>();
     ui::MainWindow window({"test", "test"}, importer);
@@ -1439,6 +1969,10 @@ void workflow(const QString &folder) {
     auto *exportButton = dialog->findChild<QPushButton *>("exportDrawingPdf");
     require(exportButton, "Missing PDF action");
     wait([&] { return !c.hasWork() && exportButton->isEnabled(); });
+    const auto initialSnapshot = qEnvironmentVariable("BENDING_DRAWING_DIALOG_SNAPSHOT");
+    if (!initialSnapshot.isEmpty())
+        require(dialog->grab().save(initialSnapshot + ".default.png"),
+                "Cannot save default drawing workspace");
     dialog->showMinimized();
     action->trigger();
     QApplication::processEvents();
@@ -1456,8 +1990,44 @@ void workflow(const QString &folder) {
     const auto oldDrawing = c.drawing();
     require(oldDrawing && oldDrawing->flatPattern,
             "Dialog did not automatically prepare the blank");
-    auto *layout = dialog->findChild<QComboBox *>("drawingLayout");
-    require(layout && layout->currentIndex() == 0, "Classical layout is not the default");
+    auto *viewList = dialog->findChild<QListWidget *>("drawingViews");
+    auto *viewScale = dialog->findChild<QComboBox *>("drawingViewScale");
+    auto *flatSide = dialog->findChild<QComboBox *>("drawingFlatSide");
+    auto *resetViews = dialog->findChild<QPushButton *>("resetDrawingComposition");
+    require(viewList && viewScale && flatSide && resetViews && viewList->count() >= 5,
+            "Drawing view controls are missing");
+    for (int row = 0; row < viewList->count(); ++row)
+        if (viewList->item(row)->text().startsWith(QStringLiteral("Развёртка"))) {
+            viewList->setCurrentRow(row);
+            require(flatSide->isVisible(), "Flat side control is hidden for the flat view");
+            const auto before =
+                dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().toImage();
+            flatSide->setCurrentIndex(2);
+            wait([&] { return exportButton->isEnabled(); });
+            require(exportButton->isEnabled() && !c.hasWork() && c.drawing() == oldDrawing &&
+                        dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().toImage() !=
+                            before,
+                    "Changing flat side failed or recomputed CAD");
+            break;
+        }
+    resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
+    viewList->setCurrentRow(0);
+    viewScale->setCurrentIndex(1); // 10:1 cannot fit the linked projections on A3.
+    require(!exportButton->isEnabled() && c.drawing() == oldDrawing && !c.hasWork(),
+            "An impossible paper scale remained exportable or started CAD work");
+    auto *state = dialog->findChild<QWidget *>("drawingPreviewState");
+    auto *stateTitle = dialog->findChild<QLabel *>("drawingPreviewStateTitle");
+    auto *retry = dialog->findChild<QPushButton *>("drawingPreviewRetry");
+    require(state && stateTitle && retry, "Missing preview feedback controls");
+    wait([&] { return stateTitle->text() == QStringLiteral("Не удалось разместить виды"); });
+    require(state->isVisible() && retry->isVisible(), "Layout error is not shown inside preview");
+    retry->click();
+    wait([&] { return exportButton->isEnabled(); });
+    require(!state->isVisible(), "Preview error remained above the recovered drawing");
+    resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
+    require(exportButton->isEnabled(), "Autocomposition did not recover after invalid scale");
     auto *page = dialog->findChild<QSpinBox *>("drawingPage");
     auto *navigation = dialog->findChild<QWidget *>("drawingPageNavigation");
     auto *controls = dialog->findChild<QWidget *>("drawingPreviewControls");
@@ -1467,10 +2037,84 @@ void workflow(const QString &folder) {
     auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
     require(page && navigation && controls && previous && next && scroll && preview,
             "Missing page navigation controls");
+    const auto chooseScale = [&](const QString &prefix, double scale) {
+        for (int row = 0; row < viewList->count(); ++row)
+            if (viewList->item(row)->text().startsWith(prefix)) {
+                viewList->setCurrentRow(row);
+                const int index = viewScale->findData(scale);
+                require(index > 0, "Missing requested standard scale");
+                viewScale->setCurrentIndex(index);
+                require(!exportButton->isEnabled() && state->isVisible(),
+                        "Recomposition did not show feedback or block stale export");
+                wait([&] { return exportButton->isEnabled(); });
+                return;
+            }
+        throw std::runtime_error("Missing view in scale fixture");
+    };
+    chooseScale(QStringLiteral("Главный вид"), .5);
+    for (int row = 0; row < 3; ++row)
+        require(viewList->item(row)->text().endsWith("1:2"),
+                "Linked projection scale was not updated");
+    chooseScale(QStringLiteral("Изометрия"), 2.);
+    chooseScale(QStringLiteral("Развёртка"), 1.);
+    auto requested = ui::DrawingSheet::defaultViews(*oldDrawing);
+    for (auto &choice : requested) {
+        if (choice.key.kind == ui::DrawingViewKind::Projection)
+            choice.scale = .5;
+        if (choice.key.kind == ui::DrawingViewKind::Isometric)
+            choice.scale = 2.;
+        if (choice.key.kind == ui::DrawingViewKind::Flat)
+            choice.scale = 1.;
+    }
+    const auto expected = ui::DrawingSheet::compose(oldDrawing, requested);
+    const auto expectedFlat =
+        std::find_if(expected->views.begin(), expected->views.end(),
+                     [](const auto &at) { return at.key.kind == ui::DrawingViewKind::Flat; });
+    require(expectedFlat != expected->views.end() && page->maximum() == expected->pages &&
+                page->value() == expectedFlat->page + 1 && c.drawing() == oldDrawing &&
+                !c.hasWork() && c.session().editRevision() == revision,
+            "Changing individual scales failed to follow selected view or recomputed CAD");
+    for (int row = 0; row < viewList->count(); ++row) {
+        const auto label = viewList->item(row)->text();
+        if (label.startsWith(QStringLiteral("Изометрия")))
+            require(label.endsWith("2:1"), "Flat scale change overwrote isometric scale");
+    }
+    if (!initialSnapshot.isEmpty())
+        require(dialog->grab().save(initialSnapshot + ".scaled.png"),
+                "Cannot save repacked scales");
+    resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
+    const auto initialPlan =
+        ui::DrawingSheet::compose(oldDrawing, ui::DrawingSheet::defaultViews(*oldDrawing));
+    const auto flatPlacement =
+        std::find_if(initialPlan->views.begin(), initialPlan->views.end(),
+                     [](const auto &at) { return at.key.kind == ui::DrawingViewKind::Flat; });
+    require(flatPlacement != initialPlan->views.end(),
+            "Flat view missing from paper selection fixture");
+    page->setValue(flatPlacement->page + 1);
+    const auto paperPoint = QPoint(qRound(flatPlacement->selectionBounds.center().x() /
+                                          ui::DrawingSheet::widthMm * preview->width()),
+                                   qRound(flatPlacement->selectionBounds.center().y() /
+                                          ui::DrawingSheet::heightMm * preview->height()));
+    for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+        QMouseEvent event(
+            type, QPointF(paperPoint), QPointF(preview->mapToGlobal(paperPoint)), Qt::LeftButton,
+            type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(preview, &event);
+    }
+    require(viewList->currentItem()->text().startsWith(QStringLiteral("Развёртка")) &&
+                flatSide->isVisible(),
+            "Clicking a paper view did not select its controls");
+    resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
     const auto basePages = page->maximum();
     require(navigation->isVisible() == (basePages > 1),
             "Single-page navigation visibility is wrong");
-    layout->setCurrentIndex(1);
+    // Request all prepared local views as well: a readable composition needs continuation.
+    for (int row = 0; row < viewList->count(); ++row)
+        viewList->item(row)->setCheckState(Qt::Checked);
+    wait([&] { return exportButton->isEnabled(); });
+    page->setValue(1);
     QApplication::processEvents();
     require(page->maximum() > 1 && navigation->isVisible() && page->value() == 1 &&
                 !previous->isEnabled() && next->isEnabled(),
@@ -1545,6 +2189,9 @@ void workflow(const QString &folder) {
         require(dialog->grab().save(snapshot + ".expanded.png"),
                 "Cannot save the expanded preview snapshot");
     dialog->resize(900, 560);
+    auto *titleOptions = dialog->findChild<QToolButton *>("drawingTitleOptions");
+    require(titleOptions, "Missing title-block editor disclosure");
+    titleOptions->setChecked(true);
     const auto compactPaper = fittedPaper();
     require(compactPaper.width() < originalPaper.width() &&
                 compactPaper.height() < originalPaper.height(),
@@ -1567,7 +2214,8 @@ void workflow(const QString &folder) {
     next->click();
     fittedPaper();
     dialog->resize(normal);
-    layout->setCurrentIndex(0);
+    resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
     fittedPaper();
     require(page->maximum() == basePages && page->value() <= basePages &&
                 navigation->isVisible() == (basePages > 1),
@@ -1665,7 +2313,9 @@ void workflow(const QString &folder) {
         QApplication::processEvents();
         inspected = inspected && dialog->grab().save(snapshot);
     }
-    layout->setCurrentIndex(1);
+    for (int row = 0; row < viewList->count(); ++row)
+        viewList->item(row)->setCheckState(Qt::Checked);
+    wait([&] { return exportButton->isEnabled(); });
     page->setValue(page->maximum());
     exportedPages = page->maximum();
     require(exportedPages > 1 && c.drawing() == oldDrawing && !c.hasWork() &&
@@ -1673,19 +2323,73 @@ void workflow(const QString &folder) {
             "Page changes recomputed CAD or changed the project");
     const auto output = qEnvironmentVariable("BENDING_DRAWING_OUTPUT");
     const auto target = output.isEmpty() ? folder + "/ui.pdf" : output;
+    const auto oldFolder = ui::preferences()->value("drawing/lastPdfDirectory");
+    bool cancelledSave = false;
+    QTimer::singleShot(30, dialog, [&] {
+        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+        require(file && file->acceptMode() == QFileDialog::AcceptSave &&
+                    file->defaultSuffix() == "pdf" &&
+                    !file->testOption(QFileDialog::DontConfirmOverwrite),
+                "PDF dialog lost its save mode, suffix or overwrite confirmation");
+        const auto source =
+            c.session().document()->metadata().sourcePath.filename().stem().u8string();
+        const auto expected = QString::fromUtf8(reinterpret_cast<const char *>(source.data()),
+                                                static_cast<qsizetype>(source.size())) +
+                              QStringLiteral(" — чертёж.pdf");
+        require(QFileInfo(file->selectedFiles().front()).fileName() == expected,
+                "Save dialog did not suggest the loaded model's name");
+        file->reject();
+        cancelledSave = true;
+    });
+    exportButton->click();
+    wait([&] { return cancelledSave; });
+    require(ui::preferences()->value("drawing/lastPdfDirectory") == oldFolder,
+            "Cancelling save changed the export folder");
     QTimer::singleShot(30, dialog, [target] {
         auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
         if (!file)
             return;
         file->setOption(QFileDialog::DontConfirmOverwrite, true);
-        file->selectFile(target);
+        file->selectFile(target.chopped(4)); // Let the dialog add .pdf before its overwrite check.
         if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
-            input->setText(target);
+            input->setText(target.chopped(4));
         QTimer::singleShot(
             0, file, [file] { QMetaObject::invokeMethod(file, "accept", Qt::DirectConnection); });
     });
     exportButton->click();
+    wait([&] { return QFile::exists(target); });
     pdf = QFile::exists(target);
+    require(ui::preferences()->value("drawing/lastPdfDirectory").toString() ==
+                QFileInfo(target).absolutePath(),
+            "Successful PDF export did not remember its folder");
+    const auto otherFolder = folder + "/overwrite-check";
+    require(QDir().mkpath(otherFolder), "Cannot prepare overwrite check");
+    const auto typed = otherFolder + "/existing.revision";
+    QFile existing(typed + ".pdf");
+    require(existing.open(QIODevice::WriteOnly), "Cannot prepare existing PDF");
+    existing.write("previous contents");
+    existing.close();
+    bool declined = false;
+    QTimer::singleShot(30, dialog, [&] {
+        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+        require(file, "Missing save dialog for overwrite check");
+        file->selectFile(typed);
+        if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
+            input->setText(typed);
+        QTimer::singleShot(0, dialog, [&] {
+            auto *question = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+            require(question, "Normalized PDF filename bypassed overwrite confirmation");
+            question->done(QMessageBox::No);
+            declined = true;
+        });
+        QMetaObject::invokeMethod(file, "accept", Qt::DirectConnection);
+    });
+    exportButton->click();
+    wait([&] { return declined; });
+    require(existing.open(QIODevice::ReadOnly) && existing.readAll() == "previous contents" &&
+                ui::preferences()->value("drawing/lastPdfDirectory").toString() ==
+                    QFileInfo(target).absolutePath(),
+            "Declining overwrite modified the PDF or remembered the rejected folder");
     dialog->findChild<QComboBox *>("drawingOrientation")->setCurrentIndex(1);
     require(!controls->isVisible() && !navigation->isVisible() && !previous->isEnabled() &&
                 !next->isEnabled() && preview->pixmap().isNull() && !exportButton->isEnabled(),
@@ -1756,9 +2460,44 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
     QTemporaryDir temp;
+    ui::setPreferencesFile(temp.path() + "/settings.ini");
     try {
         if (app.arguments().contains(QStringLiteral("--workflow-only"))) {
+            pdfDestinations(temp.path());
+            previewStates();
             workflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--preview-states-only"))) {
+            previewStates();
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--basic-dimensions-only"))) {
+            basicProjectionDimensions(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--radius-callouts-only"))) {
+            localRadiusCallouts(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--orientation-only"))) {
+            automaticDrawingOrientation(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--repeated-wave-only"))) {
+            repeatedWaveDrawing(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--composition-only"))) {
+            composition(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--layout-worker-only"))) {
+            drawingLayoutChecks();
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--dimension-bases-only"))) {
+            dimensionBases(temp.path());
             return 0;
         }
         if (app.arguments().size() == 5 && app.arguments().at(1) == "--audit-sample") {
@@ -1778,16 +2517,24 @@ int main(int argc, char **argv) {
                       << bool(d->flatPattern) << '\n';
             return 0;
         }
+        pdfDestinations(temp.path());
         flatDrawing(temp.path());
+        drawingLayoutChecks();
+        composition(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());
         holePositions(temp.path());
         ovalVisibility(temp.path());
         geometry(temp.path());
+        basicProjectionDimensions(temp.path());
+        localRadiusCallouts(temp.path());
+        dimensionBases(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
+        automaticDrawingOrientation(temp.path());
         repeatedWaveDrawing(temp.path());
         perforatedAngleDrawing(temp.path());
+        previewStates();
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";
     } catch (const std::exception &e) {

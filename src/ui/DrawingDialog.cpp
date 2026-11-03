@@ -1,19 +1,28 @@
 #include "DrawingDialog.h"
+#include "DrawingLayoutController.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
+#include "bending/ui/Preferences.h"
 #include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -30,6 +39,58 @@
 
 namespace bending::ui {
 namespace {
+QIcon fitPageIcon() {
+    QIcon icon;
+    for (int ratio : {1, 2})
+        for (auto state : {QIcon::Off, QIcon::On}) {
+            QPixmap pixmap(24 * ratio, 24 * ratio);
+            pixmap.setDevicePixelRatio(ratio);
+            pixmap.fill(Qt::transparent);
+            QPainter painter(&pixmap);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(QPen(QColor(state == QIcon::On ? "#087F83" : "#334155"), 1.6,
+                                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            QPainterPath corners;
+            for (const auto corner :
+                 {QPointF(3, 3), QPointF(21, 3), QPointF(3, 21), QPointF(21, 21)}) {
+                corners.moveTo(corner + QPointF(corner.x() < 12 ? 4 : -4, 0));
+                corners.lineTo(corner);
+                corners.lineTo(corner + QPointF(0, corner.y() < 12 ? 4 : -4));
+            }
+            painter.drawPath(corners);
+            painter.drawRoundedRect(QRectF(8, 6, 8, 12), .7, .7);
+            painter.end();
+            icon.addPixmap(pixmap, QIcon::Normal, state);
+        }
+    return icon;
+}
+QString scaleLabel(double scale) {
+    return scale >= 1 ? QStringLiteral("%1:1").arg(scale, 0, 'g', 4)
+                      : QStringLiteral("1:%1").arg(1 / scale, 0, 'g', 4);
+}
+QString drawingFailureReason(const QString &detail) {
+    if (detail == QLatin1String("Drawing requires a loaded STEP solid"))
+        return QStringLiteral("Откройте STEP с объёмной моделью детали.");
+    if (detail == QLatin1String("First drawing version supports up to 500 faces / 2000 edges"))
+        return QStringLiteral(
+            "Модель слишком сложная для автоматического чертежа: более 500 граней или 2000 рёбер.");
+    if (detail == QLatin1String("Choose a planar base face for the drawing") ||
+        detail == QLatin1String("The drawing base must be planar"))
+        return QStringLiteral("Для главного вида нужна плоская грань. Выберите другую базу.");
+    if (detail == QLatin1String("Invalid drawing settings"))
+        return QStringLiteral("Параметры вида недопустимы. Попробуйте автоматическую ориентацию.");
+    if (detail == QLatin1String("Selected face belongs to another document"))
+        return QStringLiteral("Выберите базовую грань заново: прежняя относится к другой модели.");
+    if (detail == QLatin1String("The part does not fit the supported A3 / standard scale range"))
+        return QStringLiteral("Деталь не помещается на A3 в поддерживаемом диапазоне масштабов.");
+    if (detail == QLatin1String("Drawing projection exceeds 200000 points"))
+        return QStringLiteral("Проекция детали слишком сложная для автоматического чертежа.");
+    if (std::any_of(detail.begin(), detail.end(),
+                    [](QChar c) { return c.unicode() >= 0x0400 && c.unicode() <= 0x04ff; }))
+        return detail;
+    return QStringLiteral(
+        "Не удалось построить чертёж. Подробности ошибки — в подсказке состояния.");
+}
 class DrawingPreviewArea final : public QScrollArea {
   public:
     explicit DrawingPreviewArea(QWidget *parent) : QScrollArea(parent) {
@@ -108,13 +169,18 @@ class DrawingPreviewArea final : public QScrollArea {
         zoomLabel_->setMinimumWidth(48);
         zoomLabel_->setToolTip(QStringLiteral("Масштаб предпросмотра. Изменяется колёсиком мыши."));
         bar->addWidget(zoomLabel_);
-        fit_ =
-            action(QStringLiteral("Вписать"), "fitDrawingPage", QKeySequence(Qt::CTRL | Qt::Key_0));
+        fit_ = action(QStringLiteral("Показать лист целиком"), "fitDrawingPage",
+                      QKeySequence(Qt::CTRL | Qt::Key_0));
+        fit_->setIcon(fitPageIcon());
         fit_->setCheckable(true);
         auto *fitButton = new QToolButton(footer_);
         fitButton->setObjectName(QStringLiteral("fitDrawingPageButton"));
         fitButton->setDefaultAction(fit_);
-        fitButton->setMinimumHeight(32);
+        fitButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        fitButton->setIconSize(QSize(24, 24));
+        fitButton->setAccessibleName(fit_->text());
+        fitButton->setFocusPolicy(Qt::StrongFocus);
+        fitButton->setFixedSize(32, 32);
         bar->addWidget(fitButton);
         connect(fit_, &QAction::triggered, this, [this] {
             fitToWindow_ = true;
@@ -131,12 +197,72 @@ class DrawingPreviewArea final : public QScrollArea {
         connect(zoomOut, &QAction::triggered, this,
                 [this] { zoomAt(1 / 1.2, viewport()->rect().center()); });
         viewport()->setToolTip(QStringLiteral("Колесо — масштаб · перетаскивание — перемещение · "
-                                              "Ctrl+0 — вписать лист"));
+                                              "Ctrl+0 — показать лист целиком"));
         viewport()->installEventFilter(this);
+        state_ = new QWidget(viewport());
+        state_->setObjectName(QStringLiteral("drawingPreviewState"));
+        state_->setAutoFillBackground(true);
+        auto *stateLayout = new QVBoxLayout(state_);
+        stateLayout->setContentsMargins(24, 24, 24, 24);
+        stateLayout->addStretch();
+        progress_ = new QProgressBar(state_);
+        progress_->setObjectName(QStringLiteral("drawingPreviewBusy"));
+        progress_->setRange(0, 0);
+        progress_->setTextVisible(false);
+        progress_->setFixedSize(120, 6);
+        progress_->setAccessibleName(QStringLiteral("Подготовка чертежа"));
+        stateLayout->addWidget(progress_, 0, Qt::AlignHCenter);
+        stateTitle_ = new QLabel(state_);
+        stateTitle_->setObjectName(QStringLiteral("drawingPreviewStateTitle"));
+        stateTitle_->setAlignment(Qt::AlignCenter);
+        stateTitle_->setWordWrap(true);
+        stateTitle_->setTextFormat(Qt::PlainText);
+        auto heading = stateTitle_->font();
+        heading.setBold(true);
+        stateTitle_->setFont(heading);
+        stateLayout->addWidget(stateTitle_, 0, Qt::AlignHCenter);
+        stateText_ = new QLabel(state_);
+        stateText_->setObjectName(QStringLiteral("drawingPreviewStateText"));
+        stateText_->setWordWrap(true);
+        stateText_->setAlignment(Qt::AlignCenter);
+        stateText_->setTextFormat(Qt::PlainText);
+        stateText_->setMaximumWidth(440);
+        stateLayout->addWidget(stateText_, 0, Qt::AlignHCenter);
+        retry_ = new QPushButton(state_);
+        retry_->setObjectName(QStringLiteral("drawingPreviewRetry"));
+        stateLayout->addWidget(retry_, 0, Qt::AlignHCenter);
+        stateLayout->addStretch();
+        connect(retry_, &QPushButton::clicked, this, [this] {
+            const auto action = retryAction_;
+            if (action)
+                action();
+        });
+        state_->hide();
         setPageCount(0);
         setMinimumWidth(footer_->sizeHint().width() + 32);
     }
     std::function<void()> viewChanged;
+    std::function<void(QPointF)> paperClicked;
+    void showState(const QString &title, const QString &detail, bool busy = false,
+                   const QString &action = {}, std::function<void()> retry = {}) {
+        setPageCount(0);
+        stateTitle_->setText(title);
+        const auto compact = detail.simplified();
+        stateText_->setText(compact.size() > 240 ? compact.left(237) + QStringLiteral("…")
+                                                 : compact);
+        stateText_->setToolTip(detail);
+        progress_->setVisible(busy);
+        retry_->setText(action);
+        retry_->setVisible(!action.isEmpty());
+        retryAction_ = std::move(retry);
+        state_->show();
+        positionState();
+        state_->raise();
+    }
+    void showPaper() {
+        state_->hide();
+        retryAction_ = {};
+    }
     void setPaper(QWidget *paper) {
         setWidget(paper);
         paper->installEventFilter(this);
@@ -194,6 +320,7 @@ class DrawingPreviewArea final : public QScrollArea {
     }
     bool eventFilter(QObject *object, QEvent *event) override {
         if (object == viewport() && event->type() == QEvent::Resize) {
+            positionState();
             positionNavigation();
             fitPaper();
         }
@@ -215,6 +342,7 @@ class DrawingPreviewArea final : public QScrollArea {
                 if (mouse->button() == Qt::LeftButton || mouse->button() == Qt::MiddleButton) {
                     dragging_ = true;
                     dragPosition_ = mouse->globalPosition().toPoint();
+                    pressPosition_ = dragPosition_;
                     viewport()->setCursor(Qt::ClosedHandCursor);
                     return true;
                 }
@@ -228,6 +356,14 @@ class DrawingPreviewArea final : public QScrollArea {
             } else if (event->type() == QEvent::MouseButtonRelease && dragging_) {
                 dragging_ = false;
                 viewport()->setCursor(fitToWindow_ ? Qt::ArrowCursor : Qt::OpenHandCursor);
+                const auto *mouse = static_cast<QMouseEvent *>(event);
+                if (mouse->button() == Qt::LeftButton && paperClicked && widget() &&
+                    (mouse->globalPosition().toPoint() - pressPosition_).manhattanLength() < 5) {
+                    const auto point = widget()->mapFromGlobal(mouse->globalPosition().toPoint());
+                    if (widget()->rect().contains(point))
+                        paperClicked({point.x() * DrawingSheet::widthMm / widget()->width(),
+                                      point.y() * DrawingSheet::heightMm / widget()->height()});
+                }
                 return true;
             }
         }
@@ -237,6 +373,24 @@ class DrawingPreviewArea final : public QScrollArea {
   private:
     static constexpr double referenceWidth = DrawingSheet::widthMm * 96 / 25.4;
     QFrame *footer_ = nullptr;
+    QWidget *state_ = nullptr;
+    QLabel *stateTitle_ = nullptr;
+    QLabel *stateText_ = nullptr;
+    QProgressBar *progress_ = nullptr;
+    QPushButton *retry_ = nullptr;
+    std::function<void()> retryAction_;
+    void positionState() {
+        if (!state_ || !stateText_)
+            return;
+        state_->setGeometry(viewport()->rect());
+        const int width = std::max(1, std::min(440, state_->width() - 48));
+        for (auto *label : {stateTitle_, stateText_}) {
+            label->setFixedWidth(width);
+            label->setFixedHeight(
+                std::max(label->fontMetrics().height(), label->heightForWidth(width)) + 4);
+        }
+        state_->layout()->activate();
+    }
     QWidget *navigation_ = nullptr;
     QLabel *zoomLabel_ = nullptr;
     QAction *fit_ = nullptr;
@@ -244,6 +398,7 @@ class DrawingPreviewArea final : public QScrollArea {
     bool dragging_ = false;
     int paperWidth_ = 0;
     QPoint dragPosition_;
+    QPoint pressPosition_;
     QSpinBox *page_ = nullptr;
     QAction *previous_ = nullptr;
     QAction *next_ = nullptr;
@@ -280,7 +435,6 @@ class DrawingDialog::Impl {
     std::uint64_t revision;
     QComboBox *base;
     QComboBox *turn;
-    QComboBox *layoutMode;
     QCheckBox *reverse;
     QCheckBox *breaks;
     QLineEdit *name;
@@ -291,10 +445,22 @@ class DrawingDialog::Impl {
     QSpinBox *page;
     DrawingPreviewArea *preview;
     QTimer *refit;
+    QTimer *layoutTimer;
+    std::unique_ptr<DrawingLayoutController> layouts;
+    bool layoutBusy = false;
     QLabel *image;
     QLabel *status;
     QPushButton *prepare;
     QPushButton *exportPdf;
+    QListWidget *views;
+    QComboBox *viewScale;
+    QLabel *scaleCaption;
+    QComboBox *flatSide;
+    QLabel *sideInfo;
+    std::vector<DrawingViewChoice> choices;
+    application::BendingDrawingPtr compositionSource;
+    std::shared_ptr<const DrawingSheetPlan> plan;
+    QString layoutError;
     std::optional<std::size_t> selected;
     bool settingsChanged = false;
     bool started = false;
@@ -307,21 +473,171 @@ class DrawingDialog::Impl {
                 material->text(),
                 execution->text(),
                 quantity->value() ? std::optional<int>{quantity->value()} : std::nullopt,
-                layoutMode->currentIndex() == 0 ? DrawingLayout::Classical
-                                                : DrawingLayout::Profiles};
+                DrawingLayout::Classical,
+                plan};
+    }
+    bool ensurePlan(const application::BendingDrawingPtr &drawing) {
+        if (compositionSource != drawing) {
+            cancelLayout();
+            compositionSource = drawing;
+            choices = DrawingSheet::defaultViews(*drawing);
+            plan.reset();
+            layoutError.clear();
+            const QSignalBlocker block(views), blockSide(flatSide);
+            views->clear();
+            for (const auto &choice : choices) {
+                auto *item =
+                    new QListWidgetItem(DrawingSheet::viewName(*drawing, choice.key), views);
+                item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+                item->setCheckState(choice.visible ? Qt::Checked : Qt::Unchecked);
+            }
+            flatSide->setCurrentIndex(0);
+            const bool known =
+                drawing->flatPattern && drawing->flatPattern->info.positiveZIsSideA.has_value();
+            flatSide->setItemText(1,
+                                  known ? QStringLiteral("Сторона A") : QStringLiteral("Исходная"));
+            flatSide->setItemText(2,
+                                  known ? QStringLiteral("Сторона B") : QStringLiteral("Обратная"));
+            views->setCurrentRow(0);
+        }
+        selectionControls();
+        if (!plan) {
+            if (!layoutBusy) {
+                layoutBusy = true;
+                showLayoutProgress();
+                layouts->request(drawing, choices,
+                                 static_cast<DrawingFlatSide>(flatSide->currentIndex()));
+            }
+            return false;
+        }
+        selectionControls();
+        return true;
+    }
+    void cancelLayout() {
+        if (layouts)
+            layouts->cancel();
+        layoutBusy = false;
+    }
+    void showLayoutProgress() {
+        exportPdf->setEnabled(false);
+        image->clear();
+        status->setText(QStringLiteral("Компоновка листов…"));
+        status->setToolTip({});
+        preview->showState(QStringLiteral("Компоновка листов"),
+                           QStringLiteral("Размещаем виды и размеры…"), true,
+                           QStringLiteral("Отменить"), [this] {
+                               cancelLayout();
+                               layoutTimer->stop();
+                               showLayoutError(QStringLiteral("Компоновка отменена"));
+                           });
+    }
+    void selectionControls() {
+        const QSignalBlocker block(viewScale), blockViews(views);
+        const int row = views->currentRow();
+        const bool valid = row >= 0 && static_cast<std::size_t>(row) < choices.size();
+        viewScale->setEnabled(valid && !controller.hasWork() && !settingsChanged);
+        const bool projections = valid && choices[row].key.kind == DrawingViewKind::Projection;
+        scaleCaption->setText(projections ? QStringLiteral("Общий масштаб")
+                                          : QStringLiteral("Масштаб вида"));
+        viewScale->setToolTip(
+            projections ? QStringLiteral(
+                              "Меняется вместе у главного вида и связанных проекций сверху/слева.")
+                        : QStringLiteral("Меняется только у выбранного вида. При необходимости "
+                                         "виды будут перекомпонованы."));
+        viewScale->setCurrentIndex(0);
+        if (valid && choices[row].scale)
+            for (int i = 1; i < viewScale->count(); ++i)
+                if (viewScale->itemData(i).toDouble() == *choices[row].scale)
+                    viewScale->setCurrentIndex(i);
+        const bool flat = valid && choices[row].key.kind == DrawingViewKind::Flat;
+        flatSide->setVisible(flat);
+        sideInfo->setVisible(flat);
+        if (flat && compositionSource && compositionSource->flatPattern) {
+            const auto orientation = DrawingSheet::flatOrientation(
+                compositionSource->flatPattern->info,
+                static_cast<DrawingFlatSide>(flatSide->currentIndex()));
+            sideInfo->setText(
+                QStringLiteral("ВВЕРХ: %1 · ВНИЗ: %2").arg(orientation.up).arg(orientation.down));
+        }
+        if (plan && compositionSource)
+            for (std::size_t i = 0; i < choices.size(); ++i) {
+                const auto at =
+                    std::find_if(plan->views.begin(), plan->views.end(),
+                                 [&](const auto &v) { return v.key == choices[i].key; });
+                auto label = DrawingSheet::viewName(*compositionSource, choices[i].key);
+                if (at != plan->views.end())
+                    label += QStringLiteral(" · %1").arg(scaleLabel(at->scale));
+                views->item(static_cast<int>(i))->setText(label);
+            }
+    }
+    void followSelection() {
+        const int row = views->currentRow();
+        if (plan && row >= 0 && static_cast<std::size_t>(row) < choices.size()) {
+            const auto at = std::find_if(plan->views.begin(), plan->views.end(),
+                                         [&](const auto &v) { return v.key == choices[row].key; });
+            if (at != plan->views.end()) {
+                const QSignalBlocker block(page);
+                page->setValue(at->page + 1);
+            }
+        }
+    }
+    void selectView(int, bool followPage = true) {
+        selectionControls();
+        if (followPage)
+            followSelection();
+        render();
+    }
+    void scheduleLayout() {
+        cancelLayout();
+        plan.reset();
+        layoutError.clear();
+        exportPdf->setEnabled(false);
+        image->clear();
+        selectionControls();
+        showLayoutProgress();
+        layoutTimer->start();
+    }
+    void showLayoutError(const QString &detail) {
+        layoutBusy = false;
+        layoutError = detail;
+        exportPdf->setEnabled(false);
+        image->clear();
+        const bool cancelled = detail == QStringLiteral("Компоновка отменена");
+        status->setText(cancelled ? detail : QStringLiteral("Виды не размещены"));
+        status->setToolTip(detail);
+        auto reason = detail;
+        const auto end = reason.indexOf(QStringLiteral("меньший масштаб."));
+        if (end >= 0)
+            reason = reason.left(end + QStringLiteral("меньший масштаб.").size());
+        preview->showState(
+            cancelled ? detail : QStringLiteral("Не удалось разместить виды"), reason, false,
+            cancelled ? QStringLiteral("Повторить") : QStringLiteral("Автокомпоновка"),
+            [this, cancelled] {
+                if (!cancelled)
+                    compositionSource.reset();
+                scheduleLayout();
+            });
     }
     void invalidate() {
+        cancelLayout();
         settingsChanged = true;
         exportPdf->setEnabled(false);
         status->setText(QStringLiteral("Ориентация изменена. Нажмите «Сформировать виды»."));
         image->clear();
-        preview->setPageCount(0);
+        layoutTimer->stop();
+        preview->showState(QStringLiteral("Виды изменены"),
+                           QStringLiteral("Сформируйте чертёж с новой ориентацией."), false,
+                           QStringLiteral("Сформировать виды"), [this] { build(); });
     }
     void render(bool contentChanged = true) {
         const auto drawing = controller.drawing();
-        if (!drawing || settingsChanged || controller.session().revision() != revision)
+        if (!drawing || settingsChanged || controller.isPreparingDrawing() || layoutBusy ||
+            layoutTimer->isActive() || !layoutError.isEmpty() ||
+            controller.session().revision() != revision)
             return;
         try {
+            if (!ensurePlan(drawing))
+                return;
             if (contentChanged) {
                 const auto previousPage = page->value();
                 preview->setPageCount(DrawingSheet::pageCount(*drawing, title()));
@@ -339,42 +655,75 @@ class DrawingDialog::Impl {
                 qFuzzyCompare(current.devicePixelRatioF(), ratio))
                 return;
             auto raster = DrawingSheet::preview(*drawing, title(), page->value() - 1, pixels);
+            const int selectedRow = views->currentRow();
+            if (plan && selectedRow >= 0 &&
+                static_cast<std::size_t>(selectedRow) < choices.size()) {
+                QPainter marker(&raster);
+                marker.scale(pixels / DrawingSheet::widthMm, pixels / DrawingSheet::widthMm);
+                marker.setPen(QPen(QColor("#38898B"), .3, Qt::DashLine));
+                marker.setBrush(Qt::NoBrush);
+                for (const auto &at : plan->views)
+                    if (at.page == page->value() - 1 && at.key == choices[selectedRow].key)
+                        marker.drawRect(at.selectionBounds);
+            }
             raster.setDevicePixelRatio(ratio);
             image->setPixmap(QPixmap::fromImage(raster));
             image->resize(fit);
+            preview->showPaper();
             exportPdf->setEnabled(!controller.hasWork());
         } catch (const std::exception &e) {
-            image->clear();
-            image->adjustSize();
-            exportPdf->setEnabled(false);
-            status->setText(QString::fromUtf8(e.what()));
+            showLayoutError(QString::fromUtf8(e.what()));
         }
     }
     void refresh() {
         const bool same =
             revision == controller.session().revision() && controller.session().document();
         const bool busy = controller.hasWork();
+        if (!same || controller.isPreparingDrawing() || settingsChanged)
+            cancelLayout();
         for (auto *w : {static_cast<QWidget *>(base), static_cast<QWidget *>(turn),
                         static_cast<QWidget *>(reverse), static_cast<QWidget *>(breaks)})
             w->setEnabled(same && !busy);
         prepare->setEnabled(same && !busy);
         const auto drawing = controller.drawing();
-        exportPdf->setEnabled(same && !busy && drawing && !settingsChanged);
+        views->setEnabled(same && !busy && drawing && !settingsChanged);
+        flatSide->setEnabled(same && !busy && drawing && !settingsChanged);
+        exportPdf->setEnabled(same && !busy && drawing && !settingsChanged && plan && !layoutBusy &&
+                              !layoutTimer->isActive() && layoutError.isEmpty());
         if (!same) {
-            preview->setPageCount(0);
             image->clear();
+            preview->showState(QStringLiteral("Документ изменился"),
+                               QStringLiteral("Откройте чертёж для текущей детали."));
             status->setText(
                 QStringLiteral("Документ изменился. Откройте лист заново для новой детали."));
         } else if (controller.isPreparingDrawing()) {
-            preview->setPageCount(0);
             image->clear();
+            preview->showState(QStringLiteral("Подготовка чертежа"),
+                               QStringLiteral("Строим виды и размеры…"), true);
             status->setText(QStringLiteral("Подготовка видов и размеров…"));
         } else if (const auto error = controller.drawingError()) {
-            preview->setPageCount(0);
             image->clear();
-            status->setText(QStringLiteral("Лист не сформирован: %1")
-                                .arg(QString::fromStdString(error->detail)));
+            preview->showState(QStringLiteral("Чертёж не сформирован"),
+                               drawingFailureReason(QString::fromStdString(error->detail)), false,
+                               QStringLiteral("Повторить"), [this] { build(); });
+            status->setText(QStringLiteral("Чертёж не сформирован"));
+            status->setToolTip(QString::fromStdString(error->detail));
         } else if (drawing && !settingsChanged) {
+            if (layoutTimer->isActive()) {
+                exportPdf->setEnabled(false);
+                return;
+            }
+            if (compositionSource == drawing && !layoutError.isEmpty()) {
+                showLayoutError(layoutError);
+                return;
+            }
+            try {
+                if (!ensurePlan(drawing))
+                    return;
+            } catch (const std::exception &e) {
+                showLayoutError(QString::fromUtf8(e.what()));
+                return;
+            }
             const bool cut = drawing->views[0].omittedX.has_value();
             const auto coverage = DrawingSheet::coverage(*drawing, title());
             status->setText(
@@ -413,10 +762,36 @@ class DrawingDialog::Impl {
                          : QStringLiteral(" Развёртка этой формы не подтверждена и не включена.")));
                 status->setToolTip(QString::fromStdString(drawing->flatPatternError->detail));
             }
+            auto detail = status->text();
+            if (drawing->unrecognizedCylindricalFaces)
+                detail += QStringLiteral(" Не распознано цилиндрических граней: %1.")
+                              .arg(drawing->unrecognizedCylindricalFaces);
+            if (drawing->variableProfile == application::DrawingVariableProfile::NotMeasured)
+                detail += QStringLiteral(" Размеры переменной стенки не построены.");
+            if (std::any_of(drawing->bends.begin(), drawing->bends.end(),
+                            [](const auto &b) { return b.diagnostic; }))
+                detail += QStringLiteral(" D — кандидат гиба.");
+            if (std::any_of(drawing->bends.begin(), drawing->bends.end(),
+                            [](const auto &b) { return b.trimmedEnds; }))
+                detail += QStringLiteral(" ! — подрезанные торцы.");
+            status->setToolTip(detail +
+                               QStringLiteral("\nРазмеры развёртки — от края заготовки, не X "
+                                              "упора. Калибровка станка не выполнена."));
+            status->setText(QStringLiteral("A3 · %1 лист(а)\nРазмеры гибов: %2 из %3%4")
+                                .arg(plan->pages)
+                                .arg(coverage.dimensioned)
+                                .arg(coverage.total)
+                                .arg(drawing->flatPatternError
+                                         ? QStringLiteral("\nРазвёртка не включена")
+                                         : QString{}));
             render();
         } else {
-            preview->setPageCount(0);
             image->clear();
+            preview->showState(
+                busy ? QStringLiteral("Ожидание") : QStringLiteral("Сформируйте виды"),
+                busy ? QStringLiteral("Дождитесь завершения текущей операции.")
+                     : QStringLiteral("Данные детали изменились."),
+                busy, busy ? QString{} : QStringLiteral("Сформировать виды"), [this] { build(); });
             status->setText(
                 busy ? QStringLiteral("Ожидание завершения текущей операции…")
                      : QStringLiteral("Данные детали изменены. Нажмите «Сформировать виды»."));
@@ -432,7 +807,13 @@ class DrawingDialog::Impl {
         request.reverseView = reverse->isChecked();
         request.allowBreaks = breaks->isChecked();
         settingsChanged = false;
+        layoutError.clear();
+        cancelLayout();
+        layoutTimer->stop();
+        exportPdf->setEnabled(false);
         image->clear();
+        preview->showState(QStringLiteral("Подготовка чертежа"),
+                           QStringLiteral("Строим виды и размеры…"), true);
         started = controller.prepareDrawing(builder, request);
         refresh();
     }
@@ -445,7 +826,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
                    Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint);
     setWindowModality(Qt::NonModal);
     setObjectName(QStringLiteral("bendingDrawingDialog"));
-    setWindowTitle(QStringLiteral("Лист гибки из STEP"));
+    setWindowTitle(QStringLiteral("Чертёж"));
     resize(1200, 720);
     auto *layout = new QHBoxLayout(this);
     auto *panel = new QWidget(this);
@@ -462,7 +843,70 @@ DrawingDialog::DrawingDialog(ImportController &c,
     optionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     optionScroll->setWidget(options);
     left->addWidget(optionScroll, 1);
+    auto *viewHeading = new QLabel(QStringLiteral("Виды на листе"), panel);
+    optionLayout->addWidget(viewHeading);
+    impl_->views = new QListWidget(panel);
+    impl_->views->setObjectName(QStringLiteral("drawingViews"));
+    impl_->views->setAccessibleName(QStringLiteral("Виды на листе"));
+    impl_->views->setToolTip(
+        QStringLiteral("Отметьте нужные виды. Щелчок по виду на листе выбирает его здесь."));
+    impl_->views->setMinimumHeight(150);
+    impl_->views->setMaximumHeight(240);
+    optionLayout->addWidget(impl_->views);
+    auto *viewForm = new QFormLayout;
+    viewForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    impl_->viewScale = new QComboBox(panel);
+    impl_->viewScale->setObjectName(QStringLiteral("drawingViewScale"));
+    impl_->viewScale->setAccessibleName(QStringLiteral("Масштаб выбранного вида"));
+    impl_->viewScale->addItem(QStringLiteral("Авто"));
+    for (double scale : {10., 5., 4., 2.5, 2., 1., .5, .4, .25, .2, .1, 1. / 15, .05, .04, .025,
+                         .02, 1. / 75, .01})
+        impl_->viewScale->addItem(scaleLabel(scale), scale);
+    impl_->viewScale->setToolTip(
+        QStringLiteral("Масштаб на бумаге. Главный вид и связанные проекции имеют общий масштаб."));
+    impl_->scaleCaption = new QLabel(QStringLiteral("Масштаб вида"), panel);
+    impl_->scaleCaption->setBuddy(impl_->viewScale);
+    viewForm->addRow(impl_->scaleCaption, impl_->viewScale);
+    optionLayout->addLayout(viewForm);
+    impl_->flatSide = new QComboBox(panel);
+    impl_->flatSide->setObjectName(QStringLiteral("drawingFlatSide"));
+    impl_->flatSide->setAccessibleName(QStringLiteral("Показанная сторона развёртки"));
+    impl_->flatSide->addItems({QStringLiteral("Авто: больше гибов вверх"),
+                               QStringLiteral("Сторона A"), QStringLiteral("Сторона B")});
+    impl_->flatSide->setToolTip(
+        QStringLiteral("ВВЕРХ/ВНИЗ — от показанной стороны развёртки. Смена стороны отражает "
+                       "контур и направления гибов."));
+    optionLayout->addWidget(impl_->flatSide);
+    impl_->sideInfo = new QLabel(panel);
+    impl_->sideInfo->setObjectName(QStringLiteral("drawingFlatDirections"));
+    optionLayout->addWidget(impl_->sideInfo);
+    impl_->flatSide->hide();
+    impl_->sideInfo->hide();
+    auto *resetViews = new QPushButton(QStringLiteral("Автокомпоновка"), panel);
+    resetViews->setObjectName(QStringLiteral("resetDrawingComposition"));
+    resetViews->setToolTip(
+        QStringLiteral("Вернуть рекомендуемые виды, масштабы и сторону развёртки."));
+    optionLayout->addWidget(resetViews);
+    const auto section = [&](const QString &label, const char *objectName) {
+        auto *toggle = new QToolButton(panel);
+        toggle->setObjectName(QLatin1String(objectName));
+        toggle->setText(label);
+        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        toggle->setArrowType(Qt::RightArrow);
+        toggle->setCheckable(true);
+        optionLayout->addWidget(toggle);
+        auto *body = new QWidget(panel);
+        optionLayout->addWidget(body);
+        body->hide();
+        connect(toggle, &QToolButton::toggled, this, [toggle, body](bool open) {
+            body->setVisible(open);
+            toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        });
+        return body;
+    };
+    auto *requisites = section(QStringLiteral("Основная надпись"), "drawingTitleOptions");
     auto *form = new QFormLayout;
+    requisites->setLayout(form);
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     const auto field = [&](const QString &label, const char *name, int length) {
         auto *line = new QLineEdit(panel);
@@ -484,45 +928,39 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->quantity->setSpecialValueText(QStringLiteral("Не указано"));
     impl_->quantity->setAccessibleName(QStringLiteral("Количество в партии, штук"));
     form->addRow(QStringLiteral("Количество, шт."), impl_->quantity);
-    impl_->layoutMode = new QComboBox(panel);
-    impl_->layoutMode->setObjectName(QStringLiteral("drawingLayout"));
-    impl_->layoutMode->addItems(
-        {QStringLiteral("Чертёж: виды и сечения"), QStringLiteral("Профили для ввода")});
-    form->addRow(QStringLiteral("Представление"), impl_->layoutMode);
+    auto *geometryOptions =
+        section(QStringLiteral("Ориентация и разрывы"), "drawingGeometryOptions");
+    form = new QFormLayout(geometryOptions);
+    form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     impl_->base = new QComboBox(panel);
     impl_->base->setObjectName(QStringLiteral("drawingBaseFace"));
     impl_->base->addItem(QStringLiteral("Авто: основная плоская грань"));
     if (selected)
         impl_->base->addItem(QStringLiteral("Выбранная грань №%1").arg(*selected));
-    form->addRow(QStringLiteral("Базовая сторона A"), impl_->base);
+    form->addRow(QStringLiteral("База главного вида"), impl_->base);
     impl_->turn = new QComboBox(panel);
     impl_->turn->setObjectName(QStringLiteral("drawingOrientation"));
     impl_->turn->addItems({QStringLiteral("Авто по геометрии"), QStringLiteral("0°"),
                            QStringLiteral("90°"), QStringLiteral("180°"), QStringLiteral("270°")});
     form->addRow(QStringLiteral("Ориентация видов"), impl_->turn);
-    impl_->reverse = new QCheckBox(QStringLiteral("Смотреть с обратной стороны A"), panel);
+    impl_->reverse = new QCheckBox(QStringLiteral("Обратная сторона"), panel);
     impl_->reverse->setObjectName(QStringLiteral("drawingReverseView"));
     form->addRow(impl_->reverse);
     impl_->breaks = new QCheckBox(QStringLiteral("Разрывы однородных участков"), panel);
     impl_->breaks->setObjectName(QStringLiteral("drawingAllowBreaks"));
     impl_->breaks->setChecked(true);
     form->addRow(impl_->breaks);
-    optionLayout->addLayout(form);
     impl_->prepare = new QPushButton(QStringLiteral("Сформировать виды"), panel);
     impl_->prepare->setObjectName(QStringLiteral("prepareDrawing"));
-    optionLayout->addWidget(impl_->prepare);
+    form->addRow(impl_->prepare);
     impl_->status = new QLabel(panel);
     impl_->status->setWordWrap(true);
+    impl_->status->setMinimumHeight(impl_->status->fontMetrics().height() * 3);
     impl_->status->setObjectName(QStringLiteral("drawingStatus"));
     optionLayout->addWidget(impl_->status);
-    auto *scope = new QLabel(
-        QStringLiteral("База и виды выбираются по форме детали. Для другой базы можно выбрать "
-                       "плоскую грань в 3D перед открытием листа.\n\nЭто справочный лист готовой "
-                       "формы. При выбранном материале добавляется теоретическая развёртка. Её "
-                       "размеры не являются X упора; калибровка станка не выполнена."),
-        panel);
-    scope->setWordWrap(true);
-    optionLayout->addWidget(scope);
+    impl_->status->setToolTip(QStringLiteral(
+        "Размеры справочные. Развёртка теоретическая, по выбранным материалу и K; калибровка "
+        "станка не выполнена. Размеры от края развёртки не являются X упора."));
     optionLayout->addStretch();
     impl_->exportPdf = new QPushButton(QStringLiteral("Сохранить PDF…"), panel);
     impl_->exportPdf->setEnabled(false);
@@ -544,16 +982,88 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->refit->setSingleShot(true);
     impl_->refit->setInterval(80);
     connect(impl_->refit, &QTimer::timeout, this, [this] { impl_->render(false); });
+    impl_->layoutTimer = new QTimer(this);
+    impl_->layoutTimer->setSingleShot(true);
+    impl_->layoutTimer->setInterval(16);
+    connect(impl_->layoutTimer, &QTimer::timeout, this, [this] { impl_->refresh(); });
+    impl_->layouts = std::make_unique<DrawingLayoutController>();
+    connect(impl_->layouts.get(), &DrawingLayoutController::ready, this,
+            [this](std::shared_ptr<const DrawingSheetPlan> plan) {
+                if (!impl_->layoutBusy || impl_->settingsChanged ||
+                    impl_->controller.session().revision() != impl_->revision ||
+                    plan->source != impl_->controller.drawing())
+                    return;
+                impl_->layoutBusy = false;
+                impl_->plan = std::move(plan);
+                impl_->layoutError.clear();
+                impl_->preview->setPageCount(impl_->plan->pages);
+                impl_->followSelection();
+                impl_->refresh();
+            });
+    connect(impl_->layouts.get(), &DrawingLayoutController::failed, this,
+            [this](const QString &detail) {
+                if (impl_->layoutBusy && !impl_->settingsChanged &&
+                    impl_->controller.session().revision() == impl_->revision &&
+                    impl_->compositionSource == impl_->controller.drawing())
+                    impl_->showLayoutError(detail);
+            });
     scroll->viewChanged = [this] { impl_->refit->start(); };
+    scroll->paperClicked = [this](QPointF point) {
+        if (!impl_->plan)
+            return;
+        for (const auto &at : impl_->plan->views)
+            if (at.page == impl_->page->value() - 1 &&
+                (at.selectionBounds.contains(point) ||
+                 QRectF(at.area.topLeft(),
+                        QSizeF(at.area.width(), at.key.kind == DrawingViewKind::Flat ? 14 : 7))
+                     .contains(point))) {
+                for (std::size_t i = 0; i < impl_->choices.size(); ++i)
+                    if (impl_->choices[i].key == at.key) {
+                        impl_->views->setCurrentRow(static_cast<int>(i));
+                        return;
+                    }
+            }
+    };
     layout->addWidget(panel);
     layout->addWidget(scroll, 1);
     // No edit signal runs before all controls and the preview exist.
     const auto utf8 = c.session().document()->metadata().sourcePath.stem().u8string();
     impl_->name->setText(QString::fromUtf8(reinterpret_cast<const char *>(utf8.data()),
                                            static_cast<qsizetype>(utf8.size())));
-    setWindowTitle(QStringLiteral("Лист гибки — %1").arg(impl_->name->text()));
+    setWindowTitle(QStringLiteral("Чертёж — %1").arg(impl_->name->text()));
     connect(impl_->quantity, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
-    connect(impl_->layoutMode, &QComboBox::currentIndexChanged, this, [this] { impl_->refresh(); });
+    connect(impl_->views, &QListWidget::currentRowChanged, this,
+            [this](int row) { impl_->selectView(row); });
+    connect(impl_->views, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
+        const auto row = impl_->views->row(item);
+        if (row < 0 || static_cast<std::size_t>(row) >= impl_->choices.size())
+            return;
+        const bool visible = item->checkState() == Qt::Checked;
+        if (impl_->choices[row].visible == visible)
+            return;
+        impl_->choices[row].visible = visible;
+        impl_->scheduleLayout();
+    });
+    connect(impl_->viewScale, &QComboBox::currentIndexChanged, this, [this](int index) {
+        const auto row = impl_->views->currentRow();
+        if (row < 0 || static_cast<std::size_t>(row) >= impl_->choices.size())
+            return;
+        const auto scale = index
+                               ? std::optional<double>{impl_->viewScale->itemData(index).toDouble()}
+                               : std::nullopt;
+        const auto key = impl_->choices[row].key;
+        for (auto &choice : impl_->choices)
+            if (choice.key == key ||
+                (key.kind == DrawingViewKind::Projection && choice.key.kind == key.kind))
+                choice.scale = scale;
+        impl_->scheduleLayout();
+    });
+    connect(impl_->flatSide, &QComboBox::currentIndexChanged, this,
+            [this] { impl_->scheduleLayout(); });
+    connect(resetViews, &QPushButton::clicked, this, [this] {
+        impl_->compositionSource.reset();
+        impl_->scheduleLayout();
+    });
     connect(impl_->page, &QSpinBox::valueChanged, this, [this] {
         impl_->render();
         impl_->preview->verticalScrollBar()->setValue(0);
@@ -576,26 +1086,53 @@ DrawingDialog::DrawingDialog(ImportController &c,
             return;
         const auto drawing = impl_->controller.drawing();
         const auto title = impl_->title();
-        const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранить лист гибки"),
-                                                       QStringLiteral("bending-sheet.pdf"),
-                                                       QStringLiteral("PDF (*.pdf)"));
-        if (path.isEmpty())
-            return;
-        if (!impl_->exportPdf->isEnabled() || drawing != impl_->controller.drawing())
-            return;
-        const auto destination = path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
-                                     ? path
-                                     : path + QStringLiteral(".pdf");
-        const auto error = DrawingSheet::writePdf(destination, *drawing, title);
-        if (!error.isEmpty())
-            QMessageBox::warning(this, QStringLiteral("PDF не сохранён"), error);
-        else
-            impl_->status->setText(QStringLiteral("PDF сохранён: %1").arg(destination));
+        const auto utf8 = impl_->controller.session().document()->metadata().sourcePath.u8string();
+        const auto suggested = suggestedDrawingPdfPath(QString::fromUtf8(
+            reinterpret_cast<const char *>(utf8.data()), static_cast<qsizetype>(utf8.size())));
+        auto *file =
+            new QFileDialog(this, QStringLiteral("Сохранить чертёж"),
+                            QFileInfo(suggested).absolutePath(), QStringLiteral("PDF (*.pdf)"));
+        file->setObjectName(QStringLiteral("drawingPdfFileDialog"));
+        file->setAttribute(Qt::WA_DeleteOnClose);
+        file->setAcceptMode(QFileDialog::AcceptSave);
+        file->setFileMode(QFileDialog::AnyFile);
+        file->setDefaultSuffix(QStringLiteral("pdf"));
+        file->selectFile(QFileInfo(suggested).fileName());
+        file->setWindowModality(Qt::WindowModal);
+        connect(
+            file, &QFileDialog::fileSelected, this, [this, drawing, title](const QString &path) {
+                if (path.isEmpty() || !impl_->exportPdf->isEnabled() ||
+                    drawing != impl_->controller.drawing())
+                    return;
+                const auto destination = path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
+                                             ? path
+                                             : path + QStringLiteral(".pdf");
+                // A user-supplied different suffix is normalized after QFileDialog's own check.
+                if (destination != path && QFileInfo::exists(destination) &&
+                    QMessageBox::question(this, QStringLiteral("Заменить файл?"),
+                                          QStringLiteral("Файл «%1» уже существует. Заменить его?")
+                                              .arg(QFileInfo(destination).fileName()),
+                                          QMessageBox::Yes | QMessageBox::No,
+                                          QMessageBox::No) != QMessageBox::Yes)
+                    return;
+                if (!impl_->exportPdf->isEnabled() || drawing != impl_->controller.drawing())
+                    return;
+                const auto error = DrawingSheet::writePdf(destination, *drawing, title);
+                if (!error.isEmpty())
+                    QMessageBox::warning(this, QStringLiteral("PDF не сохранён"), error);
+                else {
+                    rememberDrawingPdfDirectory(destination);
+                    impl_->status->setText(QStringLiteral("PDF сохранён: %1").arg(destination));
+                }
+            });
+        file->open();
     });
     QTimer::singleShot(0, this, [this] { impl_->build(); });
 }
 void DrawingDialog::done(int result) {
+    impl_->cancelLayout();
     impl_->refit->stop();
+    impl_->layoutTimer->stop();
     const bool cancel = impl_->started && impl_->controller.isPreparingDrawing() &&
                         impl_->controller.session().revision() == impl_->revision;
     impl_->started = false;
@@ -603,5 +1140,7 @@ void DrawingDialog::done(int result) {
         impl_->controller.cancelDrawing();
     QDialog::done(result);
 }
-DrawingDialog::~DrawingDialog() = default;
+DrawingDialog::~DrawingDialog() {
+    impl_->cancelLayout();
+}
 } // namespace bending::ui

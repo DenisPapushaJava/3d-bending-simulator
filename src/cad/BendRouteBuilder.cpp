@@ -1,3 +1,4 @@
+#include "Backgauge.h"
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "FlatPatternDisplay.h"
@@ -32,11 +33,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <list>
 #include <map>
 #include <mutex>
 #include <numbers>
 #include <set>
+#include <sstream>
 #include <tuple>
 #include <unordered_map>
 
@@ -224,6 +227,8 @@ bool stableRejection(BendPreviewErrorCode code) {
     case BendPreviewErrorCode::ContactLost:
     case BendPreviewErrorCode::RetractionNotProven:
     case BendPreviewErrorCode::UnsupportedToolGeometry:
+    // Memoizes this bounded solver's exact-input answer, not manufacturing impossibility.
+    case BendPreviewErrorCode::BackgaugeUnavailable:
         return true;
     default:
         return false;
@@ -245,6 +250,7 @@ class RouteSearch {
     std::vector<std::size_t> profileRank;
     std::vector<gp_Dir> referenceAxes;
     std::vector<Bnd_Box> wallBounds;
+    std::vector<double> wallVolumes;
     std::map<std::pair<Mask, std::size_t>, bool> frontPreferences;
     bool preferredSide(Mask mask, const RouteOperation &op) {
         if (!request.withTools || !request.allowWorkpieceRotation || !op.tools)
@@ -277,10 +283,29 @@ class RouteSearch {
             machine = turn * machine;
         }
         Bnd_Box box;
-        for (std::size_t i = 0; i < wallBounds.size(); ++i)
-            box.Add(wallBounds[i].Transformed(machine * positions.walls[i]));
+        double frontMaterial = 0, backMaterial = 0;
+        bool materialKnown = true;
+        for (std::size_t i = 0; i < wallBounds.size(); ++i) {
+            const auto bounds = wallBounds[i].Transformed(machine * positions.walls[i]);
+            box.Add(bounds);
+            // Whole walls strictly on one side give a cheap material-amount
+            // preference. A crossing/unknown wall falls back to the old overhang
+            // hint; no Boolean or mesh is built for this heuristic.
+            if (bounds.IsVoid() || bounds.IsOpen() || !std::isfinite(wallVolumes[i]) ||
+                wallVolumes[i] <= 0)
+                materialKnown = false;
+            else if (bounds.CornerMax().X() <= 0)
+                frontMaterial += wallVolumes[i];
+            else if (bounds.CornerMin().X() >= 0)
+                backMaterial += wallVolumes[i];
+            else
+                materialKnown = false;
+        }
         bool preferred = op.workpieceReversed;
-        if (!box.IsVoid()) {
+        if (materialKnown &&
+            std::abs(frontMaterial - backMaterial) > .01 * (frontMaterial + backMaterial))
+            preferred = backMaterial > frontMaterial;
+        else if (!box.IsVoid()) {
             const double front = -box.CornerMin().X(), back = box.CornerMax().X();
             if (std::abs(front - back) > std::max(.5, b.thicknessMm))
                 preferred = back > front;
@@ -440,6 +465,8 @@ class RouteSearch {
             if (const auto *verdict = cache->verdicts.find(wanted); verdict && *verdict) {
                 ++statistics.reusedTransitions;
                 ++statistics.reusedRejections;
+                if ((**verdict).code == BendPreviewErrorCode::BackgaugeUnavailable)
+                    ++statistics.backgauge.reusedNoReferenceTransitions;
                 return **verdict;
             }
         }
@@ -458,8 +485,10 @@ class RouteSearch {
             after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
             request.withTools ? op.tools : std::nullopt, request.withTools,
             request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
-            request.maximumEndSupportLossMm, reference, false);
+            request.maximumEndSupportLossMm, reference, false, &statistics.backgauge);
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
+            if (failure->code == BendPreviewErrorCode::BackgaugeUnavailable)
+                ++statistics.backgauge.noReferenceTransitions;
             if (stableRejection(failure->code))
                 remember(wanted, preview);
             return preview;
@@ -786,6 +815,59 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             BendRouteStatistics totals;
             std::size_t attempts = 0;
             BendRouteError last{BendRouteErrorCode::NoRoute, "No checked tooling variant passed"};
+            std::optional<double> invariantGaugeSpan;
+            std::vector<std::size_t> toolOrder;
+            std::vector<std::pair<double, std::size_t>> shapeRanks;
+            const auto rankStarted = std::chrono::steady_clock::now();
+            bool attemptedShapeRanking = false;
+            for (std::size_t choice = 0; choice < request.toolVariants.size(); ++choice) {
+                cancelled(stop);
+                toolOrder.push_back(choice);
+                if (!request.rankToolShapes)
+                    continue;
+                const auto &variant = request.toolVariants[choice];
+                std::vector<core::ToolFlangeHint> hints;
+                for (const auto &hint : document->metadata().toolShapeHints) {
+                    if (variant.bendIndex && *variant.bendIndex != hint.bendIndex)
+                        continue;
+                    const auto present = [&](std::size_t id) {
+                        return id < analysis.bends.size() &&
+                               std::any_of(
+                                   request.operations.begin(), request.operations.end(),
+                                   [&](const auto &op) {
+                                       const auto &b = analysis.bends[id];
+                                       return op.bendIndex == id &&
+                                              std::abs(op.target.angleRadians - b.angleRadians) <=
+                                                  analysis.angleToleranceRadians &&
+                                              std::abs(op.target.innerRadiusMm - b.innerRadiusMm) <=
+                                                  analysis.lengthToleranceMm;
+                                   });
+                    };
+                    if (present(hint.bendIndex) && present(hint.neighbourBendIndex))
+                        hints.push_back(hint);
+                }
+                const double thickness =
+                    request.manualThicknessMm.value_or(analysis.bends.front().thicknessMm);
+                attemptedShapeRanking |= !hints.empty();
+                if (const auto risk =
+                        core::toolShapeRisk(variant.assignment, hints, thickness, stop))
+                    shapeRanks.emplace_back(*risk, choice);
+            }
+            std::stable_sort(shapeRanks.begin(), shapeRanks.end(),
+                             [](auto a, auto b) { return a.first < b.first; });
+            std::vector<std::size_t> knownSlots;
+            for (const auto &rank : shapeRanks)
+                knownSlots.push_back(rank.second);
+            std::sort(knownSlots.begin(), knownSlots.end());
+            for (std::size_t i = 0; i < knownSlots.size(); ++i)
+                toolOrder[knownSlots[i]] = shapeRanks[i].second;
+            totals.shapeRankedToolVariants = shapeRanks.size();
+            totals.toolShapeRankingUs =
+                attemptedShapeRanking ? static_cast<std::uint64_t>(
+                                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - rankStarted)
+                                                .count())
+                                      : 0;
             const auto add = [&](const BendRouteStatistics &s) {
                 totals.builtStates += s.builtStates;
                 totals.reusedStates += s.reusedStates;
@@ -795,8 +877,12 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.reorderedStates += s.reorderedStates;
                 totals.reusedFlatPattern |= s.reusedFlatPattern;
                 totals.usedProfilePriority |= s.usedProfilePriority;
+                totals.gaugePrunedToolVariants += s.gaugePrunedToolVariants;
+                totals.backgauge += s.backgauge;
+                totals.shapeRankedToolVariants += s.shapeRankedToolVariants;
+                totals.toolShapeRankingUs += s.toolShapeRankingUs;
             };
-            for (std::size_t choice = 0; choice < request.toolVariants.size(); ++choice) {
+            for (const auto choice : toolOrder) {
                 cancelled(stop);
                 const auto spent = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now() - started)
@@ -829,6 +915,16 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     };
                 trial.maximumChecks = request.maximumChecks - attempts;
                 trial.maximumTimeMs = request.maximumTimeMs - static_cast<unsigned>(spent);
+                if (invariantGaugeSpan &&
+                    std::any_of(trial.operations.begin(), trial.operations.end(),
+                                [&](const auto &op) {
+                                    return op.tools && op.tools->backgauge &&
+                                           core::minimumGaugeSpanMm(*op.tools->backgauge) >
+                                               *invariantGaugeSpan + analysis.lengthToleranceMm * 4;
+                                })) {
+                    ++totals.gaugePrunedToolVariants;
+                    continue;
+                }
                 ++totals.testedToolVariants;
                 auto result = buildRoute(document, std::move(trial), stop);
                 if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
@@ -841,6 +937,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     return BendRoutePtr(std::move(accepted));
                 }
                 last = std::get<BendRouteError>(std::move(result));
+                if (last.invariantGaugeSpanMm)
+                    invariantGaugeSpan = last.invariantGaugeSpanMm;
                 attempts += last.evaluatedOperations;
                 add(last.statistics);
                 // An incomplete trial is never a rejected tool. Keep its exact cached
@@ -850,6 +948,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             }
             last.evaluatedOperations = attempts;
             last.statistics = totals;
+            last.invariantGaugeSpanMm = invariantGaugeSpan;
             return last;
         }
         std::set<std::size_t> indices;
@@ -884,6 +983,28 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                         BendPreviewErrorCode::ToolTooShort,
                         lengths};
             }
+        }
+        if (request.withTools &&
+            std::any_of(request.operations.begin(), request.operations.end(), [](const auto &op) {
+                return op.tools && op.tools->backgauge &&
+                       core::minimumGaugeSpanMm(*op.tools->backgauge) > 0;
+            })) {
+            if (const auto span = backgaugeInvariantSpan(*native, stop))
+                for (const auto &op : request.operations)
+                    if (op.tools && op.tools->backgauge &&
+                        core::minimumGaugeSpanMm(*op.tools->backgauge) >
+                            *span + analysis.lengthToleranceMm * 4) {
+                        std::ostringstream reason;
+                        reason << std::setprecision(6) << "Для контактов упора доступно не более "
+                               << *span << " мм; текущая схема базирования требует "
+                               << core::minimumGaugeSpanMm(*op.tools->backgauge)
+                               << " мм. Проверьте настройки упора.";
+                        BendRouteError failure{BendRouteErrorCode::NoRoute, reason.str(),
+                                               op.bendIndex, 0,
+                                               BendPreviewErrorCode::BackgaugeUnavailable};
+                        failure.invariantGaugeSpanMm = span;
+                        return failure;
+                    }
         }
         std::shared_ptr<RouteCache> work;
         if (request.reuseCalculations) {
@@ -959,9 +1080,18 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         for (std::size_t i = 0; i < n; ++i)
             search.referenceAxes[i] = normalBendAxis(*native, i);
         for (const auto &wall : search.layout->walls) {
+            cancelled(stop);
             Bnd_Box box;
             BRepBndLib::AddOptimal(wall.solid, box, false, false);
             search.wallBounds.push_back(box);
+            double amount = 0;
+            if (request.withTools && request.allowWorkpieceRotation)
+                try {
+                    amount = volume(wall.solid);
+                } catch (const Standard_Failure &) {
+                    // An unavailable soft hint must not reject a valid route.
+                }
+            search.wallVolumes.push_back(amount);
         }
         search.neighbours.resize(n);
         for (const auto &a : search.layout->bends)

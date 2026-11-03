@@ -802,6 +802,7 @@ class MainWindow::Impl {
                 copyChanged(&core::ToolAssignment::useDrawingGeometry);
                 copyChanged(&core::ToolAssignment::machineModel);
                 copyChanged(&core::ToolAssignment::punchReversed);
+                copyChanged(&core::ToolAssignment::backgauge);
                 // A different profile cannot retain sections belonging to the old profile.
                 if (toolDraftPunchSelected || assignment->punch != shownAssignment->punch) {
                     actual->punch = assignment->punch;
@@ -1433,6 +1434,29 @@ class MainWindow::Impl {
                                     QStringLiteral("У торца отсутствует часть опоры. Доступен "
                                                    "геометрический просмотр; устойчивость и "
                                                    "пригодность к изготовлению не подтверждены.")});
+            if (preview && preview->backgauge()) {
+                const auto &g = *preview->backgauge();
+                QString gaugeTitle = QStringLiteral("База упора не найдена");
+                QString detail = QString::fromStdString(g.detail);
+                if (g.placement) {
+                    const auto &p = *g.placement;
+                    gaugeTitle = p.kind == core::GaugeReferenceKind::StraightEdge
+                                     ? QStringLiteral("Упор по прямому краю")
+                                     : QStringLiteral("Упор по стенке 90°");
+                    detail = QStringLiteral("Ступень %1 · X %2 · R %3 · Z %4 / %5 мм\n%6")
+                                 .arg(p.level)
+                                 .arg(number(p.xMm))
+                                 .arg(number(p.rMm))
+                                 .arg(number(p.zMm[0]))
+                                 .arg(number(p.zMm[1]))
+                                 .arg(detail);
+                }
+                messages.push_back({BendMessageKind::Backgauge,
+                                    g.status == application::BackgaugeStatus::Checked
+                                        ? BendMessageSeverity::Information
+                                        : BendMessageSeverity::Warning,
+                                    gaugeTitle, detail});
+            }
             if (preview && preview->ignoresClosedCutouts())
                 messages.push_back(
                     {BendMessageKind::Approximation, BendMessageSeverity::Warning,
@@ -1784,6 +1808,30 @@ class MainWindow::Impl {
                             std::min(selectionRequest->innerRadiusMm, target->innerRadiusMm);
                     }
             }
+            if (selectionRequest) {
+                const auto &analysis = document->metadata().bendAnalysis;
+                for (const auto &hint : document->metadata().toolShapeHints) {
+                    if ((!allBends && hint.bendIndex != static_cast<std::size_t>(row)) ||
+                        hint.bendIndex >= analysis.bends.size() ||
+                        hint.neighbourBendIndex >= analysis.bends.size())
+                        continue;
+                    const auto *active = session.bend(hint.bendIndex);
+                    const auto *neighbour = session.bend(hint.neighbourBendIndex);
+                    const auto matchesCad = [&](std::size_t index) {
+                        const auto target = session.bendTarget(index);
+                        const auto &measured = analysis.bends[index];
+                        return target &&
+                               std::abs(target->angleRadians - measured.angleRadians) <=
+                                   analysis.angleToleranceRadians &&
+                               std::abs(target->innerRadiusMm - measured.innerRadiusMm) <=
+                                   analysis.lengthToleranceMm;
+                    };
+                    if (active && neighbour && included(active->review) &&
+                        included(neighbour->review) && matchesCad(hint.bendIndex) &&
+                        matchesCad(hint.neighbourBendIndex))
+                        selectionRequest->shapeHints.push_back(hint);
+                }
+            }
         }
         toolSelection->setSelectionRequest(
             selectionRequest, allBends,
@@ -1859,7 +1907,12 @@ class MainWindow::Impl {
                                          "инструмент вручную.")
                         : QStringLiteral(
                               "Проверенный вариант не найден. Доступен быстрый и ручной выбор.");
-                checkedToolDialog->finish(resumable);
+                checkedToolDialog->finish(
+                    resumable,
+                    routeError && routeError->operationError ==
+                                      application::BendPreviewErrorCode::BackgaugeUnavailable
+                        ? QString::fromStdString(routeError->detail)
+                        : QString{});
             }
             toolSelection->setCheckedSearchState(false, status, resumable);
         } else if (checkedToolJob) {
@@ -2941,7 +2994,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->controller->closeDocument();
         }
     });
-    impl_->drawingAction = fileMenu->addAction(QStringLiteral("Лист гибки / PDF…"));
+    impl_->drawingAction = fileMenu->addAction(QStringLiteral("Чертёж / PDF…"));
     impl_->drawingAction->setObjectName(QStringLiteral("bendingDrawingAction"));
     impl_->drawingAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
     impl_->drawingAction->setEnabled(false);
@@ -3737,7 +3790,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->playbackSpeed = new QSlider(Qt::Horizontal, impl_->playbackSpeedControls);
     impl_->playbackSpeed->setObjectName(QStringLiteral("bendPlaybackSpeed"));
     impl_->playbackSpeed->setAccessibleName(QStringLiteral("Скорость воспроизведения"));
-    impl_->playbackSpeed->setRange(0, 8); // 1x to 3x, in quarter steps.
+    impl_->playbackSpeed->setRange(0, 36); // 1x to 10x, in quarter steps.
     impl_->playbackSpeed->setPageStep(2);
     impl_->playbackSpeed->setTickPosition(QSlider::NoTicks);
     impl_->playbackSpeed->setTickInterval(1);
@@ -3756,13 +3809,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     sequenceLayout->addLayout(playLayout);
     impl_->playback = new QTimer(this);
     impl_->playback->setObjectName(QStringLiteral("bendPlaybackTimer"));
-    impl_->playback->setInterval(150);
+    impl_->playback->setInterval(50); // New 1x equals the former 3x.
     const auto updatePlaybackSpeed = [this](int step) {
         const double multiplier = 1.0 + static_cast<double>(step) / 4.0;
         const auto value = number(multiplier) + QStringLiteral("×");
-        impl_->playback->setInterval(qRound(150.0 / multiplier));
+        impl_->playback->setInterval(qRound(50.0 / multiplier));
         impl_->playbackSpeedValue->setText(value);
-        const auto description = QStringLiteral("Скорость показа %1. Диапазон 1×–3×, шаг 0,25×. "
+        const auto description = QStringLiteral("Скорость показа %1. Диапазон 1×–10×, шаг 0,25×. "
                                                 "Скорость пресса не рассчитывается.")
                                      .arg(value);
         impl_->playbackSpeed->setToolTip(description);

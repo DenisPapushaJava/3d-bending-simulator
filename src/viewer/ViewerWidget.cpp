@@ -512,7 +512,7 @@ class OcctCanvas final : public QWidget {
                 }
                 candidate = new CollisionPresentation(
                     display, frame.collisionHighlights, machineVisibleAction_->isChecked(),
-                    floorVisibleAction_->isChecked(), frame.floorContacts);
+                    floorVisibleAction_->isChecked(), frame.floorContacts, frame.backgaugeContacts);
                 candidate->Attributes()->SetAutoTriangulation(false);
                 candidate->Attributes()->SetFaceBoundaryDraw(displayStyle_ == DisplayStyle::Edges);
                 const std::array<Quantity_Color, 3> colors{
@@ -570,7 +570,10 @@ class OcctCanvas final : public QWidget {
                     const Quantity_Color color(c.moving ? .40 : .31, c.moving ? .47 : .40,
                                                c.moving ? .55 : .48, Quantity_TOC_RGB);
                     candidate->SetCustomColor(c.shape, color);
-                    candidate->SetCustomTransparency(c.shape, .55);
+                    if (c.gauging)
+                        candidate->SetCustomColor(c.shape,
+                                                  Quantity_Color(.28, .49, .58, Quantity_TOC_RGB));
+                    candidate->SetCustomTransparency(c.shape, c.gauging ? .12 : .55);
                 }
                 if (frame.floor) {
                     candidate->SetCustomColor(frame.floor->surface,

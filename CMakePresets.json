@@ -29,9 +29,15 @@
     }
   ],
   "buildPresets": [
-    { "name": "dev", "configurePreset": "dev" },
-    { "name": "release", "configurePreset": "release" },
-    { "name": "core", "configurePreset": "core" }
+    { "name": "dev", "displayName": "Development — app and tests", "configurePreset": "dev", "jobs": 4 },
+    {
+      "name": "dev-app",
+      "displayName": "Development — application only",
+      "inherits": "dev",
+      "targets": ["bending_simulator"]
+    },
+    { "name": "release", "configurePreset": "release", "jobs": 2 },
+    { "name": "core", "configurePreset": "core", "jobs": 2 }
   ],
   "testPresets": [
     { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } },

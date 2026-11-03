@@ -1,4 +1,5 @@
 #pragma once
+#include "bending/application/Backgauge.h"
 #include "bending/application/Document.h"
 #include "bending/application/FlatPattern.h"
 #include "bending/core/BendTarget.h"
@@ -44,6 +45,7 @@ struct BendRouteRequest {
     // Diagnostic/reference switches; the UI uses both optimizations.
     bool allowWorkpieceRotation = true; // False: check exactly the requested installations.
     bool rankCandidates = true;
+    bool rankToolShapes = true; // Soft source-profile ranking; no feasibility pruning.
     bool reuseCalculations = true;
     std::optional<double> maximumEndSupportLossMm =
         std::nullopt; // Null: legacy explicitly unbounded preview.
@@ -63,6 +65,10 @@ struct BendRouteStatistics {
     std::size_t reorderedStates = 0;
     bool usedProfilePriority = false;
     std::size_t testedToolVariants = 0;
+    std::size_t gaugePrunedToolVariants = 0; // Proven axial-span rejection; no contact cycle.
+    BackgaugeSearchStatistics backgauge;
+    std::size_t shapeRankedToolVariants = 0;
+    std::uint64_t toolShapeRankingUs = 0;
 };
 struct BendRouteStep {
     std::string id;
@@ -128,6 +134,7 @@ struct BendRouteError {
     std::optional<BendPreviewErrorCode> operationError = {};
     std::optional<BendRouteToolLengthIssue> toolLengths = {};
     BendRouteStatistics statistics = {};
+    std::optional<double> invariantGaugeSpanMm = {}; // Proven common-axis upper bound only.
 };
 using BendRouteResult = std::variant<BendRoutePtr, BendRouteError>;
 // Display-only prefix. Its visual has unverifiedDraft()==true and cannot certify a route.

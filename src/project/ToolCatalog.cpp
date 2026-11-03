@@ -256,6 +256,54 @@ bool readPreset(const QJsonObject &o, core::ToolPreset &t) {
     }
     return core::validToolPreset(t);
 }
+QJsonValue backgaugeJson(const std::optional<core::BackgaugeSetup> &s) {
+    if (!s)
+        return QJsonValue(QJsonValue::Null);
+    return QJsonObject{{"model", "demo-backgauge-v1"},
+                       {"xMinMm", s->xMinMm},
+                       {"xMaxMm", s->xMaxMm},
+                       {"rMinMm", s->rMinMm},
+                       {"rMaxMm", s->rMaxMm},
+                       {"zMinMm", s->zMinMm},
+                       {"zMaxMm", s->zMaxMm},
+                       {"fingerWidthMm", s->fingerWidthMm},
+                       {"minimumSpacingMm", s->minimumSpacingMm},
+                       {"retractMm", s->retractMm},
+                       {"allowOffsetContacts", s->allowOffsetContacts}};
+}
+bool readBackgauge(const QJsonValue &value, std::optional<core::BackgaugeSetup> &out) {
+    if (value.isNull() || value.isUndefined()) {
+        out.reset();
+        return true;
+    }
+    if (!value.isObject())
+        return false;
+    const auto o = value.toObject();
+    if (o.value("model").toString() != "demo-backgauge-v1")
+        return false;
+    core::BackgaugeSetup s;
+    const auto shared = o.value("allowOffsetContacts");
+    if (!shared.isUndefined() && !shared.isBool())
+        return false;
+    s.allowOffsetContacts = shared.toBool(false); // v15 required contact at finger centres.
+    for (const auto &[name, destination] : {std::pair{"xMinMm", &s.xMinMm},
+                                            {"xMaxMm", &s.xMaxMm},
+                                            {"rMinMm", &s.rMinMm},
+                                            {"rMaxMm", &s.rMaxMm},
+                                            {"zMinMm", &s.zMinMm},
+                                            {"zMaxMm", &s.zMaxMm},
+                                            {"fingerWidthMm", &s.fingerWidthMm},
+                                            {"minimumSpacingMm", &s.minimumSpacingMm},
+                                            {"retractMm", &s.retractMm}}) {
+        if (!o.value(QLatin1String(name)).isDouble())
+            return false;
+        *destination = o.value(QLatin1String(name)).toDouble();
+    }
+    if (!core::validBackgaugeSetup(s))
+        return false;
+    out = s;
+    return true;
+}
 QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
     if (!a) {
         return QJsonValue(QJsonValue::Null);
@@ -275,6 +323,7 @@ QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
                        {"machineName", QString::fromStdString(a->machineName)},
                        {"machineModel", machineModelJson(a->machineModel)},
                        {"punchReversed", a->punchReversed},
+                       {"backgauge", backgaugeJson(a->backgauge)},
                        {"useDrawingGeometry", a->useDrawingGeometry},
                        {"punchAssembly", assembly(a->punchAssembly)},
                        {"dieAssembly", assembly(a->dieAssembly)}};
@@ -316,6 +365,8 @@ bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment>
     }
     const auto o = value.toObject();
     core::ToolAssignment a;
+    if (!readBackgauge(o.value("backgauge"), a.backgauge))
+        return false;
     if (!readMachineModel(o.value("machineModel"), a.machineModel))
         return false;
     if (o.contains("punchReversed") && !o.value("punchReversed").isBool())

@@ -71,6 +71,9 @@ int main(int argc, char **argv) {
         QTemporaryDir folder;
         require(folder.isValid(), "No folder");
         ui::setPreferencesFile(folder.path() + "/settings.ini");
+        // This fixture checks the original 61-position segmented-tool cycle.
+        // Backgauge checking adds its own retraction positions (D136).
+        ui::preferences()->setValue("backgauge/enabled", false);
         auto pair = tool_fixture::pair();
         pair.punch.lengthMm = 835;
         pair.die.lengthMm = 835;
@@ -328,7 +331,7 @@ int main(int argc, char **argv) {
         require(saved.open(QIODevice::ReadOnly), "Cannot read saved assembly");
         auto older = QJsonDocument::fromJson(saved.readAll()).object();
         saved.close();
-        require(older.value("version").toInt() == 14, "Wrong project schema for assembly");
+        require(older.value("version").toInt() == 16, "Wrong project schema for assembly");
         older.insert("version", 9);
         QFile forged(folder.path() + "/forged-v9.bend");
         require(forged.open(QIODevice::WriteOnly), "Cannot create version test");

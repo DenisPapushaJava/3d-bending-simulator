@@ -11,7 +11,7 @@ namespace bending::ui {
 ToolSearchDialog::ToolSearchDialog(QWidget *parent) : QDialog(parent) {
     setObjectName("checkedToolProgress");
     setWindowTitle(QStringLiteral("Подбор инструмента"));
-    setWindowModality(Qt::NonModal);
+    setWindowModality(Qt::WindowModal);
     setMinimumWidth(430);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(24, 20, 24, 20);
@@ -83,8 +83,12 @@ void ToolSearchDialog::begin() {
     action_->setText(QStringLiteral("Отменить"));
     busyIndicator_->show();
     progress({}, {});
+    adjustSize();
     show();
+    if (const auto *owner = parentWidget())
+        move(pos() + owner->window()->frameGeometry().center() - frameGeometry().center());
     raise();
+    activateWindow();
 }
 void ToolSearchDialog::progress(const application::BendRouteProgress &p, const QString &tool) {
     static const std::array<QString, 3> names{QStringLiteral("Готовим деталь"),
@@ -107,7 +111,7 @@ void ToolSearchDialog::progress(const application::BendRouteProgress &p, const Q
                          ? QStringLiteral("Проверено установок: %1").arg(p.checkedOperations)
                          : QString{});
 }
-void ToolSearchDialog::finish(bool resumable) {
+void ToolSearchDialog::finish(bool resumable, const QString &reason) {
     busy_ = false;
     resumable_ = resumable;
     busyIndicator_->hide();
@@ -117,6 +121,8 @@ void ToolSearchDialog::finish(bool resumable) {
         resumable ? QStringLiteral("Можно продолжить с готовыми проверками или выбрать "
                                    "инструмент другим способом.")
                   : QStringLiteral("Можно попробовать быстрый или ручной выбор инструмента."));
+    if (!reason.isEmpty())
+        detail_->setText(reason + QStringLiteral("\n\n") + detail_->text());
     action_->setText(resumable ? QStringLiteral("Продолжить") : QStringLiteral("Закрыть"));
 }
 void ToolSearchDialog::reject() {

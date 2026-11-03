@@ -13,7 +13,7 @@ class ToolSearchDialog final : public QDialog {
     explicit ToolSearchDialog(QWidget *parent);
     void begin();
     void progress(const application::BendRouteProgress &, const QString &tool);
-    void finish(bool resumable);
+    void finish(bool resumable, const QString &reason = {});
     void reject() override;
     std::function<void()> onCancel, onQuick, onManual, onContinue;
 

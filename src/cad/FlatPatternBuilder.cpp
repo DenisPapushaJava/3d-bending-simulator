@@ -591,6 +591,8 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                                     origin * result->layout.walls[*at].toFlat);
                 flatReference->thicknessMm = t;
                 result->orientation.edges = flatReference->edges;
+                if (std::abs(flatReference->normal.Z()) > 1 - 1.e-7)
+                    result->data.positiveZIsSideA = flatReference->normal.Z() > 0;
             }
         }
         if (cutoutsIgnored) {

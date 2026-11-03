@@ -9,8 +9,14 @@
 namespace bending::viewer {
 CollisionPresentation::CollisionPresentation(
     const TopoDS_Shape &shape, const std::vector<cad::CollisionHighlightPatch> &patches,
-    bool machineVisible, bool floorVisible, const std::vector<gp_Pnt> &floorContacts)
+    bool machineVisible, bool floorVisible, const std::vector<gp_Pnt> &floorContacts,
+    const std::vector<gp_Pnt> &backgaugeContacts)
     : AIS_ColoredShape(shape) {
+    if (machineVisible && !backgaugeContacts.empty()) {
+        gaugeContacts_ = new Graphic3d_ArrayOfPoints(static_cast<int>(backgaugeContacts.size()));
+        for (const auto &point : backgaugeContacts)
+            gaugeContacts_->AddVertex(point);
+    }
     if (!floorContacts.empty()) {
         floorContacts_ = new Graphic3d_ArrayOfPoints(static_cast<int>(floorContacts.size()));
         for (auto point : floorContacts) {
@@ -39,7 +45,7 @@ void CollisionPresentation::Compute(const Handle(PrsMgr_PresentationManager) & m
                                     const Handle(Prs3d_Presentation) & presentation,
                                     Standard_Integer mode) {
     AIS_ColoredShape::Compute(manager, presentation, mode);
-    if (patches_.empty() && floorContacts_.IsNull())
+    if (patches_.empty() && floorContacts_.IsNull() && gaugeContacts_.IsNull())
         return;
     Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d;
     aspect->SetInteriorStyle(Aspect_IS_SOLID);
@@ -53,6 +59,12 @@ void CollisionPresentation::Compute(const Handle(PrsMgr_PresentationManager) & m
     group->SetGroupPrimitivesAspect(aspect);
     for (const auto &patch : patches_)
         group->AddPrimitiveArray(patch, false);
+    if (!gaugeContacts_.IsNull()) {
+        auto markers = presentation->NewGroup();
+        markers->SetGroupPrimitivesAspect(new Graphic3d_AspectMarker3d(
+            Aspect_TOM_O_POINT, Quantity_Color(.27, .74, .63, Quantity_TOC_RGB), 2.0));
+        markers->AddPrimitiveArray(gaugeContacts_, false);
+    }
     if (!floorContacts_.IsNull()) {
         auto markers = presentation->NewGroup();
         markers->SetGroupPrimitivesAspect(new Graphic3d_AspectMarker3d(

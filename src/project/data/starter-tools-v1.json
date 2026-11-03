@@ -276,11 +276,56 @@
       "segments": [
         {
           "lengthMm": 835,
-          "quantity": 0,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 415,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 270,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 200,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 100,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 50,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 40,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 20,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 15,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 10,
+          "quantity": 1,
           "shape": "straight"
         }
       ],
-      "source": "Стартовая библиотека v1 · DXF ST3408.dxf",
+      "source": "Стартовая библиотека v1 · DXF ST3408.dxf · типовой набор секций",
       "teaching": false
     },
     {
@@ -557,11 +602,56 @@
       "segments": [
         {
           "lengthMm": 835,
-          "quantity": 0,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 415,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 270,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 200,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 100,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 50,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 40,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 20,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 15,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 10,
+          "quantity": 1,
           "shape": "straight"
         }
       ],
-      "source": "Стартовая библиотека v1 · DXF ST3412.dxf",
+      "source": "Стартовая библиотека v1 · DXF ST3412.dxf · типовой набор секций",
       "teaching": false
     },
     {
@@ -929,66 +1019,56 @@
       "segments": [
         {
           "lengthMm": 835,
-          "quantity": 0,
+          "quantity": 2,
           "shape": "straight"
         },
         {
           "lengthMm": 415,
-          "quantity": 0,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 270,
-          "quantity": 0,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 200,
-          "quantity": 0,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 100,
-          "quantity": 0,
+          "quantity": 2,
           "shape": "straight"
         },
         {
           "lengthMm": 50,
-          "quantity": 0,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 40,
-          "quantity": 0,
+          "quantity": 1,
           "shape": "straight"
         },
         {
-          "lengthMm": 19,
-          "quantity": 0,
+          "lengthMm": 20,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 15,
-          "quantity": 0,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 10,
-          "quantity": 0,
+          "quantity": 1,
           "shape": "straight"
-        },
-        {
-          "lengthMm": 100,
-          "quantity": 0,
-          "shape": "left-horn"
-        },
-        {
-          "lengthMm": 100,
-          "quantity": 0,
-          "shape": "right-horn"
         }
       ],
-      "source": "Стартовая библиотека v1 · DXF ST1405.dxf",
+      "source": "Стартовая библиотека v1 · DXF ST1405.dxf · типовой набор секций",
       "teaching": false
     },
     {
@@ -1320,11 +1400,56 @@
       "segments": [
         {
           "lengthMm": 835,
-          "quantity": 0,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 415,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 270,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 200,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 100,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 50,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 40,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 20,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 15,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 10,
+          "quantity": 1,
           "shape": "straight"
         }
       ],
-      "source": "Стартовая библиотека v1 · DXF ST1701.dxf",
+      "source": "Стартовая библиотека v1 · DXF ST1701.dxf · типовой набор секций",
       "teaching": false
     },
     {
@@ -1792,16 +1917,56 @@
       "segments": [
         {
           "lengthMm": 835,
-          "quantity": 0,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 415,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 270,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 200,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 100,
-          "quantity": 0,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 50,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 40,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 20,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 15,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 10,
+          "quantity": 1,
           "shape": "straight"
         }
       ],
-      "source": "Стартовая библиотека v1 · DXF 2067-1.dxf",
+      "source": "Стартовая библиотека v1 · DXF 2067-1.dxf · типовой набор секций",
       "teaching": false
     },
     {
@@ -2160,21 +2325,51 @@
       "segments": [
         {
           "lengthMm": 400,
-          "quantity": 0,
+          "quantity": 4,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 270,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 200,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 100,
-          "quantity": 0,
-          "shape": "left-horn"
+          "quantity": 2,
+          "shape": "straight"
         },
         {
-          "lengthMm": 100,
-          "quantity": 0,
-          "shape": "right-horn"
+          "lengthMm": 50,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 40,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 20,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 15,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 10,
+          "quantity": 1,
+          "shape": "straight"
         }
       ],
-      "source": "Стартовая библиотека v1 · DXF TOP.205.85.R08.dxf",
+      "source": "Стартовая библиотека v1 · DXF TOP.205.85.R08.dxf · типовой набор секций",
       "teaching": false
     },
     {
@@ -2485,51 +2680,56 @@
       "segments": [
         {
           "lengthMm": 835,
-          "quantity": 0,
+          "quantity": 2,
           "shape": "straight"
         },
         {
-          "lengthMm": 100,
-          "quantity": 0,
-          "shape": "straight"
-        },
-        {
-          "lengthMm": 50,
-          "quantity": 0,
-          "shape": "straight"
-        },
-        {
-          "lengthMm": 40,
-          "quantity": 0,
-          "shape": "straight"
-        },
-        {
-          "lengthMm": 20,
-          "quantity": 0,
-          "shape": "straight"
-        },
-        {
-          "lengthMm": 10,
-          "quantity": 0,
-          "shape": "straight"
-        },
-        {
-          "lengthMm": 15,
-          "quantity": 0,
-          "shape": "straight"
-        },
-        {
-          "lengthMm": 200,
-          "quantity": 0,
+          "lengthMm": 415,
+          "quantity": 1,
           "shape": "straight"
         },
         {
           "lengthMm": 270,
-          "quantity": 0,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 200,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 100,
+          "quantity": 2,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 50,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 40,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 20,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 15,
+          "quantity": 1,
+          "shape": "straight"
+        },
+        {
+          "lengthMm": 10,
+          "quantity": 1,
           "shape": "straight"
         }
       ],
-      "source": "Стартовая библиотека v1 · DXF 1063.dxf",
+      "source": "Стартовая библиотека v1 · DXF 1063.dxf · типовой набор секций",
       "teaching": false
     }
   ],
