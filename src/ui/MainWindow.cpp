@@ -2994,7 +2994,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->controller->closeDocument();
         }
     });
-    impl_->drawingAction = fileMenu->addAction(QStringLiteral("Лист гибки / PDF…"));
+    impl_->drawingAction = fileMenu->addAction(QStringLiteral("Чертёж / PDF…"));
     impl_->drawingAction->setObjectName(QStringLiteral("bendingDrawingAction"));
     impl_->drawingAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
     impl_->drawingAction->setEnabled(false);

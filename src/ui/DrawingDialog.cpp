@@ -445,7 +445,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
                    Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint);
     setWindowModality(Qt::NonModal);
     setObjectName(QStringLiteral("bendingDrawingDialog"));
-    setWindowTitle(QStringLiteral("Лист гибки из STEP"));
+    setWindowTitle(QStringLiteral("Чертёж"));
     resize(1200, 720);
     auto *layout = new QHBoxLayout(this);
     auto *panel = new QWidget(this);
@@ -486,8 +486,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     form->addRow(QStringLiteral("Количество, шт."), impl_->quantity);
     impl_->layoutMode = new QComboBox(panel);
     impl_->layoutMode->setObjectName(QStringLiteral("drawingLayout"));
-    impl_->layoutMode->addItems(
-        {QStringLiteral("Чертёж: виды и сечения"), QStringLiteral("Профили для ввода")});
+    impl_->layoutMode->addItems({QStringLiteral("Виды и сечения"), QStringLiteral("Профили")});
     form->addRow(QStringLiteral("Представление"), impl_->layoutMode);
     impl_->base = new QComboBox(panel);
     impl_->base->setObjectName(QStringLiteral("drawingBaseFace"));
@@ -551,7 +550,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     const auto utf8 = c.session().document()->metadata().sourcePath.stem().u8string();
     impl_->name->setText(QString::fromUtf8(reinterpret_cast<const char *>(utf8.data()),
                                            static_cast<qsizetype>(utf8.size())));
-    setWindowTitle(QStringLiteral("Лист гибки — %1").arg(impl_->name->text()));
+    setWindowTitle(QStringLiteral("Чертёж — %1").arg(impl_->name->text()));
     connect(impl_->quantity, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
     connect(impl_->layoutMode, &QComboBox::currentIndexChanged, this, [this] { impl_->refresh(); });
     connect(impl_->page, &QSpinBox::valueChanged, this, [this] {
