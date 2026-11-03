@@ -1866,31 +1866,9 @@ void paintCompositionFrame(QPainter &p, const BendingDrawing &d, const DrawingTi
             scale = v.scale;
     titleBlock(p, title, scale, page, plan.pages);
     classicalParameters(p, d, title, {96, 7, 312, 8});
-    QStringList notes;
     if (title.quantity)
-        notes << QStringLiteral("Количество: %1 шт.").arg(*title.quantity);
-    if (!plan.coverage.missing.empty()) {
-        QStringList ids;
-        for (auto i : plan.coverage.missing)
-            ids << bendId(d, i);
-        notes << QStringLiteral("Не хватает размеров полок или угла: %1").arg(ids.join(", "));
-    }
-    if (d.drawingOnlyRecognition)
-        notes << QStringLiteral("Измерения для чертежа; симуляция этих зон не подтверждена");
-    else if (d.bendRecognitionStatus != BendRecognitionStatus::Completed)
-        notes << QStringLiteral("Распознавание гибов не завершено");
-    if (d.flatPatternError)
-        notes << QStringLiteral("Развёртка не включена: %1")
-                     .arg(d.flatPatternError->code == FlatPatternErrorCode::MissingMaterial
-                              ? QStringLiteral("не задан материал")
-                              : QStringLiteral("геометрия не подтверждена"));
-    if (d.flatPattern && d.flatPattern->info.cutoutsIgnored)
-        notes << QStringLiteral("Влияние отверстий на гибку не учитывается");
-    if (d.unrecognizedCylindricalFaces)
-        notes << QStringLiteral("Не распознано цилиндрических граней: %1")
-                     .arg(d.unrecognizedCylindricalFaces);
-    text(p, QRectF(25, 237, 385, 12), notes.join(QStringLiteral(" · ")), 2.5,
-         Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap);
+        text(p, QRectF(25, 237, 195, 12), QStringLiteral("Количество: %1 шт.").arg(*title.quantity),
+             3.5, Qt::AlignLeft | Qt::AlignTop);
 }
 } // namespace drawing
 int DrawingSheet::pageCount(const BendingDrawing &d, const DrawingTitle &title) {
@@ -2126,46 +2104,6 @@ void DrawingSheet::paint(QPainter &p, const BendingDrawing &d, const DrawingTitl
                  "Развёртка: размеры от края заготовки, не X упора. ВВЕРХ/ВНИЗ — от показанной "
                  "стороны; без калибровки станка."),
              2.5, Qt::AlignLeft | Qt::AlignVCenter);
-    QStringList notes;
-    if (d.flatPattern && d.flatPattern->info.cutoutsIgnored && flatShown)
-        notes << QStringLiteral("Отверстия показаны условно; их влияние на гибку не учитывается");
-    if (d.flatPatternError)
-        notes << (d.flatPatternError->code == FlatPatternErrorCode::MissingMaterial
-                      ? QStringLiteral("Развёртка не включена: материал не задан")
-                  : d.flatPatternError->code == FlatPatternErrorCode::Failed
-                      ? QStringLiteral("Развёртка не включена: ошибка подготовки")
-                      : QStringLiteral(
-                            "Развёртка не включена: геометрическая проверка не пройдена"));
-    if (d.variableProfile == DrawingVariableProfile::NotMeasured)
-        notes << QStringLiteral("Переменная стенка: размеры двух сечений не построены");
-    else if (d.variableProfile == DrawingVariableProfile::Measured)
-        notes << QStringLiteral("Постоянные размеры показаны на первом сечении");
-    if (page == 0 && inlineProfiles(d) && !d.views[1].holeDimensions.empty() &&
-        !d.views[2].holeDimensions.empty())
-        notes << QStringLiteral(
-            "Привязки отверстий других стенок: выберите их грань главным видом");
-    if (d.bendRecognitionStatus != BendRecognitionStatus::Completed ||
-        (d.drawingOnlyRecognition && d.bends.empty()))
-        notes << QStringLiteral("Размеры гибов не построены: геометрия не прошла распознавание");
-    else if (d.drawingOnlyRecognition)
-        notes << QStringLiteral("Измерения только для чертежа; симуляция этих зон не подтверждена");
-    if (std::any_of(d.bends.begin(), d.bends.end(), [](const auto &b) { return b.diagnostic; }))
-        notes << QStringLiteral("D — кандидат гиба");
-    if (std::any_of(d.bends.begin(), d.bends.end(), [](const auto &b) { return b.trimmedEnds; }))
-        notes << QStringLiteral("! — подрезанные торцы");
-    if (d.unrecognizedCylindricalFaces)
-        notes << QStringLiteral("Не распознано цилиндрических граней: %1")
-                     .arg(d.unrecognizedCylindricalFaces);
-    text(p, QRectF(25, 228, 380, 6), notes.join(QStringLiteral(" · ")), 2.5,
-         Qt::AlignLeft | Qt::AlignVCenter);
-    if (!coverage.missing.empty()) {
-        QStringList ids;
-        for (auto index : coverage.missing)
-            ids << bendId(d, index);
-        text(p, QRectF(25, 233, 380, 4),
-             QStringLiteral("Не хватает размеров полок или угла: %1").arg(ids.join(", ")), 2.5,
-             Qt::AlignLeft | Qt::AlignVCenter);
-    }
     pen(p, .5);
     p.drawRect(QRectF(25, 237, 195, 13));
     p.drawLine(QPointF(160, 237), QPointF(160, 250));

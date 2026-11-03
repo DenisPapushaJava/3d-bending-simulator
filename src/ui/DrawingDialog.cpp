@@ -529,7 +529,18 @@ class DrawingDialog::Impl {
                          : QStringLiteral(" Развёртка этой формы не подтверждена и не включена.")));
                 status->setToolTip(QString::fromStdString(drawing->flatPatternError->detail));
             }
-            const auto detail = status->text();
+            auto detail = status->text();
+            if (drawing->unrecognizedCylindricalFaces)
+                detail += QStringLiteral(" Не распознано цилиндрических граней: %1.")
+                              .arg(drawing->unrecognizedCylindricalFaces);
+            if (drawing->variableProfile == application::DrawingVariableProfile::NotMeasured)
+                detail += QStringLiteral(" Размеры переменной стенки не построены.");
+            if (std::any_of(drawing->bends.begin(), drawing->bends.end(),
+                            [](const auto &b) { return b.diagnostic; }))
+                detail += QStringLiteral(" D — кандидат гиба.");
+            if (std::any_of(drawing->bends.begin(), drawing->bends.end(),
+                            [](const auto &b) { return b.trimmedEnds; }))
+                detail += QStringLiteral(" ! — подрезанные торцы.");
             status->setToolTip(detail +
                                QStringLiteral("\nРазмеры развёртки — от края заготовки, не X "
                                               "упора. Калибровка станка не выполнена."));
