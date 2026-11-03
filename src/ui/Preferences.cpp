@@ -32,6 +32,40 @@ QString toolCatalogPath() {
 QString toolLibraryDirectory() {
     return libraryRoot(*preferences());
 }
+QString suggestedDrawingPdfPath(const QString &modelPath) {
+    const QFileInfo source(modelPath);
+    auto name = source.completeBaseName().trimmed();
+    for (auto &c : name)
+        if (c.unicode() < 32 || QStringLiteral("<>:\"/\\|?*").contains(c))
+            c = QLatin1Char('_');
+    while (name.endsWith(QLatin1Char('.')) || name.endsWith(QLatin1Char(' ')))
+        name.chop(1);
+    if (name.isEmpty())
+        name = QStringLiteral("Модель");
+    auto filename = name + QStringLiteral(" — чертёж.pdf");
+    if (filename.size() > 255 || filename.toUtf8().size() > 255)
+        filename = name + QStringLiteral(".pdf");
+    const auto available = [](const QString &path) {
+        const QFileInfo folder(path);
+        return !path.isEmpty() && folder.isAbsolute() && folder.isDir() && folder.isReadable() &&
+               folder.isWritable();
+    };
+    const auto saved = preferences()->value(QStringLiteral("drawing/lastPdfDirectory")).toString();
+    for (const auto &folder :
+         {saved, modelPath.isEmpty() ? QString{} : source.absolutePath(),
+          QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), QDir::homePath()})
+        if (available(folder))
+            return QDir(folder).filePath(filename);
+    return QDir(QDir::homePath()).filePath(filename);
+}
+void rememberDrawingPdfDirectory(const QString &savedPdfPath) {
+    const QFileInfo pdf(savedPdfPath);
+    if (!pdf.isAbsolute() || !pdf.isFile())
+        return;
+    auto settings = preferences();
+    settings->setValue(QStringLiteral("drawing/lastPdfDirectory"), pdf.absolutePath());
+    settings->sync();
+}
 viewer::ToolSegmentColors toolSegmentColors() {
     auto settings = preferences();
     settings->beginGroup("viewer/segmentColors");

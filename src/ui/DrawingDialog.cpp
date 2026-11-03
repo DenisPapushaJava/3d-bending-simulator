@@ -1,11 +1,13 @@
 #include "DrawingDialog.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
+#include "bending/ui/Preferences.h"
 #include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -803,21 +805,46 @@ DrawingDialog::DrawingDialog(ImportController &c,
             return;
         const auto drawing = impl_->controller.drawing();
         const auto title = impl_->title();
-        const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранить чертёж"),
-                                                       QStringLiteral("drawing.pdf"),
-                                                       QStringLiteral("PDF (*.pdf)"));
-        if (path.isEmpty())
-            return;
-        if (!impl_->exportPdf->isEnabled() || drawing != impl_->controller.drawing())
-            return;
-        const auto destination = path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
-                                     ? path
-                                     : path + QStringLiteral(".pdf");
-        const auto error = DrawingSheet::writePdf(destination, *drawing, title);
-        if (!error.isEmpty())
-            QMessageBox::warning(this, QStringLiteral("PDF не сохранён"), error);
-        else
-            impl_->status->setText(QStringLiteral("PDF сохранён: %1").arg(destination));
+        const auto utf8 = impl_->controller.session().document()->metadata().sourcePath.u8string();
+        const auto suggested = suggestedDrawingPdfPath(QString::fromUtf8(
+            reinterpret_cast<const char *>(utf8.data()), static_cast<qsizetype>(utf8.size())));
+        auto *file =
+            new QFileDialog(this, QStringLiteral("Сохранить чертёж"),
+                            QFileInfo(suggested).absolutePath(), QStringLiteral("PDF (*.pdf)"));
+        file->setObjectName(QStringLiteral("drawingPdfFileDialog"));
+        file->setAttribute(Qt::WA_DeleteOnClose);
+        file->setAcceptMode(QFileDialog::AcceptSave);
+        file->setFileMode(QFileDialog::AnyFile);
+        file->setDefaultSuffix(QStringLiteral("pdf"));
+        file->selectFile(QFileInfo(suggested).fileName());
+        file->setWindowModality(Qt::WindowModal);
+        connect(
+            file, &QFileDialog::fileSelected, this, [this, drawing, title](const QString &path) {
+                if (path.isEmpty() || !impl_->exportPdf->isEnabled() ||
+                    drawing != impl_->controller.drawing())
+                    return;
+                const auto destination = path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
+                                             ? path
+                                             : path + QStringLiteral(".pdf");
+                // A user-supplied different suffix is normalized after QFileDialog's own check.
+                if (destination != path && QFileInfo::exists(destination) &&
+                    QMessageBox::question(this, QStringLiteral("Заменить файл?"),
+                                          QStringLiteral("Файл «%1» уже существует. Заменить его?")
+                                              .arg(QFileInfo(destination).fileName()),
+                                          QMessageBox::Yes | QMessageBox::No,
+                                          QMessageBox::No) != QMessageBox::Yes)
+                    return;
+                if (!impl_->exportPdf->isEnabled() || drawing != impl_->controller.drawing())
+                    return;
+                const auto error = DrawingSheet::writePdf(destination, *drawing, title);
+                if (!error.isEmpty())
+                    QMessageBox::warning(this, QStringLiteral("PDF не сохранён"), error);
+                else {
+                    rememberDrawingPdfDirectory(destination);
+                    impl_->status->setText(QStringLiteral("PDF сохранён: %1").arg(destination));
+                }
+            });
+        file->open();
     });
     QTimer::singleShot(0, this, [this] { impl_->build(); });
 }

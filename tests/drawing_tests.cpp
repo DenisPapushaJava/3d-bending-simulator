@@ -10,6 +10,7 @@
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -20,6 +21,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
@@ -31,6 +33,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -1529,6 +1532,38 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
     require(output.open(QIODevice::WriteOnly), "Cannot write sample audit");
     require(output.write(QJsonDocument(report).toJson()) > 0, "Cannot save sample audit");
 }
+void pdfDestinations(const QString &folder) {
+    const auto models = folder + QStringLiteral("/модели");
+    const auto saved = folder + QStringLiteral("/чертежи");
+    require(QDir().mkpath(models) && QDir().mkpath(saved), "Cannot prepare export folders");
+    const auto source = models + QStringLiteral("/КСР.001 версия 2.stp");
+    const auto first = ui::suggestedDrawingPdfPath(source);
+    require(QFileInfo(first).fileName() == QStringLiteral("КСР.001 версия 2 — чертёж.pdf") &&
+                QFileInfo(first).absolutePath() == models,
+            "PDF default lost model name, Unicode, revision dots or initial source folder");
+    ui::rememberDrawingPdfDirectory(saved + "/failed.pdf");
+    require(ui::suggestedDrawingPdfPath(source) == first, "A failed export changed the folder");
+    QFile pdf(saved + "/saved.pdf");
+    require(pdf.open(QIODevice::WriteOnly), "Cannot prepare saved file");
+    pdf.write("test");
+    pdf.close();
+    ui::rememberDrawingPdfDirectory(pdf.fileName());
+    QSettings reloaded(ui::preferences()->fileName(), QSettings::IniFormat);
+    require(reloaded.value("drawing/lastPdfDirectory").toString() == saved,
+            "Export folder was not persisted to disk");
+    const auto next = ui::suggestedDrawingPdfPath(models + "/another.part.STEP");
+    require(QFileInfo(next).absolutePath() == saved &&
+                QFileInfo(next).fileName() == QStringLiteral("another.part — чертёж.pdf"),
+            "The next model reused a filename or lost the last saved folder");
+    require(QDir(saved).removeRecursively(), "Cannot remove the temporary export folder");
+    require(ui::suggestedDrawingPdfPath(source) == first &&
+                ui::preferences()->value("drawing/lastPdfDirectory").toString() == saved,
+            "An unavailable export folder prevented fallback or erased the preference");
+    require(QFileInfo(ui::suggestedDrawingPdfPath("A:B?C.stp")).fileName() ==
+                QStringLiteral("A_B_C — чертёж.pdf"),
+            "Windows-invalid filename characters survived");
+    ui::preferences()->remove("drawing/lastPdfDirectory");
+}
 void workflow(const QString &folder) {
     auto importer = std::make_shared<cad::StepImporter>();
     ui::MainWindow window({"test", "test"}, importer);
@@ -1852,19 +1887,73 @@ void workflow(const QString &folder) {
             "Page changes recomputed CAD or changed the project");
     const auto output = qEnvironmentVariable("BENDING_DRAWING_OUTPUT");
     const auto target = output.isEmpty() ? folder + "/ui.pdf" : output;
+    const auto oldFolder = ui::preferences()->value("drawing/lastPdfDirectory");
+    bool cancelledSave = false;
+    QTimer::singleShot(30, dialog, [&] {
+        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+        require(file && file->acceptMode() == QFileDialog::AcceptSave &&
+                    file->defaultSuffix() == "pdf" &&
+                    !file->testOption(QFileDialog::DontConfirmOverwrite),
+                "PDF dialog lost its save mode, suffix or overwrite confirmation");
+        const auto source =
+            c.session().document()->metadata().sourcePath.filename().stem().u8string();
+        const auto expected = QString::fromUtf8(reinterpret_cast<const char *>(source.data()),
+                                                static_cast<qsizetype>(source.size())) +
+                              QStringLiteral(" — чертёж.pdf");
+        require(QFileInfo(file->selectedFiles().front()).fileName() == expected,
+                "Save dialog did not suggest the loaded model's name");
+        file->reject();
+        cancelledSave = true;
+    });
+    exportButton->click();
+    wait([&] { return cancelledSave; });
+    require(ui::preferences()->value("drawing/lastPdfDirectory") == oldFolder,
+            "Cancelling save changed the export folder");
     QTimer::singleShot(30, dialog, [target] {
         auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
         if (!file)
             return;
         file->setOption(QFileDialog::DontConfirmOverwrite, true);
-        file->selectFile(target);
+        file->selectFile(target.chopped(4)); // Let the dialog add .pdf before its overwrite check.
         if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
-            input->setText(target);
+            input->setText(target.chopped(4));
         QTimer::singleShot(
             0, file, [file] { QMetaObject::invokeMethod(file, "accept", Qt::DirectConnection); });
     });
     exportButton->click();
+    wait([&] { return QFile::exists(target); });
     pdf = QFile::exists(target);
+    require(ui::preferences()->value("drawing/lastPdfDirectory").toString() ==
+                QFileInfo(target).absolutePath(),
+            "Successful PDF export did not remember its folder");
+    const auto otherFolder = folder + "/overwrite-check";
+    require(QDir().mkpath(otherFolder), "Cannot prepare overwrite check");
+    const auto typed = otherFolder + "/existing.revision";
+    QFile existing(typed + ".pdf");
+    require(existing.open(QIODevice::WriteOnly), "Cannot prepare existing PDF");
+    existing.write("previous contents");
+    existing.close();
+    bool declined = false;
+    QTimer::singleShot(30, dialog, [&] {
+        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+        require(file, "Missing save dialog for overwrite check");
+        file->selectFile(typed);
+        if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
+            input->setText(typed);
+        QTimer::singleShot(0, dialog, [&] {
+            auto *question = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+            require(question, "Normalized PDF filename bypassed overwrite confirmation");
+            question->done(QMessageBox::No);
+            declined = true;
+        });
+        QMetaObject::invokeMethod(file, "accept", Qt::DirectConnection);
+    });
+    exportButton->click();
+    wait([&] { return declined; });
+    require(existing.open(QIODevice::ReadOnly) && existing.readAll() == "previous contents" &&
+                ui::preferences()->value("drawing/lastPdfDirectory").toString() ==
+                    QFileInfo(target).absolutePath(),
+            "Declining overwrite modified the PDF or remembered the rejected folder");
     dialog->findChild<QComboBox *>("drawingOrientation")->setCurrentIndex(1);
     require(!controls->isVisible() && !navigation->isVisible() && !previous->isEnabled() &&
                 !next->isEnabled() && preview->pixmap().isNull() && !exportButton->isEnabled(),
@@ -1935,8 +2024,10 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
     QTemporaryDir temp;
+    ui::setPreferencesFile(temp.path() + "/settings.ini");
     try {
         if (app.arguments().contains(QStringLiteral("--workflow-only"))) {
+            pdfDestinations(temp.path());
             workflow(temp.path());
             return 0;
         }
@@ -1961,6 +2052,7 @@ int main(int argc, char **argv) {
                       << bool(d->flatPattern) << '\n';
             return 0;
         }
+        pdfDestinations(temp.path());
         flatDrawing(temp.path());
         composition(temp.path());
         drawingMeasurements(temp.path());
