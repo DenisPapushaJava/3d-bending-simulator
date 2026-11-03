@@ -1586,11 +1586,11 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             overallDimensions(shape, frames[i], drawing->views[i], stop);
             const Frame frame{classicalFrames[i].XDirection(), classicalFrames[i].YDirection(),
                               classicalFrames[i].Direction()};
-            const auto &source = drawing->views[i];
+            const auto &projection = drawing->views[i];
             overallDimensions(shape, frame, (*drawing->classicalViews)[i], stop,
-                              source.reverseProjection ==
+                              projection.reverseProjection ==
                                       (*drawing->classicalViews)[i].reverseProjection
-                                  ? &source
+                                  ? &projection
                                   : nullptr);
         }
         for (auto &auxiliary : drawing->auxiliaryViews) {
@@ -1600,10 +1600,11 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 frame.v.Reverse();
                 frame.normal.Reverse();
             }
-            const auto &source = drawing->views[auxiliary.projection];
-            overallDimensions(
-                shape, frame, auxiliary.view, stop,
-                source.reverseProjection == auxiliary.view.reverseProjection ? &source : nullptr);
+            const auto &projection = drawing->views[auxiliary.projection];
+            overallDimensions(shape, frame, auxiliary.view, stop,
+                              projection.reverseProjection == auxiliary.view.reverseProjection
+                                  ? &projection
+                                  : nullptr);
         }
         if (drawing->variableProfile != DrawingVariableProfile::Measured)
             prepareClassicalDrawing(shape, faces, bendAnalysis.bends, classicalFrames, *drawing,
