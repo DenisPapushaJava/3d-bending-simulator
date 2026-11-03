@@ -38,6 +38,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -53,6 +54,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <gp_Circ.hxx>
 #include <iostream>
@@ -1334,6 +1336,34 @@ void composition(const QString &folder) {
         }
     require(commonScale && *commonScale >= .5,
             "Projection readability was sacrificed for one page");
+    auto edited = choices;
+    for (auto &choice : edited) {
+        if (choice.key.kind == ui::DrawingViewKind::Projection)
+            choice.scale = .5;
+        if (choice.key.kind == ui::DrawingViewKind::Flat)
+            choice.scale = 1.;
+        if (choice.key.kind == ui::DrawingViewKind::Isometric)
+            choice.scale = 2.;
+    }
+    const auto enlarged = ui::DrawingSheet::compose(d, edited);
+    for (const auto &at : enlarged->views) {
+        if (at.key.kind == ui::DrawingViewKind::Projection)
+            require(at.scale == .5, "Projection scale changed with another view");
+        if (at.key.kind == ui::DrawingViewKind::Flat)
+            require(at.scale == 1., "Flat scale changed with another view");
+        if (at.key.kind == ui::DrawingViewKind::Isometric)
+            require(at.scale == 2. && at.area.top() < 237 && at.area.height() > 38,
+                    "Larger isometric view stayed locked to the small footer");
+    }
+    ui::DrawingTitle enlargedTitle;
+    enlargedTitle.plan = enlarged;
+    for (int page = 0; page < enlarged->pages; ++page)
+        require(!ui::DrawingSheet::preview(*d, enlargedTitle, page).isNull(),
+                "Repacked large isometric view did not render");
+    const auto enlargedOutput = qEnvironmentVariable("BENDING_DRAWING_ENLARGED_OUTPUT");
+    if (!enlargedOutput.isEmpty())
+        require(ui::DrawingSheet::writePdf(enlargedOutput, *d, enlargedTitle).isEmpty(),
+                "Enlarged isometric PDF export failed");
     ui::DrawingTitle title;
     title.plan = plan;
     const auto sourceStart = d->flatPattern->view.paths.front().points.front();
@@ -1564,6 +1594,72 @@ void pdfDestinations(const QString &folder) {
             "Windows-invalid filename characters survived");
     ui::preferences()->remove("drawing/lastPdfDirectory");
 }
+class ControlledDrawingBuilder final : public application::BendingDrawingBuilder {
+  public:
+    std::atomic_bool hold{true}, fail{true};
+    application::DrawingResult build(application::DocumentPtr doc,
+                                     application::DrawingRequest request,
+                                     std::stop_token stop) const override {
+        while (hold.load() && !stop.stop_requested())
+            QThread::msleep(1);
+        if (stop.stop_requested())
+            return application::DrawingError{"Cancelled", true};
+        if (fail.load())
+            return application::DrawingError{"Choose a planar base face for the drawing"};
+        return cad::BendingDrawingBuilder{}.build(std::move(doc), std::move(request), stop);
+    }
+};
+void previewStates() {
+    auto builder = std::make_shared<ControlledDrawingBuilder>();
+    ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
+    window.setAutomaticPartInputPrompt(false);
+    window.setDrawingBuilder(builder);
+    window.show();
+    auto &c = window.importController();
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step");
+    wait([&] { return !c.hasWork(); });
+    window.findChild<QAction *>("bendingDrawingAction")->trigger();
+    auto *dialog = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(dialog, "Cannot open preview-state fixture");
+    auto *state = dialog->findChild<QWidget *>("drawingPreviewState");
+    auto *progress = dialog->findChild<QProgressBar *>("drawingPreviewBusy");
+    auto *reason = dialog->findChild<QLabel *>("drawingPreviewStateText");
+    auto *retry = dialog->findChild<QPushButton *>("drawingPreviewRetry");
+    auto *exportPdf = dialog->findChild<QPushButton *>("exportDrawingPdf");
+    auto *image = dialog->findChild<QLabel *>("drawingPreviewImage");
+    wait([&] { return c.isPreparingDrawing(); });
+    require(state && state->isVisible() && progress && progress->isVisible() &&
+                progress->minimum() == 0 && progress->maximum() == 0 && !exportPdf->isEnabled(),
+            "CAD preparation did not show an indeterminate loader inside preview");
+    const auto snapshot = qEnvironmentVariable("BENDING_DRAWING_STATE_SNAPSHOT");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".loading.png"), "Cannot save loading state");
+    builder->hold = false;
+    wait([&] { return !c.hasWork(); });
+    require(state->isVisible() && !progress->isVisible() && retry->isVisible() &&
+                reason->text().contains(QStringLiteral("плоская грань")) &&
+                image->pixmap().isNull() && !exportPdf->isEnabled(),
+            "Failed CAD preparation left blank or stale paper");
+    require(reason->height() >= reason->heightForWidth(reason->width()),
+            "Preview failure text is clipped");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".failed.png"), "Cannot save failure state");
+    builder->fail = false;
+    retry->click();
+    wait([&] { return !c.hasWork() && exportPdf->isEnabled(); });
+    require(!state->isVisible() && !image->pixmap().isNull(),
+            "Retry did not replace failure with drawing");
+    builder->hold = true;
+    dialog->findChild<QComboBox *>("drawingOrientation")->setCurrentIndex(1);
+    dialog->findChild<QPushButton *>("prepareDrawing")->click();
+    require(c.isPreparingDrawing(), "Cannot restart loader before close");
+    QPointer<QDialog> closing = dialog;
+    dialog->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    wait([&] { return !c.hasWork(); });
+    require(closing.isNull() && !c.drawing(), "Closing loading preview published a late drawing");
+    window.close();
+}
 void workflow(const QString &folder) {
     auto importer = std::make_shared<cad::StepImporter>();
     ui::MainWindow window({"test", "test"}, importer);
@@ -1631,6 +1727,7 @@ void workflow(const QString &folder) {
             const auto before =
                 dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().toImage();
             flatSide->setCurrentIndex(2);
+            wait([&] { return exportButton->isEnabled(); });
             require(exportButton->isEnabled() && !c.hasWork() && c.drawing() == oldDrawing &&
                         dialog->findChild<QLabel *>("drawingPreviewImage")->pixmap().toImage() !=
                             before,
@@ -1638,11 +1735,22 @@ void workflow(const QString &folder) {
             break;
         }
     resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
     viewList->setCurrentRow(0);
     viewScale->setCurrentIndex(1); // 10:1 cannot fit the linked projections on A3.
     require(!exportButton->isEnabled() && c.drawing() == oldDrawing && !c.hasWork(),
             "An impossible paper scale remained exportable or started CAD work");
+    auto *state = dialog->findChild<QWidget *>("drawingPreviewState");
+    auto *stateTitle = dialog->findChild<QLabel *>("drawingPreviewStateTitle");
+    auto *retry = dialog->findChild<QPushButton *>("drawingPreviewRetry");
+    require(state && stateTitle && retry, "Missing preview feedback controls");
+    wait([&] { return stateTitle->text() == QStringLiteral("Не удалось разместить виды"); });
+    require(state->isVisible() && retry->isVisible(), "Layout error is not shown inside preview");
+    retry->click();
+    wait([&] { return exportButton->isEnabled(); });
+    require(!state->isVisible(), "Preview error remained above the recovered drawing");
     resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
     require(exportButton->isEnabled(), "Autocomposition did not recover after invalid scale");
     auto *page = dialog->findChild<QSpinBox *>("drawingPage");
     auto *navigation = dialog->findChild<QWidget *>("drawingPageNavigation");
@@ -1653,6 +1761,53 @@ void workflow(const QString &folder) {
     auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
     require(page && navigation && controls && previous && next && scroll && preview,
             "Missing page navigation controls");
+    const auto chooseScale = [&](const QString &prefix, double scale) {
+        for (int row = 0; row < viewList->count(); ++row)
+            if (viewList->item(row)->text().startsWith(prefix)) {
+                viewList->setCurrentRow(row);
+                const int index = viewScale->findData(scale);
+                require(index > 0, "Missing requested standard scale");
+                viewScale->setCurrentIndex(index);
+                require(!exportButton->isEnabled() && state->isVisible(),
+                        "Recomposition did not show feedback or block stale export");
+                wait([&] { return exportButton->isEnabled(); });
+                return;
+            }
+        throw std::runtime_error("Missing view in scale fixture");
+    };
+    chooseScale(QStringLiteral("Главный вид"), .5);
+    for (int row = 0; row < 3; ++row)
+        require(viewList->item(row)->text().endsWith("1:2"),
+                "Linked projection scale was not updated");
+    chooseScale(QStringLiteral("Изометрия"), 2.);
+    chooseScale(QStringLiteral("Развёртка"), 1.);
+    auto requested = ui::DrawingSheet::defaultViews(*oldDrawing);
+    for (auto &choice : requested) {
+        if (choice.key.kind == ui::DrawingViewKind::Projection)
+            choice.scale = .5;
+        if (choice.key.kind == ui::DrawingViewKind::Isometric)
+            choice.scale = 2.;
+        if (choice.key.kind == ui::DrawingViewKind::Flat)
+            choice.scale = 1.;
+    }
+    const auto expected = ui::DrawingSheet::compose(oldDrawing, requested);
+    const auto expectedFlat =
+        std::find_if(expected->views.begin(), expected->views.end(),
+                     [](const auto &at) { return at.key.kind == ui::DrawingViewKind::Flat; });
+    require(expectedFlat != expected->views.end() && page->maximum() == expected->pages &&
+                page->value() == expectedFlat->page + 1 && c.drawing() == oldDrawing &&
+                !c.hasWork() && c.session().editRevision() == revision,
+            "Changing individual scales failed to follow selected view or recomputed CAD");
+    for (int row = 0; row < viewList->count(); ++row) {
+        const auto label = viewList->item(row)->text();
+        if (label.startsWith(QStringLiteral("Изометрия")))
+            require(label.endsWith("2:1"), "Flat scale change overwrote isometric scale");
+    }
+    if (!initialSnapshot.isEmpty())
+        require(dialog->grab().save(initialSnapshot + ".scaled.png"),
+                "Cannot save repacked scales");
+    resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
     const auto initialPlan =
         ui::DrawingSheet::compose(oldDrawing, ui::DrawingSheet::defaultViews(*oldDrawing));
     const auto flatPlacement =
@@ -1674,12 +1829,14 @@ void workflow(const QString &folder) {
                 flatSide->isVisible(),
             "Clicking a paper view did not select its controls");
     resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
     const auto basePages = page->maximum();
     require(navigation->isVisible() == (basePages > 1),
             "Single-page navigation visibility is wrong");
     // Request all prepared local views as well: a readable composition needs continuation.
     for (int row = 0; row < viewList->count(); ++row)
         viewList->item(row)->setCheckState(Qt::Checked);
+    wait([&] { return exportButton->isEnabled(); });
     page->setValue(1);
     QApplication::processEvents();
     require(page->maximum() > 1 && navigation->isVisible() && page->value() == 1 &&
@@ -1781,6 +1938,7 @@ void workflow(const QString &folder) {
     fittedPaper();
     dialog->resize(normal);
     resetViews->click();
+    wait([&] { return exportButton->isEnabled(); });
     fittedPaper();
     require(page->maximum() == basePages && page->value() <= basePages &&
                 navigation->isVisible() == (basePages > 1),
@@ -1880,6 +2038,7 @@ void workflow(const QString &folder) {
     }
     for (int row = 0; row < viewList->count(); ++row)
         viewList->item(row)->setCheckState(Qt::Checked);
+    wait([&] { return exportButton->isEnabled(); });
     page->setValue(page->maximum());
     exportedPages = page->maximum();
     require(exportedPages > 1 && c.drawing() == oldDrawing && !c.hasWork() &&
@@ -2028,7 +2187,12 @@ int main(int argc, char **argv) {
     try {
         if (app.arguments().contains(QStringLiteral("--workflow-only"))) {
             pdfDestinations(temp.path());
+            previewStates();
             workflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--preview-states-only"))) {
+            previewStates();
             return 0;
         }
         if (app.arguments().contains(QStringLiteral("--composition-only"))) {
@@ -2064,6 +2228,7 @@ int main(int argc, char **argv) {
         classicalDrawing(temp.path());
         repeatedWaveDrawing(temp.path());
         perforatedAngleDrawing(temp.path());
+        previewStates();
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";
     } catch (const std::exception &e) {

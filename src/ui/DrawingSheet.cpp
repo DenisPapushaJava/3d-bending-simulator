@@ -1857,7 +1857,7 @@ void paintCompositionFrame(QPainter &p, const BendingDrawing &d, const DrawingTi
     p.drawRect(QRectF(20, 5, 395, 287));
     double scale = 1;
     for (const auto &v : plan.views)
-        if (v.page == page && v.key.kind != DrawingViewKind::Isometric) {
+        if (v.page == page) {
             scale = v.scale;
             break;
         }

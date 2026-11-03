@@ -319,6 +319,15 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
         items.insert(items.begin(), family);
     if (items.empty())
         throw std::runtime_error("Выберите хотя бы один размерный вид");
+    if (iso && iso->scale) {
+        const auto v = drawing::preparedView(*source, iso->key);
+        const double compactFit = std::min(175. / width(v), 24. / height(v));
+        if (*iso->scale > compactFit + 1.e-9) {
+            // An explicit larger isometric view participates in normal sheet packing.
+            items.push_back({{*iso}});
+            iso.reset();
+        }
+    }
     std::size_t begin = 0;
     while (begin < items.size()) {
         bool packed = false;
