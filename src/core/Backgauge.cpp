@@ -58,6 +58,9 @@ std::vector<BackgaugePlacement> backgaugeCandidates(std::span<const GaugeContact
         return result;
     // A small finite contact patch, not a full-width clamping/stability certificate.
     const double hy = std::min(thickness / 4, .5), hz = std::min(setup.fingerWidthMm / 2, 1.);
+    const double maximumFaceHeight = std::max({backgaugeHeightsMm[1] - backgaugeHeightsMm[0],
+                                               backgaugeHeightsMm[2] - backgaugeHeightsMm[1],
+                                               backgaugeHeightsMm[3] - backgaugeHeightsMm[2]});
     struct Plane {
         double x;
         GaugeReferenceKind kind;
@@ -81,9 +84,19 @@ std::vector<BackgaugePlacement> backgaugeCandidates(std::span<const GaugeContact
         it->patches.push_back(&p);
     }
     for (const auto &plane : planes) {
+        // Die top is Y=0 in the common press frame. This positions the finger,
+        // never the sheet. A 90-degree wall retains its own reference height.
+        const bool raisedEdge = plane.kind == GaugeReferenceKind::StraightEdge;
+        if (raisedEdge && thickness + 1.e-6 < backgaugeMinimumEdgeThicknessMm)
+            continue;
         std::vector<double> ys;
-        for (const auto *p : plane.patches)
-            ys.push_back((p->vertices[0].y + p->vertices[1].y + p->vertices[2].y) / 3);
+        for (const auto *p : plane.patches) {
+            double y = (p->vertices[0].y + p->vertices[1].y + p->vertices[2].y) / 3;
+            if (raisedEdge)
+                y = std::clamp(y, backgaugeEdgeClearanceMm + hy,
+                               backgaugeEdgeClearanceMm + maximumFaceHeight - hy);
+            ys.push_back(y);
+        }
         std::sort(ys.begin(), ys.end());
         ys.erase(std::unique(ys.begin(), ys.end(),
                              [](double a, double b) { return std::abs(a - b) < 1.e-6; }),
@@ -136,7 +149,12 @@ std::vector<BackgaugePlacement> backgaugeCandidates(std::span<const GaugeContact
             for (const auto level : {1U, 0U, 2U}) {
                 const double x = plane.x - backgaugeOffsetsMm[level];
                 const double r =
-                    y - (backgaugeHeightsMm[level] + backgaugeHeightsMm[level + 1]) / 2;
+                    raisedEdge
+                        ? backgaugeEdgeClearanceMm - backgaugeHeightsMm[level]
+                        : y - (backgaugeHeightsMm[level] + backgaugeHeightsMm[level + 1]) / 2;
+                if (y - hy < r + backgaugeHeightsMm[level] - 1.e-9 ||
+                    y + hy > r + backgaugeHeightsMm[level + 1] + 1.e-9)
+                    continue;
                 if (x < setup.xMinMm || x > setup.xMaxMm || r < setup.rMinMm || r > setup.rMaxMm)
                     continue;
                 for (const auto &choice : choices)

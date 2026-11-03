@@ -21,6 +21,8 @@ struct BackgaugeSetup {
 };
 inline constexpr std::array<double, 3> backgaugeOffsetsMm{0, 28.8, 65.9};
 inline constexpr std::array<double, 4> backgaugeHeightsMm{0, 10.5, 21, 25.5};
+inline constexpr double backgaugeEdgeClearanceMm = .1;
+inline constexpr double backgaugeMinimumEdgeThicknessMm = .3;
 enum class GaugeReferenceKind { StraightEdge, RightAngleWall };
 struct GaugePointYZ {
     double y, z;

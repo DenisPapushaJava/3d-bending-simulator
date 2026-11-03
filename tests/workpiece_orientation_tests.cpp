@@ -3,6 +3,7 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -160,6 +161,28 @@ int main() {
                                false, false);
         require(-outsideBounds.CornerMin().X() > outsideBounds.CornerMax().X() + 5,
                 "Automatic placement did not prefer the long side toward the operator");
+        // A long narrow tongue has less material than the shorter full-width wall.
+        // Overhang alone would put the smaller side toward the operator.
+        auto tongue = BRepAlgoAPI_Cut(fixtures::bentStrip(4, 2, std::numbers::pi / 2, 80, true, 60),
+                                      BRepPrimAPI_MakeBox(gp_Pnt(3, -61, -1), 4, 31, 82))
+                          .Shape();
+        for (double z : {-1., 45.})
+            tongue =
+                BRepAlgoAPI_Cut(tongue, BRepPrimAPI_MakeBox(gp_Pnt(-61, 3, z), 46, 4, 36)).Shape();
+        const auto tongueDoc = load(tongue, "tongue.step");
+        require(tongueDoc->metadata().bendAnalysis.bends.size() == 1, "Tongue bend missing");
+        const auto &tb = tongueDoc->metadata().bendAnalysis.bends.front();
+        auto tongueRequest = outside;
+        tongueRequest.operations.front().target = {tb.angleRadians, tb.innerRadiusMm};
+        const auto tongueResult = builder.buildRoute(tongueDoc, tongueRequest, {});
+        require(std::holds_alternative<BendRoutePtr>(tongueResult), "Tongue route unavailable");
+        const auto tongueMaterial = material(cad::OcctPreviewAccess::frame(
+            *std::get<BendRoutePtr>(tongueResult)->steps.front().preview, 0));
+        BRepAlgoAPI_Common frontHalf(
+            tongueMaterial, BRepPrimAPI_MakeBox(gp_Pnt(-1000, -1000, -1000), 1000, 2000, 2000));
+        require(frontHalf.IsDone() && !frontHalf.HasErrors() &&
+                    volume(frontHalf.Shape()) > .55 * volume(tongueMaterial),
+                "Handling preference chose a long tongue over the larger material side");
         // An asymmetric tool blocks just one placement; both outcomes must be retained.
         auto blockedTool = tool_fixture::pair(16, .8, 100);
         std::array<bool, 2> hits{};

@@ -364,6 +364,9 @@ void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token sto
         report.detail =
             "Неподвижные упрощённые пальцы; проверены подготовленные положения. "
             "Отвод, физическое удержание и перенос не проверены. Координаты не для ЧПУ.";
+    if (placement->kind == core::GaugeReferenceKind::StraightEdge)
+        report.detail +=
+            " Нижняя кромка рабочей площадки упора на 0,1 мм выше матрицы; лист не наклоняется.";
     auto oldFrames = std::move(preview.frames);
     auto oldStates = std::move(preview.states);
     auto oldConflicts = std::move(preview.machineConflicts);

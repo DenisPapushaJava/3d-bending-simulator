@@ -250,6 +250,7 @@ class RouteSearch {
     std::vector<std::size_t> profileRank;
     std::vector<gp_Dir> referenceAxes;
     std::vector<Bnd_Box> wallBounds;
+    std::vector<double> wallVolumes;
     std::map<std::pair<Mask, std::size_t>, bool> frontPreferences;
     bool preferredSide(Mask mask, const RouteOperation &op) {
         if (!request.withTools || !request.allowWorkpieceRotation || !op.tools)
@@ -282,10 +283,29 @@ class RouteSearch {
             machine = turn * machine;
         }
         Bnd_Box box;
-        for (std::size_t i = 0; i < wallBounds.size(); ++i)
-            box.Add(wallBounds[i].Transformed(machine * positions.walls[i]));
+        double frontMaterial = 0, backMaterial = 0;
+        bool materialKnown = true;
+        for (std::size_t i = 0; i < wallBounds.size(); ++i) {
+            const auto bounds = wallBounds[i].Transformed(machine * positions.walls[i]);
+            box.Add(bounds);
+            // Whole walls strictly on one side give a cheap material-amount
+            // preference. A crossing/unknown wall falls back to the old overhang
+            // hint; no Boolean or mesh is built for this heuristic.
+            if (bounds.IsVoid() || bounds.IsOpen() || !std::isfinite(wallVolumes[i]) ||
+                wallVolumes[i] <= 0)
+                materialKnown = false;
+            else if (bounds.CornerMax().X() <= 0)
+                frontMaterial += wallVolumes[i];
+            else if (bounds.CornerMin().X() >= 0)
+                backMaterial += wallVolumes[i];
+            else
+                materialKnown = false;
+        }
         bool preferred = op.workpieceReversed;
-        if (!box.IsVoid()) {
+        if (materialKnown &&
+            std::abs(frontMaterial - backMaterial) > .01 * (frontMaterial + backMaterial))
+            preferred = backMaterial > frontMaterial;
+        else if (!box.IsVoid()) {
             const double front = -box.CornerMin().X(), back = box.CornerMax().X();
             if (std::abs(front - back) > std::max(.5, b.thicknessMm))
                 preferred = back > front;
@@ -1060,9 +1080,18 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         for (std::size_t i = 0; i < n; ++i)
             search.referenceAxes[i] = normalBendAxis(*native, i);
         for (const auto &wall : search.layout->walls) {
+            cancelled(stop);
             Bnd_Box box;
             BRepBndLib::AddOptimal(wall.solid, box, false, false);
             search.wallBounds.push_back(box);
+            double amount = 0;
+            if (request.withTools && request.allowWorkpieceRotation)
+                try {
+                    amount = volume(wall.solid);
+                } catch (const Standard_Failure &) {
+                    // An unavailable soft hint must not reject a valid route.
+                }
+            search.wallVolumes.push_back(amount);
         }
         search.neighbours.resize(n);
         for (const auto &a : search.layout->bends)

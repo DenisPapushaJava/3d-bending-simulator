@@ -10,6 +10,7 @@
 #include "bending/ui/MainWindow.h"
 #include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <QApplication>
 #include <QCheckBox>
@@ -39,10 +40,12 @@ std::filesystem::path path(const QString &p) {
     return std::filesystem::path(p.toStdString());
 #endif
 }
-application::DocumentPtr document(const QString &p, double flange = 60) {
+application::DocumentPtr document(const QString &p, double flange = 60, double thickness = 2,
+                                  double radius = 4) {
     STEPControl_Writer writer;
-    require(writer.Transfer(fixtures::bentStrip(4, 2, std::numbers::pi / 2, 300, true, flange),
-                            STEPControl_AsIs) == IFSelect_RetDone &&
+    require(writer.Transfer(
+                fixtures::bentStrip(radius, thickness, std::numbers::pi / 2, 300, true, flange),
+                STEPControl_AsIs) == IFSelect_RetDone &&
                 writer.Write(p.toUtf8().constData()) == IFSelect_RetDone,
             "Fixture write failed");
     auto doc = application::resultDocument(cad::StepImporter{}.load(path(p), {}, {}));
@@ -106,12 +109,29 @@ int main(int argc, char **argv) {
                               [](const auto &c) { return c.gauging; }) == 2 &&
                     frame.backgaugeContacts.size() == 2,
                 "Fingers/contacts not prepared");
+        const auto raisedEdge = [](const application::SingleBendPreview &v) {
+            require(v.backgauge() && v.backgauge()->placement, "Gauge placement missing");
+            const auto &g = *v.backgauge()->placement;
+            require(g.kind == core::GaugeReferenceKind::StraightEdge &&
+                        std::abs(g.rMm + core::backgaugeHeightsMm[g.level] - .1) < 1.e-7,
+                    "Ordinary gauge face was not raised above the die");
+        };
+        raisedEdge(*p);
         const auto warmStart = std::chrono::steady_clock::now();
         require(preview(builder->buildAssignedToolMotion(doc, 0, target, pair, {})) == p,
                 "Warm transition not reused");
         const auto warmUs = std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now() - warmStart)
                                 .count();
+        const auto thinDoc = document(temp.path() + "/thin.step", 60, .3, 1);
+        const auto &thinBend = thinDoc->metadata().bendAnalysis.bends.front();
+        auto thinTools = pair;
+        const auto thinCycle = preview(builder->buildAssignedToolMotion(
+            thinDoc, 0, {thinBend.angleRadians, thinBend.innerRadiusMm}, thinTools, {}));
+        raisedEdge(*thinCycle);
+        const auto &thinFrame = cad::OcctPreviewAccess::frame(*thinCycle, 0);
+        for (const auto &q : thinFrame.backgaugeContacts)
+            require(q.Y() > .1 && q.Y() < .3, "Thin-sheet contact left the physical edge");
         require(p->backgauge()->addedRetractionPositions == 4 && p->frameCount() == 65,
                 "Withdrawal positions missing or forming positions replaced");
         auto fixed = pair;
@@ -157,6 +177,8 @@ int main(int argc, char **argv) {
         require(std::holds_alternative<application::RouteDraftPtr>(manual) &&
                     std::get<application::RouteDraftPtr>(manual)->visual->backgauge(),
                 "Manual transition omitted backgauge");
+        raisedEdge(*std::get<application::BendRoutePtr>(planned)->steps.front().preview);
+        raisedEdge(*std::get<application::RouteDraftPtr>(manual)->visual);
         const auto starter = project::readStarterToolCatalog();
         require(std::holds_alternative<core::ToolCatalog>(starter), "Starter tools unavailable");
         const auto &catalog = std::get<core::ToolCatalog>(starter);
@@ -242,6 +264,28 @@ int main(int argc, char **argv) {
         require(nonparallelError && !nonparallelError->invariantGaugeSpanMm &&
                     nonparallelError->evaluatedOperations == 1,
                 "Nonparallel bends were pruned by an unproven axial invariant");
+        // A finger can clear the die yet hit a non-convex punch during +X travel.
+        // In its recess the AABBs overlap but the occupied volumes do not.
+        cad::PreviewFrame aboveDie;
+        aboveDie.shape = BRepPrimAPI_MakeBox(gp_Pnt(-200, 0, 0), 2, 2, 2).Shape();
+        aboveDie.tools[0] = BRepPrimAPI_MakeBox(gp_Pnt(-20, -20, -10), 40, 20, 20).Shape();
+        aboveDie.tools[1] = BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(gp_Pnt(-10, 1, -10), 40, 30, 20),
+                                            BRepPrimAPI_MakeBox(gp_Pnt(0, 0, -11), 20, 12, 22))
+                                .Shape();
+        aboveDie.machine.push_back({"gauge", "Gauge",
+                                    BRepPrimAPI_MakeBox(gp_Pnt(1, .1, -2), 10, 10, 4).Shape(),
+                                    false, false, false, true});
+        require(cad::MachineAssembly::backgaugeCollisions(aboveDie, .001, {}).empty(),
+                "A free punch recess blocked a finger above the die");
+        aboveDie.machine[0].shape = BRepPrimAPI_MakeBox(gp_Pnt(13, .1, -2), 10, 10, 4).Shape();
+        const auto punchHits = cad::MachineAssembly::backgaugeCollisions(aboveDie, .001, {});
+        require(std::any_of(punchHits.begin(), punchHits.end(),
+                            [](const auto &hit) {
+                                return hit.pair.firstId == "punch" && hit.pair.secondId == "gauge";
+                            }) &&
+                    std::none_of(punchHits.begin(), punchHits.end(),
+                                 [](const auto &hit) { return hit.pair.firstId == "die"; }),
+                "Clearing the die suppressed a punch/finger collision");
         cad::PreviewFrame collision;
         collision.shape = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
         collision.tools = {BRepPrimAPI_MakeBox(gp_Pnt(100, 100, 100), 5, 5, 5).Shape(),

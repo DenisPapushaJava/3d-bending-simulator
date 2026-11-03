@@ -37,6 +37,24 @@ int main() {
                 "Straight-edge contacts missing");
         require(std::abs(candidates.front().xMm - 51.2) < 1.e-6,
                 "Step offset did not affect shared X");
+        for (double thickness : {.3, .6, 1.5, 3., 6., 12.}) {
+            std::vector<GaugeContactPatch> edge;
+            rectangle(edge, 80, 0, thickness, -150, 150);
+            const auto raised = backgaugeCandidates(edge, s, thickness, 0);
+            require(!raised.empty(), "Raised contact missing at a supported thickness");
+            const double hy = std::min(thickness / 4, .5);
+            for (const auto &p : raised) {
+                const double bottom = p.rMm + backgaugeHeightsMm[p.level];
+                const double top = p.rMm + backgaugeHeightsMm[p.level + 1];
+                require(std::abs(bottom - .1) < 1.e-9 && p.contactYmm - hy >= bottom - 1.e-9 &&
+                            p.contactYmm + hy <= top + 1.e-9 && p.contactYmm - hy >= 0 &&
+                            p.contactYmm + hy <= thickness,
+                        "Finite contact left the raised finger or sheet thickness");
+            }
+        }
+        std::vector<GaugeContactPatch> tooThin;
+        rectangle(tooThin, 80, 0, .2, 0, 300);
+        require(backgaugeCandidates(tooThin, s, .2, 150).empty(), "Unsupported thin edge accepted");
         s.xMaxMm = 10;
         require(backgaugeCandidates(patches, s, 2, 150).empty(), "X range ignored");
         s = {};
@@ -80,6 +98,11 @@ int main() {
         std::vector<GaugeContactPatch> wall;
         rectangle(wall, 60, 10, 40, 0, 300, GaugeReferenceKind::RightAngleWall);
         require(!backgaugeCandidates(wall, s, 2, 150).empty(), "90-degree wall missing");
+        for (const auto &p : backgaugeCandidates(wall, s, 2, 150))
+            require(std::abs(p.rMm +
+                             (backgaugeHeightsMm[p.level] + backgaugeHeightsMm[p.level + 1]) / 2 -
+                             p.contactYmm) < 1.e-9,
+                    "Die-referenced edge policy moved a 90-degree wall contact");
         std::stop_source stopped;
         stopped.request_stop();
         require(backgaugeCandidates(patches, s, 2, 150, stopped.get_token()).empty(),
