@@ -9,7 +9,8 @@
 
 namespace bending::fixtures {
 inline TopoDS_Shape foldedProfile(std::size_t bends, double length = 80, double turn = .4,
-                                  bool varied = false, bool halfEnds = false) {
+                                  bool varied = false, bool halfEnds = false,
+                                  double inclinedWallScale = 1) {
     constexpr double thickness = 2, middleRadius = 5, straight = 20;
     const auto normal = [](double angle) { return gp_Vec(-std::sin(angle), std::cos(angle), 0); };
     const auto skin = [&](double offset) {
@@ -18,7 +19,8 @@ inline TopoDS_Shape foldedProfile(std::size_t bends, double length = 80, double 
         double angle = 0;
         for (std::size_t i = 0; i <= bends; ++i) {
             const double wall = straight * (varied ? 1 + .15 * (i % 5) : 1) *
-                                (halfEnds && (i == 0 || i == bends) ? .5 : 1);
+                                (halfEnds && (i == 0 || i == bends) ? .5 : 1) *
+                                (i % 2 ? inclinedWallScale : 1);
             const auto next = p.Translated(gp_Vec(std::cos(angle), std::sin(angle), 0) * wall);
             edges.push_back(BRepBuilderAPI_MakeEdge(p.Translated(normal(angle) * offset),
                                                     next.Translated(normal(angle) * offset))

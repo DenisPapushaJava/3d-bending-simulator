@@ -57,6 +57,52 @@ struct Frame {
     gp_Dir v;
     gp_Dir normal;
 };
+std::size_t automaticBaseFace(const TopTools_IndexedMapOfShape &faces, std::stop_token stop) {
+    struct Family {
+        gp_Dir normal;
+        double area;
+        double largestArea;
+        std::size_t face;
+    };
+    std::vector<Family> families;
+    const auto greater = [](double a, double b) {
+        return a > b + std::max(1e-8, std::max(a, b) * 1e-9);
+    };
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const auto face = TopoDS::Face(faces(i));
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane)
+            continue;
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        const double area = properties.Mass();
+        if (!std::isfinite(area) || area <= 0)
+            continue;
+        const auto normal = surface.Plane().Axis().Direction();
+        auto family = std::find_if(families.begin(), families.end(), [&](const auto &f) {
+            return normal.IsParallel(f.normal, 1e-7);
+        });
+        if (family == families.end()) {
+            families.push_back({normal, area, area, static_cast<std::size_t>(i)});
+        } else {
+            family->area += area;
+            if (greater(area, family->largestArea)) {
+                family->largestArea = area;
+                family->face = static_cast<std::size_t>(i);
+            }
+        }
+    }
+    // A corrugated sheet can have a sloping facet larger than any single flat.
+    // Prefer its predominant real plane family; never invent a bounding-box plane.
+    const Family *best = nullptr;
+    for (const auto &family : families)
+        if (!best || greater(family.area, best->area) ||
+            (!greater(best->area, family.area) && greater(family.largestArea, best->largestArea)))
+            best = &family;
+    return best ? best->face : 0;
+}
 DrawingPoint project(gp_Pnt p, const Frame &f) {
     const gp_Vec v(gp_Pnt(0, 0, 0), p);
     return {v.Dot(gp_Vec(f.u)), v.Dot(gp_Vec(f.v))};
@@ -986,20 +1032,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         std::size_t base = request.baseFace.value_or(0);
         if (base > static_cast<std::size_t>(faces.Extent()))
             return DrawingError{"Selected face belongs to another document"};
-        if (!base) {
-            double maximum = 0;
-            for (int i = 1; i <= faces.Extent(); ++i) {
-                const auto face = TopoDS::Face(faces(i));
-                if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane)
-                    continue;
-                GProp_GProps area;
-                BRepGProp::SurfaceProperties(face, area);
-                if (area.Mass() > maximum + std::max(1e-8, maximum * 1e-9)) {
-                    maximum = area.Mass();
-                    base = static_cast<std::size_t>(i);
-                }
-            }
-        }
+        if (!base)
+            base = automaticBaseFace(faces, stop);
         if (!base)
             return DrawingError{"Choose a planar base face for the drawing"};
         const auto face = TopoDS::Face(faces(static_cast<int>(base)));

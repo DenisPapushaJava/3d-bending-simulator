@@ -1341,28 +1341,44 @@ double classicalSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &
             std::vector<QRectF> occupied;
             const auto section = [&](std::size_t index, QRectF cell) {
                 const auto &s = d.sections[index];
-                const double localScale =
-                    standardDrawingScale(
-                        std::min(sectionScale(d, index),
-                                 flat && index < 2
-                                     ? fittedScale(s.view, cell.width() - 40, cell.height() - 34)
-                                     : sectionScale(d, index)) *
-                        std::pow(.8, attempt))
-                        .value_or(sectionScale(d, index));
+                double localLimit = std::min(
+                    sectionScale(d, index),
+                    flat && index < 2 ? fittedScale(s.view, cell.width() - 40, cell.height() - 34)
+                                      : sectionScale(d, index));
                 const auto name = QString::fromStdString(s.designation);
-                const auto caption =
-                    QStringLiteral("%1 (%2)%3%4")
-                        .arg(s.repeatCount ? QStringLiteral("Волна сечения %1-%1 · повторений: %2")
-                                                 .arg(name)
-                                                 .arg(s.repeatCount)
-                                           : QStringLiteral("%1-%1").arg(name),
-                             scaleName(localScale),
-                             s.locations.size() > 1
-                                 ? QStringLiteral(" · %1 места").arg(s.locations.size())
-                                 : QString{},
-                             s.rotated ? QStringLiteral(" · повёрнуто") : QString{});
-                view(trial, d, s.view, cell.center() + QPointF(0, 6), localScale, caption, false,
-                     false, false, &occupied, true, cell, true);
+                std::string localError;
+                // A smaller primary view does not require a smaller enlarged section.
+                // Probe each section independently, preserving the preceding annotations.
+                for (int localAttempt = 0; localAttempt < 5; ++localAttempt) {
+                    const double localScale = standardDrawingScale(localLimit).value_or(localLimit);
+                    const auto caption =
+                        QStringLiteral("%1 (%2)%3%4")
+                            .arg(s.repeatCount
+                                     ? QStringLiteral("Волна сечения %1-%1 · повторений: %2")
+                                           .arg(name)
+                                           .arg(s.repeatCount)
+                                     : QStringLiteral("%1-%1").arg(name),
+                                 scaleName(localScale),
+                                 s.locations.size() > 1
+                                     ? QStringLiteral(" · %1 места").arg(s.locations.size())
+                                     : QString{},
+                                 s.rotated ? QStringLiteral(" · повёрнуто") : QString{});
+                    QImage scratch(420, 297, QImage::Format_RGB32);
+                    QPainter probe(&scratch);
+                    auto candidateOccupied = occupied;
+                    try {
+                        view(probe, d, s.view, cell.center() + QPointF(0, 6), localScale, caption,
+                             false, false, false, &candidateOccupied, true, cell, true);
+                    } catch (const std::runtime_error &e) {
+                        localError = e.what();
+                        localLimit = localScale * .8;
+                        continue;
+                    }
+                    view(trial, d, s.view, cell.center() + QPointF(0, 6), localScale, caption,
+                         false, false, false, &occupied, true, cell, true);
+                    return;
+                }
+                throw std::runtime_error(localError);
             };
             if (page == 0) {
                 const double leftWidth = classicalLeftWidth(d, flat);

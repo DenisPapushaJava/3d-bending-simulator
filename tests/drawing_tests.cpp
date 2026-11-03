@@ -11,6 +11,7 @@
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/ui/Preferences.h"
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -1009,12 +1010,16 @@ void classicalDrawing(const QString &folder) {
     for (std::size_t i = 0; i < expected.size(); ++i)
         require(std::abs(views[0].axialDimensions[i].valueMm - expected[i]) < 1e-5,
                 "Axial dimensions do not describe the occupied intervals and gaps");
-    require(std::count_if(views[0].holeDimensions.begin(), views[0].holeDimensions.end(),
-                          [](const auto &x) {
-                              return x.pitchIntervals == 5 && std::abs(x.pitchMm - 50) < 1e-5 &&
-                                     std::abs(x.valueMm - 250) < 1e-5;
-                          }) == 1 &&
-                views[0].holeDiameters.size() == 12,
+    require(std::any_of(views.begin(), views.end(),
+                        [](const auto &v) {
+                            return v.holeDiameters.size() == 12 &&
+                                   std::count_if(v.holeDimensions.begin(), v.holeDimensions.end(),
+                                                 [](const auto &x) {
+                                                     return x.pitchIntervals == 5 &&
+                                                            std::abs(x.pitchMm - 50) < 1e-5 &&
+                                                            std::abs(x.valueMm - 250) < 1e-5;
+                                                 }) == 1;
+                        }),
             "A verified hole pitch or diameter lost its measured source geometry");
     const auto coverage = ui::DrawingSheet::coverage(*d);
     require(coverage.total == 6 && coverage.dimensioned == 6 &&
@@ -1126,6 +1131,71 @@ void classicalDrawing(const QString &folder) {
     require(ui::DrawingSheet::writePdf(folder + "/classical-shallow-top.pdf", *tall, {}).isEmpty(),
             "A shallow projection has no room for its outside dimension number");
 }
+void automaticDrawingOrientation(const QString &folder) {
+    // Each sloping facet is larger than a flat, but the parallel flats dominate
+    // together. The drawing must follow this real plane family, in any STEP frame.
+    const auto shape = fixtures::foldedProfile(12, 83, .43, false, true, 1.1);
+    const auto check = [&](const TopoDS_Shape &source, gp_Dir expected, const QString &name,
+                           bool manual) {
+        const auto document = load(source, folder + "/" + name + ".step");
+        const auto nativeDocument = std::dynamic_pointer_cast<const cad::CadDocument>(document);
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(cad::OcctDocumentAccess::shape(*nativeDocument), TopAbs_FACE, faces);
+        application::DrawingRequest request;
+        request.quarterTurns = 0;
+        const auto drawing = build(document, request);
+        const auto normal = [&](std::size_t index) {
+            return BRepAdaptor_Surface(TopoDS::Face(faces(static_cast<int>(index))))
+                .Plane()
+                .Axis()
+                .Direction();
+        };
+        require(drawing->automaticBase && normal(drawing->baseFace).IsParallel(expected, 1e-7),
+                "A single inclined facet tilted the whole corrugated drawing");
+        require(drawing->views[2].maximum.x - drawing->views[2].minimum.x < 30,
+                "The side projection is oblique to the predominant profile plane");
+        if (manual) {
+            double maximum = 0;
+            std::size_t largest = 0;
+            for (int i = 1; i <= faces.Extent(); ++i) {
+                const auto face = TopoDS::Face(faces(i));
+                if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane)
+                    continue;
+                GProp_GProps area;
+                BRepGProp::SurfaceProperties(face, area);
+                if (area.Mass() > maximum) {
+                    maximum = area.Mass();
+                    largest = static_cast<std::size_t>(i);
+                }
+            }
+            require(largest && !normal(largest).IsParallel(expected, 1e-7),
+                    "The regression fixture has no larger inclined facet");
+            request.baseFace = largest;
+            const auto selected = build(document, request);
+            require(!selected->automaticBase && selected->baseFace == largest &&
+                        selected->views[2].maximum.x - selected->views[2].minimum.x > 60,
+                    "Automatic orientation overrode the user's explicit base face");
+        }
+        return drawing;
+    };
+    const auto original = check(shape, gp_Dir(0, 1, 0), "orientation", true);
+    const auto sameViews = [&](const auto &drawing) {
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto &a = drawing->views[i], &b = original->views[i];
+            require(std::abs((a.maximum.x - a.minimum.x) - (b.maximum.x - b.minimum.x)) < 1e-4 &&
+                        std::abs((a.maximum.y - a.minimum.y) - (b.maximum.y - b.minimum.y)) < 1e-4,
+                    "STEP placement changed the automatic orthogonal projection sizes");
+        }
+    };
+    gp_Trsf transform;
+    transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .73);
+    transform.SetTranslationPart(gp_Vec(17, -31, 62));
+    sameViews(check(BRepBuilderAPI_Transform(shape, transform, true).Shape(),
+                    gp_Dir(0, 1, 0).Transformed(transform), "orientation-moved", false));
+    transform.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)));
+    sameViews(check(BRepBuilderAPI_Transform(shape, transform, true).Shape(),
+                    gp_Dir(0, 1, 0).Transformed(transform), "orientation-mirrored", false));
+}
 void repeatedWaveDrawing(const QString &folder) {
     const auto shape = fixtures::foldedProfile(12, 83, .43, false, true);
     const auto repeated = [&](const TopoDS_Shape &source, const QString &name) {
@@ -1157,6 +1227,10 @@ void repeatedWaveDrawing(const QString &folder) {
         for (int page = 0; page < ui::DrawingSheet::pageCount(*drawing); ++page)
             require(!ui::DrawingSheet::preview(*drawing, {}, page).isNull(),
                     "Repeated wave sheet cannot be rendered");
+        const auto output = qEnvironmentVariable("BENDING_DRAWING_WAVE_OUTPUT");
+        if (!output.isEmpty() && name == "wave")
+            require(ui::DrawingSheet::writePdf(output, *drawing, {}).isEmpty(),
+                    "Repeated wave sample export failed");
         return drawing;
     };
     repeated(shape, "wave");
@@ -2309,6 +2383,14 @@ int main(int argc, char **argv) {
             localRadiusCallouts(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--orientation-only"))) {
+            automaticDrawingOrientation(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--repeated-wave-only"))) {
+            repeatedWaveDrawing(temp.path());
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--composition-only"))) {
             composition(temp.path());
             return 0;
@@ -2342,6 +2424,7 @@ int main(int argc, char **argv) {
         localRadiusCallouts(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
+        automaticDrawingOrientation(temp.path());
         repeatedWaveDrawing(temp.path());
         perforatedAngleDrawing(temp.path());
         previewStates();
