@@ -60,13 +60,14 @@ struct PreviewFrame {
     TopoDS_Shape shape;
     std::array<TopoDS_Shape, 2> tools; // Die, punch; null in the kinematic preview.
     std::array<std::vector<ToolDisplaySegment>, 2> toolSegments;
-    std::array<TopoDS_Shape, 3> regions; // Flange A, bend, flange B; A is fixed only without tools.
+    // Together cover the complete sheet, excluding tools/machine. A is fixed only without tools.
+    std::array<TopoDS_Shape, 3> regions;       // Flange A, bend, flange B.
     std::array<gp_Trsf, 2> materialTransforms; // Source components -> this frame.
     // Optional triangulated source surface with geometrically moved cutouts.
     // Display only: all checks use shape/regions above. Includes the same tools.
     TopoDS_Shape displayShape;
-    std::array<TopoDS_Shape, 3> displayRegions;
-    std::vector<TopoDS_Shape> bendZones; // Optional draft highlights by original bend index.
+    std::array<TopoDS_Shape, 3> displayRegions; // Complete display skin, excluding tools/machine.
+    std::vector<TopoDS_Shape> bendZones;        // Optional draft highlights by original bend index.
     // World-space attachments prepared from the same section/basis as the solid.
     std::optional<BendDimensionAnchors> dimensions;
 };

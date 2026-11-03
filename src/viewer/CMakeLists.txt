@@ -1,6 +1,6 @@
 add_library(bending_viewer STATIC ViewerWidget.cpp CollisionPresentation.cpp Dimensions.cpp ToolSegmentColors.cpp include/bending/viewer/ViewerWidget.h)
 add_library(Bending::Viewer ALIAS bending_viewer)
-target_sources(bending_viewer PRIVATE SheetOrientationPresentation.cpp)
+target_sources(bending_viewer PRIVATE SheetOrientationPresentation.cpp PreviewRigidScene.cpp)
 set_target_properties(bending_viewer PROPERTIES AUTOMOC ON)
 target_include_directories(bending_viewer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(bending_viewer SYSTEM PRIVATE "${OpenCASCADE_INCLUDE_DIR}")

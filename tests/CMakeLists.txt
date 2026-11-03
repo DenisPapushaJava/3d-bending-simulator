@@ -367,6 +367,10 @@ if(BENDING_BUILD_APP)
     set_tests_properties(application.import-controller PROPERTIES LABELS "integration" TIMEOUT 30)
     add_executable(viewer_tests viewer_tests.cpp)
     target_link_libraries(viewer_tests PRIVATE Bending::Viewer bending_options)
+    add_executable(preview_scene_tests preview_scene_tests.cpp)
+    target_include_directories(preview_scene_tests PRIVATE "${PROJECT_SOURCE_DIR}/tools" "${PROJECT_SOURCE_DIR}/src/viewer")
+    target_link_libraries(preview_scene_tests PRIVATE Bending::Viewer Bending::CadOcct
+        bending_options ${bending_step_toolkit})
     add_test(NAME viewer.unavailable COMMAND viewer_tests --unavailable)
     set_tests_properties(viewer.unavailable PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20 LABELS "integration")
@@ -377,9 +381,11 @@ if(BENDING_BUILD_APP)
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics)
             add_test(NAME viewer.render
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:viewer_tests>)
+            add_test(NAME viewer.preview-scene
+                COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:preview_scene_tests>)
             add_test(NAME viewer.press-orbit
                 COMMAND "${BENDING_XVFB_RUN}" -a -s "-screen 0 1600x1200x24" $<TARGET_FILE:workflow_tests> --graphics --press-orbit-only)
-            set_tests_properties(app.step-render viewer.render viewer.press-orbit PROPERTIES
+            set_tests_properties(app.step-render viewer.render viewer.preview-scene viewer.press-orbit PROPERTIES
                 ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1;QT_SCALE_FACTOR=1" TIMEOUT 60 LABELS "graphics")
         endif()
     endif()
