@@ -107,7 +107,7 @@ void ToolSearchDialog::progress(const application::BendRouteProgress &p, const Q
                          ? QStringLiteral("Проверено установок: %1").arg(p.checkedOperations)
                          : QString{});
 }
-void ToolSearchDialog::finish(bool resumable) {
+void ToolSearchDialog::finish(bool resumable, const QString &reason) {
     busy_ = false;
     resumable_ = resumable;
     busyIndicator_->hide();
@@ -117,6 +117,8 @@ void ToolSearchDialog::finish(bool resumable) {
         resumable ? QStringLiteral("Можно продолжить с готовыми проверками или выбрать "
                                    "инструмент другим способом.")
                   : QStringLiteral("Можно попробовать быстрый или ручной выбор инструмента."));
+    if (!reason.isEmpty())
+        detail_->setText(reason + QStringLiteral("\n\n") + detail_->text());
     action_->setText(resumable ? QStringLiteral("Продолжить") : QStringLiteral("Закрыть"));
 }
 void ToolSearchDialog::reject() {

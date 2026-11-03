@@ -268,7 +268,8 @@ QJsonValue backgaugeJson(const std::optional<core::BackgaugeSetup> &s) {
                        {"zMaxMm", s->zMaxMm},
                        {"fingerWidthMm", s->fingerWidthMm},
                        {"minimumSpacingMm", s->minimumSpacingMm},
-                       {"retractMm", s->retractMm}};
+                       {"retractMm", s->retractMm},
+                       {"allowOffsetContacts", s->allowOffsetContacts}};
 }
 bool readBackgauge(const QJsonValue &value, std::optional<core::BackgaugeSetup> &out) {
     if (value.isNull() || value.isUndefined()) {
@@ -281,6 +282,10 @@ bool readBackgauge(const QJsonValue &value, std::optional<core::BackgaugeSetup> 
     if (o.value("model").toString() != "demo-backgauge-v1")
         return false;
     core::BackgaugeSetup s;
+    const auto shared = o.value("allowOffsetContacts");
+    if (!shared.isUndefined() && !shared.isBool())
+        return false;
+    s.allowOffsetContacts = shared.toBool(false); // v15 required contact at finger centres.
     for (const auto &[name, destination] : {std::pair{"xMinMm", &s.xMinMm},
                                             {"xMaxMm", &s.xMaxMm},
                                             {"rMinMm", &s.rMinMm},

@@ -2,9 +2,14 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <tuple>
 
 namespace bending::core {
+double minimumGaugeSpanMm(const BackgaugeSetup &s) noexcept {
+    return s.allowOffsetContacts ? s.minimumSpacingMm
+                                 : std::max(s.minimumSpacingMm, s.fingerWidthMm);
+}
 bool validBackgaugeSetup(const BackgaugeSetup &s) noexcept {
     const auto range = [](double a, double b) {
         return std::isfinite(a) && std::isfinite(b) && a >= -10000 && b <= 10000 && a < b;
@@ -12,8 +17,8 @@ bool validBackgaugeSetup(const BackgaugeSetup &s) noexcept {
     return range(s.xMinMm, s.xMaxMm) && s.xMinMm >= 0 && range(s.rMinMm, s.rMaxMm) &&
            range(s.zMinMm, s.zMaxMm) && std::isfinite(s.fingerWidthMm) && s.fingerWidthMm >= 1 &&
            s.fingerWidthMm <= 1000 && std::isfinite(s.minimumSpacingMm) &&
-           s.minimumSpacingMm >= s.fingerWidthMm && s.minimumSpacingMm <= 10000 &&
-           std::isfinite(s.retractMm) && s.retractMm >= 0 && s.retractMm <= 500;
+           s.minimumSpacingMm >= 0 && s.minimumSpacingMm <= 10000 && std::isfinite(s.retractMm) &&
+           s.retractMm >= 0 && s.retractMm <= 500;
 }
 namespace {
 using Interval = std::array<double, 2>;
@@ -111,15 +116,32 @@ std::vector<BackgaugePlacement> backgaugeCandidates(std::span<const GaugeContact
                 std::max_element(intervals.begin(), intervals.end(), [](auto a, auto b) {
                     return a[1] < b[1];
                 })->at(1);
-            if (right - left < setup.minimumSpacingMm)
-                continue;
+            struct Contacts {
+                Interval contacts, centres;
+            };
+            std::vector<Contacts> choices;
+            if (right - left >= std::max(setup.minimumSpacingMm, setup.fingerWidthMm))
+                choices.push_back({{left, right}, {left, right}});
+            if (setup.allowOffsetContacts) {
+                const double contactSpan = right - left;
+                if (contactSpan >= std::max(setup.minimumSpacingMm, 2 * hz + 1.e-6) &&
+                    contactSpan < setup.fingerWidthMm) {
+                    const double gap = std::min(1., (contactSpan - 2 * hz) / 2);
+                    const double shift = (setup.fingerWidthMm + gap - contactSpan) / 2;
+                    const Interval centres{left - shift, right + shift};
+                    if (centres[0] >= centre + setup.zMinMm && centres[1] <= centre + setup.zMaxMm)
+                        choices.push_back({{left, right}, centres});
+                }
+            }
             for (const auto level : {1U, 0U, 2U}) {
                 const double x = plane.x - backgaugeOffsetsMm[level];
                 const double r =
                     y - (backgaugeHeightsMm[level] + backgaugeHeightsMm[level + 1]) / 2;
                 if (x < setup.xMinMm || x > setup.xMaxMm || r < setup.rMinMm || r > setup.rMaxMm)
                     continue;
-                result.push_back({plane.kind, level, x, r, {left, right}, plane.x, y});
+                for (const auto &choice : choices)
+                    result.push_back(
+                        {plane.kind, level, x, r, choice.centres, plane.x, y, choice.contacts});
             }
         }
     }
@@ -128,12 +150,31 @@ std::vector<BackgaugePlacement> backgaugeCandidates(std::span<const GaugeContact
                           p.level == 1   ? 0
                           : p.level == 0 ? 1
                                          : 2,
-                          -(p.zMm[1] - p.zMm[0]), p.xMm, p.rMm};
+                          -(p.contactZmm[1] - p.contactZmm[0]),
+                          p.xMm,
+                          p.rMm,
+                          std::abs(p.zMm[1] - p.zMm[0]),
+                          p.zMm[0],
+                          p.zMm[1],
+                          p.contactZmm[0],
+                          p.contactZmm[1]};
     };
     std::stable_sort(result.begin(), result.end(),
                      [&](const auto &a, const auto &b) { return rank(a) < rank(b); });
-    if (result.size() > 12)
-        result.resize(12);
-    return result;
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    std::vector<BackgaugePlacement> shortlist;
+    std::set<std::pair<GaugeReferenceKind, std::size_t>> families;
+    for (const auto &p : result)
+        if (families.emplace(p.kind, p.level).second && shortlist.size() < 12)
+            shortlist.push_back(p);
+    for (const auto &p : result) {
+        if (shortlist.size() >= 12)
+            break;
+        if (std::find(shortlist.begin(), shortlist.end(), p) == shortlist.end())
+            shortlist.push_back(p);
+    }
+    std::stable_sort(shortlist.begin(), shortlist.end(),
+                     [&](const auto &a, const auto &b) { return rank(a) < rank(b); });
+    return shortlist;
 }
 } // namespace bending::core

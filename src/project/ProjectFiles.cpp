@@ -232,6 +232,12 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
         if (version < 15 && ((bend.tools && bend.tools->backgauge) ||
                              (bend.catalogTools && bend.catalogTools->backgauge)))
             return false;
+        const auto newGaugePolicy = [](const auto &g) {
+            return g && (g->allowOffsetContacts || g->minimumSpacingMm < g->fingerWidthMm);
+        };
+        if (version < 16 && ((bend.tools && newGaugePolicy(bend.tools->backgauge)) ||
+                             (bend.catalogTools && newGaugePolicy(bend.catalogTools->backgauge))))
+            return false;
         if (version < 13 &&
             ((bend.tools && bend.tools->machineModel == core::MachineModel::DemoPressV3) ||
              (bend.catalogTools &&
@@ -306,9 +312,10 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
          version.toDouble() != 4.0 && version.toDouble() != 5.0 && version.toDouble() != 6.0 &&
          version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0 &&
          version.toDouble() != 10.0 && version.toDouble() != 11.0 && version.toDouble() != 12.0 &&
-         version.toDouble() != 13.0 && version.toDouble() != 14.0 && version.toDouble() != 15.0)) {
+         version.toDouble() != 13.0 && version.toDouble() != 14.0 && version.toDouble() != 15.0 &&
+         version.toDouble() != 16.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 15",
+                           "Supported project format versions are 1 through 16",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -433,7 +440,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 15},
+        {QStringLiteral("version"), 16},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},

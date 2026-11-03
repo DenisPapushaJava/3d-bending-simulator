@@ -14,8 +14,9 @@ struct BackgaugeSetup {
     double rMinMm = -125, rMaxMm = 125;
     double zMinMm = -1400, zMaxMm = 1400;
     double fingerWidthMm = 100.3;
-    double minimumSpacingMm = 110;
+    double minimumSpacingMm = 0; // Additional minimum between physical contact pads.
     double retractMm = 10;
+    bool allowOffsetContacts = true;
     bool operator==(const BackgaugeSetup &) const = default;
 };
 inline constexpr std::array<double, 3> backgaugeOffsetsMm{0, 28.8, 65.9};
@@ -36,8 +37,12 @@ struct BackgaugePlacement {
     double xMm, rMm;
     std::array<double, 2> zMm;
     double contactXmm, contactYmm;
+    std::array<double, 2> contactZmm;
+    bool operator==(const BackgaugePlacement &) const = default;
 };
 [[nodiscard]] bool validBackgaugeSetup(const BackgaugeSetup &) noexcept;
+// Necessary axial span only; not a sufficient contact or collision test.
+[[nodiscard]] double minimumGaugeSpanMm(const BackgaugeSetup &) noexcept;
 // Conservative contact pads contained in physical triangles. A miss is not a
 // proof of impossibility. Bounded shortlist; no 3D collision claim here.
 [[nodiscard]] std::vector<BackgaugePlacement>

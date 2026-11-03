@@ -44,6 +44,7 @@ const std::array<std::pair<const char *, double core::BackgaugeSetup::*>, 9> gau
 core::BackgaugeSetup gaugePreferences() {
     core::BackgaugeSetup s;
     auto settings = preferences();
+    s.allowOffsetContacts = settings->value("backgauge/allowOffsetContacts", true).toBool();
     for (const auto &[key, field] : gaugeFields)
         s.*field =
             settings->value(QStringLiteral("backgauge/") + QLatin1String(key), s.*field).toDouble();
@@ -319,7 +320,7 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
             QStringLiteral("X от:"),          QStringLiteral("X до:"),
             QStringLiteral("R от:"),          QStringLiteral("R до:"),
             QStringLiteral("Z от:"),          QStringLiteral("Z до:"),
-            QStringLiteral("Ширина пальца:"), QStringLiteral("Разнос центров не менее:"),
+            QStringLiteral("Ширина пальца:"), QStringLiteral("Разнос контактов не менее:"),
             QStringLiteral("Отвод по X:")};
         std::array<QDoubleSpinBox *, 9> inputs{};
         for (std::size_t i = 0; i < inputs.size(); ++i) {
@@ -333,11 +334,18 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
                                  QLatin1String(gaugeFields[i].first));
             form->addRow(labels[i], input);
         }
+        auto *shared = new QCheckBox(QStringLiteral("Контакты по всей ширине пальцев"), &dialog);
+        shared->setChecked(backgaugeSetup_.allowOffsetContacts);
+        shared->setToolTip(QStringLiteral(
+            "Контакт может находиться вне центра пальца. Оба пальца остаются в проверке "
+            "столкновений. 0 мм — без дополнительного минимума разноса контактов."));
+        form->addRow(shared);
         auto *buttons =
             new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
         form->addRow(buttons);
         const auto read = [&] {
             core::BackgaugeSetup s;
+            s.allowOffsetContacts = shared->isChecked();
             for (std::size_t i = 0; i < inputs.size(); ++i)
                 s.*gaugeFields[i].second = inputs[i]->value();
             return s;
@@ -347,12 +355,15 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         };
         for (auto *input : inputs)
             connect(input, &QDoubleSpinBox::valueChanged, &dialog, validate);
+        connect(shared, &QCheckBox::toggled, &dialog, validate);
         connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         validate();
         if (dialog.exec() == QDialog::Accepted && backgaugeSetup_ != read()) {
             backgaugeSetup_ = read();
             auto settings = preferences();
+            settings->setValue("backgauge/allowOffsetContacts",
+                               backgaugeSetup_.allowOffsetContacts);
             for (const auto &[key, field] : gaugeFields)
                 settings->setValue(QStringLiteral("backgauge/") + QLatin1String(key),
                                    backgaugeSetup_.*field);

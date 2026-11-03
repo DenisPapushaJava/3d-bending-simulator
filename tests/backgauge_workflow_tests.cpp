@@ -5,6 +5,7 @@
 #include "bending/cad/occt/MachineAssembly.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include "bending/project/ProjectFiles.h"
+#include "bending/project/ToolCatalog.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
 #include "bending/ui/Preferences.h"
@@ -14,10 +15,13 @@
 #include <QCheckBox>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPushButton>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QToolButton>
 #include <STEPControl_Writer.hxx>
 #include <chrono>
 #include <iostream>
@@ -153,6 +157,91 @@ int main(int argc, char **argv) {
         require(std::holds_alternative<application::RouteDraftPtr>(manual) &&
                     std::get<application::RouteDraftPtr>(manual)->visual->backgauge(),
                 "Manual transition omitted backgauge");
+        const auto starter = project::readStarterToolCatalog();
+        require(std::holds_alternative<core::ToolCatalog>(starter), "Starter tools unavailable");
+        const auto &catalog = std::get<core::ToolCatalog>(starter);
+        const auto preset = [&](const char *code) {
+            const auto found = std::find_if(catalog.begin(), catalog.end(),
+                                            [&](const auto &t) { return t.code == code; });
+            require(found != catalog.end(), "Starter tool missing");
+            auto copy = *found;
+            copy.segments.reset();
+            return copy;
+        };
+        const auto angle = application::resultDocument(
+            cad::StepImporter{}.load(path(QString::fromUtf8(BENDING_GAUGE_EXAMPLE)), {}, {}));
+        require(angle && angle->metadata().bendAnalysis.bends.size() == 1,
+                "Starter angle import failed");
+        core::ToolAssignment shortPair{preset("ST1405S"), preset("2067-1"), 3, 10, "", true};
+        shortPair.punchReversed = core::defaultPunchOrientation(shortPair.punch).value_or(false);
+        shortPair.machineModel = core::MachineModel::DemoPressV3;
+        shortPair.backgauge.emplace();
+        const auto &ab = angle->metadata().bendAnalysis.bends.front();
+        application::BendRouteRequest shortRoute;
+        shortRoute.automatic = shortRoute.withTools = true;
+        shortRoute.operations.push_back({"B01",
+                                         0,
+                                         {ab.angleRadians, ab.innerRadiusMm},
+                                         core::toolParameters(shortPair),
+                                         shortPair});
+        auto strictPair = shortPair;
+        strictPair.backgauge->minimumSpacingMm = 110;
+        strictPair.backgauge->allowOffsetContacts = false;
+        shortRoute.toolVariants = {{strictPair, {}}, {strictPair, {}}, {strictPair, {}}};
+        const auto spanStart = std::chrono::steady_clock::now();
+        const auto strictResult = builder->buildRoute(angle, shortRoute, {});
+        const auto *strictError = std::get_if<application::BendRouteError>(&strictResult);
+        require(strictError && strictError->invariantGaugeSpanMm &&
+                    *strictError->invariantGaugeSpanMm < 81 &&
+                    strictError->evaluatedOperations == 0 &&
+                    strictError->statistics.builtTransitions == 0 &&
+                    strictError->statistics.testedToolVariants == 1 &&
+                    strictError->statistics.gaugePrunedToolVariants == 2,
+                "Tool-independent span rejection did not prune repeated tool trials");
+        const auto spanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - spanStart)
+                                .count();
+        shortRoute.toolVariants.push_back({shortPair, {}});
+        const auto shortResult = builder->buildRoute(angle, shortRoute, {});
+        if (const auto *error = std::get_if<application::BendRouteError>(&shortResult))
+            throw std::runtime_error("Short starter angle: " + error->detail);
+        const auto shortPlan = std::get<application::BendRoutePtr>(shortResult);
+        require(shortPlan->selectedToolVariant == 3 &&
+                    shortPlan->statistics.gaugePrunedToolVariants == 2 &&
+                    shortPlan->steps.front().preview->backgauge() &&
+                    shortPlan->steps.front().preview->backgauge()->status ==
+                        application::BackgaugeStatus::Checked,
+                "New contact policy was incorrectly pruned by legacy spacing");
+        const auto &shortGauge = *shortPlan->steps.front().preview->backgauge()->placement;
+        require(shortGauge.contactZmm[1] - shortGauge.contactZmm[0] < 80 &&
+                    shortGauge.zMm[1] - shortGauge.zMm[0] >= shortPair.backgauge->fingerWidthMm,
+                "Short part lost physical contacts or overlapping fingers were accepted");
+        std::cout << "Invariant rejection of 3 pairs: " << spanMs
+                  << " ms, 0 cycles; short angle checked\n";
+        const auto trayPath = path(QString::fromUtf8(BENDING_GAUGE_EXAMPLE)).parent_path() /
+                              "tray-four-bends-2mm.step";
+        const auto tray = application::resultDocument(cad::StepImporter{}.load(trayPath, {}, {}));
+        require(tray && tray->metadata().bendAnalysis.bends.size() == 4, "Tray import failed");
+        auto nonparallel = shortRoute;
+        nonparallel.toolVariants.clear();
+        nonparallel.operations.clear();
+        nonparallel.maximumChecks = 1;
+        nonparallel.allowWorkpieceRotation = false;
+        auto hugeSpacing = shortPair;
+        hugeSpacing.backgauge->minimumSpacingMm = 5000;
+        const auto &trayBends = tray->metadata().bendAnalysis.bends;
+        for (std::size_t i = 0; i < trayBends.size(); ++i)
+            nonparallel.operations.push_back(
+                {"T" + std::to_string(i),
+                 i,
+                 {trayBends[i].angleRadians, trayBends[i].innerRadiusMm},
+                 core::toolParameters(hugeSpacing),
+                 hugeSpacing});
+        const auto nonparallelResult = builder->buildRoute(tray, nonparallel, {});
+        const auto *nonparallelError = std::get_if<application::BendRouteError>(&nonparallelResult);
+        require(nonparallelError && !nonparallelError->invariantGaugeSpanMm &&
+                    nonparallelError->evaluatedOperations == 1,
+                "Nonparallel bends were pruned by an unproven axial invariant");
         cad::PreviewFrame collision;
         collision.shape = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
         collision.tools = {BRepPrimAPI_MakeBox(gp_Pnt(100, 100, 100), 5, 5, 5).Shape(),
@@ -186,13 +275,48 @@ int main(int argc, char **argv) {
         require(file.open(QIODevice::ReadOnly), "Open JSON failed");
         auto json = QJsonDocument::fromJson(file.readAll()).object();
         file.close();
+        // Explicit v15 centre-contact policy remains strict when opened by v16.
+        require(session.setBendToolAssignment(0, strictPair), "Legacy assignment rejected");
+        require(!files->save(path(project), *doc, {}, session.bends(), {}), "Legacy save failed");
+        require(file.open(QIODevice::ReadOnly), "Legacy JSON open failed");
+        auto legacyJson = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+        legacyJson.insert("version", 15);
+        auto legacyBends = legacyJson.value("bends").toArray();
+        auto legacyBend = legacyBends[0].toObject();
+        auto legacyTools = legacyBend.value("catalogTools").toObject();
+        auto legacyGauge = legacyTools.value("backgauge").toObject();
+        legacyGauge.remove("allowOffsetContacts");
+        legacyTools.insert("backgauge", legacyGauge);
+        legacyBend.insert("catalogTools", legacyTools);
+        legacyBends[0] = legacyBend;
+        legacyJson.insert("bends", legacyBends);
+        require(file.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                "Legacy JSON rewrite failed");
+        file.write(QJsonDocument(legacyJson).toJson());
+        file.close();
+        const auto legacyLoaded = files->load(path(project), {}, {});
+        require(application::resultDocument(legacyLoaded) &&
+                    std::get<application::OpenedProject>(legacyLoaded).bends.front().catalogTools ==
+                        strictPair,
+                "v15 contact policy changed silently");
+        json.insert("version", 15);
+        require(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "Rewrite v15 failed");
+        file.write(QJsonDocument(json).toJson());
+        file.close();
+        require(!application::resultDocument(files->load(path(project), {}, {})),
+                "New contact policy accepted as v15");
         json.insert("version", 14);
         require(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "Rewrite JSON failed");
         file.write(QJsonDocument(json).toJson());
         file.close();
         require(!application::resultDocument(files->load(path(project), {}, {})),
                 "Legacy schema silently accepted backgauge scope");
-        ui::MainWindow window({"test", "test"}, files, files, builder);
+        // Match ToolLibrary's starter copy: length templates do not assert zero stock.
+        auto workshop = catalog;
+        for (auto &tool : workshop)
+            tool.segments.reset();
+        ui::MainWindow window({"test", "test"}, files, files, builder, workshop);
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
         window.show();
@@ -231,10 +355,33 @@ int main(int argc, char **argv) {
                     !controller.bendPreviewError()->diagnostic->punchRetraction(),
                 "UI lost the safe collision prefix or retained a success certificate");
         require(controller.setBendToolAssignment(0, pair), "UI assignment restore failed");
+        controller.closeDocument();
+        wait(controller);
+        window.openStep(QString::fromUtf8(BENDING_GAUGE_EXAMPLE));
+        wait(controller);
+        window.findChild<QToolButton *>("processStage1")->click();
+        wait(controller);
+        auto *recommend = window.findChild<QPushButton *>("recommendTools");
+        require(recommend && recommend->isEnabled(), "Checked tool search unavailable");
+        recommend->click();
+        wait(controller);
+        if (const auto error = controller.bendRouteError())
+            throw std::runtime_error("Starter angle tool selection: " + error->detail);
+        require(controller.bendRoute() && controller.bendRoute()->steps.size() == 1 &&
+                    controller.session().bend(0)->catalogTools &&
+                    controller.session().bend(0)->catalogTools->backgauge &&
+                    controller.session().bend(0)->catalogTools->backgauge->minimumSpacingMm == 0 &&
+                    controller.session().bend(0)->catalogTools->backgauge->allowOffsetContacts &&
+                    controller.bendRoute()->steps.front().preview->backgauge()->status ==
+                        application::BackgaugeStatus::Checked,
+                "Default UI tool selection did not check the short starter angle with gauges");
         if (argc > 1 && std::string_view(argv[1]) == "--render") {
             auto *viewer = window.findChild<viewer::ViewerWidget *>();
             require(viewer, "Viewer missing");
-            require(viewer->presentBendPreview(p, 0, controller.session().revision()).isEmpty(),
+            require(viewer
+                        ->presentBendPreview(controller.bendRoute()->steps.front().preview, 0,
+                                             controller.session().revision())
+                        .isEmpty(),
                     "Gauge presentation failed");
             viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
             viewer->fitAll();

@@ -1451,6 +1451,13 @@ buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget
             BRepBndLib::Add(frame.shape, envelope);
             preview->machineConflicts.push_back({});
             preview->frames.push_back(std::move(frame));
+            if (i == 0 && intervals > 0 && preview->setup && preview->setup->tools.backgauge)
+                if (const auto issue = backgaugeContactIssue(
+                        preview->frames.front(), *preview->setup->tools.backgauge,
+                        model.thicknessMm, preview->setup->tools.lengthMm / 2,
+                        withMotion ? preview->setup->tools.backgauge->retractMm : 0,
+                        preview->filledCutouts, analysis.lengthToleranceMm, stop))
+                    return BendPreviewError{BendPreviewErrorCode::BackgaugeUnavailable, *issue};
         }
         if (stop.stop_requested()) {
             return cancelled();

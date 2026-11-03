@@ -1,3 +1,4 @@
+#include "Backgauge.h"
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "FlatPatternDisplay.h"
@@ -32,11 +33,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <list>
 #include <map>
 #include <mutex>
 #include <numbers>
 #include <set>
+#include <sstream>
 #include <tuple>
 #include <unordered_map>
 
@@ -786,6 +789,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             BendRouteStatistics totals;
             std::size_t attempts = 0;
             BendRouteError last{BendRouteErrorCode::NoRoute, "No checked tooling variant passed"};
+            std::optional<double> invariantGaugeSpan;
             const auto add = [&](const BendRouteStatistics &s) {
                 totals.builtStates += s.builtStates;
                 totals.reusedStates += s.reusedStates;
@@ -795,6 +799,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.reorderedStates += s.reorderedStates;
                 totals.reusedFlatPattern |= s.reusedFlatPattern;
                 totals.usedProfilePriority |= s.usedProfilePriority;
+                totals.gaugePrunedToolVariants += s.gaugePrunedToolVariants;
             };
             for (std::size_t choice = 0; choice < request.toolVariants.size(); ++choice) {
                 cancelled(stop);
@@ -829,6 +834,16 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     };
                 trial.maximumChecks = request.maximumChecks - attempts;
                 trial.maximumTimeMs = request.maximumTimeMs - static_cast<unsigned>(spent);
+                if (invariantGaugeSpan &&
+                    std::any_of(trial.operations.begin(), trial.operations.end(),
+                                [&](const auto &op) {
+                                    return op.tools && op.tools->backgauge &&
+                                           core::minimumGaugeSpanMm(*op.tools->backgauge) >
+                                               *invariantGaugeSpan + analysis.lengthToleranceMm * 4;
+                                })) {
+                    ++totals.gaugePrunedToolVariants;
+                    continue;
+                }
                 ++totals.testedToolVariants;
                 auto result = buildRoute(document, std::move(trial), stop);
                 if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
@@ -841,6 +856,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     return BendRoutePtr(std::move(accepted));
                 }
                 last = std::get<BendRouteError>(std::move(result));
+                if (last.invariantGaugeSpanMm)
+                    invariantGaugeSpan = last.invariantGaugeSpanMm;
                 attempts += last.evaluatedOperations;
                 add(last.statistics);
                 // An incomplete trial is never a rejected tool. Keep its exact cached
@@ -850,6 +867,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             }
             last.evaluatedOperations = attempts;
             last.statistics = totals;
+            last.invariantGaugeSpanMm = invariantGaugeSpan;
             return last;
         }
         std::set<std::size_t> indices;
@@ -884,6 +902,28 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                         BendPreviewErrorCode::ToolTooShort,
                         lengths};
             }
+        }
+        if (request.withTools &&
+            std::any_of(request.operations.begin(), request.operations.end(), [](const auto &op) {
+                return op.tools && op.tools->backgauge &&
+                       core::minimumGaugeSpanMm(*op.tools->backgauge) > 0;
+            })) {
+            if (const auto span = backgaugeInvariantSpan(*native, stop))
+                for (const auto &op : request.operations)
+                    if (op.tools && op.tools->backgauge &&
+                        core::minimumGaugeSpanMm(*op.tools->backgauge) >
+                            *span + analysis.lengthToleranceMm * 4) {
+                        std::ostringstream reason;
+                        reason << std::setprecision(6) << "Для контактов упора доступно не более "
+                               << *span << " мм; текущая схема базирования требует "
+                               << core::minimumGaugeSpanMm(*op.tools->backgauge)
+                               << " мм. Проверьте настройки упора.";
+                        BendRouteError failure{BendRouteErrorCode::NoRoute, reason.str(),
+                                               op.bendIndex, 0,
+                                               BendPreviewErrorCode::BackgaugeUnavailable};
+                        failure.invariantGaugeSpanMm = span;
+                        return failure;
+                    }
         }
         std::shared_ptr<RouteCache> work;
         if (request.reuseCalculations) {

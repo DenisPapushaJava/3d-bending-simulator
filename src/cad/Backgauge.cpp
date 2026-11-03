@@ -2,21 +2,26 @@
 #include "CollisionHighlight.h"
 #include "CollisionReuse.h"
 #include "GeometryCacheInternal.h"
+#include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/MachineAssembly.h"
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <algorithm>
 #include <cmath>
+#include <gp_Ax3.hxx>
 #include <stdexcept>
 
 namespace bending::cad {
@@ -87,7 +92,7 @@ Skin contactSkin(const PreviewFrame &frame, bool filled, double thickness, std::
 }
 // Reject a contact inside a closed cutout: its rearward ray reaches material.
 bool exposed(const Skin &skin, const core::BackgaugePlacement &p, double tolerance) {
-    for (const auto z : p.zMm)
+    for (const auto z : p.contactZmm)
         for (const auto &t : skin.triangles) {
             const double ay = t[1].Y() - t[0].Y(), az = t[1].Z() - t[0].Z();
             const double by = t[2].Y() - t[0].Y(), bz = t[2].Z() - t[0].Z();
@@ -171,6 +176,50 @@ PreviewFrame checkingFrame(const PreviewFrame &source) {
     return frame;
 }
 } // namespace
+std::optional<double> backgaugeInvariantSpan(const CadDocument &doc, std::stop_token stop) {
+    const auto &bends = OcctDocumentAccess::simulationBends(doc).bends;
+    if (bends.empty())
+        return {};
+    const auto axis = [](const auto &b) {
+        return gp_Vec(gp_Pnt(b.axisStart.x, b.axisStart.y, b.axisStart.z),
+                      gp_Pnt(b.axisEnd.x, b.axisEnd.y, b.axisEnd.z));
+    };
+    auto direction = axis(bends.front());
+    if (direction.SquareMagnitude() < 1.e-12)
+        return {};
+    direction.Normalize();
+    for (const auto &b : bends) {
+        cancelled(stop);
+        auto next = axis(b);
+        if (next.SquareMagnitude() < 1.e-12 ||
+            direction.Crossed(next.Normalized()).Magnitude() > 1.e-12)
+            return {}; // Other bends can change projection along this axis.
+    }
+    gp_Trsf basis;
+    basis.SetTransformation(gp_Ax3(gp_Pnt(), gp_Dir(direction)));
+    const auto projected =
+        BRepBuilderAPI_Transform(OcctDocumentAccess::shape(doc), basis, false).Shape();
+    Bnd_Box bounds;
+    BRepBndLib::AddOptimal(projected, bounds, false, true);
+    cancelled(stop);
+    if (bounds.IsVoid() || bounds.IsOpen())
+        return {};
+    return bounds.CornerMax().Z() - bounds.CornerMin().Z();
+}
+std::optional<std::string> backgaugeContactIssue(const PreviewFrame &frame,
+                                                 const core::BackgaugeSetup &setup,
+                                                 double thickness, double centre, double withdrawal,
+                                                 bool filled, double tolerance,
+                                                 std::stop_token stop) {
+    const auto skin = contactSkin(frame, filled, thickness, stop);
+    const auto candidates = core::backgaugeCandidates(skin.patches, setup, thickness, centre, stop);
+    cancelled(stop);
+    for (const auto &p : candidates)
+        if (p.xMm + withdrawal <= setup.xMaxMm && exposed(skin, p, tolerance))
+            return {};
+    return "В начальном положении не найдены два физических контакта упора "
+           "в заданных пределах X/R/Z с учётом отвода. Проверьте настройки упора.";
+}
 void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token stop) {
     if (!preview.setup || !preview.setup->tools.backgauge || preview.frames.empty())
         return;
@@ -289,7 +338,7 @@ void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token sto
         if (pose.source < oldToolConflicts.size())
             preview.frameConflicts[i] = oldToolConflicts[pose.source];
         if (i == 0)
-            for (const auto z : placement->zMm)
+            for (const auto z : placement->contactZmm)
                 frame.backgaugeContacts.emplace_back(placement->contactXmm, placement->contactYmm,
                                                      z);
         const auto &bodies = chosenBodies[static_cast<std::size_t>(pose.fraction * 4)];
@@ -319,9 +368,11 @@ void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token sto
     preview.envelope.minimum.y = std::min(preview.envelope.minimum.y, placement->rMm - 50);
     preview.envelope.maximum.y = std::max(preview.envelope.maximum.y, placement->rMm + 25.5);
     preview.envelope.minimum.z =
-        std::min(preview.envelope.minimum.z, placement->zMm[0] - setup.fingerWidthMm / 2);
+        std::min(preview.envelope.minimum.z,
+                 std::min(placement->zMm[0], placement->zMm[1]) - setup.fingerWidthMm / 2);
     preview.envelope.maximum.z =
-        std::max(preview.envelope.maximum.z, placement->zMm[1] + setup.fingerWidthMm / 2);
+        std::max(preview.envelope.maximum.z,
+                 std::max(placement->zMm[0], placement->zMm[1]) + setup.fingerWidthMm / 2);
 }
 void truncateCollisionPreview(CadPreview &preview, std::size_t failed) {
     preview.frames.resize(failed + 1);

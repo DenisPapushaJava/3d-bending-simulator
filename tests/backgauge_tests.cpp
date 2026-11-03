@@ -1,4 +1,5 @@
 #include "bending/core/Backgauge.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -23,8 +24,8 @@ int main() {
         invalid.rMaxMm = std::numeric_limits<double>::quiet_NaN();
         require(!validBackgaugeSetup(invalid), "NaN range accepted");
         invalid = s;
-        invalid.minimumSpacingMm = 1;
-        require(!validBackgaugeSetup(invalid), "Overlapping fingers accepted");
+        invalid.minimumSpacingMm = -1;
+        require(!validBackgaugeSetup(invalid), "Negative contact spacing accepted");
         invalid = s;
         invalid.retractMm = -1;
         require(!validBackgaugeSetup(invalid), "Negative withdrawal accepted");
@@ -32,7 +33,7 @@ int main() {
         rectangle(patches, 80, 0, 2, 0, 300);
         auto candidates = backgaugeCandidates(patches, s, 2, 150);
         require(!candidates.empty() && candidates.front().level == 1 &&
-                    candidates.front().zMm[1] - candidates.front().zMm[0] >= 110,
+                    candidates.front().zMm[1] - candidates.front().zMm[0] >= s.fingerWidthMm,
                 "Straight-edge contacts missing");
         require(std::abs(candidates.front().xMm - 51.2) < 1.e-6,
                 "Step offset did not affect shared X");
@@ -45,14 +46,32 @@ int main() {
         s = {};
         std::vector<GaugeContactPatch> narrow;
         rectangle(narrow, 80, 0, 2, 0, 80);
-        require(backgaugeCandidates(narrow, s, 2, 40).empty(), "One finger became two contacts");
+        candidates = backgaugeCandidates(narrow, s, 2, 40);
+        require(!candidates.empty() && std::abs(candidates.front().zMm[1] -
+                                                candidates.front().zMm[0]) >= s.fingerWidthMm,
+                "Short edge did not separate contacts from non-overlapping finger centres");
+        require(candidates.front().contactZmm[1] > candidates.front().contactZmm[0] &&
+                    candidates.front().contactZmm[1] - candidates.front().contactZmm[0] <
+                        s.fingerWidthMm,
+                "Two distinct off-centre contacts missing");
+        for (const auto &p : candidates)
+            for (std::size_t i = 0; i < 2; ++i)
+                require(std::abs(p.contactZmm[i] - p.zMm[i]) + 1 <= s.fingerWidthMm / 2 &&
+                            p.contactZmm[i] >= 1 && p.contactZmm[i] <= 79,
+                        "Contact pad left its physical finger face or source edge");
+        s.minimumSpacingMm = 110;
+        require(backgaugeCandidates(narrow, s, 2, 40).empty(), "Explicit contact spacing ignored");
+        s.minimumSpacingMm = 0;
+        s.allowOffsetContacts = false;
+        require(backgaugeCandidates(narrow, s, 2, 40).empty(), "Strict two-finger policy ignored");
+        s = {};
         std::vector<GaugeContactPatch> cutout;
         rectangle(cutout, 80, 0, 2, 0, 60);
         rectangle(cutout, 80, 0, 2, 240, 300);
         candidates = backgaugeCandidates(cutout, s, 2, 150);
         require(!candidates.empty(), "Separated physical patches not supported");
         for (const auto &p : candidates)
-            for (const auto z : p.zMm)
+            for (const auto z : p.contactZmm)
                 require(z < 60 || z > 240, "Contact placed into a cutout");
         rectangle(patches, 60, 10, 40, 0, 300, GaugeReferenceKind::RightAngleWall);
         require(backgaugeCandidates(patches, s, 2, 150).front().kind ==

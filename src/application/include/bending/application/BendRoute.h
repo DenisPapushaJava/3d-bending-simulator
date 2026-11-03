@@ -63,6 +63,7 @@ struct BendRouteStatistics {
     std::size_t reorderedStates = 0;
     bool usedProfilePriority = false;
     std::size_t testedToolVariants = 0;
+    std::size_t gaugePrunedToolVariants = 0; // Proven axial-span rejection; no contact cycle.
 };
 struct BendRouteStep {
     std::string id;
@@ -128,6 +129,7 @@ struct BendRouteError {
     std::optional<BendPreviewErrorCode> operationError = {};
     std::optional<BendRouteToolLengthIssue> toolLengths = {};
     BendRouteStatistics statistics = {};
+    std::optional<double> invariantGaugeSpanMm = {}; // Proven common-axis upper bound only.
 };
 using BendRouteResult = std::variant<BendRoutePtr, BendRouteError>;
 // Display-only prefix. Its visual has unverifiedDraft()==true and cannot certify a route.

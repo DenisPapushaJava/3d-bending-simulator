@@ -1883,7 +1883,12 @@ class MainWindow::Impl {
                                          "инструмент вручную.")
                         : QStringLiteral(
                               "Проверенный вариант не найден. Доступен быстрый и ручной выбор.");
-                checkedToolDialog->finish(resumable);
+                checkedToolDialog->finish(
+                    resumable,
+                    routeError && routeError->operationError ==
+                                      application::BendPreviewErrorCode::BackgaugeUnavailable
+                        ? QString::fromStdString(routeError->detail)
+                        : QString{});
             }
             toolSelection->setCheckedSearchState(false, status, resumable);
         } else if (checkedToolJob) {
