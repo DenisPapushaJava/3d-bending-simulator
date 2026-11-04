@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "EndSupportFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
@@ -48,7 +49,7 @@ int main(int argc, char **argv) {
         const auto path = temporary.path() + "/joint.step";
         // A third bend supplies another step so a whole grouped operation can move.
         const auto source =
-            tools ? fixtures::jointBend()
+            tools ? end_support_fixture::joint()
                   : BRepAlgoAPI_Cut(fixtures::channel(120),
                                     BRepPrimAPI_MakeBox(gp_Pnt(-20, -5, 45), 25, 60, 20).Shape())
                         .Shape();
@@ -77,6 +78,9 @@ int main(int argc, char **argv) {
         std::vector<application::BendToolUpdate> updates;
         application::BendRouteRequest request;
         request.withTools = tools;
+        request.allowPartialEndSupport = tools;
+        if (tools)
+            request.maximumEndSupportLossMm = 3;
         request.automatic = true;
         request.maximumChecks = 64;
         for (const auto index : controller.session().orderedBends()) {
@@ -93,6 +97,10 @@ int main(int argc, char **argv) {
         require(route && route->steps.size() == steps &&
                     controller.session().orderedBends().size() == zones,
                 "Controller did not accept a complete grouped route");
+        if (tools)
+            require(route->partialEndSupport &&
+                        route->steps.front().preview->endSupportIntervals().size() == 2,
+                    "Controller dropped a joint member's partial-support report");
         window.findChild<QToolButton *>("processStage2")->click();
         wait(controller);
         window.findChild<QComboBox *>("bendRouteMode")->setCurrentIndex(tools ? 1 : 0);
@@ -120,6 +128,11 @@ int main(int argc, char **argv) {
         wait(controller);
         require(window.findChild<QLabel *>("bendRouteStatus")->text().contains(" + B"),
                 "Grouped step report is ambiguous");
+        if (tools)
+            require(window.findChild<QLabel *>("bendRouteStatus")
+                            ->text()
+                            .count(QStringLiteral("Материал под опорой"), Qt::CaseInsensitive) == 2,
+                    "Joint support warning collapsed two real intervals");
         if (const auto output = qEnvironmentVariable("BENDING_JOINT_SNAPSHOT"); !output.isEmpty()) {
             auto *view = window.findChild<viewer::ViewerWidget *>();
             require(view && view->isVisible() && view->isReady(),

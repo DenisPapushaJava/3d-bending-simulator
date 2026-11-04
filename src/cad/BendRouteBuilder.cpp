@@ -1317,13 +1317,16 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             Mask formed = 0;
             for (const auto &step : result->steps) {
                 formed |= Mask{1} << step.bendIndex;
+                for (const auto &member : step.additionalBends)
+                    formed |= Mask{1} << member.bendIndex;
                 const auto &op = search.inputs[step.bendIndex]->operation;
-                search.remember(search.key(formed, op, step.fixedSecond), step.preview);
+                search.remember(search.key(formed, op, step.fixedSecond, step.additionalBends),
+                                step.preview);
             }
         }
         result->partialEndSupport =
             std::any_of(result->steps.begin(), result->steps.end(),
-                        [](const auto &step) { return step.preview->partialEndSupport(); });
+                        [](const auto &step) { return step.preview->hasPartialEndSupport(); });
         return BendRoutePtr(result);
     } catch (const BendRouteError &e) {
         if (e.code == BendRouteErrorCode::Cancelled)

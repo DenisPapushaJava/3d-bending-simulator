@@ -6,6 +6,19 @@
 #include <filesystem>
 #include <stdexcept>
 namespace end_support_fixture {
+inline TopoDS_Shape joint(double firstStart = .46, double firstEnd = 3, double secondStart = 1.25,
+                          double secondEnd = 2.5) {
+    auto shape = bending::fixtures::jointBend();
+    for (const auto &[from, to] :
+         std::array<std::pair<double, double>, 4>{{{-1, firstStart},
+                                                   {45 - firstEnd, 46},
+                                                   {64, 65 + secondStart},
+                                                   {120 - secondEnd, 121}}})
+        shape = BRepAlgoAPI_Cut(shape,
+                                BRepPrimAPI_MakeBox(gp_Pnt(-31, 3, from), 28, 4, to - from).Shape())
+                    .Shape();
+    return shape;
+}
 inline void write(const std::filesystem::path &path, double endLoss, bool middle = false,
                   double otherEndLoss = 0) {
     auto shape = bending::fixtures::bentStrip(4, 4, std::numbers::pi / 2, 50, true, 27);

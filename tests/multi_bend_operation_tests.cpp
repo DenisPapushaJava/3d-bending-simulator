@@ -1,5 +1,7 @@
 #include "BendFixtures.h"
 #include "BendOperation.h"
+#include "CompositeBendFixtures.h"
+#include "EndSupportFixtures.h"
 #include "JointBends.h"
 #include "RouteGeometry.h"
 #include "ToolFixtures.h"
@@ -148,6 +150,102 @@ void checkJointOperation(const std::filesystem::path &path) {
                 checkSkin(frame);
         }
     }
+    const auto partial = import(end_support_fixture::joint(), "joint-partial.step");
+    require(partial->metadata().bendAnalysis.bends.size() == 2,
+            "End cuts changed the joint zone identities");
+    for (const bool reversed : {false, true}) {
+        const auto result =
+            cad::buildBendOperation(partial, 0, target, reversed, {}, parameters, true, assignment,
+                                    true, 3, {}, true, nullptr, members);
+        if (const auto *failure = std::get_if<application::BendPreviewError>(&result))
+            throw std::runtime_error("Partial joint operation: " + failure->detail);
+        const auto preview = std::get<application::BendPreviewPtr>(result);
+        require(preview->activeBendCount() == 2 && preview->hasPartialEndSupport() &&
+                    preview->frameCount() == 61 && preview->punchRetraction() &&
+                    application::validEndSupportIntervals(*preview, 3, .001),
+                "Joint partial support lost its complete checked scope");
+        const auto intervals = preview->endSupportIntervals();
+        require(intervals.size() == 2 &&
+                    intervals[0].fromMm + intervals[0].material.bendLengthMm + 19.99 <
+                        intervals[1].fromMm,
+                "Joint support filled the relief between real intervals");
+        std::vector<double> losses;
+        for (const auto &interval : intervals) {
+            losses.push_back(interval.material.supportedFromMm);
+            losses.push_back(interval.material.bendLengthMm - interval.material.supportedToMm);
+        }
+        std::sort(losses.begin(), losses.end());
+        for (std::size_t i = 0; i < losses.size(); ++i)
+            require(std::abs(losses[i] - std::array{.46, 1.25, 2.5, 3.}[i]) < .001,
+                    "A member's end loss was replaced by a common envelope loss");
+    }
+    const auto excessive =
+        import(end_support_fixture::joint(.46, 3, 3.2, 2.5), "joint-excessive.step");
+    for (const auto &input : {partial, excessive}) {
+        const auto result = cad::buildBendOperation(
+            input, 0, target, false, {}, parameters, true, assignment, input != partial,
+            input == partial ? 0 : 3, {}, true, nullptr, members);
+        const auto *failure = std::get_if<application::BendPreviewError>(&result);
+        require(failure && failure->code ==
+                               (input == partial
+                                    ? application::BendPreviewErrorCode::SupportNotProven
+                                    : application::BendPreviewErrorCode::EndSupportLimitExceeded),
+                "Joint end policy ignored strict zero or an excessive member");
+    }
+    application::BendRouteRequest partialRequest;
+    partialRequest.withTools = partialRequest.allowPartialEndSupport = true;
+    partialRequest.maximumEndSupportLossMm = 3;
+    for (std::size_t i = 0; i < 2; ++i)
+        partialRequest.operations.push_back({"partial-" + std::to_string(i), i, target,
+                                             core::toolParameters(assignment), assignment});
+    cad::SingleBendPreviewBuilder partialBuilder;
+    for (const bool automatic : {true, false}) {
+        partialRequest.automatic = automatic;
+        const auto result = partialBuilder.buildRoute(partial, partialRequest, {});
+        if (const auto *failure = std::get_if<application::BendRouteError>(&result))
+            throw std::runtime_error("Partial joint route: " + failure->detail);
+        const auto route = std::get<application::BendRoutePtr>(result);
+        require(route->partialEndSupport && route->steps.size() == 1 &&
+                    route->steps.front().preview->endSupportIntervals().size() == 2,
+                "Manual/automatic route collapsed joint support reports");
+    }
+    partialRequest.maximumEndSupportLossMm = 2;
+    require(std::holds_alternative<application::BendRouteError>(
+                partialBuilder.buildRoute(partial, partialRequest, {})),
+            "Joint cache ignored a tightened end limit");
+    partialRequest.maximumEndSupportLossMm = 3;
+    require(std::holds_alternative<application::BendRoutePtr>(
+                partialBuilder.buildRoute(partial, partialRequest, {})),
+            "Joint cache retained a refusal after restoring the limit");
+    // Composite radial end with a slope and straight cap, identical through thickness.
+    const auto trimmed =
+        import(BRepAlgoAPI_Cut(composite_fixture::part(120),
+                               BRepPrimAPI_MakeBox(gp_Pnt(-40, -5, 45), 55, 20, 20).Shape())
+                   .Shape(),
+               "joint-trimmed.step");
+    require(trimmed->metadata().bendAnalysis.bends.size() == 2 &&
+                std::any_of(trimmed->metadata().bendAnalysis.bends.begin(),
+                            trimmed->metadata().bendAnalysis.bends.end(),
+                            [](const auto &zone) { return zone.trimmedEnds; }),
+            "Trimmed joint fixture lost its real cylindrical cut");
+    const auto trimmedResult =
+        cad::buildBendOperation(trimmed, 0, target, false, {}, parameters, true, assignment, true,
+                                3, {}, true, nullptr, members);
+    if (const auto *failure = std::get_if<application::BendPreviewError>(&trimmedResult))
+        throw std::runtime_error("Trimmed joint support: " + failure->detail);
+    const auto trimmedPreview = std::get<application::BendPreviewPtr>(trimmedResult);
+    require(trimmedPreview->hasPartialEndSupport() &&
+                application::validEndSupportIntervals(*trimmedPreview, 3, .001),
+            "A true trimmed joint did not retain its bounded support report");
+    for (std::size_t f = 0; f < trimmedPreview->frameCount(); ++f) {
+        const auto &frame = cad::OcctPreviewAccess::frame(*trimmedPreview, f);
+        double material = 0;
+        for (const auto &region : frame.regions)
+            material += volume(region);
+        require(BRepCheck_Analyzer(frame.shape).IsValid() &&
+                    std::abs(material - trimmed->metadata().volumeMm3) < .001,
+                "Trimmed joint support changed the source end contour or material");
+    }
     auto shortTools = parameters;
     shortTools.lengthMm = 110;
     const auto shortAssignment = tool_fixture::explicitPair(shortTools);
@@ -213,12 +311,14 @@ void checkJointOperation(const std::filesystem::path &path) {
     require(core::hasCompleteDrawingToolGeometry(blocked),
             "Blocked joint fixture lost its DXF profile");
     const auto blockedResult =
-        cad::buildBendOperation(doc, 0, target, false, {}, core::toolParameters(blocked), true,
-                                blocked, false, 3, {}, true, nullptr, members);
+        cad::buildBendOperation(partial, 0, target, false, {}, core::toolParameters(blocked), true,
+                                blocked, true, 3, {}, true, nullptr, members);
     const auto *blockedError = std::get_if<application::BendPreviewError>(&blockedResult);
     require(blockedError &&
                 blockedError->code == application::BendPreviewErrorCode::ToolIntersection &&
                 blockedError->diagnostic && blockedError->diagnostic->activeBendCount() == 2 &&
+                blockedError->diagnostic->hasPartialEndSupport() &&
+                blockedError->diagnostic->endSupportIntervals().size() == 2 &&
                 blockedError->diagnostic->collision(),
             "Joint operation bypassed a real tool collision or lost the stopping diagnostic");
     application::BendRouteRequest request;
@@ -256,6 +356,20 @@ void checkJointOperation(const std::filesystem::path &path) {
     require(std::holds_alternative<application::BendRoutePtr>(together) &&
                 std::get<application::BendRoutePtr>(together)->steps.size() == 1,
             "Joint and single transition cache keys were confused");
+    // Persisting the complete grouped path must not overwrite a single-zone key.
+    request.allowJointBends = false;
+    const auto singlesAgain = builder.buildRoute(doc, request, {});
+    require(std::holds_alternative<application::BendRoutePtr>(singlesAgain),
+            "Grouped path retention poisoned a later separate route");
+    const auto separateRoute = std::get<application::BendRoutePtr>(singlesAgain);
+    require(separateRoute->steps.size() == 2 &&
+                std::all_of(separateRoute->steps.begin(), separateRoute->steps.end(),
+                            [](const auto &step) {
+                                return step.additionalBends.empty() &&
+                                       step.preview->activeBendCount() == 1;
+                            }),
+            "A single-zone cache key returned a grouped preview");
+    request.allowJointBends = true;
     auto scoped = request;
     scoped.withTools = scoped.automatic = true;
     auto third = scoped.operations.front();

@@ -650,11 +650,17 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                    : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
                                        : QStringLiteral("Движение без инструмента. ");
         if (selected_ > 0)
-            if (const auto *support = route_->steps[operation()].preview->partialEndSupport())
-                message += QStringLiteral("Материал под опорой: %1–%2 из %3 мм. ")
-                               .arg(support->supportedFromMm, 0, 'f', 2)
-                               .arg(support->supportedToMm, 0, 'f', 2)
-                               .arg(support->bendLengthMm, 0, 'f', 2);
+            for (const auto &interval : route_->steps[operation()].preview->endSupportIntervals()) {
+                const auto &support = interval.material;
+                if (support.supportedFromMm == 0 && support.supportedToMm == support.bendLengthMm)
+                    continue;
+                message += QStringLiteral("Участок %1–%2 мм: материал под опорой %3–%4 из %5 мм. ")
+                               .arg(interval.fromMm, 0, 'f', 2)
+                               .arg(interval.fromMm + support.bendLengthMm, 0, 'f', 2)
+                               .arg(support.supportedFromMm, 0, 'f', 2)
+                               .arg(support.supportedToMm, 0, 'f', 2)
+                               .arg(support.bendLengthMm, 0, 'f', 2);
+            }
         if (selected_ > 0 && route_->withTools) {
             const auto *entry = session.bend(route_->steps[operation()].bendIndex);
             if (entry && entry->catalogTools)

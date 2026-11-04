@@ -837,9 +837,9 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                             if (*preview)
                                 for (std::size_t f = 0; f < (*preview)->frameCount(); ++f)
                                     matchingMode &= !(*preview)->machineCollisionAtFrame(f);
-                            if (*preview && (*preview)->partialEndSupport())
-                                matchingMode &= withinEndSupportLimit(
-                                    *(*preview)->partialEndSupport(), maximumEndSupportLossMm,
+                            if (*preview)
+                                matchingMode &= validEndSupportIntervals(
+                                    **preview, maximumEndSupportLossMm,
                                     state->session.document()
                                                 ->metadata()
                                                 .bendAnalysis.lengthToleranceMm *
@@ -876,16 +876,13 @@ bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixe
                                                    (!error.diagnostic->collisionAtFrame(f) &&
                                                     !error.diagnostic->machineCollisionAtFrame(f)));
                                 }
-                                const bool matchingSupport =
-                                    !error.diagnostic->partialEndSupport() ||
-                                    withinEndSupportLimit(
-                                        *error.diagnostic->partialEndSupport(),
-                                        maximumEndSupportLossMm,
-                                        state->session.document()
-                                                    ->metadata()
-                                                    .bendAnalysis.lengthToleranceMm *
-                                                4 +
-                                            1.e-8);
+                                const bool matchingSupport = validEndSupportIntervals(
+                                    *error.diagnostic, maximumEndSupportLossMm,
+                                    state->session.document()
+                                                ->metadata()
+                                                .bendAnalysis.lengthToleranceMm *
+                                            4 +
+                                        1.e-8);
                                 if (!collision || !prefix || !matchingSupport ||
                                     error.diagnostic->workpieceReversed() != workpieceReversed ||
                                     !error.diagnostic->toolSetup() ||
@@ -1192,30 +1189,17 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                                   ? p->pressMotion() && p->punchRetraction()
                                                   : !p->toolSetup());
                                     if (p && found != request.operations.end()) {
-                                        if (const auto *support = p->partialEndSupport()) {
-                                            partialEndSupport = true;
+                                        partialEndSupport |= p->hasPartialEndSupport();
+                                        valid &= validEndSupportIntervals(
+                                            *p, request.maximumEndSupportLossMm,
+                                            s->session.document()
+                                                        ->metadata()
+                                                        .bendAnalysis.lengthToleranceMm *
+                                                    4 +
+                                                1.e-8);
+                                        if (p->hasPartialEndSupport())
                                             valid &=
-                                                request.withTools &&
-                                                request.allowPartialEndSupport &&
-                                                std::isfinite(support->bendLengthMm) &&
-                                                std::isfinite(support->supportedFromMm) &&
-                                                std::isfinite(support->supportedToMm) &&
-                                                support->bendLengthMm == p->model().widthMm &&
-                                                support->supportedFromMm >= 0 &&
-                                                support->supportedFromMm <
-                                                    support->bendLengthMm / 2 &&
-                                                support->supportedToMm >
-                                                    support->bendLengthMm / 2 &&
-                                                support->supportedToMm <= support->bendLengthMm;
-                                            if (request.maximumEndSupportLossMm)
-                                                valid &= withinEndSupportLimit(
-                                                    *support, *request.maximumEndSupportLossMm,
-                                                    s->session.document()
-                                                                ->metadata()
-                                                                .bendAnalysis.lengthToleranceMm *
-                                                            4 +
-                                                        1.e-8);
-                                        }
+                                                request.withTools && request.allowPartialEndSupport;
                                         const bool drawingPunch =
                                             request.withTools && found->assignment &&
                                             found->assignment->useDrawingGeometry &&

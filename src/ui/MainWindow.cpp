@@ -1127,7 +1127,7 @@ class MainWindow::Impl {
             : controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
             : controller->bendRoute() && controller->bendRoute()->partialEndSupport
                 ? QStringLiteral("Просмотр: неполная опора")
-            : scenePreview() && scenePreview()->partialEndSupport()
+            : scenePreview() && scenePreview()->hasPartialEndSupport()
                 ? QStringLiteral("Просмотр: неполная опора")
             : controller->bendRoute()
                 ? QStringLiteral("Порядок: %1 шагов").arg(controller->bendRoute()->steps.size())
@@ -1356,7 +1356,7 @@ class MainWindow::Impl {
             preview ? preview->machineCollisionAtFrame(frame) : std::nullopt;
         const bool collision = preview && (preview->collision() ||
                                            preview->collisionAtFrame(frame) || machineCollision);
-        const bool partial = (preview && preview->partialEndSupport()) ||
+        const bool partial = (preview && preview->hasPartialEndSupport()) ||
                              (viewingRoute && route && route->partialEndSupport);
         const bool preparing = controller->isPreparingDraft() || controller->isPreparingRoute() ||
                                controller->isPreparingPreview();
@@ -1406,13 +1406,21 @@ class MainWindow::Impl {
         else if (partial) {
             result = QStringLiteral("Просмотр с неполной опорой у торца.\n"
                                     "Пригодность к изготовлению не подтверждена.");
-            if (preview && preview->partialEndSupport()) {
-                const auto &s = *preview->partialEndSupport();
-                result += QStringLiteral("\nНехватка у торцов: %1 / %2 мм; допуск %3 мм на каждый.")
-                              .arg(s.supportedFromMm, 0, 'f', 2)
-                              .arg(s.bendLengthMm - s.supportedToMm, 0, 'f', 2)
-                              .arg(toolSelection->maximumEndSupportLossMm(), 0, 'f', 2);
-            }
+            if (preview)
+                for (const auto &interval : preview->endSupportIntervals()) {
+                    const auto &s = interval.material;
+                    if (s.supportedFromMm == 0 && s.supportedToMm == s.bendLengthMm)
+                        continue;
+                    if (preview->activeBendCount() > 1)
+                        result += QStringLiteral("\nУчасток %1–%2 мм:")
+                                      .arg(interval.fromMm, 0, 'f', 2)
+                                      .arg(interval.fromMm + s.bendLengthMm, 0, 'f', 2);
+                    result +=
+                        QStringLiteral("\nНехватка у торцов: %1 / %2 мм; допуск %3 мм на каждый.")
+                            .arg(s.supportedFromMm, 0, 'f', 2)
+                            .arg(s.bendLengthMm - s.supportedToMm, 0, 'f', 2)
+                            .arg(toolSelection->maximumEndSupportLossMm(), 0, 'f', 2);
+                }
         } else if (preview && preview->pressMotion())
             result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.")
                                    : QStringLiteral("Геометрическая проверка пройдена.")) +

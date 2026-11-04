@@ -109,6 +109,12 @@ struct BendEndSupport {
     double supportedFromMm;
     double supportedToMm;
 };
+// One real axial interval of an operation. Empty space between joint zones is
+// not material and must not be collapsed into a single central support strip.
+struct BendSupportInterval {
+    double fromMm;
+    BendEndSupport material;
+};
 [[nodiscard]] inline bool validEndSupportLimitMm(double limit) noexcept {
     return std::isfinite(limit) && limit >= 0;
 }

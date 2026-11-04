@@ -324,7 +324,9 @@ int main(int argc, char **argv) {
         if (sample) {
             if (route->partialEndSupport)
                 for (std::size_t i = 0; i < route->steps.size(); ++i)
-                    if (const auto *support = route->steps[i].preview->partialEndSupport()) {
+                    if (route->steps[i].preview->hasPartialEndSupport()) {
+                        const auto *support =
+                            &route->steps[i].preview->endSupportIntervals().front().material;
                         std::cout << "B" << route->steps[i].bendIndex + 1 << " support material "
                                   << support->supportedFromMm << ".." << support->supportedToMm
                                   << " / " << support->bendLengthMm << " mm\n";

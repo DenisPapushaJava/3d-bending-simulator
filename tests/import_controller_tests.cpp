@@ -263,8 +263,14 @@ void testSaveRace() {
 class TestPreview final : public SingleBendPreview {
   public:
     explicit TestPreview(bool tools = false, bool motion = false, bool certified = true,
-                         bending::core::MachineModel machine = bending::core::MachineModel::None)
-        : withTools_(tools), withMotion_(motion), certified_(certified), machine_(machine) {}
+                         bending::core::MachineModel machine = bending::core::MachineModel::None,
+                         bool support = true)
+        : withTools_(tools), withMotion_(motion), certified_(certified), machine_(machine),
+          support_(support) {}
+    std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
+        return withTools_ && support_ ? std::span<const BendSupportInterval>(intervals_)
+                                      : std::span<const BendSupportInterval>{};
+    }
     bending::core::MachineModel machineModel() const noexcept override {
         return machine_;
     }
@@ -295,6 +301,8 @@ class TestPreview final : public SingleBendPreview {
     bool withMotion_;
     bool certified_;
     bending::core::MachineModel machine_;
+    bool support_;
+    std::array<BendSupportInterval, 1> intervals_{{{0, {80, 0, 80}}}};
     bending::simulation::PressMotion motion_{};
     bending::simulation::PressState state_{};
     bending::simulation::PressState returned_{
@@ -313,7 +321,9 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
         }
-        return BendPreviewPtr(std::make_shared<TestPreview>(true, true, !omitRetraction.load()));
+        return BendPreviewPtr(std::make_shared<TestPreview>(true, true, !omitRetraction.load(),
+                                                            bending::core::MachineModel::None,
+                                                            !omitSupport.load()));
     }
     BendPreviewResult buildToolSetup(DocumentPtr document, std::size_t index,
                                      bending::core::BendTarget target, bending::core::PressTools,
@@ -326,7 +336,8 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
         return BendPreviewPtr(
             std::make_shared<TestPreview>(true, false, true,
                                           omitFloor ? bending::core::MachineModel::DemoPressV3
-                                                    : bending::core::MachineModel::None));
+                                                    : bending::core::MachineModel::None,
+                                          !omitSupport.load()));
     }
     BendPreviewResult build(DocumentPtr, std::size_t, bending::core::BendTarget, bool,
                             std::stop_token) const override {
@@ -357,6 +368,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     std::atomic<bool> fail{false};
     std::atomic<bool> omitRetraction{false};
     std::atomic<bool> omitFloor{false};
+    std::atomic<bool> omitSupport{false};
 };
 void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     const auto importer = std::make_shared<GatedImporter>();
@@ -412,6 +424,15 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
         require(!controller.bendPreview() && controller.bendPreviewError() &&
                     controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
                 "Normal snapshot accepted for reversed punch request");
+        prepare();
+        waitUntil(finished);
+        builder->omitSupport = true;
+        prepare();
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "Tool preview without its support-interval proof was accepted");
+        builder->omitSupport = false;
         prepare();
         waitUntil(finished);
     }

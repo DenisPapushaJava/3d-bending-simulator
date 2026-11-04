@@ -1080,6 +1080,7 @@ application::BendPreviewResult buildBendOperation(
                 supportModel.widthMm = to - from;
                 auto supportBasis = sourceBasis;
                 supportBasis.origin.Translate(sourceBasis.z * from);
+                BendEndSupport report{supportModel.widthMm, 0, supportModel.widthMm};
                 if (reach > analysis.lengthToleranceMm) {
                     auto supportSection = sourceSection;
                     const double length = reach + analysis.lengthToleranceMm / 2.0;
@@ -1158,10 +1159,6 @@ application::BendPreviewResult buildBendOperation(
                                 throw std::runtime_error("Cannot bound missing support material");
                         }
                     }
-                    if (partial && joint)
-                        return BendPreviewError{
-                            BendPreviewErrorCode::UnsupportedGeometry,
-                            "Partial end support of a joint operation is not yet supported"};
                     if (partial) {
                         // One common uninterrupted strip must contain the bend midpoint.
                         // This restricts a preview; it does not prove end support or stability.
@@ -1170,8 +1167,7 @@ application::BendPreviewResult buildBendOperation(
                             return BendPreviewError{
                                 BendPreviewErrorCode::SupportNotProven,
                                 "No common central support strip on both flanges"};
-                        const BendEndSupport report{supportModel.widthMm, supportedFrom,
-                                                    supportedTo};
+                        report = {supportModel.widthMm, supportedFrom, supportedTo};
                         if (maximumEndSupportLossMm &&
                             !withinEndSupportLimit(report, *maximumEndSupportLossMm,
                                                    axialMargin + 1.e-8)) {
@@ -1200,10 +1196,12 @@ application::BendPreviewResult buildBendOperation(
                                     BendPreviewErrorCode::SupportNotProven,
                                     "The bounded central support strip still loses material"};
                         }
-                        preview->endSupport = report;
                     }
                 }
+                preview->supportIntervals.push_back({from, report});
             }
+            std::sort(preview->supportIntervals.begin(), preview->supportIntervals.end(),
+                      [](const auto &a, const auto &b) { return a.fromMm < b.fromMm; });
             basis = {{-simulation::bendAllowanceMm(model) / 2.0, model.thicknessMm,
                       (toolParameters->lengthMm - model.widthMm) / 2.0},
                      {1, 0, 0},
@@ -1517,7 +1515,7 @@ application::BendPreviewResult buildBendOperation(
                         diagnostic->realDie = preview->realDie;
                         diagnostic->filledCutouts = preview->filledCutouts;
                         diagnostic->gaps = preview->gaps;
-                        diagnostic->endSupport = preview->endSupport;
+                        diagnostic->supportIntervals = preview->supportIntervals;
                         diagnostic->otherBends = preview->otherBends;
                         if (pair < pairs.size())
                             diagnostic->conflict = static_cast<ToolCollisionPair>(pair);

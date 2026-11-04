@@ -40,9 +40,9 @@ class CadPreview : public SingleBendPreview {
     bool filledCutouts = false;
     bool realPunch = false, realDie = false;
     std::array<double, 2> gaps{};
-    std::optional<BendEndSupport> endSupport;
-    const BendEndSupport *partialEndSupport() const noexcept override {
-        return endSupport ? &*endSupport : nullptr;
+    std::vector<BendSupportInterval> supportIntervals;
+    std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
+        return supportIntervals;
     }
     std::size_t otherBends = 0;
     std::size_t otherFormedBends() const noexcept override {

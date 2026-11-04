@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <variant>
 
@@ -62,8 +63,16 @@ class SingleBendPreview {
     [[nodiscard]] virtual std::array<double, 2> toolSegmentGaps() const noexcept {
         return {0, 0};
     }
-    [[nodiscard]] virtual const BendEndSupport *partialEndSupport() const noexcept {
-        return nullptr;
+    [[nodiscard]] virtual std::span<const BendSupportInterval>
+    endSupportIntervals() const noexcept {
+        return {};
+    }
+    [[nodiscard]] bool hasPartialEndSupport() const noexcept {
+        for (const auto &interval : endSupportIntervals())
+            if (interval.material.supportedFromMm > 0 ||
+                interval.material.supportedToMm < interval.material.bendLengthMm)
+                return true;
+        return false;
     }
     [[nodiscard]] virtual bool usesDrawingTools() const noexcept {
         return false;
@@ -101,6 +110,32 @@ class SingleBendPreview {
         return nullptr;
     }
 };
+// Validate the transient CAD report against the operation envelope, independently
+// of whether any of its real intervals has partial support. No gap is filled.
+[[nodiscard]] inline bool validEndSupportIntervals(const SingleBendPreview &preview,
+                                                   std::optional<double> limit,
+                                                   double tolerance) noexcept {
+    const auto intervals = preview.endSupportIntervals();
+    if (intervals.empty())
+        return !preview.toolSetup();
+    const double width = preview.model().widthMm;
+    if (!preview.toolSetup() || intervals.size() != preview.activeBendCount() ||
+        !std::isfinite(width) || width <= 0 || !validEndSupportLimitMm(tolerance) ||
+        (limit && !validEndSupportLimitMm(*limit)))
+        return false;
+    double end = 0;
+    for (const auto &interval : intervals) {
+        const auto &s = interval.material;
+        if (!std::isfinite(interval.fromMm) || interval.fromMm < 0 ||
+            interval.fromMm < end - tolerance ||
+            !withinEndSupportLimit(s, limit.value_or(width), tolerance))
+            return false;
+        end = interval.fromMm + s.bendLengthMm;
+        if (!std::isfinite(end) || end > width + tolerance)
+            return false;
+    }
+    return intervals.front().fromMm <= tolerance && std::abs(end - width) <= tolerance;
+}
 using BendPreviewPtr = std::shared_ptr<const SingleBendPreview>;
 enum class BendPreviewErrorCode {
     UnsupportedGeometry,

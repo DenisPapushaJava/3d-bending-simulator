@@ -1,5 +1,6 @@
 #include "bending/application/BendRoute.h"
 #include "bending/application/DocumentSession.h"
+#include "bending/application/SingleBendPreview.h"
 
 #include <algorithm>
 #include <iostream>
@@ -327,6 +328,60 @@ void testBendPreparation() {
     require(session.bends().empty() && !session.bend(0), "Close retained preparations");
 }
 
+void testEndSupportReports() {
+    struct Preview : SingleBendPreview {
+        std::vector<BendSupportInterval> intervals{{0, {45, .46, 42}}, {65, {55, 1.25, 52.5}}};
+        bending::simulation::SingleBend geometry{2, 4, 1.57, 120, 30, 30};
+        bending::simulation::FlatToolSetup setup{};
+        std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
+            return intervals;
+        }
+        std::size_t activeBendCount() const noexcept override {
+            return 2;
+        }
+        const bending::simulation::SingleBend &model() const noexcept override {
+            return geometry;
+        }
+        const bending::simulation::FlatToolSetup *toolSetup() const noexcept override {
+            return &setup;
+        }
+        std::size_t frameCount() const noexcept override {
+            return 0;
+        }
+        BoundsMm bounds() const noexcept override {
+            return {};
+        }
+    } preview;
+    require(preview.hasPartialEndSupport() && validEndSupportIntervals(preview, 3, .001) &&
+                !validEndSupportIntervals(preview, 2.9, .001),
+            "Interval validation lost the per-end limit");
+    for (const int invalid : {0, 1, 2, 3, 4, 5}) {
+        Preview candidate;
+        switch (invalid) {
+        case 0:
+            candidate.intervals.pop_back();
+            break;
+        case 1:
+            candidate.intervals[1].fromMm = 44;
+            break;
+        case 2:
+            candidate.intervals[1].fromMm = 66;
+            break;
+        case 3:
+            candidate.intervals[0].fromMm = 1;
+            break;
+        case 4:
+            candidate.intervals[1].material.supportedFromMm = 30;
+            break;
+        case 5:
+            candidate.intervals[1].material.supportedToMm =
+                std::numeric_limits<double>::quiet_NaN();
+            break;
+        }
+        require(!validEndSupportIntervals(candidate, 100, .001),
+                "Incomplete/overlapping/invalid joint support report was accepted");
+    }
+}
 } // namespace
 int main() {
     try {
@@ -334,6 +389,7 @@ int main() {
         testProjectState();
         testPartInputs();
         testBendPreparation();
+        testEndSupportReports();
         require(withinEndSupportLimit({50, .46, 49.54}, 3) &&
                     withinEndSupportLimit({50, 3, 47}, 3) &&
                     !withinEndSupportLimit({50, 3.01, 47}, 3) &&

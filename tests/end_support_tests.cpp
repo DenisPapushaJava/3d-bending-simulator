@@ -14,7 +14,7 @@ application::BendPreviewPtr accepted(const application::BendPreviewResult &r) {
     if (const auto *e = std::get_if<application::BendPreviewError>(&r))
         throw std::runtime_error(e->detail);
     const auto p = std::get<application::BendPreviewPtr>(r);
-    require(p && p->partialEndSupport() && p->pressMotion() && p->frameCount() == 61 &&
+    require(p && p->hasPartialEndSupport() && p->pressMotion() && p->frameCount() == 61 &&
                 p->punchRetraction(),
             "A bounded partial cycle lost its scope/report");
     return p;
@@ -59,14 +59,15 @@ int main() {
             small, 0, {smallBend.angleRadians, smallBend.innerRadiusMm}, collidingTool, {}, 100);
         const auto *conflict = std::get_if<application::BendPreviewError>(&collision);
         require(conflict && conflict->code == application::BendPreviewErrorCode::ToolIntersection &&
-                    conflict->diagnostic && conflict->diagnostic->partialEndSupport(),
+                    conflict->diagnostic && conflict->diagnostic->hasPartialEndSupport(),
                 "End allowance suppressed a real tool collision or its support scope");
         require(std::get<application::BendPreviewError>(run(small, 0)).code ==
                     application::BendPreviewErrorCode::SupportNotProven,
                 "Strict zero admitted a partial end");
         const auto edge = load("edge.step", 3, false, 3);
         const auto boundary = accepted(run(edge, 3));
-        require(application::withinEndSupportLimit(*boundary->partialEndSupport(), 3, 1.e-3),
+        require(application::withinEndSupportLimit(boundary->endSupportIntervals().front().material,
+                                                   3, 1.e-3),
                 "Three millimetres per end were treated as a total allowance");
         const auto excessive = load("excessive.step", 3.2);
         const auto rejected = run(excessive, 3);

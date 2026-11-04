@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
         wait([&] { return !controller.hasWork(); });
         if (controller.bendPreviewError())
             throw std::runtime_error(controller.bendPreviewError()->detail);
-        require(controller.bendPreview() && controller.bendPreview()->partialEndSupport() &&
+        require(controller.bendPreview() && controller.bendPreview()->hasPartialEndSupport() &&
                     summary->text().contains("0.46") && summary->styleSheet().contains("#FFF2CC"),
                 "Single bend was blocked or presented as fully supported");
         if (const auto output = qEnvironmentVariable("BENDING_SUPPORT_SNAPSHOT");
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
         limit->setValue(3);
         apply->click();
         wait([&] { return !controller.hasWork(); });
-        require(controller.bendPreview() && controller.bendPreview()->partialEndSupport() &&
+        require(controller.bendPreview() && controller.bendPreview()->hasPartialEndSupport() &&
                     controller.session().editRevision() == edit,
                 "Restoring policy lost the preview or modified the CAD/project");
         require(ui::preferences()->value("checks/maximumEndSupportLossMm").toDouble() == 3,
