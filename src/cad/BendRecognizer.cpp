@@ -378,15 +378,20 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
 BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm,
                             std::stop_token stop, BendRecognitionPurpose purpose) {
     BendAnalysis result;
+    // STEP end curves may need several microns of BRep tolerance even when the
+    // analytic cylinders and flanges agree precisely. Keep their original
+    // tolerances, but never let them inflate simulation comparisons past the
+    // former 0.001 mm input / 0.01 mm comparison limit.
+    const double comparisonInput = purpose == BendRecognitionPurpose::Simulation
+                                       ? std::min(maximumToleranceMm, 0.001)
+                                       : maximumToleranceMm;
     result.lengthToleranceMm =
-        std::max(1.0e-5, maximumToleranceMm *
+        std::max(1.0e-5, comparisonInput *
                              (purpose == BendRecognitionPurpose::DrawingMeasurements ? 2.0 : 10.0));
     if (stop.stop_requested()) {
         return result;
     }
-    const double maximumAccepted =
-        purpose == BendRecognitionPurpose::DrawingMeasurements ? 0.01 : 0.001;
-    if (!std::isfinite(maximumToleranceMm) || maximumToleranceMm > maximumAccepted) {
+    if (!std::isfinite(maximumToleranceMm) || maximumToleranceMm < 0 || maximumToleranceMm > 0.01) {
         result.status = BendRecognitionStatus::Unsupported;
         return result;
     }

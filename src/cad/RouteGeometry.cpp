@@ -1,6 +1,24 @@
 #include "RouteGeometry.h"
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <cmath>
 #include <stdexcept>
 namespace bending::cad {
+unsigned skinBoundaryMembership(const gp_Pnt &point, const std::array<TopoDS_Shape, 3> &bodies,
+                                double tolerance, std::stop_token stop) {
+    if (stop.stop_requested())
+        return 0;
+    const auto vertex = BRepBuilderAPI_MakeVertex(point).Vertex();
+    unsigned regions = 0;
+    for (std::size_t r = 0; r < bodies.size(); ++r) {
+        if (stop.stop_requested())
+            return 0;
+        BRepExtrema_DistShapeShape distance(vertex, bodies[r]);
+        if (distance.IsDone() && std::isfinite(distance.Value()) && distance.Value() <= tolerance)
+            regions |= 1u << r;
+    }
+    return regions;
+}
 RoutePlacement routePlacement(const SheetLayout &layout, const std::vector<double> &progress) {
     RoutePlacement result;
     result.walls.resize(layout.walls.size());

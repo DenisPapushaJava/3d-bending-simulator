@@ -137,16 +137,17 @@ void drawingMeasurements(const QString &folder) {
     require(tolerantDoc->metadata().maximumToleranceMm > .001 &&
                 tolerantDoc->metadata().maximumToleranceMm <= .01 &&
                 tolerantDoc->metadata().bendAnalysis.status ==
-                    application::BendRecognitionStatus::Unsupported,
+                    application::BendRecognitionStatus::Completed &&
+                tolerantDoc->metadata().bendAnalysis.lengthToleranceMm <= .01,
             "Fixture did not preserve its STEP boundary gap");
     const auto tolerant = build(tolerantDoc);
-    require(tolerant->drawingOnlyRecognition && tolerant->bends.size() == 1 &&
+    require(!tolerant->drawingOnlyRecognition && tolerant->bends.size() == 1 &&
                 tolerant->bendRecognitionStatus == application::BendRecognitionStatus::Completed &&
                 tolerant->thicknessMm && std::abs(*tolerant->thicknessMm - 6) < 1e-5 &&
-                tolerantDoc->metadata().bendAnalysis.bends.empty(),
-            "Drawing tolerance changed the simulation document or lost dimensions");
+                tolerantDoc->metadata().bendAnalysis.bends.size() == 1,
+            "Bounded BRep tolerance lost precise bend measurements");
     require(ui::DrawingSheet::writePdf(folder + "/tolerant.pdf", *tolerant, {}).isEmpty(),
-            "Drawing-only measurement PDF failed");
+            "Tolerant source measurement PDF failed");
     const auto mixedDoc = load(fixtures::cornerTrimmedChannel(), folder + "/mixed.step");
     require(mixedDoc->metadata().bendAnalysis.bends.size() == 2, "Fixture lost a recognized bend");
     const auto mixed = build(mixedDoc);

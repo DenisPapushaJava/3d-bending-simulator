@@ -288,9 +288,11 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
     // Membership is in immutable SOURCE components and does not depend on the
     // displayed angle. Preserve all rail memberships; never cache across operations.
     WholePartSkin result;
-    std::array<BRepClass3d_SolidClassifier, 3> classifiers{BRepClass3d_SolidClassifier(flanges[0]),
-                                                           BRepClass3d_SolidClassifier(sector),
-                                                           BRepClass3d_SolidClassifier(flanges[1])};
+    const std::array<TopoDS_Shape, 3> bodies{flanges[0], sector, flanges[1]};
+    std::array<BRepClass3d_SolidClassifier, 3> classifiers{BRepClass3d_SolidClassifier(bodies[0]),
+                                                           BRepClass3d_SolidClassifier(bodies[1]),
+                                                           BRepClass3d_SolidClassifier(bodies[2])};
+    std::size_t boundaryFallbacks = 0;
     TopTools_IndexedMapOfShape sourceFaces;
     TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
     for (TopExp_Explorer f(source, TopAbs_FACE); f.More(); f.Next()) {
@@ -318,6 +320,22 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
                     continue;
                 regions |= 1u << r;
                 ++votes[r];
+            }
+            if (!regions) {
+                // At approximate shared end curves the solid classifier can
+                // report OUT even for an exact boundary point. A bounded
+                // distance query proves ON without increasing the tolerance.
+                // The complete solid reconstruction was checked before this
+                // display-skin mapping; this never replaces collision checks.
+                if (++boundaryFallbacks > 256)
+                    throw std::runtime_error("Source skin boundary-query budget exceeded");
+                regions = skinBoundaryMembership(point, bodies, tolerance, stop);
+                if (stop.stop_requested())
+                    return {};
+                for (std::size_t r = 0; r < bodies.size(); ++r) {
+                    if (regions & (1u << r))
+                        ++votes[r];
+                }
             }
             if (!regions)
                 throw std::runtime_error(

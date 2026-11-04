@@ -8,6 +8,10 @@ struct RoutePlacement {
 };
 RoutePlacement routePlacement(const SheetLayout &, const std::vector<double> &progress);
 TopoDS_Shape makeRouteSector(const simulation::SingleBend &, const gp_Ax3 &, double);
+// Fallback for unclassified display nodes, after the complete solid proof.
+// Retain every matching component, including shared bend rails. No meshing/Boolean.
+[[nodiscard]] unsigned skinBoundaryMembership(const gp_Pnt &, const std::array<TopoDS_Shape, 3> &,
+                                              double tolerance, std::stop_token);
 std::array<TopoDS_Shape, 2> makeRouteDraftTools(const core::PressTools &,
                                                 const std::optional<core::ToolAssignment> &,
                                                 std::stop_token,

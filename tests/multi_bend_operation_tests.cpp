@@ -1,3 +1,4 @@
+#include "RouteGeometry.h"
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
@@ -6,6 +7,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
@@ -56,12 +58,30 @@ application::DocumentPtr load(const std::filesystem::path &path) {
     require(bool(d), "Import failed");
     return d;
 }
+void checkBoundaryMembership() {
+    const std::array<TopoDS_Shape, 3> bodies{
+        BRepPrimAPI_MakeBox(gp_Pnt(-10, 0, 0), 10, 2, 4).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 2, 2, 4).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(2, 0, 0), 10, 2, 4).Shape()};
+    require(cad::skinBoundaryMembership({0, 1, 2}, bodies, .001, {}) == 3 &&
+                cad::skinBoundaryMembership({2, 1, 2}, bodies, .001, {}) == 6,
+            "Boundary fallback dropped a shared rail membership");
+    require(cad::skinBoundaryMembership({0, -.0005, 2}, bodies, .001, {}) == 3 &&
+                cad::skinBoundaryMembership({0, -.002, 2}, bodies, .001, {}) == 0 &&
+                cad::skinBoundaryMembership({100, 100, 100}, bodies, .001, {}) == 0,
+            "Boundary fallback exceeded its prepared tolerance");
+    std::stop_source stop;
+    stop.request_stop();
+    require(cad::skinBoundaryMembership({0, 1, 2}, bodies, .001, stop.get_token()) == 0,
+            "Cancelled boundary fallback returned partial memberships");
+}
 int main(int argc, char **argv) {
     const auto folder =
         std::filesystem::temp_directory_path() /
         ("multi-operation-" +
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
+        checkBoundaryMembership();
         std::filesystem::create_directories(folder);
         const bool sample = argc >= 2;
         auto file = sample ? std::filesystem::path(argv[1]) : folder / "tray.step";

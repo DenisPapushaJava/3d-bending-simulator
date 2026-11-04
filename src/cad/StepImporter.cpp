@@ -455,6 +455,17 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
                         "Import cancelled before thickness analysis");
         }
         data->metadata.bendAnalysis = recognizeBends(data->shape, tolerance, stop);
+        if (tolerance > .001 &&
+            data->metadata.bendAnalysis.status == application::BendRecognitionStatus::Completed &&
+            (!data->metadata.bendAnalysis.bends.empty() ||
+             !data->metadata.bendAnalysis.interiorContourDiagnostics.empty())) {
+            data->metadata.diagnostics.push_back(
+                {ImportStage::Transfer, DiagnosticSeverity::Warning, 0,
+                 "Повышенный допуск BRep: " + std::to_string(tolerance) +
+                     " мм. Допуск сравнения при распознавании гибов ограничен 0,01 мм; "
+                     "исходная геометрия не исправлялась. Развёртка и движение проверяются "
+                     "отдельно."});
+        }
         auto filled =
             fillClosedCutouts(data->shape, data->metadata.bendAnalysis.lengthToleranceMm, stop);
         data->metadata.closedCutouts = filled.report;
