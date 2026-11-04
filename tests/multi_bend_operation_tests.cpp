@@ -1,13 +1,19 @@
+#include "BendFixtures.h"
+#include "BendOperation.h"
+#include "JointBends.h"
 #include "RouteGeometry.h"
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
+#include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
@@ -17,6 +23,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 using namespace bending;
 void require(bool ok, const char *why) {
@@ -29,9 +36,10 @@ double volume(const TopoDS_Shape &s) {
     return std::abs(p.Mass());
 }
 void checkSkin(const cad::PreviewFrame &frame) {
-    std::array<BRepClass3d_SolidClassifier, 3> solid{BRepClass3d_SolidClassifier(frame.regions[0]),
-                                                     BRepClass3d_SolidClassifier(frame.regions[1]),
-                                                     BRepClass3d_SolidClassifier(frame.regions[2])};
+    std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> solid;
+    for (const auto &region : frame.regions)
+        for (TopExp_Explorer e(region, TopAbs_SOLID); e.More(); e.Next())
+            solid.push_back(std::make_unique<BRepClass3d_SolidClassifier>(e.Current()));
     unsigned count = 0;
     // Independent classification in each MOVED frame checks cached source membership,
     // including bend-rail nodes and faces with visible holes on the filled calculation body.
@@ -44,8 +52,9 @@ void checkSkin(const cad::PreviewFrame &frame) {
                 const auto point = mesh->Node(n).Transformed(location.Transformation());
                 bool contained = false;
                 for (auto &classifier : solid) {
-                    classifier.Perform(point, .02);
-                    contained |= classifier.State() == TopAbs_ON || classifier.State() == TopAbs_IN;
+                    classifier->Perform(point, .02);
+                    contained |=
+                        classifier->State() == TopAbs_ON || classifier->State() == TopAbs_IN;
                 }
                 require(contained, "Visible skin left the checked material during motion");
                 ++count;
@@ -75,6 +84,205 @@ void checkBoundaryMembership() {
     require(cad::skinBoundaryMembership({0, 1, 2}, bodies, .001, stop.get_token()) == 0,
             "Cancelled boundary fallback returned partial memberships");
 }
+void checkJointOperation(const std::filesystem::path &path) {
+    const auto source = fixtures::jointBend();
+    const auto import = [&](const TopoDS_Shape &shape, const char *name) {
+        const auto file = path.parent_path() / name;
+        STEPControl_Writer writer;
+        require(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone &&
+                    writer.Write(file.string().c_str()) == IFSelect_RetDone,
+                "Joint fixture write failed");
+        return load(file);
+    };
+    const auto doc = import(source, "joint.step");
+    const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(doc);
+    std::ostringstream before;
+    BRepTools::Write(cad::OcctDocumentAccess::shape(*native), before);
+    const auto sourceBytes = std::string(doc->sourceStep());
+    const auto &analysis = doc->metadata().bendAnalysis;
+    require(analysis.bends.size() == 2, "Separate joint zones were merged at import");
+    const std::array<std::size_t, 2> members{0, 1};
+    const auto envelope = cad::jointBendEnvelope(analysis, members);
+    require(envelope && std::abs(envelope->lengthMm - 120) < .001,
+            "Joint envelope lost the gap between zones");
+    auto changed = analysis;
+    changed.bends[1].innerRadiusMm += 1;
+    require(!cad::jointBendEnvelope(changed, members), "Different radii grouped");
+    changed = analysis;
+    changed.bends[1].angleRadians -= .1;
+    require(!cad::jointBendEnvelope(changed, members), "Different angles grouped");
+    changed = analysis;
+    changed.bends[1].axisStart.x += 1;
+    changed.bends[1].axisEnd.x += 1;
+    require(!cad::jointBendEnvelope(changed, members), "Offset axes grouped");
+    changed = analysis;
+    changed.lengthToleranceMm = .01;
+    changed.bends[1].axisStart.x += .005;
+    changed.bends[1].axisEnd.x -= .005;
+    require(!cad::jointBendEnvelope(changed, members),
+            "Nearby endpoints hid angularly incompatible axes");
+    const auto &bend = analysis.bends.front();
+    const core::BendTarget target{bend.angleRadians, bend.innerRadiusMm};
+    const core::PressTools parameters{16, std::numbers::pi / 3, std::numbers::pi / 6, .8, 120, 10};
+    const auto assignment = tool_fixture::explicitPair(parameters);
+    for (const bool reversed : {false, true}) {
+        const auto result =
+            cad::buildBendOperation(doc, 0, target, reversed, {}, parameters, true, assignment,
+                                    false, 3, {}, true, nullptr, members);
+        if (const auto *error = std::get_if<application::BendPreviewError>(&result))
+            throw std::runtime_error("Joint operation: " + error->detail);
+        const auto preview = std::get<application::BendPreviewPtr>(result);
+        require(preview->activeBendCount() == 2 && preview->otherFormedBends() == 0 &&
+                    preview->frameCount() == 61 && !preview->collision() &&
+                    preview->punchRetraction(),
+                "Joint operation bypassed the full press cycle");
+        for (std::size_t f = 0; f < preview->frameCount(); ++f) {
+            const auto &frame = cad::OcctPreviewAccess::frame(*preview, f);
+            double material = 0;
+            for (const auto &region : frame.regions)
+                material += volume(region);
+            require(BRepCheck_Analyzer(frame.shape).IsValid() &&
+                        std::abs(material - doc->metadata().volumeMm3) < .001,
+                    "Joint motion lost material or filled the gap");
+            if (f == 0 || f == 20 || f == 40)
+                checkSkin(frame);
+        }
+    }
+    auto shortTools = parameters;
+    shortTools.lengthMm = 110;
+    const auto shortAssignment = tool_fixture::explicitPair(shortTools);
+    const auto shortResult =
+        cad::buildBendOperation(doc, 0, target, false, {}, shortTools, true, shortAssignment, false,
+                                3, {}, true, nullptr, members);
+    const auto *error = std::get_if<application::BendPreviewError>(&shortResult);
+    require(error && error->code == application::BendPreviewErrorCode::ToolTooShort,
+            "Joint operation measured summed metal lengths instead of the full span");
+    const auto notched = import(
+        BRepAlgoAPI_Cut(source, BRepPrimAPI_MakeBox(gp_Pnt(3, -31, 20), 4, 28, 2).Shape()).Shape(),
+        "joint-notched.step");
+    require(notched->metadata().bendAnalysis.bends.size() == 2 &&
+                notched->metadata().closedCutouts.status != application::ClosedCutoutStatus::Filled,
+            "Internal support notch hid a zone or was filled");
+    const auto notchResult =
+        cad::buildBendOperation(notched, 0, target, false, {}, parameters, true, assignment, true,
+                                3, {}, true, nullptr, members);
+    const auto *notchError = std::get_if<application::BendPreviewError>(&notchResult);
+    require(notchError && notchError->code == application::BendPreviewErrorCode::SupportNotProven,
+            "A real internal support gap was confused with the relief between zones");
+    gp_Trsf rotation, translation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .73);
+    translation.SetTranslation(gp_Vec(123.4, -456.7, 89.1));
+    const auto rotated =
+        import(BRepBuilderAPI_Transform(source, translation * rotation, true).Shape(),
+               "joint-rotated.step");
+    const auto &rotatedBend = rotated->metadata().bendAnalysis.bends.front();
+    const auto rotatedResult =
+        cad::buildBendOperation(rotated, 0, {rotatedBend.angleRadians, rotatedBend.innerRadiusMm},
+                                false, {}, {}, false, {}, false, {}, {}, true, nullptr, members);
+    require(std::holds_alternative<application::BendPreviewPtr>(rotatedResult) &&
+                std::get<application::BendPreviewPtr>(rotatedResult)->activeBendCount() == 2,
+            "Joint geometry depends on world axes or origin");
+    auto gaugedAssignment = assignment;
+    gaugedAssignment.backgauge = core::BackgaugeSetup{};
+    const auto gauged =
+        cad::buildBendOperation(doc, 0, target, false, {}, core::toolParameters(gaugedAssignment),
+                                true, gaugedAssignment, false, 3, {}, true, nullptr, members);
+    if (const auto *failure = std::get_if<application::BendPreviewError>(&gauged))
+        throw std::runtime_error("Joint gauging: " + failure->detail);
+    require(std::get<application::BendPreviewPtr>(gauged)->backgauge() &&
+                std::get<application::BendPreviewPtr>(gauged)->backgauge()->status ==
+                    application::BackgaugeStatus::Checked,
+            "Joint operation bypassed the common X/R backgauge");
+    auto blocked = assignment;
+    blocked.punch.id += "-blocked";
+    auto &edges = blocked.punch.drawing->edges;
+    const auto right = edges[2];
+    const core::DrawingPoint shoulder{right.start.x + .25 * (right.end.x - right.start.x),
+                                      right.start.y + .25 * (right.end.y - right.start.y)};
+    const auto line = [](core::DrawingPoint a, core::DrawingPoint b) {
+        return core::DrawingEdge{a, b, {}, 0};
+    };
+    // Own finite contour: preserve the valid circular nose, add a blocking wing.
+    edges = {edges[0],
+             edges[1],
+             line(right.start, shoulder),
+             line(shoulder, {50, shoulder.y}),
+             line({50, shoulder.y}, {50, right.end.y}),
+             line({50, right.end.y}, right.end),
+             edges[3]};
+    require(core::hasCompleteDrawingToolGeometry(blocked),
+            "Blocked joint fixture lost its DXF profile");
+    const auto blockedResult =
+        cad::buildBendOperation(doc, 0, target, false, {}, core::toolParameters(blocked), true,
+                                blocked, false, 3, {}, true, nullptr, members);
+    const auto *blockedError = std::get_if<application::BendPreviewError>(&blockedResult);
+    require(blockedError &&
+                blockedError->code == application::BendPreviewErrorCode::ToolIntersection &&
+                blockedError->diagnostic && blockedError->diagnostic->activeBendCount() == 2 &&
+                blockedError->diagnostic->collision(),
+            "Joint operation bypassed a real tool collision or lost the stopping diagnostic");
+    application::BendRouteRequest request;
+    request.withTools = true;
+    request.maximumChecks = 32;
+    request.maximumTimeMs = 60000;
+    for (std::size_t i = 0; i < analysis.bends.size(); ++i)
+        request.operations.push_back(
+            {"zone-" + std::to_string(i),
+             i,
+             {analysis.bends[i].angleRadians, analysis.bends[i].innerRadiusMm},
+             core::toolParameters(assignment),
+             assignment});
+    cad::SingleBendPreviewBuilder builder;
+    for (const bool automatic : {true, false}) {
+        request.automatic = automatic;
+        const auto result = builder.buildRoute(doc, request, {});
+        if (const auto *failure = std::get_if<application::BendRouteError>(&result))
+            throw std::runtime_error("Joint route: " + failure->detail);
+        const auto route = std::get<application::BendRoutePtr>(result);
+        require(route->steps.size() == 1 && route->steps[0].additionalBends.size() == 1 &&
+                    route->steps[0].preview->activeBendCount() == 2 &&
+                    !route->steps[0].preview->collision(),
+                "Automatic/manual checked route lost the joint operation");
+    }
+    request.withTools = false;
+    request.automatic = true;
+    request.allowJointBends = false;
+    const auto separate = builder.buildRoute(doc, request, {});
+    require(std::holds_alternative<application::BendRoutePtr>(separate) &&
+                std::get<application::BendRoutePtr>(separate)->steps.size() == 2,
+            "Joint support broke the separate geometric route");
+    request.allowJointBends = true;
+    const auto together = builder.buildRoute(doc, request, {});
+    require(std::holds_alternative<application::BendRoutePtr>(together) &&
+                std::get<application::BendRoutePtr>(together)->steps.size() == 1,
+            "Joint and single transition cache keys were confused");
+    auto scoped = request;
+    scoped.withTools = scoped.automatic = true;
+    auto third = scoped.operations.front();
+    third.id = "third";
+    third.bendIndex = 2;
+    scoped.operations.push_back(third);
+    const auto oldThird = scoped.operations.back();
+    auto replacement = assignment;
+    replacement.clearanceMm = 17;
+    scoped.toolVariants = {{replacement, 0, {1}}};
+    require(application::applyRouteToolVariant(scoped, 0) &&
+                scoped.operations[0].assignment == replacement &&
+                scoped.operations[1].assignment == replacement &&
+                scoped.operations.back() == oldThird,
+            "Joint checked-tool variant changed a different operation");
+    const auto beforeInvalid = scoped.operations;
+    scoped.toolVariants.front().additionalBendIndices = {0};
+    require(!application::applyRouteToolVariant(scoped, 0) && scoped.operations == beforeInvalid,
+            "Repeated joint target partially changed the request");
+    scoped.toolVariants.front().additionalBendIndices = {999};
+    require(!application::applyRouteToolVariant(scoped, 0) && scoped.operations == beforeInvalid,
+            "Missing joint target partially changed the request");
+    std::ostringstream after;
+    BRepTools::Write(cad::OcctDocumentAccess::shape(*native), after);
+    require(before.str() == after.str() && sourceBytes == doc->sourceStep(),
+            "Joint transitions mutated the imported BRep or STEP");
+}
 int main(int argc, char **argv) {
     const auto folder =
         std::filesystem::temp_directory_path() /
@@ -83,6 +291,8 @@ int main(int argc, char **argv) {
     try {
         checkBoundaryMembership();
         std::filesystem::create_directories(folder);
+        if (argc == 1)
+            checkJointOperation(folder / "joint.step");
         const bool sample = argc >= 2;
         auto file = sample ? std::filesystem::path(argv[1]) : folder / "tray.step";
         if (!sample) {

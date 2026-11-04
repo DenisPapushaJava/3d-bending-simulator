@@ -5,6 +5,10 @@ namespace bending::cad {
 using namespace application;
 class CadPreview : public SingleBendPreview {
   public:
+    std::size_t activeBends = 1;
+    std::size_t activeBendCount() const noexcept override {
+        return activeBends;
+    }
     std::optional<BackgaugeReport> gauging;
     const BackgaugeReport *backgauge() const noexcept override {
         return gauging ? &*gauging : nullptr;

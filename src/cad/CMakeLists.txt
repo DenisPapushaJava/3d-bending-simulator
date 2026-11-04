@@ -1,6 +1,7 @@
 add_library(bending_cad STATIC Kernel.cpp CadDocument.cpp StepImporter.cpp ThicknessRecognizer.cpp BendRecognizer.cpp ClosedCutouts.cpp SingleBendPreviewBuilder.cpp MachineAssembly.cpp BendRouteBuilder.cpp RouteGeometry.cpp RouteDraftGeometry.cpp DrawingTools.cpp BendingDrawingBuilder.cpp DrawingOpenings.cpp DrawingProfiles.cpp DrawingSections.cpp FlatPatternBuilder.cpp FlatPatternDisplay.cpp)
 add_library(Bending::Cad ALIAS bending_cad)
 target_sources(bending_cad PRIVATE Backgauge.cpp)
+target_sources(bending_cad PRIVATE JointBends.cpp)
 target_sources(bending_cad PRIVATE ToolGeometryCache.cpp CollisionHighlight.cpp CollisionStrip.cpp TrimmedBend.cpp FloorGeometry.cpp DrawingRepeats.cpp SheetOrientation.cpp)
 file(SHA256 "${PROJECT_SOURCE_DIR}/vcpkg.json" bending_geometry_sdk_revision)
 target_sources(bending_cad PRIVATE ToolShapeHints.cpp)

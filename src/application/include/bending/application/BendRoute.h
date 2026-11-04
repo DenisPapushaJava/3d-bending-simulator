@@ -24,9 +24,19 @@ struct RouteOperation {
 };
 struct RouteToolVariant {
     core::ToolAssignment assignment;
-    // Null: common pair for the whole part; otherwise replace only this bend's tooling.
+    // Null: common pair for the whole part; otherwise primary + additional zones only.
     std::optional<std::size_t> bendIndex;
+    std::vector<std::size_t> additionalBendIndices = {};
 };
+[[nodiscard]] inline bool routeToolVariantApplies(const RouteToolVariant &variant,
+                                                  std::size_t index) {
+    if (!variant.bendIndex || *variant.bendIndex == index)
+        return true;
+    for (const auto member : variant.additionalBendIndices)
+        if (member == index)
+            return true;
+    return false;
+}
 enum class BendRoutePhase { Preparing, ToolCandidate, Checking };
 struct BendRouteProgress {
     BendRoutePhase phase = BendRoutePhase::Preparing;
@@ -47,6 +57,7 @@ struct BendRouteRequest {
     bool rankCandidates = true;
     bool rankToolShapes = true; // Soft source-profile ranking; no feasibility pruning.
     bool reuseCalculations = true;
+    bool allowJointBends = true; // Reference/diagnostic switch; no geometric rule is relaxed.
     std::optional<double> maximumEndSupportLossMm =
         std::nullopt; // Null: legacy explicitly unbounded preview.
     // Explicit checked tool-selection command only. Empty preserves ordinary route behaviour.
@@ -75,6 +86,10 @@ struct BendRouteStep {
     std::size_t bendIndex;
     bool fixedSecond; // Resolved workpiece Y half-turn (legacy field name), not punch orientation.
     std::shared_ptr<const SingleBendPreview> preview;
+    // Additional original zones formed in this same press stroke. The primary
+    // zone above keeps its stable ID; source recognition is never merged.
+    // workpieceReversed is resolved relative to each member's own reference axis.
+    std::vector<RouteOperation> additionalBends = {};
 };
 struct BendRoute {
     DocumentPtr source;

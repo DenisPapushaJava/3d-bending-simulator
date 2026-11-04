@@ -44,7 +44,7 @@ void wait(const std::function<bool()> &ready) {
 }
 class Builder final : public SingleBendPreviewBuilder {
   public:
-    enum class Mode { Real, WrongIndex, Error, Wait };
+    enum class Mode { Real, WrongIndex, DuplicateJointZone, Error, Wait };
     mutable cad::SingleBendPreviewBuilder impl;
     mutable BendRouteRequest last;
     mutable BendRoutePtr accepted;
@@ -72,6 +72,11 @@ class Builder final : public SingleBendPreviewBuilder {
         if (mode == Mode::WrongIndex) {
             auto broken = std::make_shared<BendRoute>(*accepted);
             broken->selectedToolVariant = r.toolVariants.size();
+            return BendRoutePtr(broken);
+        }
+        if (mode == Mode::DuplicateJointZone) {
+            auto broken = std::make_shared<BendRoute>(*accepted);
+            broken->steps.front().additionalBends.push_back(r.operations.front());
             return BendRoutePtr(broken);
         }
         if (mode == Mode::Wait) {
@@ -217,6 +222,13 @@ int main(int argc, char **argv) {
                   c.bendRouteError()->code == BendRouteErrorCode::Failed &&
                   c.session().bend(0)->catalogTools == saved,
               "Invalid selected index changed the document");
+        builder->mode = Builder::Mode::DuplicateJointZone;
+        recommend->click();
+        wait([&] { return !c.hasWork(); });
+        check(!c.bendRoute() && c.bendRouteError() &&
+                  c.bendRouteError()->code == BendRouteErrorCode::Failed &&
+                  c.session().bend(0)->catalogTools == saved,
+              "Duplicate joint zone changed the document");
         auto *progress = window.findChild<QDialog *>("checkedToolProgress");
         check(progress, "No checked-result dialog");
         auto *title = progress->findChild<QLabel *>("checkedToolTitle");

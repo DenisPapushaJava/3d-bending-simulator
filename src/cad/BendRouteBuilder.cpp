@@ -3,6 +3,7 @@
 #include "CadPreview.h"
 #include "FlatPatternDisplay.h"
 #include "GeometryCacheInternal.h"
+#include "JointBends.h"
 #include "RouteDraftGeometry.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
@@ -33,6 +34,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <gp_Lin.hxx>
 #include <iomanip>
 #include <list>
 #include <map>
@@ -122,6 +124,7 @@ struct TransitionKey {
     Mask mask;
     std::shared_ptr<const TransitionInputs> inputs;
     bool fixedSecond;
+    std::vector<std::shared_ptr<const TransitionInputs>> jointInputs = {};
     bool operator==(const TransitionKey &) const = default;
 };
 struct TransitionHash {
@@ -129,8 +132,11 @@ struct TransitionHash {
         auto hash = std::hash<Mask>{}(key.mask);
         hash ^= std::hash<std::shared_ptr<const TransitionInputs>>{}(key.inputs) + 0x9e3779b9u +
                 (hash << 6) + (hash >> 2);
-        return hash ^
-               (std::hash<bool>{}(key.fixedSecond) + 0x9e3779b9u + (hash << 6) + (hash >> 2));
+        hash ^= std::hash<bool>{}(key.fixedSecond) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+        for (const auto &member : key.jointInputs)
+            hash ^= std::hash<std::shared_ptr<const TransitionInputs>>{}(member) + 0x9e3779b9u +
+                    (hash << 6) + (hash >> 2);
+        return hash;
     }
 };
 // Stable list nodes provide LRU eviction; the hash index never scans CAD/profile data.
@@ -249,13 +255,14 @@ class RouteSearch {
     std::vector<Mask> neighbours;
     std::vector<std::size_t> profileRank;
     std::vector<gp_Dir> referenceAxes;
+    std::vector<Mask> jointNeighbours;
     std::vector<Bnd_Box> wallBounds;
     std::vector<double> wallVolumes;
     std::map<std::pair<Mask, std::size_t>, bool> frontPreferences;
-    bool preferredSide(Mask mask, const RouteOperation &op) {
+    bool preferredSide(Mask mask, const RouteOperation &op, Mask removed) {
         if (!request.withTools || !request.allowWorkpieceRotation || !op.tools)
             return op.workpieceReversed;
-        const auto key = std::pair{mask, op.bendIndex};
+        const auto key = std::pair{mask, static_cast<std::size_t>(removed)};
         if (const auto found = frontPreferences.find(key); found != frontPreferences.end())
             return found->second;
         const auto link = std::find_if(layout->bends.begin(), layout->bends.end(),
@@ -264,7 +271,7 @@ class RouteSearch {
             return op.workpieceReversed;
         std::vector<double> progress(request.operations.size());
         for (std::size_t i = 0; i < progress.size(); ++i)
-            progress[i] = i != op.bendIndex && (mask & (Mask{1} << i)) ? 1. : 0.;
+            progress[i] = !(removed & (Mask{1} << i)) && (mask & (Mask{1} << i)) ? 1. : 0.;
         const auto positions = routePlacement(*layout, progress);
         const auto &b = source->metadata().bendAnalysis.bends[op.bendIndex];
         const auto state = simulation::draftPressState(
@@ -428,8 +435,14 @@ class RouteSearch {
         return value;
     }
 
-    TransitionKey key(Mask mask, const RouteOperation &op, bool side) const {
-        return {mask, inputs[op.bendIndex], side};
+    TransitionKey key(Mask mask, const RouteOperation &op, bool side,
+                      const std::vector<RouteOperation> &additional = {}) const {
+        if (additional.empty())
+            return {mask, inputs[op.bendIndex], side};
+        std::vector<std::shared_ptr<const TransitionInputs>> members;
+        for (const auto &member : additional)
+            members.push_back(inputs[member.bendIndex]);
+        return {mask, inputs[op.bendIndex], side, std::move(members)};
     }
     // 0 = verified success, 1 = unknown, 2 = stable rejection of this exact transition.
     int priorResult(Mask mask, const RouteOperation &op, bool side) const {
@@ -455,8 +468,9 @@ class RouteSearch {
             cache->verdicts.put(std::move(key), std::nullopt);
         }
     }
-    BendPreviewResult transition(Mask mask, const RouteOperation &op, bool fixedSecond) {
-        const auto wanted = key(mask, op, fixedSecond);
+    BendPreviewResult transition(Mask mask, const RouteOperation &op, bool fixedSecond,
+                                 const std::vector<RouteOperation> &additional = {}) {
+        const auto wanted = key(mask, op, fixedSecond, additional);
         if (request.reuseCalculations) {
             if (const auto *preview = cache->transitions.find(wanted)) {
                 ++statistics.reusedTransitions;
@@ -472,6 +486,15 @@ class RouteSearch {
         }
         ++statistics.builtTransitions;
         const auto after = state(mask);
+        Mask removed = Mask{1} << op.bendIndex;
+        std::vector<std::size_t> joint;
+        if (!additional.empty()) {
+            joint.push_back(*after->indices[op.bendIndex]);
+            for (const auto &member : additional) {
+                removed |= Mask{1} << member.bendIndex;
+                joint.push_back(*after->indices[member.bendIndex]);
+            }
+        }
         const auto link = std::find_if(layout->bends.begin(), layout->bends.end(),
                                        [&](const auto &b) { return b.bendIndex == op.bendIndex; });
         check(link != layout->bends.end(), "Missing workpiece placement reference");
@@ -481,11 +504,21 @@ class RouteSearch {
         const auto placements = routePlacement(*layout, progress);
         const auto reference =
             referenceAxes[op.bendIndex].Transformed(placements.walls[link->parent]);
+        for (const auto &member : additional) {
+            const auto memberLink =
+                std::find_if(layout->bends.begin(), layout->bends.end(),
+                             [&](const auto &b) { return b.bendIndex == member.bendIndex; });
+            check(memberLink != layout->bends.end(), "Missing joint placement reference");
+            const auto memberReference =
+                referenceAxes[member.bendIndex].Transformed(placements.walls[memberLink->parent]);
+            check(memberReference.IsParallel(reference, 1e-6),
+                  "Joint zones use different workpiece orientation references");
+        }
         auto preview = buildBendOperation(
             after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
             request.withTools ? op.tools : std::nullopt, request.withTools,
             request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
-            request.maximumEndSupportLossMm, reference, false, &statistics.backgauge);
+            request.maximumEndSupportLossMm, reference, false, &statistics.backgauge, joint);
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
             if (failure->code == BendPreviewErrorCode::BackgaugeUnavailable)
                 ++statistics.backgauge.noReferenceTransitions;
@@ -496,7 +529,7 @@ class RouteSearch {
         const auto p = std::get<BendPreviewPtr>(preview);
         // A rejected cycle never needs a canonical predecessor. Successful cycles still
         // undergo both independent volume differences against the complete before state.
-        const auto before = state(mask ^ (Mask{1} << op.bendIndex));
+        const auto before = state(mask ^ removed);
         // The first state must agree with the independently assembled
         // predecessor up to the same placement of the reference wall.
         const auto &components = OcctPreviewAccess::sourceComponents(*p);
@@ -550,8 +583,12 @@ class RouteSearch {
                         : static_cast<std::size_t>(
                               std::abs(static_cast<int>(profileRank[op.bendIndex]) -
                                        static_cast<int>(profileRank[reversed.back().bendIndex])));
-                return std::tuple{prior, std::popcount(neighbours[op.bendIndex] & mask),
-                                  continuation};
+                // Preserve a potential common stroke while undoing its separating
+                // neighbours. This is only a ranking preference, never precedence.
+                const bool separatesJoint =
+                    request.allowJointBends && (jointNeighbours[op.bendIndex] & mask) != 0;
+                return std::tuple{prior, separatesJoint,
+                                  std::popcount(neighbours[op.bendIndex] & mask), continuation};
             };
             std::stable_sort(result.begin(), result.end(),
                              [&](auto a, auto b) { return score(a) < score(b); });
@@ -559,67 +596,169 @@ class RouteSearch {
         }
         return result;
     }
+    bool tryCandidate(Mask mask, std::size_t order,
+                      const std::vector<RouteOperation> &additional = {}) {
+        const auto &op = request.operations[order];
+        std::vector<bool> reverseReference;
+        if (!additional.empty()) {
+            const auto after = state(mask);
+            std::vector<std::size_t> indices{*after->indices[op.bendIndex]};
+            for (const auto &member : additional)
+                indices.push_back(*after->indices[member.bendIndex]);
+            if (!jointBendEnvelope(OcctDocumentAccess::simulationBends(*after->document), indices))
+                return false; // A flat signature alone is not a current common stroke.
+            std::vector<double> progress(request.operations.size());
+            for (std::size_t i = 0; i < progress.size(); ++i)
+                progress[i] = (mask & (Mask{1} << i)) ? 1. : 0.;
+            const auto placements = routePlacement(*layout, progress);
+            const auto reference = [&](std::size_t index) {
+                const auto link = std::find_if(layout->bends.begin(), layout->bends.end(),
+                                               [&](const auto &b) { return b.bendIndex == index; });
+                check(link != layout->bends.end(), "Missing joint reference");
+                return referenceAxes[index].Transformed(placements.walls[link->parent]);
+            };
+            const auto primary = reference(op.bendIndex);
+            for (const auto &member : additional) {
+                const auto axis = reference(member.bendIndex);
+                if (!axis.IsParallel(primary, 1e-6))
+                    return false;
+                reverseReference.push_back(axis.Dot(primary) < 0);
+            }
+        }
+        auto bit = Mask{1} << op.bendIndex;
+        for (const auto &member : additional)
+            bit |= Mask{1} << member.bendIndex;
+        const bool preferred = preferredSide(mask, op, bit);
+        std::array<bool, 2> sides{preferred, !preferred};
+        if (request.allowWorkpieceRotation && request.rankCandidates &&
+            priorResult(mask, op, sides[1]) < priorResult(mask, op, sides[0]))
+            std::swap(sides[0], sides[1]);
+        for (std::size_t choice = 0; choice < (request.allowWorkpieceRotation ? 2u : 1u);
+             ++choice) {
+            const bool fixedSecond = sides[choice];
+            auto resolved = additional;
+            bool matching = true;
+            for (std::size_t i = 0; i < resolved.size(); ++i) {
+                resolved[i].workpieceReversed = fixedSecond != reverseReference[i];
+                matching &= request.allowWorkpieceRotation ||
+                            resolved[i].workpieceReversed == additional[i].workpieceReversed;
+            }
+            if (!matching)
+                continue;
+            cancelled(stop);
+            if (dead.contains(mask ^ bit))
+                break;
+            if (attempts >= request.maximumChecks ||
+                std::chrono::steady_clock::now() - started >
+                    std::chrono::milliseconds(request.maximumTimeMs))
+                throw BendRouteError{BendRouteErrorCode::SearchLimit,
+                                     "Route search budget reached; " + lastFailure, failedBend,
+                                     attempts};
+            ++attempts;
+            if (request.onProgress)
+                request.onProgress({BendRoutePhase::Checking, 0, 0, attempts - 1, op.bendIndex});
+            try {
+                auto preview = transition(mask, op, fixedSecond, additional);
+                if (request.onProgress)
+                    request.onProgress({BendRoutePhase::Checking, 0, 0, attempts, op.bendIndex});
+                if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
+                    if (failure->code == BendPreviewErrorCode::Cancelled)
+                        cancelled(stop);
+                    lastFailure = failure->detail;
+                    lastOperationError = failure->code;
+                    failedBend = op.bendIndex;
+                    incomplete |= failure->code == BendPreviewErrorCode::Failed ||
+                                  failure->code == BendPreviewErrorCode::UnsupportedGeometry;
+                    continue;
+                }
+                reversed.push_back({op.id, op.bendIndex, fixedSecond,
+                                    std::get<BendPreviewPtr>(std::move(preview)),
+                                    std::move(resolved)});
+                if (search(mask ^ bit))
+                    return true;
+                reversed.pop_back();
+            } catch (const BendRouteError &e) {
+                if (e.code == BendRouteErrorCode::Cancelled ||
+                    e.code == BendRouteErrorCode::SearchLimit)
+                    throw;
+                incomplete = true;
+                lastFailure = e.detail;
+                lastOperationError.reset();
+                failedBend = op.bendIndex;
+            }
+        }
+        return false;
+    }
+    bool tryJointCandidate(Mask mask, std::size_t order, std::vector<RouteOperation> members) {
+        members.push_back(request.operations[order]);
+        std::sort(members.begin(), members.end(),
+                  [](const auto &a, const auto &b) { return a.bendIndex < b.bendIndex; });
+        const auto primary =
+            std::find_if(request.operations.begin(), request.operations.end(),
+                         [&](const auto &op) { return op.bendIndex == members.front().bendIndex; });
+        const auto primaryOrder = static_cast<std::size_t>(primary - request.operations.begin());
+        members.erase(members.begin());
+        return tryCandidate(mask, primaryOrder, members);
+    }
     bool search(Mask mask) {
         cancelled(stop);
         if (!mask)
             return true;
         if (dead.contains(mask))
             return false;
-        for (const auto order : candidates(mask)) {
+        const auto singles = candidates(mask);
+        std::set<Mask> triedGroups;
+        for (const auto order : singles) {
             const auto &op = request.operations[order];
-            const auto bit = Mask{1} << op.bendIndex;
-            const bool preferred = preferredSide(mask, op);
-            std::array<bool, 2> sides{preferred, !preferred};
-            if (request.allowWorkpieceRotation && request.rankCandidates &&
-                priorResult(mask, op, sides[1]) < priorResult(mask, op, sides[0]))
-                std::swap(sides[0], sides[1]);
-            for (std::size_t choice = 0; choice < (request.allowWorkpieceRotation ? 2u : 1u);
-                 ++choice) {
-                const bool fixedSecond = sides[choice];
-                cancelled(stop);
-                if (dead.contains(mask ^ bit))
-                    break;
-                if (attempts >= request.maximumChecks ||
-                    std::chrono::steady_clock::now() - started >
-                        std::chrono::milliseconds(request.maximumTimeMs))
-                    throw BendRouteError{BendRouteErrorCode::SearchLimit,
-                                         "Route search budget reached; " + lastFailure, failedBend,
-                                         attempts};
-                ++attempts;
-                if (request.onProgress)
-                    request.onProgress(
-                        {BendRoutePhase::Checking, 0, 0, attempts - 1, op.bendIndex});
-                try {
-                    auto preview = transition(mask, op, fixedSecond);
-                    if (request.onProgress)
-                        request.onProgress(
-                            {BendRoutePhase::Checking, 0, 0, attempts, op.bendIndex});
-                    if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
-                        if (failure->code == BendPreviewErrorCode::Cancelled)
-                            cancelled(stop);
-                        lastFailure = failure->detail;
-                        lastOperationError = failure->code;
-                        failedBend = op.bendIndex;
-                        incomplete |= failure->code == BendPreviewErrorCode::Failed ||
-                                      failure->code == BendPreviewErrorCode::UnsupportedGeometry;
-                        continue;
-                    }
-                    reversed.push_back({op.id, op.bendIndex, fixedSecond,
-                                        std::get<BendPreviewPtr>(std::move(preview))});
-                    if (search(mask ^ bit))
-                        return true;
-                    reversed.pop_back();
-                } catch (const BendRouteError &e) {
-                    if (e.code == BendRouteErrorCode::Cancelled ||
-                        e.code == BendRouteErrorCode::SearchLimit)
-                        throw;
-                    incomplete = true;
-                    lastFailure = e.detail;
-                    lastOperationError.reset();
-                    failedBend = op.bendIndex;
-                }
+            if (!request.allowJointBends || !jointNeighbours[op.bendIndex])
+                continue;
+            std::vector<RouteOperation> additional;
+            Mask group = Mask{1} << op.bendIndex;
+            // One maximal compatible class and a local pair, not all subsets.
+            const auto &analysis = OcctDocumentAccess::simulationBends(*native);
+            for (std::size_t other = request.operations.size(); other-- > 0;) {
+                const auto &member = request.operations[other];
+                const Mask bit = Mask{1} << member.bendIndex;
+                if (!(mask & bit) || !(jointNeighbours[op.bendIndex] & bit) ||
+                    std::abs(member.target.angleRadians - op.target.angleRadians) >
+                        analysis.angleToleranceRadians ||
+                    std::abs(member.target.innerRadiusMm - op.target.innerRadiusMm) > tolerance ||
+                    (request.withTools &&
+                     (member.tools != op.tools || member.assignment != op.assignment)))
+                    continue;
+                if (!request.automatic &&
+                    (other >= order || order - other != additional.size() + 1))
+                    continue;
+                additional.push_back(member);
+                group |= bit;
+            }
+            if (additional.empty() || !triedGroups.insert(group).second)
+                continue;
+            if (tryJointCandidate(mask, order, additional))
+                return true;
+            if (additional.size() > 1) {
+                const auto &flatBends = flat->info().bends;
+                const auto centre = [&](std::size_t index) {
+                    const auto at =
+                        std::find_if(flatBends.begin(), flatBends.end(),
+                                     [&](const auto &b) { return b.bendIndex == index; });
+                    const auto line = at->centreLine();
+                    return gp_Pnt((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, 0);
+                };
+                const auto origin = centre(op.bendIndex);
+                const auto closest = std::min_element(
+                    additional.begin(), additional.end(), [&](const auto &a, const auto &b) {
+                        return origin.SquareDistance(centre(a.bendIndex)) <
+                               origin.SquareDistance(centre(b.bendIndex));
+                    });
+                const Mask pair = (Mask{1} << op.bendIndex) | (Mask{1} << closest->bendIndex);
+                if (triedGroups.insert(pair).second && tryJointCandidate(mask, order, {*closest}))
+                    return true;
             }
         }
+        for (const auto order : singles)
+            if (tryCandidate(mask, order))
+                return true;
         dead.insert(mask);
         return false;
     }
@@ -828,7 +967,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 const auto &variant = request.toolVariants[choice];
                 std::vector<core::ToolFlangeHint> hints;
                 for (const auto &hint : document->metadata().toolShapeHints) {
-                    if (variant.bendIndex && *variant.bendIndex != hint.bendIndex)
+                    if (!routeToolVariantApplies(variant, hint.bendIndex))
                         continue;
                     const auto present = [&](std::size_t id) {
                         return id < analysis.bends.size() &&
@@ -1093,6 +1232,20 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 }
             search.wallVolumes.push_back(amount);
         }
+        search.jointNeighbours.resize(n);
+        const auto &flatBends = search.flat->info().bends;
+        for (const auto &a : flatBends)
+            for (const auto &b : flatBends) {
+                if (a.bendIndex == b.bendIndex || a.direction != b.direction ||
+                    std::abs(a.turnRadians - b.turnRadians) > analysis.angleToleranceRadians ||
+                    std::abs(a.radiusMm - b.radiusMm) > analysis.lengthToleranceMm)
+                    continue;
+                const auto line = a.centreLine(), other = b.centreLine();
+                const gp_Lin axis(point(line[0]), gp_Dir(gp_Vec(point(line[0]), point(line[1]))));
+                if (axis.Distance(point(other[0])) <= analysis.lengthToleranceMm &&
+                    axis.Distance(point(other[1])) <= analysis.lengthToleranceMm)
+                    search.jointNeighbours[a.bendIndex] |= Mask{1} << b.bendIndex;
+            }
         search.neighbours.resize(n);
         for (const auto &a : search.layout->bends)
             for (const auto &b : search.layout->bends)

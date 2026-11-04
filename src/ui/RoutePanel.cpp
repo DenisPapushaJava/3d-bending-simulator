@@ -99,6 +99,12 @@ QString routeFailureReason(const application::BendRouteError &error) {
 }
 namespace {
 const char *stepMime = "application/x-bending-route-step";
+QString stepZones(const application::BendRouteStep &step) {
+    auto result = QStringLiteral("B%1").arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
+    for (const auto &member : step.additionalBends)
+        result += QStringLiteral(" + B%1").arg(member.bendIndex + 1, 2, 10, QLatin1Char('0'));
+    return result;
+}
 class StepButton final : public QPushButton {
   public:
     using QPushButton::QPushButton;
@@ -414,7 +420,30 @@ void RoutePanel::moveTo(int from, int to) {
     const auto before = ids_;
     const auto selected = ids_[static_cast<std::size_t>(from)];
     selected_ = to + 1;
-    if (onReorder(sequence.bendIds())) {
+    if (route_ && std::any_of(route_->steps.begin(), route_->steps.end(),
+                              [](const auto &step) { return !step.additionalBends.empty(); })) {
+        std::vector<std::string> expanded;
+        for (const auto &id : sequence.bendIds()) {
+            const auto step = std::find_if(route_->steps.begin(), route_->steps.end(),
+                                           [&](const auto &value) { return value.id == id; });
+            if (step == route_->steps.end())
+                return;
+            expanded.push_back(step->id);
+            for (const auto &member : step->additionalBends)
+                expanded.push_back(member.id);
+        }
+        // A group moved to another state must be checked there again. Keep all
+        // source IDs; a rejected grouping may legitimately split into single steps.
+        const auto beforeSources = sourceIds_;
+        if (onReorder(expanded, true)) {
+            undo_.push_back({beforeSources, expanded, selected, true});
+            redo_.clear();
+            if (undo_.size() > 50)
+                undo_.erase(undo_.begin());
+        }
+        return;
+    }
+    if (onReorder(sequence.bendIds(), false)) {
         undo_.push_back({before, sequence.bendIds(), selected});
         redo_.clear();
         if (undo_.size() > 50)
@@ -424,13 +453,13 @@ void RoutePanel::moveTo(int from, int to) {
     redoButton_->setEnabled(!redo_.empty());
 }
 void RoutePanel::undo() {
-    if (undo_.empty() || !onReorder || ids_ != undo_.back().after)
+    if (undo_.empty() || !onReorder || sourceIds_ != undo_.back().after)
         return;
     const auto edit = undo_.back();
     selected_ = static_cast<int>(std::find(edit.before.begin(), edit.before.end(), edit.selected) -
                                  edit.before.begin()) +
                 1;
-    if (onReorder(edit.before)) {
+    if (onReorder(edit.before, edit.grouped)) {
         undo_.pop_back();
         redo_.push_back(edit);
     }
@@ -438,13 +467,13 @@ void RoutePanel::undo() {
     redoButton_->setEnabled(!redo_.empty());
 }
 void RoutePanel::redo() {
-    if (redo_.empty() || !onReorder || ids_ != redo_.back().before)
+    if (redo_.empty() || !onReorder || sourceIds_ != redo_.back().before)
         return;
     const auto edit = redo_.back();
     selected_ = static_cast<int>(std::find(edit.after.begin(), edit.after.end(), edit.selected) -
                                  edit.after.begin()) +
                 1;
-    if (onReorder(edit.after)) {
+    if (onReorder(edit.after, edit.grouped)) {
         redo_.pop_back();
         undo_.push_back(edit);
     }
@@ -463,17 +492,34 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         undo_.clear();
         redo_.clear();
     }
-    const auto indices = session.orderedBends();
+    const auto sourceIndices = session.orderedBends();
+    sourceIds_.clear();
+    for (const auto index : sourceIndices)
+        if (const auto *entry = session.bend(index))
+            sourceIds_.push_back(entry->id);
+    auto indices = sourceIndices;
     std::vector<std::string> ids;
-    for (auto i : indices)
-        if (const auto *b = session.bend(i))
-            ids.push_back(b->id);
+    if (route) {
+        indices.clear();
+        for (const auto &step : route->steps) {
+            ids.push_back(step.id);
+            indices.push_back(step.bendIndex);
+        }
+    } else
+        for (auto i : indices)
+            if (const auto *b = session.bend(i))
+                ids.push_back(b->id);
     const bool changed = ids != ids_ || route != route_;
     const bool newRoute = route && route != route_;
+    const bool leavingJointRoute =
+        !route && route_ &&
+        std::any_of(route_->steps.begin(), route_->steps.end(),
+                    [](const auto &step) { return !step.additionalBends.empty(); });
     ids_ = std::move(ids);
     indices_ = indices;
     route_ = std::move(route);
-    selected_ = newRoute ? 0 : std::clamp(selected_, 0, static_cast<int>(ids_.size()));
+    selected_ =
+        newRoute || leavingJointRoute ? 0 : std::clamp(selected_, 0, static_cast<int>(ids_.size()));
     if (changed && steps_.size() != ids_.size() + 1) {
         while (auto *item = strip_->takeAt(0)) {
             delete item->widget();
@@ -517,18 +563,21 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         steps_[i]->setProperty("routeId", i ? QString::fromStdString(ids_[i - 1]) : QString{});
         steps_[i]->setToolTip(
             i ? (route_ ? QString{} : QStringLiteral("Черновик · ")) +
-                    QStringLiteral("Шаг %1 · B%2 · форма после гиба. Перетащите между шагами.")
+                    QStringLiteral("Шаг %1 · %2 · форма после гиба. Перетащите между шагами.")
                         .arg(i)
-                        .arg(indices_[i - 1] + 1, 2, 10, QLatin1Char('0'))
+                        .arg(route_ ? stepZones(route_->steps[i - 1])
+                                    : QStringLiteral("B%1").arg(indices_[i - 1] + 1, 2, 10,
+                                                                QLatin1Char('0')))
               : QStringLiteral("0 — заготовка: все гибы разогнуты"));
         steps_[i]->setAccessibleName(i ? QStringLiteral("Показать результат шага %1").arg(i)
                                        : QStringLiteral("Показать заготовку"));
     }
-    bool included = !ids_.empty() && session.document() &&
-                    ids_.size() == session.document()->metadata().bendAnalysis.bends.size();
+    bool included =
+        !ids_.empty() && session.document() &&
+        sourceIndices.size() == session.document()->metadata().bendAnalysis.bends.size();
     bool assigned = included;
     std::optional<std::size_t> missingTool;
-    for (auto index : indices_)
+    for (auto index : sourceIndices)
         if (const auto *entry = session.bend(index)) {
             included &= application::included(entry->review);
             if (!entry->tools) {
@@ -555,8 +604,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         steps_[i]->setEnabled(!busy && included);
         steps_[i]->setChecked(static_cast<int>(i) == selected_);
     }
-    undoButton_->setEnabled(!busy && !undo_.empty() && ids_ == undo_.back().after);
-    redoButton_->setEnabled(!busy && !redo_.empty() && ids_ == redo_.back().before);
+    undoButton_->setEnabled(!busy && !undo_.empty() && sourceIds_ == undo_.back().after);
+    redoButton_->setEnabled(!busy && !redo_.empty() && sourceIds_ == redo_.back().before);
     QString message;
     if (preparing)
         message = QStringLiteral("Строим 3D-состояния и проверяем порядок… Можно отменить расчёт.");
@@ -588,14 +637,14 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             const auto &step = route_->steps[operation()];
             const auto &b = session.document()->metadata().bendAnalysis.bends[step.bendIndex];
             message =
-                QStringLiteral("Шаг %1/%2 · B%6 · целевой внутренний угол %3° · L %4 мм · подача "
+                QStringLiteral("Шаг %1/%2 · %6 · целевой внутренний угол %3° · L %4 мм · подача "
                                "со стороны %5. ")
                     .arg(selected_)
                     .arg(route_->steps.size())
                     .arg((std::numbers::pi - b.angleRadians) * 180 / std::numbers::pi, 0, 'f', 1)
-                    .arg(b.lengthMm, 0, 'f', 1)
+                    .arg(step.preview->model().widthMm, 0, 'f', 1)
                     .arg(step.fixedSecond ? "B" : "A")
-                    .arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
+                    .arg(stepZones(step));
         }
         message += route_->partialEndSupport ? QStringLiteral("Неполная опора у торца. ")
                    : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")

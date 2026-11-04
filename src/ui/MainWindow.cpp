@@ -518,15 +518,40 @@ class MainWindow::Impl {
                 return index;
         return std::nullopt;
     }
-    bool setToolContext(std::optional<std::size_t> index) {
+    bool inToolContext(const std::string &id) const {
+        return toolContextId.empty() || id == toolContextId ||
+               std::find(toolContextMembers.begin(), toolContextMembers.end(), id) !=
+                   toolContextMembers.end();
+    }
+    bool setToolContext(std::optional<std::size_t> index, bool includeJoint = true) {
         const auto &session = controller->session();
         const auto *entry = index ? session.bend(*index) : nullptr;
         const auto id = entry ? entry->id : std::string{};
-        if (id != toolContextId && toolDraftChanged && !commitStageTools())
+        std::vector<std::string> members;
+        double span = 0;
+        if (includeJoint && index && viewingRoute) {
+            if (const auto route = controller->bendRoute();
+                route && routePanel->selected() > 0 &&
+                routePanel->operation() < route->steps.size()) {
+                const auto &step = route->steps[routePanel->operation()];
+                if (step.bendIndex == *index && !step.additionalBends.empty()) {
+                    for (const auto &member : step.additionalBends)
+                        members.push_back(member.id);
+                    span = step.preview->model().widthMm;
+                }
+            }
+        }
+        if ((id != toolContextId || members != toolContextMembers) && toolDraftChanged &&
+            !commitStageTools())
             return false;
         toolContextId = id;
-        if (const auto selected = toolContextIndex())
+        toolContextMembers = std::move(members);
+        toolContextSpan = span;
+        if (const auto selected = toolContextIndex()) {
+            const QSignalBlocker block(bendList->selectionModel());
             bendList->setCurrentIndex(bendModel->index(static_cast<int>(*selected), 0));
+        }
+        showSelectedBend(false);
         refreshPreview();
         return true;
     }
@@ -536,7 +561,13 @@ class MainWindow::Impl {
     void editRouteTool(std::size_t index) {
         const auto order = controller->session().orderedBends();
         const auto found = std::find(order.begin(), order.end(), index);
-        if (found != order.end())
+        if (const auto route = controller->bendRoute(); route) {
+            const auto step =
+                std::find_if(route->steps.begin(), route->steps.end(),
+                             [&](const auto &value) { return value.bendIndex == index; });
+            if (step != route->steps.end())
+                routePanel->select(static_cast<int>(step - route->steps.begin()) + 1, false);
+        } else if (found != order.end())
             routePanel->select(static_cast<int>(found - order.begin()) + 1, false);
         if (!setToolContext(index))
             return;
@@ -598,9 +629,8 @@ class MainWindow::Impl {
                 refreshPreview();
                 return;
             }
-            const bool replacing =
-                checkedTooling && (!request.toolVariants.front().bendIndex ||
-                                   request.toolVariants.front().bendIndex == index);
+            const bool replacing = checkedTooling && application::routeToolVariantApplies(
+                                                         request.toolVariants.front(), index);
             const auto operationAssignment =
                 replacing ? std::optional{request.toolVariants.front().assignment}
                 : perBend ? entry->catalogTools
@@ -683,15 +713,22 @@ class MainWindow::Impl {
         std::optional<std::size_t> target;
         if (perBend)
             target = static_cast<std::size_t>(row);
+        std::vector<std::size_t> members;
+        for (const auto index : session.orderedBends())
+            if (const auto *entry = session.bend(index);
+                entry && std::find(toolContextMembers.begin(), toolContextMembers.end(),
+                                   entry->id) != toolContextMembers.end())
+                members.push_back(index);
         if (!checkedToolVariants.empty() && checkedToolDocument == session.revision() &&
             checkedToolEdit == session.editRevision() &&
-            checkedToolVariants.front().bendIndex == target) {
+            checkedToolVariants.front().bendIndex == target &&
+            checkedToolVariants.front().additionalBendIndices == members) {
             prepareRoute(true, true, true, checkedToolVariants);
             return;
         }
         std::vector<application::RouteToolVariant> variants;
         for (auto &a : toolSelection->checkedCandidates())
-            variants.push_back({std::move(a), target});
+            variants.push_back({std::move(a), target, members});
         if (variants.empty()) {
             toolSelection->setCheckedSearchState(
                 false, QStringLiteral("Нет подходящих DXF-профилей. Доступен ручной выбор."));
@@ -779,8 +816,7 @@ class MainWindow::Impl {
         std::vector<application::BendToolUpdate> toolUpdates;
         for (const auto index : session.orderedBends()) {
             const auto *entry = session.bend(index);
-            if (!entry || !included(entry->review) ||
-                (!toolContextId.empty() && entry->id != toolContextId))
+            if (!entry || !included(entry->review) || !inToolContext(entry->id))
                 continue;
             auto actual = assignment;
             // The global editor patches only fields the user changed. Local setups keep
@@ -1201,6 +1237,19 @@ class MainWindow::Impl {
         const auto indices = controller->session().orderedBends();
         return indices.empty() ? std::nullopt : std::optional{indices.front()};
     }
+    std::vector<std::size_t> selectedJointBends() const {
+        const auto route = controller->bendRoute();
+        if (!viewingRoute || !route || routePanel->selected() <= 0 ||
+            routePanel->operation() >= route->steps.size())
+            return {};
+        const auto &step = route->steps[routePanel->operation()];
+        if (step.additionalBends.empty())
+            return {};
+        std::vector<std::size_t> result{step.bendIndex};
+        for (const auto &member : step.additionalBends)
+            result.push_back(member.bendIndex);
+        return result;
+    }
     void beginPreviewReplacement(bool preserveFrame = false) {
         shortToolDiagnosticDraft.reset();
         if (!viewingSource && displayedPreview && !previewReplacement) {
@@ -1221,8 +1270,18 @@ class MainWindow::Impl {
         const bool multiple =
             controller->session().document()->metadata().bendAnalysis.bends.size() > 1;
         const int step = routePanel->selected();
+        const auto joint = selectedJointBends();
+        const auto oldRoute = controller->bendRoute();
         beginPreviewReplacement(true);
         stopPlayback();
+        if (!joint.empty()) {
+            for (const auto member : joint)
+                if (!controller->setBendWorkpieceOrientation(
+                        member, !controller->session().bend(member)->workpieceReversed))
+                    return;
+            prepareRoute(false, oldRoute->withTools);
+            return;
+        }
         if (!controller->setBendWorkpieceOrientation(*index, reversed))
             return;
         if (multiple) {
@@ -1244,11 +1303,27 @@ class MainWindow::Impl {
         auto tools = *entry->tools;
         auto assignment = entry->catalogTools;
         const bool all = multi && blankSetupSelected();
+        const auto joint = selectedJointBends();
         if (!all && tools.punchReversed == reversed)
             return;
         beginPreviewReplacement(true);
         const int step = routePanel->selected();
         stopPlayback();
+        if (!joint.empty()) {
+            std::vector<application::BendToolUpdate> updates;
+            for (const auto member : joint) {
+                const auto *part = session.bend(member);
+                auto actual = part->catalogTools;
+                auto parameters = *part->tools;
+                parameters.punchReversed = reversed;
+                if (actual)
+                    actual->punchReversed = reversed;
+                updates.push_back({member, parameters, std::move(actual)});
+            }
+            if (controller->setBendToolAssignments(updates))
+                prepareRoute(false, true);
+            return;
+        }
         if (all) {
             if (!controller->setAllBendPunchOrientations(reversed))
                 return;
@@ -1557,16 +1632,23 @@ class MainWindow::Impl {
             if (index && *index < document->metadata().bendAnalysis.bends.size()) {
                 const auto &bend = document->metadata().bendAnalysis.bends[*index];
                 const auto target = session.bendTarget(*index);
+                const auto currentRoute = controller->bendRoute();
+                const auto currentPreview = scenePreview();
+                const auto operationCount =
+                    currentRoute ? currentRoute->steps.size() : session.orderedBends().size();
+                const auto length = currentPreview && currentPreview->activeBendCount() > 1
+                                        ? currentPreview->model().widthMm
+                                        : bend.lengthMm;
                 operationSummary->setText(
                     QStringLiteral("Гиб %1 из %2\n%3° · L %4 мм")
                         .arg(document->metadata().bendAnalysis.bends.size() > 1
                                  ? routePanel->selected()
                                  : 1)
-                        .arg(session.orderedBends().size())
+                        .arg(operationCount)
                         .arg(number((std::numbers::pi -
                                      (target ? target->angleRadians : bend.angleRadians)) *
                                     180 / std::numbers::pi),
-                             number(bend.lengthMm)));
+                             number(length)));
                 if (const auto *entry = session.bend(*index); entry && entry->tools) {
                     const auto name = entry->catalogTools
                                           ? text(entry->catalogTools->punch.code) + " / " +
@@ -1740,6 +1822,8 @@ class MainWindow::Impl {
         if (toolScopeRevision != session.revision()) {
             toolScopeRevision = session.revision();
             toolContextId.clear();
+            toolContextMembers.clear();
+            toolContextSpan = 0;
             toolDraftChanged = false;
             lastRouteAutomatic = true;
             routePanel->setWithTools(true);
@@ -1757,6 +1841,17 @@ class MainWindow::Impl {
                                              text(entry->id));
             }
             auto at = toolAssignmentScope->findData(text(toolContextId));
+            if (!toolContextMembers.empty()) {
+                QString label = QStringLiteral("Совместный гиб");
+                for (const auto index : session.orderedBends()) {
+                    const auto *entry = session.bend(index);
+                    if (entry && inToolContext(entry->id))
+                        label += QStringLiteral(" B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
+                }
+                toolAssignmentScope->addItem(label, text(toolContextId));
+                at = toolAssignmentScope->count() - 1;
+                toolAssignmentScope->setItemData(at, true, Qt::UserRole + 1);
+            }
             if (at < 0) {
                 toolContextId.clear();
                 at = 0;
@@ -1813,7 +1908,8 @@ class MainWindow::Impl {
                 document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)];
             if (const auto target = session.bendTarget(static_cast<std::size_t>(row)))
                 selectionRequest = core::ToolSelectionRequest{
-                    bend.thicknessMm, target->angleRadians, target->innerRadiusMm, bend.lengthMm};
+                    bend.thicknessMm, target->angleRadians, target->innerRadiusMm,
+                    std::max(bend.lengthMm, toolContextSpan)};
             if (allBends && selectionRequest) {
                 const auto &bends = document->metadata().bendAnalysis.bends;
                 for (std::size_t i = 0; i < bends.size(); ++i)
@@ -2762,6 +2858,8 @@ class MainWindow::Impl {
     QLabel *toolAssignmentStatus = nullptr;
     std::uint64_t toolScopeRevision = 0;
     std::string toolContextId;
+    std::vector<std::string> toolContextMembers;
+    double toolContextSpan = 0;
     bool viewingRoute = false;
     bool viewingDraft = false, draftAutoPlay = false;
     std::weak_ptr<const application::RouteDraft> shortToolDiagnosticDraft;
@@ -3659,14 +3757,15 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         if (at < 0)
             return;
         const auto id = impl_->toolAssignmentScope->itemData(at).toString().toStdString();
-        if (id == impl_->toolContextId)
+        const bool joint = impl_->toolAssignmentScope->itemData(at, Qt::UserRole + 1).toBool();
+        if (id == impl_->toolContextId && joint == !impl_->toolContextMembers.empty())
             return;
         impl_->cancelCheckedToolSelection(true);
         std::optional<std::size_t> index;
         for (const auto i : impl_->controller->session().orderedBends())
             if (impl_->controller->session().bend(i)->id == id)
                 index = i;
-        impl_->setToolContext(index);
+        impl_->setToolContext(index, joint);
         impl_->refreshPreview();
     });
     connect(impl_->checkBend, &QPushButton::clicked, this, [this] {
@@ -3710,8 +3809,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         std::vector<application::BendToolUpdate> updates;
         for (const auto i : impl_->controller->session().orderedBends()) {
             const auto *entry = impl_->controller->session().bend(i);
-            if (included(entry->review) &&
-                (impl_->toolContextId.empty() || impl_->toolContextId == entry->id))
+            if (included(entry->review) && impl_->inToolContext(entry->id))
                 updates.push_back({i, {}, {}});
         }
         impl_->beginPreviewReplacement();
@@ -3982,13 +4080,22 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         else
             impl_->prepareRoute(impl_->lastRouteAutomatic, impl_->routePanel->withTools(), true);
     };
-    impl_->routePanel->onReorder = [this](std::vector<std::string> ids) {
+    impl_->routePanel->onReorder = [this](std::vector<std::string> ids, bool grouped) {
+        const auto previous = impl_->controller->bendRoute();
+        const bool joint =
+            grouped || (previous && std::any_of(previous->steps.begin(), previous->steps.end(),
+                                                [](const auto &step) {
+                                                    return !step.additionalBends.empty();
+                                                }));
         impl_->beginPreviewReplacement();
         impl_->stopPlayback();
         impl_->draftAutoPlay = false;
         if (!impl_->controller->setBendOrder(ids))
             return false;
-        impl_->prepareManualDraft();
+        if (joint)
+            impl_->prepareRoute(false, impl_->routePanel->withTools());
+        else
+            impl_->prepareManualDraft();
         return true;
     };
     impl_->routePanel->onPrepare = [this](bool automatic, bool withTools) {

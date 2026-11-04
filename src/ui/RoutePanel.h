@@ -43,7 +43,7 @@ class RoutePanel final : public QWidget {
     std::function<void(bool automatic, bool withTools)> onPrepare;
     std::function<void(int)> onSelect;
     std::function<void(std::optional<std::size_t>)> onHover;
-    std::function<bool(std::vector<std::string>)> onReorder;
+    std::function<bool(std::vector<std::string>, bool grouped)> onReorder;
     std::function<void()> onModeChanged;
     std::function<void(std::size_t)> onEditTool;
     std::function<void()> onExpandSearch;
@@ -56,12 +56,14 @@ class RoutePanel final : public QWidget {
     struct OrderEdit {
         std::vector<std::string> before, after;
         std::string selected;
+        bool grouped = false;
     };
     std::vector<OrderEdit> undo_, redo_;
     std::uint64_t documentRevision_ = 0;
     QPushButton *undoButton_, *redoButton_;
     application::BendRoutePtr route_;
     std::vector<std::string> ids_;
+    std::vector<std::string> sourceIds_;
     std::vector<std::size_t> indices_;
     std::vector<QPushButton *> steps_;
     int selected_ = 0;

@@ -28,6 +28,9 @@ struct MachineCollision {
 };
 class SingleBendPreview {
   public:
+    [[nodiscard]] virtual std::size_t activeBendCount() const noexcept {
+        return 1;
+    }
     virtual ~SingleBendPreview() = default;
     [[nodiscard]] virtual const BackgaugeReport *backgauge() const noexcept {
         return nullptr;

@@ -1132,7 +1132,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                                          request, *(*route)->selectedToolVariant));
                             bool valid = selectedInput && *route && (*route)->source == document &&
                                          (*route)->withTools == request.withTools &&
-                                         (*route)->steps.size() == request.operations.size();
+                                         !(*route)->steps.empty() &&
+                                         (*route)->steps.size() <= request.operations.size();
                             std::set<std::string> ids;
                             std::vector<std::string> order;
                             bool partialEndSupport = false;
@@ -1145,6 +1146,40 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                                                 step.bendIndex == op.bendIndex;
                                                      });
                                     const auto &p = step.preview;
+                                    std::vector<std::string> memberIds;
+                                    for (const auto &member : step.additionalBends) {
+                                        const auto input = std::find_if(
+                                            request.operations.begin(), request.operations.end(),
+                                            [&](const auto &op) {
+                                                return op.id == member.id &&
+                                                       op.bendIndex == member.bendIndex;
+                                            });
+                                        valid &= input != request.operations.end() &&
+                                                 ids.insert(member.id).second &&
+                                                 found != request.operations.end();
+                                        if (input != request.operations.end())
+                                            valid &= input->target == member.target &&
+                                                     input->tools == member.tools &&
+                                                     input->assignment == member.assignment &&
+                                                     (request.allowWorkpieceRotation ||
+                                                      input->workpieceReversed ==
+                                                          member.workpieceReversed);
+                                        if (found != request.operations.end())
+                                            valid &= std::abs(member.target.angleRadians -
+                                                              found->target.angleRadians) <=
+                                                         document->metadata()
+                                                             .bendAnalysis.angleToleranceRadians &&
+                                                     std::abs(member.target.innerRadiusMm -
+                                                              found->target.innerRadiusMm) <=
+                                                         document->metadata()
+                                                             .bendAnalysis.lengthToleranceMm &&
+                                                     (!request.withTools ||
+                                                      (member.tools == found->tools &&
+                                                       member.assignment == found->assignment));
+                                        memberIds.push_back(member.id);
+                                    }
+                                    valid &= p && p->activeBendCount() ==
+                                                      step.additionalBends.size() + 1;
                                     valid &= found != request.operations.end() &&
                                              ids.insert(step.id).second && p &&
                                              !p->unverifiedDraft() && !p->collision() &&
@@ -1223,7 +1258,9 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         }
                                     }
                                     order.push_back(step.id);
+                                    order.insert(order.end(), memberIds.begin(), memberIds.end());
                                 }
+                            valid &= ids.size() == request.operations.size();
                             valid &= *route && (*route)->partialEndSupport == partialEndSupport;
                             if (valid) {
                                 auto candidate = s->session;
@@ -1235,10 +1272,14 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                         else
                                             valid &= candidate.setBendTools(op.bendIndex, op.tools);
                                     }
-                                if (request.withTools)
-                                    for (const auto &step : (*route)->steps)
+                                for (const auto &step : (*route)->steps)
+                                    if (request.withTools || !step.additionalBends.empty()) {
                                         valid &= candidate.setBendWorkpieceOrientation(
                                             step.bendIndex, step.fixedSecond);
+                                        for (const auto &member : step.additionalBends)
+                                            valid &= candidate.setBendWorkpieceOrientation(
+                                                member.bendIndex, member.workpieceReversed);
+                                    }
                                 valid &= candidate.setBendOrder(order);
                                 if (valid)
                                     s->session = std::move(candidate);
