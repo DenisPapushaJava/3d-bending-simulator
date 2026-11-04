@@ -9,6 +9,7 @@ class QComboBox;
 class QHBoxLayout;
 class QScrollArea;
 namespace bending::ui {
+[[nodiscard]] QString routeFailureReason(const application::BendRouteError &);
 class RoutePanel final : public QWidget {
     Q_OBJECT
   public:

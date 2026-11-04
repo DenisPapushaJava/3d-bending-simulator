@@ -648,7 +648,7 @@ class MainWindow::Impl {
         } else if (checkedTooling) {
             checkedToolJob = false;
             checkedToolVariants.clear();
-            checkedToolDialog->finish(false);
+            checkedToolDialog->finish(application::BendRouteErrorCode::Failed);
             toolSelection->setCheckedSearchState(
                 false, QStringLiteral(
                            "Полная проверка недоступна. Используйте быстрый или ручной выбор."));
@@ -1923,14 +1923,14 @@ class MainWindow::Impl {
                     resumable
                         ? QStringLiteral("Проверка не завершена. Продолжите подбор или выберите "
                                          "инструмент вручную.")
+                    : routeError && routeError->code == application::BendRouteErrorCode::Unsupported
+                        ? QStringLiteral("Не все установки удалось проверить. Доступен быстрый "
+                                         "и ручной выбор.")
                         : QStringLiteral(
                               "Проверенный вариант не найден. Доступен быстрый и ручной выбор.");
-                checkedToolDialog->finish(
-                    resumable,
-                    routeError && routeError->operationError ==
-                                      application::BendPreviewErrorCode::BackgaugeUnavailable
-                        ? QString::fromStdString(routeError->detail)
-                        : QString{});
+                checkedToolDialog->finish(routeError ? routeError->code
+                                                     : application::BendRouteErrorCode::Failed,
+                                          routeError ? routeFailureReason(*routeError) : QString{});
             }
             toolSelection->setCheckedSearchState(false, status, resumable);
         } else if (checkedToolJob) {

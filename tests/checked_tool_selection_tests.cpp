@@ -44,12 +44,13 @@ void wait(const std::function<bool()> &ready) {
 }
 class Builder final : public SingleBendPreviewBuilder {
   public:
-    enum class Mode { Real, WrongIndex, Wait };
+    enum class Mode { Real, WrongIndex, Error, Wait };
     mutable cad::SingleBendPreviewBuilder impl;
     mutable BendRouteRequest last;
     mutable BendRoutePtr accepted;
     mutable std::atomic<unsigned> calls = 0;
     std::atomic<Mode> mode = Mode::Real;
+    BendRouteError error{BendRouteErrorCode::Failed, "Failure"};
     mutable std::atomic<bool> entered = false, release = false, stopObserved = false;
     BendPreviewResult build(DocumentPtr d, std::size_t i, core::BendTarget t, bool reverse,
                             std::stop_token stop) const override {
@@ -66,6 +67,8 @@ class Builder final : public SingleBendPreviewBuilder {
                                std::stop_token stop) const override {
         last = r;
         ++calls;
+        if (mode == Mode::Error)
+            return error;
         if (mode == Mode::WrongIndex) {
             auto broken = std::make_shared<BendRoute>(*accepted);
             broken->selectedToolVariant = r.toolVariants.size();
@@ -214,10 +217,43 @@ int main(int argc, char **argv) {
                   c.bendRouteError()->code == BendRouteErrorCode::Failed &&
                   c.session().bend(0)->catalogTools == saved,
               "Invalid selected index changed the document");
+        auto *progress = window.findChild<QDialog *>("checkedToolProgress");
+        check(progress, "No checked-result dialog");
+        auto *title = progress->findChild<QLabel *>("checkedToolTitle");
+        auto *detail = progress->findChild<QLabel *>("checkedToolDetail");
+        auto *action = progress->findChild<QPushButton *>("checkedToolProgressAction");
+        check(title && detail && action, "No checked-result fields");
+        builder->mode = Builder::Mode::Error;
+        for (const auto code : {BendRouteErrorCode::Unsupported, BendRouteErrorCode::NoRoute,
+                                BendRouteErrorCode::SearchLimit}) {
+            builder->error = {code, "Contact motion parameters rejected", 1, 27,
+                              BendPreviewErrorCode::SupportNotProven};
+            recommend->click();
+            wait([&] { return !c.hasWork(); });
+            check(progress->isVisible() && detail->text().contains("B02") &&
+                      detail->text().contains(QStringLiteral("опора на матрицу")) &&
+                      !detail->text().contains(QStringLiteral("Contact motion")) &&
+                      c.session().bend(0)->catalogTools == saved && !c.bendRoute(),
+                  "Failed selection hid its localized bend reason or applied tooling");
+            check(title->text() == (code == BendRouteErrorCode::Unsupported
+                                        ? QStringLiteral("Проверка ограничена")
+                                    : code == BendRouteErrorCode::SearchLimit
+                                        ? QStringLiteral("Проверка не завершена")
+                                        : QStringLiteral("Проверенный вариант не найден")) &&
+                      action->text() == (code == BendRouteErrorCode::SearchLimit
+                                             ? QStringLiteral("Продолжить")
+                                             : QStringLiteral("Закрыть")),
+                  "Unknown, limited and exhausted searches became the same result");
+            check((progress->frameGeometry().center() - window.frameGeometry().center())
+                          .manhattanLength() <= 4,
+                  "Result message resizing moved the dialog off centre");
+            check(detail->height() >= detail->heightForWidth(detail->width()) &&
+                      progress->rect().contains(detail->geometry()),
+                  "Localized result reason was clipped");
+        }
         builder->mode = Builder::Mode::Wait;
         recommend->click();
         wait([&] { return builder->entered.load(); });
-        auto *progress = window.findChild<QDialog *>("checkedToolProgress");
         auto *indicator = window.findChild<QProgressBar *>("checkedToolBusy");
         check(progress && progress->isVisible() && progress->windowModality() == Qt::WindowModal &&
                   QApplication::activeModalWidget() == progress && indicator &&

@@ -23,6 +23,80 @@
 #include <algorithm>
 #include <numbers>
 namespace bending::ui {
+QString routeFailureReason(const application::BendRouteError &error) {
+    QString message;
+    if (error.bendIndex)
+        message += (error.toolLengths ? QStringLiteral(" Гиб B%1.")
+                                      : QStringLiteral(" Последняя попытка: B%1."))
+                       .arg(*error.bendIndex + 1, 2, 10, QLatin1Char('0'));
+    if (error.toolLengths) {
+        const auto &lengths = *error.toolLengths;
+        message += QStringLiteral(" Нужно %1 мм; пуансон %2 мм, матрица %3 мм. "
+                                  "Подберите секции на этапе «Инструмент».")
+                       .arg(lengths.bendLengthMm, 0, 'f', 2)
+                       .arg(lengths.punchLengthMm, 0, 'f', 2)
+                       .arg(lengths.dieLengthMm, 0, 'f', 2);
+    }
+    if (error.operationError) {
+        using Code = application::BendPreviewErrorCode;
+        switch (*error.operationError) {
+        case Code::ToolTooShort:
+            if (!error.toolLengths)
+                message += QStringLiteral(" Инструмент короче линии гиба.");
+            break;
+        case Code::MissingLeftSupport:
+        case Code::MissingRightSupport:
+        case Code::SupportNotProven:
+            message += QStringLiteral(" Не подтверждена опора на матрицу во время гиба.");
+            break;
+        case Code::EndSupportLimitExceeded:
+            message += QStringLiteral(" Нехватка опоры у торца превышает заданный допуск.");
+            break;
+        case Code::ToolIntersection:
+            message += QStringLiteral(" Обнаружено столкновение с инструментом.");
+            break;
+        case Code::MachineIntersection:
+            message += QStringLiteral(" Столкновение с узлом демонстрационного станка: %1.")
+                           .arg(QString::fromStdString(error.detail));
+            break;
+        case Code::BackgaugeUnavailable:
+            message += QStringLiteral(" Не найдена база заднего упора.");
+            if (!error.detail.empty())
+                message += QLatin1Char(' ') + QString::fromStdString(error.detail);
+            break;
+        case Code::SheetIntersection:
+            message += QStringLiteral(" Стенки детали пересекаются при движении.");
+            break;
+        case Code::ToolAngleConflict:
+            message += QStringLiteral(" Угол инструмента не подходит.");
+            break;
+        case Code::NoseTooLarge:
+            message += QStringLiteral(" Радиус пуансона слишком велик.");
+            break;
+        case Code::NarrowDieOpening:
+            message += QStringLiteral(" Раскрытие V слишком мало для толщины.");
+            break;
+        case Code::RetractionNotProven:
+            message += QStringLiteral(" Не подтверждён свободный отвод пуансона.");
+            break;
+        case Code::ContactLost:
+            message += QStringLiteral(" Не подтверждён контакт с инструментом.");
+            break;
+        case Code::UnsupportedToolGeometry:
+            message += QStringLiteral(" Контакт этого профиля пока не поддержан.");
+            break;
+        case Code::UnsupportedGeometry:
+            message += QStringLiteral(" Промежуточная геометрия пока не поддерживается.");
+            break;
+        case Code::UnsupportedParameters:
+            message += QStringLiteral(" Параметры этой установки пока не поддерживаются.");
+            break;
+        default:
+            break;
+        }
+    }
+    return message.trimmed();
+}
 namespace {
 const char *stepMime = "application/x-bending-route-step";
 class StepButton final : public QPushButton {
@@ -503,68 +577,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                       "В проверенных вариантах порядок не найден. Измените порядок или инструмент.")
                 : QStringLiteral(
                       "Не удалось подготовить полный порядок для этой геометрии/настройки.");
-        if (error->bendIndex)
-            message += (error->toolLengths ? QStringLiteral(" Гиб B%1.")
-                                           : QStringLiteral(" Последняя попытка: B%1."))
-                           .arg(*error->bendIndex + 1, 2, 10, QLatin1Char('0'));
-        if (error->toolLengths) {
-            const auto &lengths = *error->toolLengths;
-            message += QStringLiteral(" Нужно %1 мм; пуансон %2 мм, матрица %3 мм. "
-                                      "Подберите секции на этапе «Инструмент».")
-                           .arg(lengths.bendLengthMm, 0, 'f', 2)
-                           .arg(lengths.punchLengthMm, 0, 'f', 2)
-                           .arg(lengths.dieLengthMm, 0, 'f', 2);
-        }
-        if (error->operationError) {
-            using Code = application::BendPreviewErrorCode;
-            switch (*error->operationError) {
-            case Code::ToolTooShort:
-                if (!error->toolLengths)
-                    message += QStringLiteral(" Инструмент короче линии гиба.");
-                break;
-            case Code::MissingLeftSupport:
-            case Code::MissingRightSupport:
-            case Code::SupportNotProven:
-                message += QStringLiteral(" Не подтверждена опора на матрицу.");
-                break;
-            case Code::EndSupportLimitExceeded:
-                message += QStringLiteral("Нехватка опоры у торца превышает заданный допуск.");
-                break;
-            case Code::ToolIntersection:
-                message += QStringLiteral(" Обнаружено столкновение с инструментом.");
-                break;
-            case Code::MachineIntersection:
-                message += QStringLiteral(" Столкновение с узлом демонстрационного станка: %1.")
-                               .arg(QString::fromStdString(error->detail));
-                break;
-            case Code::BackgaugeUnavailable:
-                message += QStringLiteral(" Не найдена база заднего упора.");
-                break;
-            case Code::SheetIntersection:
-                message += QStringLiteral(" Стенки детали пересекаются при движении.");
-                break;
-            case Code::ToolAngleConflict:
-                message += QStringLiteral(" Угол инструмента не подходит.");
-                break;
-            case Code::NoseTooLarge:
-                message += QStringLiteral(" Радиус пуансона слишком велик.");
-                break;
-            case Code::NarrowDieOpening:
-                message += QStringLiteral(" Раскрытие V слишком мало для толщины.");
-                break;
-            case Code::RetractionNotProven:
-                message += QStringLiteral(" Не подтверждён свободный отвод пуансона.");
-                break;
-            case Code::ContactLost:
-                message += QStringLiteral(" Не подтверждён контакт с инструментом.");
-                break;
-            case Code::UnsupportedToolGeometry:
-                message += QStringLiteral(" Контакт этого профиля пока не поддержан.");
-                break;
-            default:
-                break;
-            }
-        }
+        const auto reason = routeFailureReason(*error);
+        if (!reason.isEmpty())
+            message += QLatin1Char(' ') + reason;
     } else if (route_) {
         if (selected_ == 0)
             message = QStringLiteral("Плоская геометрическая заготовка · %1 операций. ")
