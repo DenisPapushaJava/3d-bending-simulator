@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -577,6 +578,51 @@ void testProfiled(const std::filesystem::path &path) {
         std::cout << "Private profiled STEP: both fixed sides and 61 tool states passed\n";
     }
 }
+void testRoundedShoulderReturn(const std::filesystem::path &path) {
+    const auto shape = fixtures::bentStrip(5, 4, std::numbers::pi / 2, 80, true, 20);
+    const auto document = load(shape, path);
+    const auto sourceBytes = std::string(document->sourceStep());
+    require(document->metadata().bendAnalysis.bends.size() == 1,
+            "Return flange fixture was not recognized");
+    const auto &bend = document->metadata().bendAnalysis.bends.front();
+    const core::PressTools parameters{40, std::numbers::pi / 3, std::numbers::pi / 6, .8, 80, 10};
+    const auto assignment = tool_fixture::explicitPair(parameters, 3);
+    cad::SingleBendPreviewBuilder builder;
+    for (bool reversed : {false, true}) {
+        const auto result = builder.buildAssignedToolMotion(
+            document, 0, {bend.angleRadians, bend.innerRadiusMm}, assignment, {}, 0, reversed);
+        if (const auto *error = std::get_if<application::BendPreviewError>(&result))
+            throw std::runtime_error("Rounded shoulder return: " + error->detail);
+        const auto motion = std::get<application::BendPreviewPtr>(result);
+        require(motion->frameCount() == 61 && motion->pressMotion() && motion->usesDrawingTools() &&
+                    motion->punchRetraction() && !motion->collision(),
+                "A newly admitted return bypassed the complete DXF cycle");
+        for (std::size_t f = 0; f < motion->frameCount(); ++f) {
+            const auto &frame = cad::OcctPreviewAccess::frame(*motion, f);
+            double materialVolume = 0;
+            for (const auto &region : frame.regions)
+                materialVolume += volume(region);
+            require(BRepCheck_Analyzer(frame.shape).IsValid() &&
+                        std::abs(materialVolume - document->metadata().volumeMm3) < 1e-4,
+                    "A newly admitted return lost material");
+        }
+    }
+    const auto cut = BRepPrimAPI_MakeBox(gp_Pnt(4, -21, 39), 6, 6, 2).Shape();
+    const auto notched = load(BRepAlgoAPI_Cut(shape, cut).Shape(), path);
+    require(notched->metadata().closedCutouts.status != application::ClosedCutoutStatus::Filled &&
+                notched->metadata().bendAnalysis.bends.size() == 1,
+            "Open support notch was filled or hid the bend");
+    const auto &notchedBend = notched->metadata().bendAnalysis.bends.front();
+    for (bool reversed : {false, true}) {
+        const auto result = builder.buildAssignedToolMotion(
+            notched, 0, {notchedBend.angleRadians, notchedBend.innerRadiusMm}, assignment, {}, 100,
+            reversed);
+        const auto *error = std::get_if<application::BendPreviewError>(&result);
+        require(error && error->code == application::BendPreviewErrorCode::SupportNotProven,
+                "Tighter bound admitted an interrupted central support strip");
+    }
+    require(document->sourceStep() == sourceBytes, "Return flange check altered the source STEP");
+}
 } // namespace
 int main() {
     try {
@@ -584,6 +630,7 @@ int main() {
         Temporary temporary;
         test(temporary.path / "part.step");
         testProfiled(temporary.path / "profiled.step");
+        testRoundedShoulderReturn(temporary.path / "rounded-return.step");
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -3,6 +3,7 @@
 #include "bending/simulation/SingleBend.h"
 #include "bending/simulation/ToolProfiles.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -17,6 +18,106 @@ void require(bool value, const char *message) {
 }
 void close(double actual, double expected, const char *message) {
     require(std::isfinite(actual) && std::abs(actual - expected) < 1.0e-8, message);
+}
+void checkSupportBounds() {
+    using namespace bending;
+    using namespace simulation;
+    constexpr double degree = std::numbers::pi / 180;
+    const core::PressTools tools{40, 60 * degree, 30 * degree, .1, 100, 10};
+    SingleBend shortReturn{4, 5, 90 * degree, 80, 20, 100};
+    const DieShoulders rounded{21, 3, 100, 100};
+    auto result = preparePressMotion(shortReturn, tools, 1e-5, rounded);
+    require(std::holds_alternative<PressMotion>(result),
+            "Loose support bound rejected a sufficient return flange");
+    const auto motion = std::get<PressMotion>(result);
+    close(motion.maximumSupportDistanceMm, 21 * std::sqrt(2.) - 12,
+          "Rounded shoulder support endpoint is wrong");
+    shortReturn.fixedFlangeMm = motion.maximumSupportDistanceMm + .5e-5;
+    require(std::get<PressMotionIssue>(preparePressMotion(shortReturn, tools, 1e-5, rounded)) ==
+                PressMotionIssue::SupportNotProven,
+            "Support bound consumed the required length tolerance");
+    shortReturn.fixedFlangeMm = motion.maximumSupportDistanceMm + 2e-5;
+    require(
+        std::holds_alternative<PressMotion>(preparePressMotion(shortReturn, tools, 1e-5, rounded)),
+        "Sufficient support margin was rejected");
+    const SingleBend smallAngle{2, 4, 30 * degree, 80, 30, 40};
+    const DieShoulders smallRounded{13, 2, 100, 100};
+    auto smallTools = tools;
+    smallTools.openingMm = 24;
+    const auto startMaximum =
+        std::get<PressMotion>(preparePressMotion(smallAngle, smallTools, 1e-5, smallRounded));
+    close(startMaximum.maximumSupportDistanceMm, 13 - 5 * std::numbers::pi / 12,
+          "Support maximum at the flat endpoint was missed");
+    const SingleBend large{.3, 100, 5 * degree, 100000, 100000, 100000};
+    const core::PressTools largeTools{1000, 30 * degree, 30 * degree, .1, 100000, 10};
+    const DieShoulders largeShoulders{100000, 100000, 100, 100};
+    for (double tolerance : {1e-7, .01}) {
+        const auto bound =
+            std::get<PressMotion>(preparePressMotion(large, largeTools, tolerance, largeShoulders));
+        for (double progress : {0., 1e-12, .25, .5, pressBendingEndProgress, 1.}) {
+            const auto state = pressMotionState(large, bound, progress);
+            require(state && std::isfinite(state->punchTipYmm) &&
+                        state->supportDistanceMm <= bound.maximumSupportDistanceMm,
+                    "Large-scale rounding escaped the support bound");
+        }
+    }
+    auto invalidShoulders = largeShoulders;
+    invalidShoulders.radiusMm = std::numeric_limits<double>::max();
+    require(std::holds_alternative<PressMotionIssue>(
+                preparePressMotion(large, largeTools, 1e-7, invalidShoulders)),
+            "Unbounded shoulder geometry acquired a support certificate");
+
+    std::size_t cases = 0, states = 0;
+    for (double thickness : {.1, .3, 1., 3., 4., 6., 20.})
+        for (double radius : {.1, .2, 2., 5., 8., 50.})
+            for (double angle : {5., 15., 30., 60., 90., 120., 150., 175.})
+                for (double ratio : {5., 8., 16.})
+                    for (double shoulderRadius : {0., .5, 4.})
+                        for (double flange : {8., 28., 200.}) {
+                            const SingleBend model{thickness, radius, angle * degree,
+                                                   80,        flange, flange + 30};
+                            const core::PressTools parameters{std::max(1., thickness * ratio),
+                                                              30 * degree,
+                                                              30 * degree,
+                                                              .1,
+                                                              100,
+                                                              10};
+                            std::optional<DieShoulders> shoulders;
+                            if (shoulderRadius > 0)
+                                shoulders =
+                                    DieShoulders{parameters.openingMm / 2 + .4 * shoulderRadius,
+                                                 shoulderRadius, 100, 100};
+                            const auto prepared =
+                                preparePressMotion(model, parameters, 1e-5, shoulders);
+                            const auto *bound = std::get_if<PressMotion>(&prepared);
+                            if (!bound)
+                                continue;
+                            ++cases;
+                            require(std::isfinite(bound->maximumSupportDistanceMm) &&
+                                        bound->maximumSupportDistanceMm > 0 &&
+                                        bound->maximumSupportDistanceMm < flange - 1e-5,
+                                    "Invalid support certificate in parameter grid");
+                            for (int sample = 0; sample <= 100; ++sample) {
+                                const double progress =
+                                    (.2 + .8 * sample / 100.) * pressBendingEndProgress;
+                                const auto state = pressMotionState(model, *bound, progress);
+                                require(state && state->supportDistanceMm > 0 &&
+                                            state->supportDistanceMm <=
+                                                bound->maximumSupportDistanceMm,
+                                        "A forming state escaped the continuous support bound");
+                                const auto contact =
+                                    dieSupportPoint(*bound, state->section.angleRadians);
+                                const auto tangent = state->section.outerArc[2];
+                                const double measured =
+                                    std::hypot(contact.x - tangent.x, contact.y - tangent.y);
+                                require(measured <= bound->maximumSupportDistanceMm,
+                                        "Geometric contact escaped the support bound");
+                                ++states;
+                            }
+                        }
+    require(cases > 2000 && states > 200000, "Support grid did not exercise enough valid states");
+    std::cout << "Support bounds: " << cases << " configurations, " << states
+              << " independently measured contact positions\n";
 }
 } // namespace
 int main() {
@@ -280,6 +381,7 @@ int main() {
         auto invalid = model;
         invalid.thicknessMm = -2;
         require(!singleBendSection(invalid, 0.5), "Negative thickness accepted");
+        checkSupportBounds();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

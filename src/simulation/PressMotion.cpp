@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 namespace bending::simulation {
@@ -32,11 +33,22 @@ PressMotionResult preparePressMotion(const SingleBend &m, core::PressTools tools
     const double halfLength = bendAllowanceMm(m) / 2.0;
     const double a = shoulders ? shoulders->halfSpanMm : tools.openingMm / 2.0;
     const double shoulderRadius = shoulders ? shoulders->radiusMm : 0.;
-    // For h in [0,half], sinc(h) decreases, sin(h) increases, cos(h) decreases.
-    // Bound outer tangency X and q=(a-X)/cos(h) without a discrete-only support test.
-    const double maximumTangencyX = halfLength + m.thicknessMm / 2.0 * std::sin(half);
-    const double maximumQ = (a - halfLength * sinc(half)) / std::cos(half);
-    if (a - shoulderRadius * std::sin(half) - maximumTangencyX <= tolerance ||
+    const double sine = std::sin(half), cosine = std::cos(half);
+    // Preserve the sufficient contact condition for the complete interval.
+    // It also establishes a > halfLength, required by the endpoint proof below.
+    const double maximumTangencyX = halfLength + m.thicknessMm / 2.0 * sine;
+    if (a - shoulderRadius * sine - maximumTangencyX <= tolerance) {
+        return PressMotionIssue::SupportNotProven;
+    }
+    // q(h)=(a-L*sinc(h)-b*sin(h))/cos(h), b=t/2+r. Under the condition above,
+    // the numerator of q'(h) is increasing: q has no interior maximum.
+    // See docs/bend-support-search-proposal.md for the continuous proof.
+    const double b = m.thicknessMm / 2.0 + shoulderRadius;
+    const double endQ = (a - halfLength * sinc(half) - b * sine) / cosine;
+    const double roundoff =
+        32 * std::numeric_limits<double>::epsilon() * (a + halfLength + b) / cosine;
+    const double maximumQ = std::max(a - halfLength, endQ) + roundoff;
+    if (!std::isfinite(maximumQ) ||
         maximumQ >= std::min(m.fixedFlangeMm, m.movingFlangeMm) - tolerance) {
         return PressMotionIssue::SupportNotProven;
     }
