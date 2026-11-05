@@ -135,6 +135,12 @@ struct DrawingSectionLocation {
     PointMm station{0, 0, 0};
     std::vector<std::size_t> bends;
 };
+struct DrawingSectionBasis {
+    PointMm origin;
+    PointMm right; // Unit directions, in the source model; normal is DrawingSection::normal.
+    PointMm up;
+    std::size_t sourceView;
+};
 struct DrawingSection {
     DrawingView view; // Actual intersection of the source solid, including internal voids.
     PointMm normal{0, 0, 1};
@@ -143,6 +149,7 @@ struct DrawingSection {
     // A verified translated unit of this true section, not a claim of whole-body periodicity.
     std::size_t repeatCount = 0;
     bool rotated = false;
+    std::optional<DrawingSectionBasis> basis = {};
 };
 struct DrawingAuxiliaryView {
     DrawingView view;

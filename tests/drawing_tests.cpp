@@ -1,5 +1,6 @@
 #include "BendFixtures.h"
 #include "DrawingLayoutChecks.h"
+#include "DrawingSectionOrientationChecks.h"
 #include "ProfileFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
@@ -1253,6 +1254,9 @@ void repeatedWaveDrawing(const QString &folder) {
                     unit->repeatCount == 3 && unit->view.angles.size() == 4 &&
                     unit->view.dimensions.size() == 5 && unit->view.dimensionedBends.size() == 12,
                 "The actual repeated wave lost its dimensions or bend coverage");
+        require(std::none_of(drawing->sections.begin(), drawing->sections.end(),
+                             [](const auto &s) { return s.rotated || !s.basis; }),
+                "Wave normalization leaked an additional paper rotation into the section");
         require(ui::DrawingSheet::coverage(*drawing).dimensioned == 12 && drawing->flatPattern &&
                     drawing->flatPattern->repeatedBendGroups.size() == 4,
                 "The repeated flat line coordinates were not retained");
@@ -2497,6 +2501,10 @@ int main(int argc, char **argv) {
             drawingLayoutChecks();
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--section-orientation-only"))) {
+            drawingSectionOrientationChecks(temp.path());
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--dimension-bases-only"))) {
             dimensionBases(temp.path());
             return 0;
@@ -2532,6 +2540,7 @@ int main(int argc, char **argv) {
         dimensionBases(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
+        drawingSectionOrientationChecks(temp.path());
         automaticDrawingOrientation(temp.path());
         repeatedWaveDrawing(temp.path());
         perforatedAngleDrawing(temp.path());

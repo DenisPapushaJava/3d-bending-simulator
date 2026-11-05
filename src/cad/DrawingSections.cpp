@@ -38,11 +38,7 @@ gp_Pnt point(PointMm p) {
 }
 gp_Ax2 sectionFrame(const DrawingProfile &profile, const gp_Ax2 &reference) {
     const gp_Dir normal(profile.normal.x, profile.normal.y, profile.normal.z);
-    auto right =
-        gp_Vec(reference.XDirection()) - gp_Vec(normal) * normal.Dot(reference.XDirection());
-    if (right.Magnitude() < 1e-7)
-        right = gp_Vec(reference.Direction()) - gp_Vec(normal) * normal.Dot(reference.Direction());
-    return {point(profile.station), normal, gp_Dir(right)};
+    return drawingSectionFrame(point(profile.station), normal, reference);
 }
 struct ActualSection {
     DrawingView view;
@@ -180,6 +176,26 @@ std::optional<DrawingSectionLocation> location(const DrawingProfile &profile,
     }
     return {};
 }
+bool aligned(const gp_Ax2 &section, const gp_Ax2 &source, const DrawingSectionMarker &marker,
+             double tolerance) {
+    const gp_Vec n(section.Direction()), u(section.XDirection()), v(section.YDirection());
+    const gp_Vec su(source.XDirection()), sv(source.YDirection()), sn(source.Direction());
+    const auto trace = sn.Crossed(n);
+    if (std::abs(sn.Dot(n)) > 1e-7 || std::abs(u.Crossed(v).Dot(n) - 1) > 1e-7 ||
+        std::abs(trace.Dot(u) - trace.Dot(su)) > 1e-7 ||
+        std::abs(trace.Dot(v) - trace.Dot(sv)) > 1e-7 ||
+        std::hypot(marker.viewDirection.x + n.Dot(su), marker.viewDirection.y + n.Dot(sv)) > 1e-7 ||
+        std::hypot(marker.second.x - marker.first.x, marker.second.y - marker.first.y) < 1e-7)
+        return false;
+    // Source projections use model-origin coordinates. Their arbitrary depth
+    // along sn cannot affect a cut that is edge-on in this source view.
+    for (const auto &p : {marker.first, marker.second}) {
+        const auto world = gp_Pnt(0, 0, 0).Translated(su * p.x + sv * p.y);
+        if (std::abs(gp_Vec(section.Location(), world).Dot(n)) > tolerance)
+            return false;
+    }
+    return true;
+}
 void compactCoordinates(DrawingView &view) {
     std::vector<DrawingDimension> result;
     for (bool horizontal : {true, false}) {
@@ -272,10 +288,14 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
     for (const auto &original : drawing.profiles) {
         cancelled(stop);
         try {
+            const auto initialLocation = location(original, frames, *drawing.classicalViews);
+            if (!initialLocation)
+                continue;
+            const auto &reference = frames[initialLocation->sourceView];
             std::optional<ActualSection> best;
             DrawingProfile measured = original;
             for (double fraction : {.5, .382, .618, .25, .75}) {
-                auto candidate = drawingProfileAt(original.bends, bends, faces, frames[0],
+                auto candidate = drawingProfileAt(original.bends, bends, faces, reference,
                                                   tolerance, fraction, stop);
                 if (!candidate || candidate->segments.size() != original.segments.size())
                     continue;
@@ -287,7 +307,7 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                     continue; // Moving a section must not silently shorten a rounded flange.
                 std::optional<ActualSection> actual;
                 try {
-                    actual = intersect(shape, sectionFrame(*candidate, frames[0]), budget, stop);
+                    actual = intersect(shape, sectionFrame(*candidate, reference), budget, stop);
                 } catch (const Standard_Failure &) {
                     continue; // Preserve any earlier valid section at this station group.
                 }
@@ -302,11 +322,16 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             if (!best)
                 continue;
             auto at = location(measured, frames, *drawing.classicalViews);
-            if (!at)
+            if (!at || at->sourceView != initialLocation->sourceView)
                 continue;
+            const auto basis = sectionFrame(measured, reference);
+            if (!aligned(basis, reference, at->marker, tolerance))
+                continue; // Never publish an ordinary section with an unproved orientation.
             std::size_t index = 0;
             for (; index < geometries.size(); ++index)
-                if (equivalent(geometries[index], *best, representatives[index], measured, bends,
+                if (drawing.sections[index].basis &&
+                    drawing.sections[index].basis->sourceView == at->sourceView &&
+                    equivalent(geometries[index], *best, representatives[index], measured, bends,
                                tolerance, stop))
                     break;
             if (index == geometries.size()) {
@@ -317,6 +342,11 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                     continue; // Local detail fallback retains the remaining zones.
                 section.designation = names[index];
                 section.normal = measured.normal;
+                section.basis = DrawingSectionBasis{
+                    measured.station,
+                    {basis.XDirection().X(), basis.XDirection().Y(), basis.XDirection().Z()},
+                    {basis.YDirection().X(), basis.YDirection().Y(), basis.YDirection().Z()},
+                    at->sourceView};
                 section.view = best->view;
                 section.view.angles = measured.view.angles;
                 for (const auto &segment : measured.segments) {
@@ -354,13 +384,13 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
         if (repeat) {
             auto &overview = drawing.sections.front();
             overview.view = std::move(repeat->overview);
-            overview.rotated = true;
+            overview.rotated = false;
             DrawingSection unit;
             unit.view = std::move(repeat->unit);
             unit.normal = overview.normal;
             unit.designation = overview.designation;
             unit.repeatCount = repeat->count;
-            unit.rotated = true;
+            unit.basis = overview.basis;
             drawing.sections.push_back(std::move(unit));
         }
     }

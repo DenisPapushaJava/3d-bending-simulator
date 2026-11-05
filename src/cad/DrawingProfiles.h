@@ -7,6 +7,9 @@
 #include <gp_Pnt.hxx>
 
 namespace bending::cad {
+// Fold the reference plane onto the cut about their common trace, with no
+// additional paper rotation. N points to the observer; the view looks along -N.
+[[nodiscard]] gp_Ax2 drawingSectionFrame(gp_Pnt origin, gp_Dir normal, const gp_Ax2 &reference);
 struct DrawingBendCorner {
     gp_Pnt point;
     std::array<gp_Dir, 2> directions;

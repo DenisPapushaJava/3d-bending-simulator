@@ -226,12 +226,6 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
                 axis.Reverse();
             break;
         }
-    gp_Vec horizontal =
-        gp_Vec(reference.XDirection()) - gp_Vec(axis) * axis.Dot(reference.XDirection());
-    if (horizontal.Magnitude() < 1e-7)
-        horizontal = gp_Vec(reference.Direction()) - gp_Vec(axis) * axis.Dot(reference.Direction());
-    if (horizontal.Magnitude() < 1e-7)
-        throw Unmeasured{};
     double low = -1e100, high = 1e100;
     const double thickness = bends[ordered.front()].thicknessMm;
     for (auto index : ordered) {
@@ -249,7 +243,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
     if (high - low <= 20 * tolerance)
         throw Unmeasured{};
     const gp_Pnt station(gp_XYZ(axis.X(), axis.Y(), axis.Z()) * (low + (high - low) * fraction));
-    const gp_Ax2 frame(station, axis, gp_Dir(horizontal));
+    const auto frame = drawingSectionFrame(station, axis, reference);
     std::vector<DrawingBendCorner> corners;
     for (auto index : ordered) {
         const auto corner = drawingBendCorner(bends[index], faces, station);
@@ -417,6 +411,26 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
     return profile;
 }
 } // namespace
+
+gp_Ax2 drawingSectionFrame(gp_Pnt origin, gp_Dir normal, const gp_Ax2 &reference) {
+    const auto from = reference.Direction();
+    const double cosine = std::clamp(from.Dot(normal), -1., 1.);
+    const gp_Vec trace = gp_Vec(from).Crossed(gp_Vec(normal));
+    const double sine = trace.Magnitude();
+    gp_Vec right(reference.XDirection());
+    if (sine > 1e-12) {
+        const gp_Vec axis = trace / sine;
+        // Rodrigues' shortest rotation maps the source normal onto the cut
+        // normal while leaving the common trace fixed, including oblique cuts.
+        right =
+            right * cosine + axis.Crossed(right) * sine + axis * (axis.Dot(right) * (1 - cosine));
+    } else if (cosine < 0) {
+        // Parallel planes have no unique trace. Schematics keep source-up;
+        // a located section still requires an edge-on source view in location().
+        right.Reverse();
+    }
+    return {origin, normal, gp_Dir(right)};
+}
 
 std::optional<DrawingBendCorner> drawingBendCorner(const application::RecognizedBend &bend,
                                                    const TopTools_IndexedMapOfShape &faces,

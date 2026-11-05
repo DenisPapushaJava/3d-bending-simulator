@@ -237,6 +237,32 @@ repeatedDrawingSection(const TopoDS_Shape &flat, const DrawingView &actual,
         // Reserve the overall witnesses before short end dimensions put their
         // outside numbers across them; otherwise a level overview can be unplaceable.
         result.overview.dimensions.insert(result.overview.dimensions.begin(), extent);
+        // Normalization is only for proving/clipping the repeat. Return both
+        // drawings in the source section's orientation, with every annotation.
+        const auto restorePoint = [&](DrawingPoint p) {
+            return DrawingPoint{c * p.x + s * p.y, -s * p.x + c * p.y};
+        };
+        for (auto *view : {&result.overview, &result.unit}) {
+            for (auto &path : view->paths)
+                for (auto &p : path.points)
+                    p = restorePoint(p);
+            for (auto &loop : view->sectionLoops)
+                for (auto &p : loop)
+                    p = restorePoint(p);
+            for (auto &d : view->dimensions) {
+                d.start = restorePoint(d.start);
+                d.end = restorePoint(d.end);
+                if (d.witnesses)
+                    for (auto &p : *d.witnesses)
+                        p = restorePoint(p);
+            }
+            for (auto &angle : view->angles) {
+                angle.vertex = restorePoint(angle.vertex);
+                angle.first = restorePoint(angle.first);
+                angle.second = restorePoint(angle.second);
+            }
+            bounds(*view);
+        }
         return result;
     }
     return {};
