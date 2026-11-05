@@ -234,14 +234,6 @@ class StepCanvas final : public QWidget {
   private:
     int marker_ = -1;
 };
-class StepStrip final : public QWidget {
-  public:
-    using QWidget::QWidget;
-    int count = 1;
-    QSize sizeHint() const override {
-        return {count * 44 + 12, QWidget::sizeHint().height()};
-    }
-};
 } // namespace
 RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     setObjectName("bendRoutePanel");
@@ -274,7 +266,7 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(automatic_);
     layout->addWidget(expandSearch_);
     advancedLayout->addLayout(actions);
-    stepStrip_ = new StepStrip(this);
+    stepStrip_ = new QWidget(this);
     stepStrip_->setObjectName("routeStepStrip");
     auto *stripLayout = new QHBoxLayout(stepStrip_);
     stripLayout->setContentsMargins(2, 2, 2, 2);
@@ -282,18 +274,14 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setFixedHeight(40);
-    connect(scroll->horizontalScrollBar(), &QScrollBar::rangeChanged, this,
-            [this, scroll](int, int maximum) {
-                scroll->setFixedHeight(
-                    40 + (maximum > 0 ? scroll->horizontalScrollBar()->sizeHint().height() : 0));
-                stepStrip_->updateGeometry();
-            });
+    // Reserve the scrollbar band even when all steps fit; no vertical jump.
+    scroll->setFixedHeight(40 + scroll->horizontalScrollBar()->sizeHint().height());
     auto *strip = new StepCanvas(scroll);
     strip->moved = [this](int from, int to) { moveTo(from, to); };
     strip_ = new QHBoxLayout(strip);
     strip_->setContentsMargins(0, 0, 0, 0);
     strip_->setSpacing(4);
+    strip_->setAlignment(Qt::AlignTop);
     scroll->setWidget(strip);
     stripLayout->addWidget(scroll);
     earlier_ = new QPushButton(QStringLiteral("← Раньше"), this);
@@ -553,8 +541,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     [this, i] { select(static_cast<int>(i)); });
         }
         strip_->addStretch();
-        static_cast<StepStrip *>(stepStrip_)->count = static_cast<int>(ids_.size() + 1);
-        stepStrip_->adjustSize();
+        stepStrip_->updateGeometry();
     }
     auto *canvas = static_cast<StepCanvas *>(strip_->parentWidget());
     canvas->buttons = steps_;

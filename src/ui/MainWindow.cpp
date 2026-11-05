@@ -71,6 +71,33 @@
 namespace bending::ui {
 namespace {
 using namespace application;
+QIcon playbackIcon(bool playing) {
+    QIcon icon;
+    for (int ratio : {1, 2})
+        for (const auto mode : {QIcon::Normal, QIcon::Disabled}) {
+            QPixmap pixmap(24 * ratio, 24 * ratio);
+            pixmap.setDevicePixelRatio(ratio);
+            pixmap.fill(Qt::transparent);
+            QPainter painter(&pixmap);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(mode == QIcon::Disabled ? "#7B8D97" : "#FFFFFF"));
+            if (playing) {
+                painter.drawRoundedRect(QRectF(6, 5, 4, 14), 0.7, 0.7);
+                painter.drawRoundedRect(QRectF(14, 5, 4, 14), 0.7, 0.7);
+            } else {
+                QPainterPath triangle;
+                triangle.moveTo(8, 4);
+                triangle.lineTo(21, 12);
+                triangle.lineTo(8, 20);
+                triangle.closeSubpath();
+                painter.drawPath(triangle);
+            }
+            painter.end();
+            icon.addPixmap(pixmap, mode);
+        }
+    return icon;
+}
 QIcon workpieceOrientationIcon(bool reversed) {
     QIcon icon;
     for (int ratio : {1, 2}) {
@@ -1188,9 +1215,26 @@ class MainWindow::Impl {
         playbackControls->show();
         operationOverlay->show();
     }
+    void refreshPlaybackAction() {
+        const bool playing = playback->isActive();
+        const auto action = playing ? QStringLiteral("Пауза") : QStringLiteral("Воспроизвести");
+        const auto &icon = playbackIcons[playing ? 1 : 0];
+        if (playBend->icon().cacheKey() != icon.cacheKey())
+            playBend->setIcon(icon);
+        if (playBend->accessibleName() != action)
+            playBend->setAccessibleName(action);
+        const auto context = bendFrame->toolTip();
+        if (!playing)
+            playBend->setAccessibleDescription(context);
+        playBend->setToolTip(context.isEmpty() ? action : action + QLatin1Char('\n') + context);
+    }
+    void startPlayback() {
+        playback->start();
+        refreshPlaybackAction();
+    }
     void stopPlayback() {
         playback->stop();
-        playBend->setText(QStringLiteral("Воспроизвести"));
+        refreshPlaybackAction();
     }
     void prefetchDraftStep() {
         if (!viewingDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
@@ -1239,7 +1283,7 @@ class MainWindow::Impl {
                                                   "выбранного гиба.")
                                  : text;
         bendFrame->setToolTip(tooltip);
-        playBend->setToolTip(tooltip);
+        refreshPlaybackAction();
     }
     std::optional<std::size_t> selectedOperationIndex() const {
         if (viewingRoute && controller->bendRoute() && routePanel->selected() > 0)
@@ -2475,8 +2519,7 @@ class MainWindow::Impl {
             draftAutoPlay = false;
             bendFrame->setValue(0);
             if (playBend->isEnabled()) {
-                playBend->setText(QStringLiteral("Пауза"));
-                playback->start();
+                startPlayback();
                 prefetchDraftStep();
             }
         }
@@ -3025,6 +3068,7 @@ class MainWindow::Impl {
     std::optional<core::PressTools> shownTools;
     QSlider *bendFrame = nullptr;
     QPushButton *playBend = nullptr;
+    std::array<QIcon, 2> playbackIcons;
     QToolButton *reversePunchButton = nullptr;
     QToolButton *reverseWorkpieceButton = nullptr;
     std::array<QIcon, 2> workpieceOrientationIcons;
@@ -3890,10 +3934,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                 Qt::Horizontal);
     impl_->operationOverlay = new QWidget(this);
     impl_->operationOverlay->setObjectName("operationOverlay");
+    impl_->operationOverlay->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto *overlayLayout = new QVBoxLayout(impl_->operationOverlay);
     overlayLayout->setContentsMargins(6, 6, 6, 6);
     overlayLayout->setSpacing(2);
-    overlayLayout->addWidget(impl_->routePanel->stepStrip(), 0, Qt::AlignHCenter);
+    overlayLayout->addWidget(impl_->routePanel->stepStrip());
     auto *sequence = new QWidget(impl_->operationOverlay);
     sequence->setObjectName("playbackControls");
     impl_->playbackControls = sequence;
@@ -3910,7 +3955,9 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                                   "вкладке «Инструмент» и подготовьте просмотр."),
                    sequence);
     impl_->setupPlaybackHint->setObjectName(QStringLiteral("setupPlaybackHint"));
-    impl_->setupPlaybackHint->setWordWrap(true);
+    impl_->setupPlaybackHint->setToolTip(impl_->setupPlaybackHint->text());
+    impl_->setupPlaybackHint->setText(QStringLiteral("Показано одно начальное положение"));
+    impl_->setupPlaybackHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
 
     impl_->bendFrame = new QSlider(Qt::Horizontal, sequence);
     impl_->bendFrame->setObjectName(QStringLiteral("bendFrame"));
@@ -3919,15 +3966,28 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->bendFrame->setTickPosition(QSlider::NoTicks);
     impl_->bendFrame->setTickInterval(5);
     impl_->previewControls = new QStackedWidget(sequence);
-    impl_->previewControls->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    impl_->previewControls->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    impl_->previewControls->setFixedHeight(34);
     impl_->previewControls->addWidget(impl_->bendFrame);
     impl_->previewControls->addWidget(impl_->setupPlaybackHint);
 
     auto *playLayout = new QHBoxLayout;
-    impl_->playBend = new QPushButton(QStringLiteral("Воспроизвести"), sequence);
+    playLayout->setSpacing(6);
+    impl_->playBend = new QPushButton(sequence);
+    impl_->playbackIcons = {playbackIcon(false), playbackIcon(true)};
+    impl_->playBend->setIcon(impl_->playbackIcons[0]);
+    impl_->playBend->setIconSize(QSize(20, 20));
+    impl_->playBend->setFixedSize(40, 34);
+    impl_->playBend->setAccessibleName(QStringLiteral("Воспроизвести"));
+    impl_->playBend->setToolTip(QStringLiteral("Воспроизвести"));
+    impl_->playBend->setStyleSheet(QStringLiteral("QPushButton#playBend{padding:0;}"));
+    auto playPolicy = impl_->playBend->sizePolicy();
+    playPolicy.setRetainSizeWhenHidden(true);
+    impl_->playBend->setSizePolicy(playPolicy);
     impl_->playBend->setObjectName(QStringLiteral("playBend"));
     impl_->returnToCad = new QPushButton(QStringLiteral("Деталь"), sequence);
     impl_->returnToCad->setObjectName(QStringLiteral("returnToCad"));
+    impl_->returnToCad->setFixedHeight(34);
     playLayout->addWidget(impl_->playBend);
     impl_->reversePunchButton = new QToolButton(sequence);
     impl_->reversePunchButton->setObjectName("reversePunch");
@@ -3966,7 +4026,12 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             &QPushButton::click);
     playLayout->addWidget(impl_->showKinematics);
     impl_->playbackSpeedControls = new QWidget(sequence);
+    impl_->playbackSpeedControls->setFixedHeight(34);
+    auto speedPolicy = impl_->playbackSpeedControls->sizePolicy();
+    speedPolicy.setRetainSizeWhenHidden(true);
+    impl_->playbackSpeedControls->setSizePolicy(speedPolicy);
     auto *speedLayout = new QHBoxLayout(impl_->playbackSpeedControls);
+    speedLayout->setSpacing(6);
     speedLayout->setContentsMargins(8, 0, 8, 0);
     auto *speedTitle = new QLabel(QStringLiteral("Скорость"), impl_->playbackSpeedControls);
     impl_->playbackSpeed = new QSlider(Qt::Horizontal, impl_->playbackSpeedControls);
@@ -4021,8 +4086,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     impl_->routePanel->selected() < static_cast<int>(route->steps.size())) {
                     impl_->routePanel->select(impl_->routePanel->selected() + 1);
                     impl_->bendFrame->setValue(0);
-                    impl_->playBend->setText(QStringLiteral("Пауза"));
-                    impl_->playback->start();
+                    impl_->startPlayback();
                     return;
                 }
             if (impl_->viewingDraft &&
@@ -4057,8 +4121,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         }
         if (!impl_->playBend->isEnabled())
             return;
-        impl_->playBend->setText(QStringLiteral("Пауза"));
-        impl_->playback->start();
+        impl_->startPlayback();
         impl_->prefetchDraftStep();
     });
     connect(impl_->returnToCad, &QPushButton::clicked, this, [this] {

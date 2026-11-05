@@ -1764,7 +1764,11 @@ void ViewerWidget::layoutOverlays() {
         if (widget->layout())
             widget->layout()->activate();
         const auto size = widget->parentWidget()->size();
-        const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
+        const int availableWidth = std::max(1, size.width() - 24);
+        const bool expands = widget->sizePolicy().expandingDirections().testFlag(Qt::Horizontal);
+        const int width = expands
+                              ? availableWidth
+                              : std::max(1, std::min(availableWidth, widget->sizeHint().width()));
         const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
         const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
         if (widget->geometry() != target)

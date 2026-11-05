@@ -23,6 +23,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -32,6 +33,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSlider>
 #include <QStringList>
@@ -941,6 +944,26 @@ void testSingleBendWorkflow(bool graphics) {
     slider->setValue(10);
     const auto previewBeforeSpeedChange = controller.bendPreview();
     const auto editBeforeSpeedChange = controller.session().editRevision();
+    const auto controlRect = [viewer](QWidget *control) {
+        return QRect(control->mapTo(viewer, QPoint()), control->size());
+    };
+    const auto transportSnapshot = [&](const char *suffix) {
+        const auto output = qEnvironmentVariable("BENDING_TRANSPORT_SNAPSHOT");
+        if (graphics && !output.isEmpty()) {
+            auto *panel = window.findChild<QWidget *>("operationOverlay");
+            require(panel->grab().save(output + QLatin1Char('-') + QString::fromLatin1(suffix) +
+                                       ".png"),
+                    "Cannot save native transport snapshot");
+        }
+    };
+    QApplication::processEvents();
+    const auto playRect = controlRect(play);
+    const auto sliderRect = controlRect(slider);
+    const auto playIcon = play->icon().cacheKey();
+    transportSnapshot("play");
+    require(play->text().isEmpty() && !play->icon().isNull() && play->width() == 40 &&
+                play->accessibleName() == QStringLiteral("Воспроизвести"),
+            "Playback is not a fixed-size accessible icon button");
     speed->setValue(4);
     require(slider->value() == 10 && !playback->isActive() && playback->interval() == 25 &&
                 speedValue->text() == QStringLiteral("2×"),
@@ -952,6 +975,11 @@ void testSingleBendWorkflow(bool graphics) {
         previousFrame = frame;
     });
     play->click();
+    require(play->text().isEmpty() && play->accessibleName() == QStringLiteral("Пауза") &&
+                play->icon().cacheKey() != playIcon && controlRect(play) == playRect &&
+                controlRect(slider) == sliderRect,
+            "Play/Pause changed control geometry or did not update its accessible action");
+    transportSnapshot("pause");
     waitUntil([&] { return slider->value() > 10; });
     const auto runningFrame = slider->value();
     speed->setFocus();
@@ -965,7 +993,55 @@ void testSingleBendWorkflow(bool graphics) {
     QObject::disconnect(frameConnection);
     const auto pausedFrame = slider->value();
     speed->setValue(0);
-    require(play->text() == QStringLiteral("Воспроизвести"), "Playback did not pause");
+    require(play->accessibleName() == QStringLiteral("Воспроизвести"), "Playback did not pause");
+    require(play->icon().cacheKey() == playIcon && controlRect(play) == playRect &&
+                controlRect(slider) == sliderRect,
+            "Pausing or changing speed moved the transport controls");
+    auto *overlay = window.findChild<QWidget *>("operationOverlay");
+    auto *strip = window.findChild<QWidget *>("routeStepStrip");
+    auto *scroll = strip->findChild<QScrollArea *>();
+    auto *stepLayout = qobject_cast<QHBoxLayout *>(scroll->widget()->layout());
+    require(overlay && stepLayout && !scroll->horizontalScrollBar()->maximum(),
+            "Missing initial compact step strip");
+    const bool stripWasVisible = strip->isVisible();
+    strip->show(); // The isolated kinematic mode normally hides steps.
+    waitUntil([&] { return overlay->height() >= strip->height() + 34; });
+    const auto overlayRect = overlay->geometry();
+    const auto firstStepRect = controlRect(window.findChild<QPushButton *>("routeStep0"));
+    const auto toolRect = controlRect(window.findChild<QToolButton *>("reversePunch"));
+    const auto speedRect = controlRect(speed);
+    const auto returnRect = controlRect(returnToCad);
+    std::vector<QPushButton *> extraSteps;
+    // Exercise presentation with 32 steps, without starting CAD or changing the document.
+    for (int i = 2; i <= 32; ++i) {
+        auto *button = new QPushButton(QString::number(i), scroll->widget());
+        button->setFixedSize(40, 36);
+        stepLayout->insertWidget(stepLayout->count() - 1, button);
+        extraSteps.push_back(button);
+    }
+    waitUntil([&] { return scroll->horizontalScrollBar()->maximum() > 0; });
+    QApplication::processEvents();
+    require(overlay->geometry() == overlayRect && controlRect(play) == playRect &&
+                controlRect(slider) == sliderRect &&
+                controlRect(window.findChild<QPushButton *>("routeStep0")) == firstStepRect &&
+                controlRect(window.findChild<QToolButton *>("reversePunch")) == toolRect &&
+                controlRect(speed) == speedRect && controlRect(returnToCad) == returnRect,
+            "Overflowing step strip moved the primary controls or the first step");
+    transportSnapshot("many");
+    scroll->horizontalScrollBar()->setValue(scroll->horizontalScrollBar()->maximum());
+    QApplication::processEvents();
+    require(controlRect(play) == playRect && controlRect(slider) == sliderRect,
+            "Scrolling steps moved playback controls");
+    for (auto *button : extraSteps)
+        delete button;
+    waitUntil([&] { return scroll->horizontalScrollBar()->maximum() == 0; });
+    QApplication::processEvents();
+    require(overlay->geometry() == overlayRect && controlRect(play) == playRect &&
+                controlRect(slider) == sliderRect,
+            "Removing extra steps moved the transport");
+    transportSnapshot("few");
+    strip->setVisible(stripWasVisible);
+    QApplication::processEvents();
     require(orderedFrames && !playback->isActive() && playback->interval() == 50 &&
                 slider->value() == pausedFrame && speedValue->text() == QStringLiteral("1×") &&
                 controller.bendPreview() == previewBeforeSpeedChange &&
@@ -1203,7 +1279,7 @@ void testSingleBendWorkflow(bool graphics) {
                     .contains(QStringLiteral("Отвод пуансона")) &&
                 status->text().contains(QStringLiteral("непрерывно")),
             "Return phase or continuous-check report is missing from UI");
-    waitUntil([&] { return play->text() == QStringLiteral("Воспроизвести"); });
+    waitUntil([&] { return play->accessibleName() == QStringLiteral("Воспроизвести"); });
     play->click();
     waitUntil([&] { return slider->value() > 0 && slider->value() < 60; });
     play->click();
@@ -1491,7 +1567,7 @@ void testBendOpeningDiagnosticWorkflow(bool graphics) {
             auto *play = window.findChild<QPushButton *>(QStringLiteral("playBend"));
             play->click();
             waitUntil([&] { return slider->value() == 20; });
-            waitUntil([&] { return play->text() == QStringLiteral("Воспроизвести"); });
+            waitUntil([&] { return play->accessibleName() == QStringLiteral("Воспроизвести"); });
             if (graphics) {
                 const auto output = qEnvironmentVariable("BENDING_OPENING_SNAPSHOT");
                 if (!output.isEmpty()) {
