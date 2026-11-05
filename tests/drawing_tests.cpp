@@ -2044,6 +2044,24 @@ void sectionControlsWorkflow(const QString &folder) {
     const auto snapshot = qEnvironmentVariable("BENDING_SECTION_CONTROLS_SNAPSHOT");
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".pending.png"), "Cannot save rebuild overlay");
+    auto *state = dialog->findChild<QWidget *>("drawingPreviewState");
+    auto *stateTitle = dialog->findChild<QLabel *>("drawingPreviewStateTitle");
+    auto *stateText = dialog->findChild<QLabel *>("drawingPreviewStateText");
+    require(state && stateTitle && stateText, "Missing section overlay text");
+    const auto overlayGeometry = [&] {
+        return std::array{state->geometry(), stateTitle->geometry(), stateText->geometry(),
+                          rebuild->geometry()};
+    };
+    const auto stationaryOverlay = overlayGeometry();
+    for (int value = 300; value <= 350; value += 5) {
+        slider->setValue(value);
+        QApplication::processEvents();
+    }
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".pending-after.png"),
+                "Cannot save overlay after repeated section edits");
+    require(overlayGeometry() == stationaryOverlay,
+            "Moving the section slider shifted or enlarged the unchanged overlay");
     rebuild->click();
     wait([&] { return !controller.hasWork() && save->isEnabled(); });
     require(builder->calls == before + 1 && location() &&

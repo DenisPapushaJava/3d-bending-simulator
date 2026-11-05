@@ -388,6 +388,8 @@ class DrawingPreviewArea final : public QScrollArea {
         const int width = std::max(1, std::min(440, state_->width() - 48));
         for (auto *label : {stateTitle_, stateText_}) {
             label->setFixedWidth(width);
+            // heightForWidth includes minimumHeight: do not accumulate the previous padding.
+            label->setMinimumHeight(0);
             label->setFixedHeight(
                 std::max(label->fontMetrics().height(), label->heightForWidth(width)) + 4);
         }
