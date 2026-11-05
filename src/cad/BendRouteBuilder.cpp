@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <gp_Lin.hxx>
 #include <iomanip>
+#include <limits>
 #include <list>
 #include <map>
 #include <mutex>
@@ -264,6 +265,14 @@ class RouteSearch {
     std::vector<Mask> jointNeighbours;
     std::vector<Bnd_Box> wallBounds;
     std::vector<double> wallVolumes;
+    struct AccessObstacle {
+        std::size_t bend;
+        double from, to;
+    };
+    std::vector<std::vector<AccessObstacle>> accessObstacles;
+    bool commonAssemblyPhase = false;
+    struct CommonAssemblyBudget {};
+    std::size_t phaseCheckLimit = 0;
     std::map<std::pair<Mask, std::size_t>, bool> frontPreferences;
     bool preferredSide(Mask mask, const RouteOperation &op, Mask removed) {
         if (!request.withTools || !request.allowWorkpieceRotation || !op.tools)
@@ -344,6 +353,154 @@ class RouteSearch {
             throw BendRouteError{BendRouteErrorCode::SearchLimit,
                                  "Route search budget reached; " + lastFailure, failedBend,
                                  attempts};
+        if (commonAssemblyPhase && (attempts >= phaseCheckLimit ||
+                                    std::chrono::steady_clock::now() - started >
+                                        std::chrono::milliseconds(request.maximumTimeMs / 2)))
+            throw CommonAssemblyBudget{};
+    }
+
+    void prepareToolAccess() {
+        if (!request.automatic || !request.withTools ||
+            (!request.rankToolAccess && !request.preferCommonAssembly))
+            return;
+        accessObstacles.resize(inputs.size());
+        const auto &bends = source->metadata().bendAnalysis.bends;
+        for (const auto &a : layout->bends) {
+            cancelled(stop);
+            const auto &bend = bends[a.bendIndex];
+            const gp_Vec axis(referenceAxes[a.bendIndex]);
+            const auto origin = gp_Vec(point(bend.axisStart), point(bend.axisEnd)).Dot(axis) >= 0
+                                    ? point(bend.axisStart)
+                                    : point(bend.axisEnd);
+            for (const auto &b : layout->bends) {
+                if (a.bendIndex == b.bendIndex ||
+                    referenceAxes[a.bendIndex].IsParallel(
+                        referenceAxes[b.bendIndex],
+                        source->metadata().bendAnalysis.angleToleranceRadians))
+                    continue;
+                std::optional<std::size_t> far;
+                if (a.parent == b.parent || a.child == b.parent)
+                    far = b.child;
+                else if (a.parent == b.child || a.child == b.child)
+                    far = b.parent;
+                if (!far || wallBounds[*far].IsVoid() || wallBounds[*far].IsOpen())
+                    continue;
+                const auto &box = wallBounds[*far];
+                const auto min = box.CornerMin(), max = box.CornerMax();
+                double low = std::numeric_limits<double>::infinity(), high = -low;
+                for (int corner = 0; corner < 8; ++corner) {
+                    const gp_Pnt p(corner & 1 ? max.X() : min.X(), corner & 2 ? max.Y() : min.Y(),
+                                   corner & 4 ? max.Z() : min.Z());
+                    const double z = gp_Vec(origin, p).Dot(axis);
+                    low = std::min(low, z);
+                    high = std::max(high, z);
+                }
+                accessObstacles[a.bendIndex].push_back({b.bendIndex, low, high});
+            }
+        }
+    }
+    double toolAccessRisk(Mask mask, const RouteOperation &op) const {
+        if (accessObstacles.empty() || !op.tools)
+            return 0;
+        const auto &bend = source->metadata().bendAnalysis.bends[op.bendIndex];
+        const double length = bend.lengthMm;
+        const double punch = core::punchLengthMm(*op.tools), die = op.tools->lengthMm;
+        if (std::max(punch, die) <= length + tolerance)
+            return 0;
+        const double half = request.allowAxialPlacement
+                                ? std::max(0., axialPlacementHalfRange(*op.tools, length))
+                                : 0;
+        double best = std::numeric_limits<double>::infinity();
+        for (const double offset : {-half, half, 0.}) {
+            double risk = 0;
+            for (const auto &obstacle : accessObstacles[op.bendIndex]) {
+                if (!(mask & (Mask{1} << obstacle.bend)))
+                    continue;
+                for (const double span : {punch, die}) {
+                    const double extra = std::max(0., span - length);
+                    const double from = (length - span) / 2 - offset;
+                    const double to = (length + span) / 2 - offset;
+                    const double overlap =
+                        std::max(0., std::min(to, obstacle.to) - std::max(from, obstacle.from));
+                    risk += extra / length * overlap /
+                            std::max(bend.thicknessMm, obstacle.to - obstacle.from);
+                }
+            }
+            best = std::min(best, risk);
+        }
+        return best; // Bounding intervals rank candidates only; overlap proves no collision.
+    }
+    bool tryCommonAssembly(Mask full) {
+        if (!request.preferCommonAssembly || !request.automatic || !request.withTools ||
+            !request.assemblySearch || accessObstacles.empty() || request.operations.size() < 2)
+            return false;
+        const auto &first = request.operations.front();
+        if (!first.assignment || !first.assignment->punchAssembly ||
+            !first.assignment->dieAssembly || !first.assignment->punch.segments ||
+            !first.assignment->die.segments ||
+            std::any_of(
+                request.operations.begin(), request.operations.end(),
+                [&](const auto &op) {
+                    return op.assignment != first.assignment || !op.tools ||
+                           core::punchLengthMm(*op.tools) + tolerance <
+                               source->metadata().bendAnalysis.bends[op.bendIndex].lengthMm ||
+                           op.tools->lengthMm + tolerance <
+                               source->metadata().bendAnalysis.bends[op.bendIndex].lengthMm;
+                }) ||
+            std::none_of(request.operations.begin(), request.operations.end(),
+                         [&](const auto &op) { return toolAccessRisk(full, op) > 0; }))
+            return false;
+        // Do not replace a potentially shared stroke with several short strokes
+        // merely because the original pair cannot cover its complete flat envelope.
+        const auto &flatBends = flat->info().bends;
+        for (const auto &a : flatBends) {
+            const auto line = a.centreLine();
+            const auto origin = point(line[0]);
+            const gp_Vec axis(gp_Dir(gp_Vec(origin, point(line[1]))));
+            double low = 0, high = a.lengthMm();
+            for (const auto &b : flatBends)
+                if (jointNeighbours[a.bendIndex] & (Mask{1} << b.bendIndex))
+                    for (const auto p : b.centreLine()) {
+                        const double z = gp_Vec(origin, point(p)).Dot(axis);
+                        low = std::min(low, z);
+                        high = std::max(high, z);
+                    }
+            if (high - low >
+                std::min(core::punchLengthMm(*first.tools), first.tools->lengthMm) + tolerance)
+                return false;
+        }
+        const auto quota = std::min(request.maximumChecks / 3, request.operations.size() * 2);
+        if (quota < request.operations.size())
+            return false;
+        phaseCheckLimit = attempts + quota;
+        commonAssemblyPhase = true;
+        ++statistics.commonAssemblyPasses;
+        const auto before = attempts;
+        try {
+            if (search(full)) {
+                statistics.commonAssemblyChecks += attempts - before;
+                statistics.usedCommonAssembly = true;
+                commonAssemblyPhase = false;
+                return true;
+            }
+        } catch (const CommonAssemblyBudget &) {
+            // Only this restricted family is incomplete. The global budget and
+            // exact transition cache remain shared with the ordinary search.
+        } catch (...) {
+            statistics.commonAssemblyChecks += attempts - before;
+            commonAssemblyPhase = false;
+            throw;
+        }
+        statistics.commonAssemblyChecks += attempts - before;
+        commonAssemblyPhase = false;
+        dead.clear();
+        reversed.clear();
+        reversedKeys.clear();
+        incomplete = false;
+        lastFailure.clear();
+        lastOperationError.reset();
+        failedBend.reset();
+        return false;
     }
     void touchState(Mask mask) {
         cache->stateOrder.remove(mask);
@@ -715,6 +872,14 @@ class RouteSearch {
                 result.push_back(order);
         if (request.automatic && request.rankCandidates) {
             const auto original = result;
+            std::array<double, maximumSheetBends> access{};
+            if (request.rankToolAccess) {
+                for (const auto order : result)
+                    access[request.operations[order].bendIndex] =
+                        toolAccessRisk(mask, request.operations[order]);
+                statistics.toolAccessRankedStates +=
+                    std::any_of(access.begin(), access.end(), [](double risk) { return risk > 0; });
+            }
             const auto score = [&](std::size_t order) {
                 const auto &op = request.operations[order];
                 // Soft accessibility estimate: fewer still-formed bends on the adjacent
@@ -739,7 +904,7 @@ class RouteSearch {
                 // neighbours. This is only a ranking preference, never precedence.
                 const bool separatesJoint =
                     request.allowJointBends && (jointNeighbours[op.bendIndex] & mask) != 0;
-                return std::tuple{prior, separatesJoint,
+                return std::tuple{prior, access[op.bendIndex], separatesJoint,
                                   std::popcount(neighbours[op.bendIndex] & mask), continuation};
             };
             std::stable_sort(result.begin(), result.end(),
@@ -872,7 +1037,7 @@ class RouteSearch {
             }
         }
         const bool planning =
-            mayPlan(op.bendIndex) && op.assignment &&
+            !commonAssemblyPhase && mayPlan(op.bendIndex) && op.assignment &&
             std::all_of(additional.begin(), additional.end(), [&](const auto &m) {
                 return mayPlan(m.bendIndex) && m.assignment &&
                        sameToolSetupExceptAssemblies(*op.assignment, *m.assignment);
@@ -1041,12 +1206,7 @@ class RouteSearch {
                 cancelled(stop);
                 if (dead.contains(mask ^ bit))
                     break;
-                if (attempts >= request.maximumChecks ||
-                    std::chrono::steady_clock::now() - started >
-                        std::chrono::milliseconds(request.maximumTimeMs))
-                    throw BendRouteError{BendRouteErrorCode::SearchLimit,
-                                         "Route search budget reached; " + lastFailure, failedBend,
-                                         attempts};
+                checkBudget();
                 ++attempts;
                 if (request.onProgress)
                     request.onProgress(
@@ -1499,6 +1659,10 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.reusedOperationPreparations += s.reusedOperationPreparations;
                 totals.operationPreparationUs += s.operationPreparationUs;
                 totals.placementEvaluationUs += s.placementEvaluationUs;
+                totals.toolAccessRankedStates += s.toolAccessRankedStates;
+                totals.commonAssemblyPasses += s.commonAssemblyPasses;
+                totals.commonAssemblyChecks += s.commonAssemblyChecks;
+                totals.usedCommonAssembly |= s.usedCommonAssembly;
             };
             for (const auto choice : toolOrder) {
                 cancelled(stop);
@@ -1772,11 +1936,12 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 }
             }
         }
+        search.prepareToolAccess();
         bool found = false;
         if (search.request.onProgress)
             search.request.onProgress({BendRoutePhase::ToolCandidate, 0, 0, 0, std::nullopt});
         try {
-            found = search.search((Mask{1} << n) - 1);
+            found = search.tryCommonAssembly(full) || search.search(full);
         } catch (BendRouteError &e) {
             e.statistics = search.statistics;
             throw;

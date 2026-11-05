@@ -77,6 +77,8 @@ struct BendRouteRequest {
     // Explicit automatic search only; fixed/manual requests retain their exact offset.
     bool allowAxialPlacement = false;
     bool reusePlacementPreparation = true; // Reference switch; no change to checked scope.
+    bool rankToolAccess = true;       // Soft axial obstruction ranking; never a collision verdict.
+    bool preferCommonAssembly = true; // Bounded original-assembly pass, then normal planning.
 };
 // Apply one input snapshot without changing IDs, targets, order or workpiece orientations.
 [[nodiscard]] bool applyRouteToolVariant(BendRouteRequest &, std::size_t variant);
@@ -97,6 +99,9 @@ struct BendRouteStatistics {
     std::size_t plannedDieWindows = 0, reusedDieWindowPlans = 0;
     std::size_t preparedOperations = 0, reusedOperationPreparations = 0;
     std::uint64_t operationPreparationUs = 0, placementEvaluationUs = 0;
+    std::size_t toolAccessRankedStates = 0;
+    std::size_t commonAssemblyPasses = 0, commonAssemblyChecks = 0;
+    bool usedCommonAssembly = false;
 };
 struct BendRouteStep {
     std::string id;
