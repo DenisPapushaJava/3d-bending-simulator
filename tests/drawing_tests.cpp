@@ -1984,20 +1984,39 @@ void drawingWindowPlacement() {
             std::cout << "Drawing screen " << screen->name().toStdString() << " edge=" << edge
                       << " frame=" << placed.x() << ',' << placed.y() << ' ' << placed.width()
                       << 'x' << placed.height() << '\n';
-            // A subsequent activation/hide-show must preserve a deliberate manual placement.
             auto *manualScreen = screens[(index + 1) % screens.size()];
-            dialog->setScreen(manualScreen);
-            frame = dialog->frameGeometry();
+            // The drawing command always returns this same window to the current parent.
+            for (int state = 0; state < 4; ++state) {
+                dialog->showNormal();
+                dialog->setScreen(manualScreen);
+                frame = dialog->frameGeometry();
+                frame.moveCenter(manualScreen->availableGeometry().center());
+                dialog->move(frame.topLeft() + QPoint(12, 12));
+                wait([&] { return dialog->screen() == manualScreen; });
+                if (state == 1)
+                    dialog->hide();
+                else if (state == 2)
+                    dialog->showMinimized();
+                else if (state == 3)
+                    dialog->showMaximized();
+                action->trigger();
+                wait([&] {
+                    return dialog->isVisible() && !dialog->isMinimized() &&
+                           dialog->windowHandle()->isExposed() && dialog->screen() == screen &&
+                           (state == 3 ? dialog->isMaximized()
+                                       : available.contains(dialog->frameGeometry()));
+                });
+                require(window.findChild<QDialog *>("bendingDrawingDialog") == dialog &&
+                            builder->calls == calls + 1,
+                        "Returning to the parent recreated the drawing or restarted CAD");
+            }
+            window.setScreen(manualScreen);
+            frame = window.frameGeometry();
             frame.moveCenter(manualScreen->availableGeometry().center());
-            dialog->move(frame.topLeft() + QPoint(12, 12));
-            wait([&] { return dialog->screen() == manualScreen; });
-            const auto manual = dialog->frameGeometry();
-            dialog->hide();
+            window.move(frame.topLeft());
+            wait([&] { return window.screen() == manualScreen; });
             action->trigger();
-            wait([&] { return dialog->isVisible() && dialog->windowHandle()->isExposed(); });
-            require(window.findChild<QDialog *>("bendingDrawingDialog") == dialog &&
-                        dialog->frameGeometry() == manual,
-                    "Reactivating a drawing window reset its manual placement");
+            wait([&] { return dialog->screen() == manualScreen && dialog->isMaximized(); });
             dialog->close();
             QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
             wait([&] { return !controller.hasWork(); });

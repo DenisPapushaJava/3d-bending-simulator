@@ -3241,11 +3241,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->drawingAction->setEnabled(false);
     connect(impl_->drawingAction, &QAction::triggered, this, [this] {
         if (impl_->drawingDialog) {
-            if (impl_->drawingDialog->isMinimized())
-                impl_->drawingDialog->showNormal();
-            impl_->drawingDialog->show();
-            impl_->drawingDialog->raise();
-            impl_->drawingDialog->activateWindow();
+            impl_->drawingDialog->showAtParent();
             return;
         }
         const auto &session = impl_->controller->session();
@@ -3263,7 +3259,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                 impl_->drawingDialog.clear();
             impl_->refresh();
         });
-        dialog->show();
+        dialog->showAtParent();
     });
     fileMenu->addSeparator();
     auto *exit = fileMenu->addAction(QStringLiteral("Выход"));
