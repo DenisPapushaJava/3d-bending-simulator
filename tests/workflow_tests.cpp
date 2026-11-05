@@ -1771,6 +1771,9 @@ void testPressOrbit() {
     drag(Qt::RightButton, {0, 80});
     require(differences(front, image()) > 100, "Free camera did not incline from the front");
     button->click();
+    // OCCT free rotation can move the target around its gravity point. Refit both
+    // reference and levelled views before comparing projection, not target position.
+    viewer->fitAll();
     require(differences(front, image()) <= 2,
             "Anchor did not restore the exact horizontal front projection");
     button->click();
