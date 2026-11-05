@@ -156,6 +156,75 @@ void limits() {
     bounds.maximumRecordingBytes = 0;
     rejected({}, bounds, ui::DrawingLayoutInterruption::LimitExceeded);
 }
+void unevenProjectionDimensions() {
+    auto d = std::make_shared<application::BendingDrawing>();
+    const auto rectangle = [](application::DrawingView &v, double width, double height) {
+        v.minimum = {0, 0};
+        v.maximum = {width, height};
+        v.paths = {{{{0, 0}, {width, 0}, {width, height}, {0, height}, {0, 0}}, false}};
+        v.dimensions = {{{0, 0}, {width, 0}, width, ""}, {{0, 0}, {0, height}, height, ""}};
+    };
+    rectangle(d->views[0], 1230, 350);
+    rectangle(d->views[1], 1230, 170);
+    rectangle(d->views[2], 170, 350);
+    auto &front = d->views[0];
+    front.holeDimensions = {{{0, 18}, {750, 18}, 750, ""},
+                            {{0, 175}, {850, 175}, 850, ""},
+                            {{750, 0}, {750, 18}, 18, ""},
+                            {{850, 0}, {850, 175}, 175, ""},
+                            {{750, 0}, {750, 332}, 332, ""}};
+    front.axialDimensions = {{{0, 0}, {1000, 0}, 1000, ""},
+                             {{1000, 0}, {1230, 0}, 230, ""},
+                             {{0, 0}, {0, 45}, 45, ""},
+                             {{0, 45}, {0, 305}, 260, ""},
+                             {{0, 305}, {0, 350}, 45, ""}};
+    auto &top = d->views[1];
+    for (int i = 0; i < 11; ++i) {
+        const double x = 120 + 95 * i, y = i % 3 ? 40 : 100;
+        top.holeDimensions.push_back({{0, y}, {x, y}, x, ""});
+        top.circleCenters.push_back({{x, y}, 3});
+    }
+    for (int i = 0; i < 8; ++i) {
+        const double x = 250 + 100 * i, y = 12 + 14 * i;
+        top.holeDimensions.push_back({{x, 0}, {x, y}, y, ""});
+        top.circleCenters.push_back({{x, y}, 3});
+    }
+    std::vector<ui::DrawingViewChoice> choices;
+    for (std::size_t i = 0; i < 3; ++i)
+        choices.push_back({{ui::DrawingViewKind::Projection, i}});
+    const auto check = [&](const auto &plan) {
+        require(plan->pages == 1 && plan->views.size() == 3,
+                "Uneven dimension density split a projection family");
+        std::size_t count = 0;
+        for (const auto &v : plan->views) {
+            require(v.scale >= .1 && v.scale == plan->views.front().scale,
+                    "Dense dimensions reduced or unlinked the projection scale");
+            count += v.dimensions.size();
+        }
+        require(count == 35, "Dense projection family lost measurements");
+        require(std::abs(plan->views[0].centre.x() - plan->views[1].centre.x()) < 1e-8 &&
+                    std::abs(plan->views[0].centre.y() - plan->views[2].centre.y()) < 1e-8,
+                "Annotation insets unlinked the projection positions");
+        verifyRecordedDimensions(*d, *plan); // Actual vector output at both PDF device DPIs.
+    };
+    check(ui::DrawingSheet::compose(d, choices));
+    for (auto &choice : choices)
+        choice.scale = .1;
+    check(ui::DrawingSheet::compose(d, choices));
+    for (auto &choice : choices)
+        choice.scale = .2;
+    bool rejected = false;
+    try {
+        (void)ui::DrawingSheet::compose(d, choices);
+    } catch (const std::runtime_error &e) {
+        const auto error = QString::fromUtf8(e.what());
+        rejected = error.contains(QStringLiteral("Связанные виды")) &&
+                   (error.contains(QStringLiteral("Главный вид")) ||
+                    error.contains(QStringLiteral("Вид сверху")) ||
+                    error.contains(QStringLiteral("Вид слева")));
+    }
+    require(rejected, "Fixed oversized scale was silently reduced or named the wrong view");
+}
 void worker() {
     struct Gate {
         std::mutex mutex;
@@ -319,5 +388,6 @@ void verifyRecordedDimensions(const bending::application::BendingDrawing &drawin
 
 void drawingLayoutChecks() {
     limits();
+    unevenProjectionDimensions();
     worker();
 }
