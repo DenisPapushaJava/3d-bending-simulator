@@ -1063,15 +1063,16 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->sectionSlider = new QSlider(Qt::Horizontal, impl_->sectionOptions);
     impl_->sectionSlider->setObjectName(QStringLiteral("drawingSectionSlider"));
     impl_->sectionSlider->setAccessibleName(QStringLiteral("Положение сечения, проценты"));
-    impl_->sectionSlider->setRange(0, 1000);
+    impl_->sectionSlider->setRange(1, 999);
     impl_->sectionSlider->setPageStep(100);
     impl_->sectionSlider->setToolTip(QStringLiteral(
-        "0–100% общего участка выбранных гибов. Смена стороны взгляда не меняет отсчёт."));
+        "0,1–99,9% общего участка выбранных гибов. Смена стороны взгляда не меняет отсчёт."));
     impl_->sectionPercent = new QDoubleSpinBox(impl_->sectionOptions);
     impl_->sectionPercent->setObjectName(QStringLiteral("drawingSectionPercent"));
     impl_->sectionPercent->setAccessibleName(QStringLiteral("Положение сечения, проценты"));
-    impl_->sectionPercent->setRange(0, 100);
+    impl_->sectionPercent->setRange(.1, 99.9);
     impl_->sectionPercent->setDecimals(1);
+    impl_->sectionPercent->setSingleStep(.1);
     impl_->sectionPercent->setSuffix(QStringLiteral(" %"));
     position->addWidget(impl_->sectionSlider, 1);
     position->addWidget(impl_->sectionPercent);

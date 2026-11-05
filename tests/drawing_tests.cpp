@@ -2092,7 +2092,7 @@ void sectionControlsWorkflow(const QString &folder) {
     wait([&] { return !controller.hasWork() && save->isEnabled(); });
     require(builder->cancelled > 0 && location() && std::abs(location()->fraction - .61) < 1e-9,
             "A superseded section build published its obsolete position");
-    percent->setValue(0);
+    percent->setValue(.1);
     awaitManual();
     rebuild->click();
     wait([&] { return !controller.hasWork() && (save->isEnabled() || controller.drawingError()); });
