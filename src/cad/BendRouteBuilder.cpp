@@ -256,6 +256,7 @@ class RouteSearch {
     std::vector<std::shared_ptr<const TransitionInputs>> assemblyInputs;
     std::map<std::pair<std::size_t, double>, std::array<core::SegmentPlan, 2>> assemblyPlans;
     bool assemblyLimitReached = false;
+    std::string windowHint; // Qualified explanation only after a real collision-driven attempt.
     BendRouteStatistics statistics;
     std::vector<Mask> neighbours;
     std::vector<std::size_t> profileRank;
@@ -570,10 +571,14 @@ class RouteSearch {
         if (const auto *error = std::get_if<BendPreviewError>(&result)) {
             // Route search consumes the report, not the failed cycle. Never retain its
             // diagnostic BReps/meshes here; single/manual previews have their own cache.
-            cache->verdicts.put(
-                std::move(key),
-                BendPreviewError{error->code, error->detail, error->frameIndex, {},
-                                  error->endSupport, error->axialSupportGap});
+            cache->verdicts.put(std::move(key), BendPreviewError{error->code,
+                                                                 error->detail,
+                                                                 error->frameIndex,
+                                                                 {},
+                                                                 error->endSupport,
+                                                                 error->axialSupportGap,
+                                                                 error->toolCollision,
+                                                                 error->dieWindow});
         } else {
             cache->transitions.put(key, std::get<BendPreviewPtr>(std::move(result)));
             cache->verdicts.put(std::move(key), std::nullopt);
@@ -743,6 +748,96 @@ class RouteSearch {
         }
         return result;
     }
+    struct WindowSeed {
+        TransitionKey key;
+        core::ToolWindow window;
+    };
+    struct WindowPlanEntry {
+        TransitionKey key;
+        core::ToolWindow window;
+        double maximumGap;
+        core::SegmentPlan plan;
+    };
+    std::vector<WindowPlanEntry> windowPlans; // At most 32 compact numeric plans per worker.
+    bool tryDieWindows(Mask mask, const RouteOperation &op,
+                       const std::vector<RouteOperation> &additional,
+                       const std::vector<bool> &reverseReference, double required,
+                       const std::vector<WindowSeed> &seeds) {
+        std::size_t attemptsHere = 0;
+        for (const auto &seed : seeds) {
+            auto window = seed.window;
+            for (unsigned refinement = 0; refinement < 2; ++refinement) {
+                cancelled(stop);
+                checkBudget();
+                if (attemptsHere >= 4) {
+                    assemblyLimitReached = true;
+                    return false;
+                }
+                const auto &original = *seed.key.inputs->operation.assignment;
+                const double maximumGap = request.assemblySearch->maximumGapMm;
+                auto found =
+                    std::find_if(windowPlans.begin(), windowPlans.end(), [&](const auto &p) {
+                        return p.key == seed.key && p.window == window &&
+                               p.maximumGap == maximumGap;
+                    });
+                core::SegmentPlan plan;
+                if (found != windowPlans.end()) {
+                    plan = found->plan;
+                    ++statistics.reusedDieWindowPlans;
+                } else {
+                    plan = core::planToolWindow(*original.die.segments, window, maximumGap, 200000,
+                                                stop);
+                    ++statistics.plannedDieWindows;
+                    if (windowPlans.size() >= 32) {
+                        assemblyLimitReached = true;
+                        break;
+                    }
+                    windowPlans.push_back({seed.key, window, maximumGap, plan});
+                }
+                cancelled(stop);
+                checkBudget();
+                assemblyLimitReached |= plan.status == core::SegmentPlanStatus::SearchLimit;
+                if (plan.status != core::SegmentPlanStatus::Complete) {
+                    if (plan.status == core::SegmentPlanStatus::InsufficientStock)
+                        windowHint =
+                            window.conflictToMm - window.conflictFromMm > maximumGap
+                                ? " Для одной из установок предел зазора меньше зоны столкновения."
+                                : " Для одной из установок не удалось собрать окно из наличия в "
+                                  "пределах заданного зазора.";
+                    break;
+                }
+                auto candidate = op;
+                candidate.assignment = original;
+                candidate.assignment->dieAssembly = plan.assembly;
+                candidate.tools = core::toolParameters(*candidate.assignment);
+                auto members = additional;
+                for (auto &m : members) {
+                    m.assignment->punchAssembly = original.punchAssembly;
+                    m.assignment->dieAssembly = plan.assembly;
+                    m.tools = core::toolParameters(*m.assignment);
+                }
+                ++attemptsHere;
+                std::vector<WindowSeed> next;
+                const auto pose = std::pair{seed.key.fixedSecond, seed.key.axialOffset};
+                if (tryInstallation(mask, candidate, members, reverseReference,
+                                    assemblyKey(mask, candidate, members), required, &next, pose))
+                    return true;
+                // A later checked frame can enlarge this same single window. Never
+                // infer a second window or relax support after a different refusal.
+                if (next.empty() || next.front().window.freeFromMm != window.freeFromMm ||
+                    next.front().window.freeToMm != window.freeToMm)
+                    break;
+                const auto previous = window;
+                window.conflictFromMm =
+                    std::min(window.conflictFromMm, next.front().window.conflictFromMm);
+                window.conflictToMm =
+                    std::max(window.conflictToMm, next.front().window.conflictToMm);
+                if (window == previous)
+                    break;
+            }
+        }
+        return false;
+    }
     bool tryCandidate(Mask mask, std::size_t order,
                       const std::vector<RouteOperation> &additional = {}) {
         const auto &op = request.operations[order];
@@ -785,6 +880,9 @@ class RouteSearch {
         if (!planning)
             return tryInstallation(mask, op, additional, reverseReference,
                                    key(mask, op, false, additional), required);
+        std::vector<WindowSeed> windowSeeds;
+        const bool windows = request.assemblySearch->allowDieWindows && !additional.empty() &&
+                             op.assignment->useDrawingGeometry && op.assignment->die.segments;
         for (const auto &assemblies : assemblyAlternatives(op, required)) {
             cancelled(stop);
             auto candidate = op;
@@ -797,11 +895,31 @@ class RouteSearch {
                 member.assignment->dieAssembly = assemblies.second;
                 member.tools = candidate.tools;
             }
+            const auto permitted = [&](const auto &before) {
+                const auto reusable = [](const auto &oldAssembly, const auto &nextAssembly,
+                                         bool allow) {
+                    return !nextAssembly || nextAssembly->jointGapsMm.empty() ||
+                           oldAssembly == nextAssembly || allow;
+                };
+                return reusable(before.punchAssembly, assemblies.first, false) &&
+                       reusable(before.dieAssembly, assemblies.second,
+                                request.assemblySearch->allowDieWindows);
+            };
+            if (!permitted(*op.assignment) ||
+                !std::all_of(additional.begin(), additional.end(),
+                             [&](const auto &member) { return permitted(*member.assignment); }))
+                continue;
             const auto wanted = assemblyKey(mask, candidate, members);
-            if (tryInstallation(mask, candidate, members, reverseReference, wanted, required))
+            if (tryInstallation(mask, candidate, members, reverseReference, wanted, required,
+                                windows ? &windowSeeds : nullptr))
                 return true;
         }
-        return false;
+        std::stable_sort(windowSeeds.begin(), windowSeeds.end(), [](const auto &a, const auto &b) {
+            return std::pair{a.window.lengthMm, a.window.conflictToMm - a.window.conflictFromMm} <
+                   std::pair{b.window.lengthMm, b.window.conflictToMm - b.window.conflictFromMm};
+        });
+        return windows &&
+               tryDieWindows(mask, op, additional, reverseReference, required, windowSeeds);
     }
     std::vector<double> axialPlacements(Mask mask, const RouteOperation &op, bool reversedSide,
                                         double required,
@@ -870,7 +988,8 @@ class RouteSearch {
     bool tryInstallation(Mask mask, const RouteOperation &op,
                          const std::vector<RouteOperation> &additional,
                          const std::vector<bool> &reverseReference, const TransitionKey &baseKey,
-                         double required) {
+                         double required, std::vector<WindowSeed> *windowSeeds = nullptr,
+                         std::optional<std::pair<bool, double>> fixedPose = {}) {
         if (request.withTools &&
             (!op.tools || core::punchLengthMm(*op.tools) + tolerance < required ||
              op.tools->lengthMm + tolerance < required)) {
@@ -897,11 +1016,13 @@ class RouteSearch {
             }
             return std::pair{verdict, support};
         };
-        if (request.allowWorkpieceRotation && request.rankCandidates &&
+        if (fixedPose)
+            sides = {fixedPose->first, fixedPose->first};
+        if (!fixedPose && request.allowWorkpieceRotation && request.rankCandidates &&
             prior(sides[1]) < prior(sides[0]))
             std::swap(sides[0], sides[1]);
-        for (std::size_t choice = 0; choice < (request.allowWorkpieceRotation ? 2u : 1u);
-             ++choice) {
+        for (std::size_t choice = 0;
+             choice < (!fixedPose && request.allowWorkpieceRotation ? 2u : 1u); ++choice) {
             const bool fixedSecond = sides[choice];
             auto resolved = additional;
             bool matching = true;
@@ -913,8 +1034,10 @@ class RouteSearch {
             if (!matching)
                 continue;
             PreparedBendOperationPtr prepared;
-            for (const double offset :
-                 axialPlacements(mask, op, fixedSecond, required, additional, baseKey)) {
+            const auto positions =
+                fixedPose ? std::vector<double>{fixedPose->second}
+                          : axialPlacements(mask, op, fixedSecond, required, additional, baseKey);
+            for (const double offset : positions) {
                 cancelled(stop);
                 if (dead.contains(mask ^ bit))
                     break;
@@ -943,6 +1066,36 @@ class RouteSearch {
                         lastFailure = failure->detail;
                         lastOperationError = failure->code;
                         failedBend = op.bendIndex;
+                        if (windowSeeds && failure->toolCollision == ToolCollisionPair::SheetDie) {
+                            incomplete =
+                                true; // One window/four seeds are not an exhaustive search.
+                            if (failure->dieWindow &&
+                                std::none_of(windowSeeds->begin(), windowSeeds->end(),
+                                             [&](const auto &s) { return s.key == wanted; })) {
+                                const auto score = [](const WindowSeed &s) {
+                                    return std::pair{s.window.lengthMm,
+                                                     s.window.conflictToMm -
+                                                         s.window.conflictFromMm};
+                                };
+                                WindowSeed seed{wanted, *failure->dieWindow};
+                                if (seed.window.conflictToMm - seed.window.conflictFromMm >
+                                    request.assemblySearch->maximumGapMm) {
+                                    windowHint = " Для одной из установок предел зазора меньше "
+                                                 "зоны столкновения.";
+                                } else if (windowSeeds->size() < 4)
+                                    windowSeeds->push_back(std::move(seed));
+                                else {
+                                    assemblyLimitReached = true;
+                                    const auto worst =
+                                        std::max_element(windowSeeds->begin(), windowSeeds->end(),
+                                                         [&](const auto &a, const auto &b) {
+                                                             return score(a) < score(b);
+                                                         });
+                                    if (score(seed) < score(*worst))
+                                        *worst = std::move(seed);
+                                }
+                            }
+                        }
                         incomplete |= failure->code == BendPreviewErrorCode::Failed ||
                                       failure->code == BendPreviewErrorCode::UnsupportedGeometry;
                         if (failure->code != BendPreviewErrorCode::ToolIntersection &&
@@ -1340,6 +1493,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.toolShapeRankingUs += s.toolShapeRankingUs;
                 totals.plannedAssemblies += s.plannedAssemblies;
                 totals.reusedAssemblyPlans += s.reusedAssemblyPlans;
+                totals.plannedDieWindows += s.plannedDieWindows;
+                totals.reusedDieWindowPlans += s.reusedDieWindowPlans;
                 totals.preparedOperations += s.preparedOperations;
                 totals.reusedOperationPreparations += s.reusedOperationPreparations;
                 totals.operationPreparationUs += s.operationPreparationUs;
@@ -1630,7 +1785,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             return BendRouteError{search.assemblyLimitReached ? BendRouteErrorCode::SearchLimit
                                   : search.incomplete         ? BendRouteErrorCode::Unsupported
                                                               : BendRouteErrorCode::NoRoute,
-                                  search.lastFailure,
+                                  search.lastFailure + search.windowHint,
                                   search.failedBend,
                                   search.attempts,
                                   search.lastOperationError,

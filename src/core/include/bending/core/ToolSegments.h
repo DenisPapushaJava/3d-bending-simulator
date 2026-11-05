@@ -37,6 +37,15 @@ struct SegmentPlan {
     ToolAssembly assembly;
     double lengthMm = 0;
 };
+// One forbidden axial interval inside a material-free corridor, in assembly coordinates.
+// The outer span is retained; straight sections on both sides share the same stock.
+struct ToolWindow {
+    double lengthMm, freeFromMm, conflictFromMm, conflictToMm, freeToMm;
+    bool operator==(const ToolWindow &) const = default;
+};
+[[nodiscard]] SegmentPlan planToolWindow(const std::vector<ToolSegment> &, const ToolWindow &,
+                                         double maximumGapMm, std::size_t workBudget = 200000,
+                                         std::stop_token stop = {});
 [[nodiscard]] bool validToolSegments(const std::vector<ToolSegment> &);
 [[nodiscard]] std::optional<double> assemblyLength(const std::vector<ToolSegment> &,
                                                    const ToolAssembly &);

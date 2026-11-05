@@ -687,6 +687,7 @@ class MainWindow::Impl {
         if (checkedTooling) {
             application::RouteAssemblySearch scope;
             scope.maximumGapMm = toolSelection->maximumSegmentGapMm();
+            scope.allowDieWindows = true;
             for (const auto &operation : request.operations)
                 if (application::routeToolVariantApplies(request.toolVariants.front(),
                                                          operation.bendIndex))

@@ -1,4 +1,5 @@
 #include "bending/application/BendRoute.h"
+#include "bending/application/SingleBendPreview.h"
 #include "bending/core/ToolGeometry.h"
 #include <algorithm>
 #include <set>
@@ -26,7 +27,8 @@ bool validRouteAssemblySearch(const BendRouteRequest &request) {
                                      [&](const auto &entry) { return entry.bendIndex == index; });
         if (!seen.insert(index).second || op == request.operations.end() || !op->assignment ||
             op->assignment->punch.teaching || op->assignment->die.teaching ||
-            !core::hasCompleteDrawingToolGeometry(*op->assignment))
+            !core::hasCompleteDrawingToolGeometry(*op->assignment) ||
+            (s.allowDieWindows && !op->assignment->useDrawingGeometry))
             return false;
     }
     return true;
@@ -63,6 +65,8 @@ bool applyRouteAssemblyResult(BendRouteRequest &request, const BendRoute &route)
                                const std::optional<core::ToolAssembly> &after) {
             return before == after ||
                    (profile.segments && after &&
+                    (after->jointGapsMm.empty() || (profile.kind == core::ToolKind::Die &&
+                                                    request.assemblySearch->allowDieWindows)) &&
                     core::maximumAssemblyGap(*after) <= request.assemblySearch->maximumGapMm &&
                     core::assemblyLength(*profile.segments, *after).has_value());
         };
@@ -84,6 +88,58 @@ bool applyRouteAssemblyResult(BendRouteRequest &request, const BendRoute &route)
         const auto *assignment = step.assemblyAssignment ? step.assemblyAssignment.get()
                                  : input->assignment     ? &*input->assignment
                                                          : nullptr;
+        const auto newWindow = [](const auto *after, const auto *before) {
+            return after && after->dieAssembly && !after->dieAssembly->jointGapsMm.empty() &&
+                   (!before || after->dieAssembly != before->dieAssembly);
+        };
+        bool changesWindow =
+            newWindow(assignment, input->assignment ? &*input->assignment : nullptr);
+        for (const auto &member : step.additionalBends) {
+            const auto before = std::find_if(
+                request.operations.begin(), request.operations.end(), [&](const auto &op) {
+                    return op.id == member.id && op.bendIndex == member.bendIndex;
+                });
+            if (before == request.operations.end())
+                return false;
+            changesWindow |= newWindow(member.assignment ? &*member.assignment : nullptr,
+                                       before->assignment ? &*before->assignment : nullptr);
+        }
+        if (changesWindow) {
+            if (!assignment || std::any_of(step.additionalBends.begin(), step.additionalBends.end(),
+                                           [&](const auto &member) {
+                                               return !member.assignment ||
+                                                      *member.assignment != *assignment;
+                                           }))
+                return false;
+            if (!route.source || !step.preview || !assignment->useDrawingGeometry ||
+                !step.preview->usesDrawingDie() || !step.preview->usesDrawingPunch())
+                return false;
+            const auto parameters = core::toolParameters(*assignment);
+            if (!parameters || !step.preview->toolSetup() ||
+                step.preview->toolSetup()->tools != *parameters)
+                return false;
+            const double tolerance = route.source->metadata().bendAnalysis.lengthToleranceMm;
+            if (!validEndSupportIntervals(*step.preview,
+                                          request.allowPartialEndSupport
+                                              ? request.maximumEndSupportLossMm
+                                              : std::optional<double>(0),
+                                          tolerance))
+                return false;
+            const double origin = (parameters->lengthMm - step.preview->model().widthMm) / 2 +
+                                  step.preview->workpieceOffsetMm();
+            for (const auto &zone : step.preview->endSupportIntervals()) {
+                const double start = origin + zone.fromMm;
+                const auto uncovered = core::assemblyUncoveredLength(
+                    *assignment->die.segments, *assignment->dieAssembly, start,
+                    start + zone.material.bendLengthMm);
+                if (!uncovered || *uncovered > tolerance)
+                    return false;
+            }
+            const auto missing = step.preview->uncoveredToolLengthMm();
+            if (!std::isfinite(missing[0]) || !std::isfinite(missing[1]) || missing[0] < 0 ||
+                missing[1] < 0 || missing[0] > tolerance || missing[1] > tolerance)
+                return false;
+        }
         if (!apply(step.id, step.bendIndex, assignment,
                    step.assemblyAssignment ? core::toolParameters(*step.assemblyAssignment)
                                            : input->tools))

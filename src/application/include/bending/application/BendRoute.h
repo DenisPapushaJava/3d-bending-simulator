@@ -50,6 +50,7 @@ struct BendRouteProgress {
 struct RouteAssemblySearch {
     std::vector<std::size_t> bendIndices;
     double maximumGapMm = 0;
+    bool allowDieWindows = false; // Only after an actual sheet-die collision.
 };
 struct BendRouteRequest {
     // Complete list in the requested forward order; Automatic may reorder it.
@@ -93,6 +94,7 @@ struct BendRouteStatistics {
     std::size_t shapeRankedToolVariants = 0;
     std::uint64_t toolShapeRankingUs = 0;
     std::size_t plannedAssemblies = 0, reusedAssemblyPlans = 0;
+    std::size_t plannedDieWindows = 0, reusedDieWindowPlans = 0;
     std::size_t preparedOperations = 0, reusedOperationPreparations = 0;
     std::uint64_t operationPreparationUs = 0, placementEvaluationUs = 0;
 };

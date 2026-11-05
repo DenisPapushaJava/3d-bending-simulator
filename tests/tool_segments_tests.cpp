@@ -121,6 +121,44 @@ int main() {
                  {{0, 0, 2}, 0, {0, 10}}})
             check(!assemblyLength(localStock, bad) && !assemblyIntervals(localStock, bad),
                   "Invalid per-joint layout or stock overuse accepted");
+        for (unsigned x = 0; x < 4; ++x)
+            for (unsigned y = 0; y < 4; ++y)
+                for (unsigned z = 0; z < 4; ++z) {
+                    bool feasible = false;
+                    for (unsigned a = 0; a <= x; ++a)
+                        for (unsigned b = 0; b <= y; ++b)
+                            for (unsigned c = 0; c <= z; ++c)
+                                for (unsigned d = 0; d + a <= x; ++d)
+                                    for (unsigned e = 0; e + b <= y; ++e)
+                                        for (unsigned f = 0; f + c <= z; ++f) {
+                                            const auto left = 7 * a + 11 * b + 17 * c;
+                                            const auto right = 7 * d + 11 * e + 17 * f;
+                                            feasible |= left >= 25 && left <= 32 && right >= 25 &&
+                                                        right <= 34 && left + right >= 60;
+                                        }
+                    const std::vector<ToolSegment> stock{{7, x}, {11, y}, {17, z}};
+                    const auto plan = planToolWindow(stock, {80, 25, 32, 46, 55}, 20);
+                    check((plan.status == SegmentPlanStatus::Complete) == feasible,
+                          "Two-sided window planner disagrees with exhaustive shared-stock "
+                          "allocation");
+                    if (feasible)
+                        check(assemblyLength(stock, plan.assembly) == 80 &&
+                                  assemblyUncoveredLength(stock, plan.assembly, 0, 25) == 0 &&
+                                  assemblyUncoveredLength(stock, plan.assembly, 55, 80) == 0 &&
+                                  assemblyUncoveredLength(stock, plan.assembly, 32, 46) == 14 &&
+                                  maximumAssemblyGap(plan.assembly) <= 20,
+                              "Window plan lost required material, crossed the obstacle or "
+                              "invented stock");
+                }
+        check(planToolWindow({{10, 20}}, {100, 30, 40, 60, 70}, 20, 1).status ==
+                      SegmentPlanStatus::SearchLimit &&
+                  planToolWindow({{10, 20}}, {100, 30, 40, 60, 70}, 20, 200000, stop.get_token())
+                          .status == SegmentPlanStatus::Cancelled &&
+                  planToolWindow({{10, 20}}, {100, 30, 40, 60, 70}, 19).status ==
+                      SegmentPlanStatus::InsufficientStock &&
+                  planToolWindow({{10, 20}}, {100, 45, 40, 60, 70}, 30).status ==
+                      SegmentPlanStatus::InvalidInput,
+              "Window planner ignored cancellation, quota, clearance or input validity");
         const auto precise = planToolSegments({{80.001, 1}}, 80.0008);
         const auto gap = planToolSegments({{100, 2}}, 210, 200000, 10);
         check(gap.status == SegmentPlanStatus::Complete && gap.assembly.gapMm == 10 &&

@@ -1625,7 +1625,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                             pair == pairs.size() ? machineConflict.has_value() : toolHits[pair];
                         if (conflict) {
                             const auto failure = [&](BendPreviewPtr diagnostic = {}) {
-                                return BendPreviewError{
+                                BendPreviewError error{
                                     pair == pairs.size() ? BendPreviewErrorCode::MachineIntersection
                                                          : BendPreviewErrorCode::ToolIntersection,
                                     pair == pairs.size() ? machineConflict->firstName + " — " +
@@ -1633,6 +1633,53 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                                          : "Tool and material volumes intersect",
                                     diagnostic ? diagnostic->frameCount() - 1 : i,
                                     std::move(diagnostic)};
+                                if (pair < pairs.size())
+                                    error.toolCollision = static_cast<ToolCollisionPair>(pair);
+                                if (pair != 0 || toolHits[1] || toolHits[2] || machineConflict ||
+                                    !realTools || !realTools->useDrawingGeometry ||
+                                    !realTools->die.segments ||
+                                    preview->supportIntervals.size() < 2)
+                                    return error;
+                                // Numeric proposal from an already computed actual Common. No
+                                // new Boolean, meshing, or clearance verdict is produced here.
+                                try {
+                                    const auto hit = std::find_if(
+                                        evidence.begin(), evidence.end(), [](const auto &e) {
+                                            return e.firstId == "sheet" && e.secondId == "die";
+                                        });
+                                    if (hit == evidence.end())
+                                        return error;
+                                    Bnd_Box box;
+                                    BRepBndLib::AddOptimal(hit->overlap, box, false, false);
+                                    if (box.IsVoid() || box.IsOpen())
+                                        return error;
+                                    const double lo =
+                                        std::floor((box.CornerMin().Z() - 4 * tolerance) * 1000) /
+                                        1000;
+                                    const double hi =
+                                        std::ceil((box.CornerMax().Z() + 4 * tolerance) * 1000) /
+                                        1000;
+                                    const double origin =
+                                        (toolParameters->lengthMm - model.widthMm) / 2 +
+                                        workpieceOffsetMm;
+                                    for (std::size_t j = 1; j < preview->supportIntervals.size();
+                                         ++j) {
+                                        const auto &previous = preview->supportIntervals[j - 1];
+                                        const double from = origin + previous.fromMm +
+                                                            previous.material.bendLengthMm;
+                                        const double to =
+                                            origin + preview->supportIntervals[j].fromMm;
+                                        if (lo >= from && hi <= to && lo < hi) {
+                                            error.dieWindow = core::ToolWindow{
+                                                toolParameters->lengthMm, from, lo, hi, to};
+                                            break;
+                                        }
+                                    }
+                                } catch (const Standard_Failure &) {
+                                    // Optional proposal unavailable; the real collision remains.
+                                } catch (const std::exception &) {
+                                }
+                                return error;
                             };
                             // Full-route search consumes a compact rejection, never this unused
                             // visual. Manual/isolated cycles retain every contact overlay/prefix.
