@@ -543,7 +543,7 @@ class OcctCanvas final : public QWidget {
                               Quantity_Color(.14, .19, .22, Quantity_TOC_RGB), .82,
                               floorVisibleAction_->isChecked()});
             bodies.push_back({"floor-grid", frame.floor->grid,
-                              Quantity_Color(.25, .31, .36, Quantity_TOC_RGB), 0,
+                              Quantity_Color(.25, .31, .36, Quantity_TOC_sRGB), 0,
                               floorVisibleAction_->isChecked()});
         }
         rigidScene_->update(std::move(bodies),

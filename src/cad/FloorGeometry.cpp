@@ -46,7 +46,8 @@ FloorPlane makeFloorPlane(double y, double z) {
     builder.UpdateFace(face, mesh);
     TopoDS_Compound grid;
     builder.MakeCompound(grid);
-    for (int i = 0; i < count; ++i) {
+    // Draw 500 mm grid lines; retain the finer surface mesh for contact overlays.
+    for (int i = 0; i < count; i += 2) {
         const double offset = -halfSize + i * spacing;
         builder.Add(grid, BRepBuilderAPI_MakeEdge(gp_Pnt(offset, y + .05, z - halfSize),
                                                   gp_Pnt(offset, y + .05, z + halfSize))
