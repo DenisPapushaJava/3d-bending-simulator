@@ -1,6 +1,12 @@
 # Разработка и проверки
 
 
+## Пример детали с обратным язычком — 2026-11-05
+
+В стартовый манифест добавлен `reverse-tab-2mm.step`: t2, три исходные зоны (две соосные и обратный язычок). Геометрия общая с регрессионным случаем D173 через `tools/DieWindowFixture.h`; генератор не зависит от каталога tests. Остальные четыре STEP не перезаписаны. Проверено побайтовое совпадение нового файла в examples и dev/runtime; штатный install использует тот же манифест.
+
+После сборки `step_examples`, `example_parts_tests`, `die_window_tests`, `die_window_workflow_tests` целевой CTest-набор `app.example-parts|cad.die-window|app.die-window` прошёл **3/3**, 41,21 с. Все пять runtime-примеров проверены на импорт/толщину/распознавание, развёртку и размерение гибов. Для нового файла отрисованы и просмотрены обе страницы: основные виды/сечения/изометрия, затем развёртка (`out/reverse-tab-example-audit/reverse-tab-1.png`, `reverse-tab-2.png`). Qt offscreen/100%; viewer и расчёт не менялись, новый GPU/Windows/HiDPI-прогон и релиз не выполнялись. clang-format 18 и git diff-check пройдены; D051 сохраняется.
+
 ## D173 — автоматическое окно после коллизии, 2026-11-05
 
 [Контракт](automatic-die-window.md). Полный native dev и выбранные Release targets собраны; Release использует warnings-as-errors. Новых библиотек/VERSION/формата проекта нет. D051 сохраняется.

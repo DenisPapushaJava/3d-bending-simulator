@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "DieWindowFixture.h"
 #include "TrayFixtures.h"
 
 #include <APIHeaderSection_MakeHeader.hxx>
@@ -69,6 +70,7 @@ int main(int argc, char *argv[]) {
         if (!fixtures) {
             write(output / "tray-four-bends-2mm.step", bending::fixtures::tray(), "MM");
             write(output / "tool-clearance-2mm.step", bending::fixtures::channel(80, 24, 40), "MM");
+            write(output / "reverse-tab-2mm.step", bending::fixtures::dieWindowPart(), "MM");
             if (argc == 2)
                 write(output / "profiled-bend-6mm.step", bending::fixtures::profiledBend(), "MM");
             return 0;

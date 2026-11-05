@@ -48,8 +48,8 @@ int main(int argc, char **argv) {
         require(manifest.open(QIODevice::ReadOnly), "Manifest missing");
         const auto parts =
             QJsonDocument::fromJson(manifest.readAll()).object().value("parts").toArray();
-        require(parts.size() == 4, "Starter examples not curated");
-        require(QDir(directory).entryList({"*.step", "*.stp"}, QDir::Files).size() == 4,
+        require(parts.size() == 5, "Starter examples not curated");
+        require(QDir(directory).entryList({"*.step", "*.stp"}, QDir::Files).size() == parts.size(),
                 "Test fixtures leaked into runtime");
         const auto source = project::readStarterToolCatalog();
         require(std::holds_alternative<core::ToolCatalog>(source), "Starter profiles unavailable");

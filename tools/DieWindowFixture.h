@@ -1,5 +1,5 @@
 #pragma once
-// Original MIT fixture: two coaxial bends and a reverse central tab on their shared web.
+// Original MIT example: two coaxial bends and a reverse central tab on their shared web.
 #include "BendFixtures.h"
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
