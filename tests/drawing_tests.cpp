@@ -1024,6 +1024,53 @@ TopoDS_Shape segmentedWall(bool holes = true) {
     unify.Build();
     return unify.Shape();
 }
+void sectionEditLimit(const QString &folder) {
+    // Seventeen real stations, sixteen distinct profiles; the last shares the first section.
+    TopoDS_Shape shape;
+    for (int i = 0; i < 17; ++i) {
+        const auto part =
+            fixtures::bentStrip(4, 2, std::numbers::pi / 2, 40, true, 30 + (i == 16 ? 0 : i * 2));
+        gp_Trsf transform;
+        transform.SetTranslation(gp_Vec(0, 0, i * 42));
+        const auto moved = BRepBuilderAPI_Transform(part, transform, true).Shape();
+        shape = shape.IsNull() ? moved : BRepAlgoAPI_Fuse(shape, moved).Shape();
+    }
+    shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(4, -20, 0), 2, 10, 712)).Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, true, true, false);
+    unify.Build();
+    const auto document = load(unify.Shape(), folder + "/section-limit.step");
+    const auto bytes = std::string(document->sourceStep());
+    const auto drawing = build(document);
+    require(drawing->profiles.size() == 17 && drawing->sections.size() == 16,
+            "Fixture did not reach the distinct-section limit");
+    const auto last =
+        std::max_element(drawing->profiles.begin(), drawing->profiles.end(),
+                         [](const auto &a, const auto &b) { return a.station.z < b.station.z; });
+    auto ids = last->bends;
+    std::sort(ids.begin(), ids.end());
+    const auto containsLocation = [&](const application::BendingDrawing &d) {
+        for (const auto &s : d.sections)
+            for (const auto &location : s.locations) {
+                auto key = location.bends;
+                std::sort(key.begin(), key.end());
+                if (key == ids)
+                    return true;
+            }
+        return false;
+    };
+    require(containsLocation(*drawing), "The last station is not editable in the default sheet");
+    application::DrawingRequest request;
+    request.sectionEdits = {{ids, .5, false}};
+    const auto shared = build(document, request);
+    require(shared->sections.size() == 16 && containsLocation(*shared),
+            "An edit sharing an existing section was rejected at the limit");
+    request.sectionEdits.front().reversed = true;
+    const auto result = cad::BendingDrawingBuilder{}.build(document, request, {});
+    const auto *error = std::get_if<application::DrawingError>(&result);
+    require(error && error->detail.find("16") != std::string::npos && !error->cancelled,
+            "A manual section beyond the limit was silently omitted or misreported");
+    require(document->sourceStep() == bytes, "Section-limit handling modified the source STEP");
+}
 void classicalDrawing(const QString &folder) {
     const auto source = segmentedWall();
     const auto document = load(source, folder + "/classical-wall.step");
@@ -1976,8 +2023,9 @@ void sectionControlsWorkflow(const QString &folder) {
     auto *slider = dialog->findChild<QSlider *>("drawingSectionSlider");
     auto *automatic = dialog->findChild<QPushButton *>("drawingSectionAuto");
     auto *rebuild = dialog->findChild<QPushButton *>("drawingPreviewRetry");
+    auto *resetViews = dialog->findChild<QPushButton *>("resetDrawingComposition");
     require(list && scale && options && place && flip && percent && slider && automatic &&
-                rebuild && !options->isVisible(),
+                rebuild && resetViews && !options->isVisible(),
             "Section-only controls are missing or shown on a projection");
     const auto initial = controller.drawing();
     const auto grouped = std::find_if(initial->sections.begin(), initial->sections.end(),
@@ -2033,6 +2081,21 @@ void sectionControlsWorkflow(const QString &folder) {
                 "Section settings started CAD or restored stale paper without a rebuild click");
     };
     const int before = builder->calls;
+    percent->setFocus();
+    percent->selectAll();
+    for (const auto &entry : std::array<std::pair<int, QString>, 4>{
+             std::pair{Qt::Key_4, QStringLiteral("4")}, std::pair{Qt::Key_5, QStringLiteral("5")},
+             std::pair{Qt::Key_Period, percent->locale().decimalPoint()},
+             std::pair{Qt::Key_6, QStringLiteral("6")}}) {
+        QKeyEvent press(QEvent::KeyPress, entry.first, Qt::NoModifier, entry.second);
+        QApplication::sendEvent(percent, &press);
+        QKeyEvent release(QEvent::KeyRelease, entry.first, Qt::NoModifier, entry.second);
+        QApplication::sendEvent(percent, &release);
+        QApplication::processEvents();
+    }
+    require(std::abs(percent->value() - 45.6) < 1e-9 && slider->value() == 456 &&
+                builder->calls == before,
+            "Refreshing the panel rewrote the percentage while it was being typed");
     slider->setValue(250);
     slider->setValue(280);
     percent->setValue(35);
@@ -2041,6 +2104,18 @@ void sectionControlsWorkflow(const QString &folder) {
     awaitManual();
     require(builder->calls == before && controller.drawing() == initial,
             "Changing a section submitted CAD before explicit confirmation");
+    const int selectedSection = list->currentRow();
+    resetViews->click();
+    require(options->isVisible() && place->currentIndex() == 1 &&
+                list->currentRow() == selectedSection && percent->value() == 35 &&
+                scale->currentIndex() == 0,
+            "Auto composition lost the unapplied section or failed to reset its paper scale");
+    percent->setValue(36.5);
+    require(slider->value() == 365 && builder->calls == before,
+            "The section cannot be edited after resetting its composition");
+    percent->setValue(35);
+    scale->setCurrentIndex(scale->findData(.5));
+    awaitManual();
     const auto snapshot = qEnvironmentVariable("BENDING_SECTION_CONTROLS_SNAPSHOT");
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".pending.png"), "Cannot save rebuild overlay");
@@ -2702,6 +2777,10 @@ int main(int argc, char **argv) {
             sectionControlsWorkflow(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--section-limit-only"))) {
+            sectionEditLimit(temp.path());
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--dimension-bases-only"))) {
             dimensionBases(temp.path());
             return 0;
@@ -2737,6 +2816,7 @@ int main(int argc, char **argv) {
         dimensionBases(temp.path());
         operatorProfiles(temp.path());
         classicalDrawing(temp.path());
+        sectionEditLimit(temp.path());
         drawingSectionOrientationChecks(temp.path());
         automaticDrawingOrientation(temp.path());
         repeatedWaveDrawing(temp.path());

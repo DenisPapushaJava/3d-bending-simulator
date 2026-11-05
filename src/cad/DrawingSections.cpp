@@ -371,8 +371,6 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                               (high - low),
                           0., 1.);
             at->reversed = reversed;
-            if (edit != edits.end())
-                applied[static_cast<std::size_t>(edit - edits.begin())] = true;
             std::size_t index = 0;
             for (; index < geometries.size(); ++index)
                 if (drawing.sections[index].basis &&
@@ -384,8 +382,13 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                 DrawingSection section;
                 static const std::array names{"А", "Б", "В", "Г", "Д", "Е", "Ж", "З",
                                               "И", "К", "Л", "М", "Н", "П", "Р", "С"};
-                if (index >= names.size())
+                if (index >= names.size()) {
+                    if (edit != edits.end())
+                        throw DrawingError{"Настройки сечения не применены: поддерживается не "
+                                           "более 16 различных сечений. Верните «Авто» или "
+                                           "измените настройки."};
                     continue; // Local detail fallback retains the remaining zones.
+                }
                 section.designation = names[index];
                 section.normal = measured.normal;
                 section.basis = DrawingSectionBasis{
@@ -415,6 +418,8 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             section.view.dimensionedBends.insert(section.view.dimensionedBends.end(),
                                                  measured.bends.begin(), measured.bends.end());
             section.locations.push_back(std::move(*at));
+            if (edit != edits.end())
+                applied[static_cast<std::size_t>(edit - edits.begin())] = true;
         } catch (const Standard_Failure &) {
             // Optional real sections cannot discard the source views or simulation analysis.
         }

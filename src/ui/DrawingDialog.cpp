@@ -536,10 +536,12 @@ class DrawingDialog::Impl {
         for (std::size_t i = 0; i < s->locations.size(); ++i)
             if (cutKey(s->locations[i]) == activeCut)
                 selectedPlace = i;
-        sectionPlace->clear();
-        for (std::size_t i = 0; i < s->locations.size(); ++i)
-            sectionPlace->addItem(
-                QStringLiteral("Место %1 из %2").arg(i + 1).arg(s->locations.size()));
+        if (sectionPlace->count() != static_cast<int>(s->locations.size())) {
+            sectionPlace->clear();
+            for (std::size_t i = 0; i < s->locations.size(); ++i)
+                sectionPlace->addItem(
+                    QStringLiteral("Место %1 из %2").arg(i + 1).arg(s->locations.size()));
+        }
         sectionPlace->setCurrentIndex(static_cast<int>(selectedPlace));
         sectionPlace->setVisible(s->locations.size() > 1);
         const auto &location = s->locations[selectedPlace];
@@ -550,7 +552,9 @@ class DrawingDialog::Impl {
                                     ? edited->fraction.value_or(location.fraction)
                                     : location.fraction;
         sectionSlider->setValue(qRound(fraction * 1000));
-        sectionPercent->setValue(fraction * 100);
+        // A same-value setValue rewrites intermediate text (e.g. "45.") during typing.
+        if (!qFuzzyCompare(sectionPercent->value(), fraction * 100))
+            sectionPercent->setValue(fraction * 100);
         sectionFlip->setChecked(edited != sectionEdits.end() ? edited->reversed
                                                              : location.reversed);
         sectionAuto->setEnabled(edited != sectionEdits.end());
@@ -755,6 +759,20 @@ class DrawingDialog::Impl {
         showLayoutProgress();
         layoutTimer->start();
     }
+    void resetComposition() {
+        if (!compositionSource)
+            return;
+        const QSignalBlocker block(views), blockSide(flatSide);
+        choices = DrawingSheet::defaultViews(*compositionSource);
+        for (std::size_t i = 0; i < choices.size(); ++i) {
+            views->item(static_cast<int>(i))
+                ->setText(DrawingSheet::viewName(*compositionSource, choices[i].key));
+            views->item(static_cast<int>(i))
+                ->setCheckState(choices[i].visible ? Qt::Checked : Qt::Unchecked);
+        }
+        flatSide->setCurrentIndex(0);
+        scheduleLayout();
+    }
     void showLayoutError(const QString &detail) {
         layoutBusy = false;
         layoutError = detail;
@@ -772,8 +790,9 @@ class DrawingDialog::Impl {
             cancelled ? QStringLiteral("Повторить") : QStringLiteral("Автокомпоновка"),
             [this, cancelled] {
                 if (!cancelled)
-                    compositionSource.reset();
-                scheduleLayout();
+                    resetComposition();
+                else
+                    scheduleLayout();
             });
     }
     void invalidate() {
@@ -1308,10 +1327,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     });
     connect(impl_->flatSide, &QComboBox::currentIndexChanged, this,
             [this] { impl_->scheduleLayout(); });
-    connect(resetViews, &QPushButton::clicked, this, [this] {
-        impl_->compositionSource.reset();
-        impl_->scheduleLayout();
-    });
+    connect(resetViews, &QPushButton::clicked, this, [this] { impl_->resetComposition(); });
     connect(impl_->page, &QSpinBox::valueChanged, this, [this] {
         impl_->render();
         impl_->preview->verticalScrollBar()->setValue(0);
