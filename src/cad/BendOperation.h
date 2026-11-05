@@ -14,5 +14,5 @@ buildBendOperation(application::DocumentPtr, std::size_t, core::BendTarget, bool
                    std::optional<double> maximumEndSupportLossMm = {},
                    std::optional<gp_Dir> referenceAxis = {}, bool prepareDiagnostic = true,
                    application::BackgaugeSearchStatistics *statistics = nullptr,
-                   std::span<const std::size_t> jointBends = {});
+                   std::span<const std::size_t> jointBends = {}, double workpieceOffsetMm = 0);
 } // namespace bending::cad

@@ -15,6 +15,10 @@ class CadPreview : public SingleBendPreview {
     }
     bool draft = false;
     bool reversed = false;
+    double axialOffset = 0;
+    double workpieceOffsetMm() const noexcept override {
+        return axialOffset;
+    }
     bool workpieceReversed() const noexcept override {
         return reversed;
     }

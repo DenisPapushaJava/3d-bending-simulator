@@ -148,6 +148,7 @@ QJsonArray bendsJson(const std::vector<BendPreparation> &bends) {
             QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
                         {QStringLiteral("review"), reviewName(bend.review)},
                         {QStringLiteral("workpieceReversed"), bend.workpieceReversed},
+                        {QStringLiteral("workpieceOffsetMm"), bend.workpieceOffsetMm},
                         {QStringLiteral("geometry"), geometry},
                         {QStringLiteral("target"), target},
                         {QStringLiteral("tools"), toolsJson(bend.tools)},
@@ -174,6 +175,11 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
             (version < 14 && !orientation.isUndefined()))
             return false;
         bend.workpieceReversed = orientation.toBool(false);
+        const auto offset = object.value(QStringLiteral("workpieceOffsetMm"));
+        if ((version >= 17 && (!offset.isDouble() || !validWorkpieceOffset(offset.toDouble()))) ||
+            (version < 17 && !offset.isUndefined()))
+            return false;
+        bend.workpieceOffsetMm = offset.toDouble(0);
         bend.id = object.value(QStringLiteral("id")).toString().toStdString();
         const auto review = object.value(QStringLiteral("review")).toString();
         if (review == QStringLiteral("automatic") && version >= 4) {
@@ -313,9 +319,9 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
          version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0 &&
          version.toDouble() != 10.0 && version.toDouble() != 11.0 && version.toDouble() != 12.0 &&
          version.toDouble() != 13.0 && version.toDouble() != 14.0 && version.toDouble() != 15.0 &&
-         version.toDouble() != 16.0)) {
+         version.toDouble() != 16.0 && version.toDouble() != 17.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 16",
+                           "Supported project format versions are 1 through 17",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -440,7 +446,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 16},
+        {QStringLiteral("version"), 17},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/Document.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/BendTarget.h"
 #include "bending/core/PressTools.h"
 #include "bending/core/ToolCatalog.h"
@@ -29,6 +30,7 @@ struct BendPreparation {
     std::optional<core::PressTools> tools = std::nullopt;
     std::optional<core::ToolAssignment> catalogTools = std::nullopt;
     bool workpieceReversed = false; // Physical Y half-turn; independent of tool orientation.
+    double workpieceOffsetMm = 0;   // Along machine Z, relative to the centred tool installation.
 };
 struct BendBindings {
     // Current recognized zone -> preparation entry. Ambiguous matches stay unbound.

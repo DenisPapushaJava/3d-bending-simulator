@@ -125,6 +125,7 @@ struct TransitionKey {
     std::shared_ptr<const TransitionInputs> inputs;
     bool fixedSecond;
     std::vector<std::shared_ptr<const TransitionInputs>> jointInputs = {};
+    double axialOffset = 0;
     bool operator==(const TransitionKey &) const = default;
 };
 struct TransitionHash {
@@ -132,6 +133,7 @@ struct TransitionHash {
         auto hash = std::hash<Mask>{}(key.mask);
         hash ^= std::hash<std::shared_ptr<const TransitionInputs>>{}(key.inputs) + 0x9e3779b9u +
                 (hash << 6) + (hash >> 2);
+        hash ^= std::hash<double>{}(key.axialOffset) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
         hash ^= std::hash<bool>{}(key.fixedSecond) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
         for (const auto &member : key.jointInputs)
             hash ^= std::hash<std::shared_ptr<const TransitionInputs>>{}(member) + 0x9e3779b9u +
@@ -451,11 +453,13 @@ class RouteSearch {
     TransitionKey key(Mask mask, const RouteOperation &op, bool side,
                       const std::vector<RouteOperation> &additional = {}) const {
         if (additional.empty())
-            return {mask, inputs[op.bendIndex], side};
+            return {
+                mask, inputs[op.bendIndex], side, {}, request.withTools ? op.workpieceOffsetMm : 0};
         std::vector<std::shared_ptr<const TransitionInputs>> members;
         for (const auto &member : additional)
             members.push_back(inputs[member.bendIndex]);
-        return {mask, inputs[op.bendIndex], side, std::move(members)};
+        return {mask, inputs[op.bendIndex], side, std::move(members),
+                request.withTools ? op.workpieceOffsetMm : 0};
     }
     bool mayPlan(std::size_t index) const {
         return request.assemblySearch &&
@@ -479,6 +483,7 @@ class RouteSearch {
                 return entry;
         auto normalized = op;
         normalized.workpieceReversed = false;
+        normalized.workpieceOffsetMm = 0;
         auto entry =
             cache->intern({std::move(normalized), request.withTools, request.allowPartialEndSupport,
                            request.maximumEndSupportLossMm});
@@ -487,7 +492,7 @@ class RouteSearch {
     }
     TransitionKey assemblyKey(Mask mask, const RouteOperation &op,
                               const std::vector<RouteOperation> &additional) {
-        TransitionKey result{mask, assemblyInput(op), false};
+        TransitionKey result{mask, assemblyInput(op), false, {}, op.workpieceOffsetMm};
         for (const auto &member : additional)
             result.jointInputs.push_back(assemblyInput(member));
         return result;
@@ -534,6 +539,8 @@ class RouteSearch {
         };
         // Four small assembly pairs; the immutable DXF profiles are not copied
         // into this family or each candidate's unchanged member assignments.
+        if (request.allowAxialPlacement)
+            add(originalPair); // Try retaining the installed long pair at its end first.
         add(fitted);
         add(originalPair);
         add({fitted.first, originalPair.second});
@@ -618,11 +625,12 @@ class RouteSearch {
             check(memberReference.IsParallel(reference, 1e-6),
                   "Joint zones use different workpiece orientation references");
         }
-        auto preview = buildBendOperation(
-            after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
-            request.withTools ? op.tools : std::nullopt, request.withTools,
-            request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
-            request.maximumEndSupportLossMm, reference, false, &statistics.backgauge, joint);
+        auto preview =
+            buildBendOperation(after->document, *after->indices[op.bendIndex], op.target,
+                               fixedSecond, stop, request.withTools ? op.tools : std::nullopt,
+                               request.withTools, request.withTools ? op.assignment : std::nullopt,
+                               request.allowPartialEndSupport, request.maximumEndSupportLossMm,
+                               reference, false, &statistics.backgauge, joint, wanted.axialOffset);
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
             if (failure->code == BendPreviewErrorCode::BackgaugeUnavailable)
                 ++statistics.backgauge.noReferenceTransitions;
@@ -763,6 +771,70 @@ class RouteSearch {
         }
         return false;
     }
+    std::vector<double> axialPlacements(Mask mask, const RouteOperation &op, bool reversedSide,
+                                        double required,
+                                        const std::vector<RouteOperation> &additional,
+                                        const TransitionKey &baseKey) {
+        if (!request.allowAxialPlacement || !request.withTools)
+            return {request.withTools ? op.workpieceOffsetMm : 0};
+        const double half = axialPlacementHalfRange(*op.tools, required);
+        if (half <= tolerance)
+            return {0};
+        checkBudget();
+        if (request.reuseCalculations)
+            for (const double offset : {-half, half, 0.}) {
+                auto wanted = baseKey;
+                wanted.fixedSecond = reversedSide;
+                wanted.axialOffset = offset;
+                if (const auto *verdict = cache->verdicts.peek(wanted); verdict && !*verdict)
+                    // Independent installations share one canonical predecessor. A
+                    // known successful pose needs neither SDK ranking nor other poses.
+                    return {offset};
+            }
+        double preferred = -half;
+        try {
+            const auto current = state(mask);
+            const auto &analysis = OcctDocumentAccess::simulationBends(*current->document);
+            const auto &b = analysis.bends[*current->indices[op.bendIndex]];
+            const auto link =
+                std::find_if(layout->bends.begin(), layout->bends.end(),
+                             [&](const auto &v) { return v.bendIndex == op.bendIndex; });
+            std::vector<double> progress(request.operations.size());
+            for (std::size_t i = 0; i < progress.size(); ++i)
+                progress[i] = (mask & (Mask{1} << i)) ? 1. : 0.;
+            const auto placements = routePlacement(*layout, progress);
+            auto axis = referenceAxes[op.bendIndex].Transformed(placements.walls[link->parent]);
+            if (reversedSide)
+                axis.Reverse();
+            gp_Trsf toLocal;
+            toLocal.SetTransformation(gp_Ax3(point(b.axisStart), axis));
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(OcctDocumentAccess::simulationShape(*current->document)
+                                       .Moved(TopLoc_Location(toLocal)),
+                                   box, false, false);
+            if (!box.IsVoid() && !box.IsOpen()) {
+                double low = 0, high = 0;
+                const auto include = [&](const RecognizedBend &zone) {
+                    for (const auto p : {zone.axisStart, zone.axisEnd}) {
+                        const double z = gp_Vec(point(b.axisStart), point(p)).Dot(gp_Vec(axis));
+                        low = std::min(low, z);
+                        high = std::max(high, z);
+                    }
+                };
+                include(b);
+                for (const auto &member : additional)
+                    include(analysis.bends[*current->indices[member.bendIndex]]);
+                const double before = low - box.CornerMin().Z(), after = box.CornerMax().Z() - high;
+                // Rank only: the box may include flat material and is never a
+                // collision verdict. Use the complete current joint envelope.
+                preferred = before >= after ? -half : half;
+            }
+        } catch (const Standard_Failure &) {
+            // A failed optional ranking query must not discard a full-check candidate.
+        }
+        cancelled(stop);
+        return {preferred, -preferred, 0};
+    }
     bool tryInstallation(Mask mask, const RouteOperation &op,
                          const std::vector<RouteOperation> &additional,
                          const std::vector<bool> &reverseReference, const TransitionKey &baseKey,
@@ -808,60 +880,78 @@ class RouteSearch {
             }
             if (!matching)
                 continue;
-            cancelled(stop);
-            if (dead.contains(mask ^ bit))
-                break;
-            if (attempts >= request.maximumChecks ||
-                std::chrono::steady_clock::now() - started >
-                    std::chrono::milliseconds(request.maximumTimeMs))
-                throw BendRouteError{BendRouteErrorCode::SearchLimit,
-                                     "Route search budget reached; " + lastFailure, failedBend,
-                                     attempts};
-            ++attempts;
-            if (request.onProgress)
-                request.onProgress({BendRoutePhase::Checking, 0, 0, attempts - 1, op.bendIndex});
-            const auto depth = reversed.size();
-            try {
-                auto wanted = baseKey;
-                wanted.fixedSecond = fixedSecond;
-                auto preview = transition(mask, op, fixedSecond, additional, wanted);
+            for (const double offset :
+                 axialPlacements(mask, op, fixedSecond, required, additional, baseKey)) {
+                cancelled(stop);
+                if (dead.contains(mask ^ bit))
+                    break;
+                if (attempts >= request.maximumChecks ||
+                    std::chrono::steady_clock::now() - started >
+                        std::chrono::milliseconds(request.maximumTimeMs))
+                    throw BendRouteError{BendRouteErrorCode::SearchLimit,
+                                         "Route search budget reached; " + lastFailure, failedBend,
+                                         attempts};
+                ++attempts;
                 if (request.onProgress)
-                    request.onProgress({BendRoutePhase::Checking, 0, 0, attempts, op.bendIndex});
-                if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
-                    if (failure->code == BendPreviewErrorCode::Cancelled)
-                        cancelled(stop);
-                    lastFailure = failure->detail;
-                    lastOperationError = failure->code;
+                    request.onProgress(
+                        {BendRoutePhase::Checking, 0, 0, attempts - 1, op.bendIndex});
+                const auto depth = reversed.size();
+                try {
+                    auto wanted = baseKey;
+                    wanted.fixedSecond = fixedSecond;
+                    wanted.axialOffset = offset;
+                    auto preview = transition(mask, op, fixedSecond, additional, wanted);
+                    if (request.onProgress)
+                        request.onProgress(
+                            {BendRoutePhase::Checking, 0, 0, attempts, op.bendIndex});
+                    if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
+                        if (failure->code == BendPreviewErrorCode::Cancelled)
+                            cancelled(stop);
+                        lastFailure = failure->detail;
+                        lastOperationError = failure->code;
+                        failedBend = op.bendIndex;
+                        incomplete |= failure->code == BendPreviewErrorCode::Failed ||
+                                      failure->code == BendPreviewErrorCode::UnsupportedGeometry;
+                        if (failure->code != BendPreviewErrorCode::ToolIntersection &&
+                            failure->code != BendPreviewErrorCode::MachineIntersection &&
+                            failure->code != BendPreviewErrorCode::BackgaugeUnavailable &&
+                            failure->code != BendPreviewErrorCode::ContactLost &&
+                            failure->code != BendPreviewErrorCode::RetractionNotProven &&
+                            failure->code != BendPreviewErrorCode::Failed)
+                            break;
+                        incomplete |= request.allowAxialPlacement &&
+                                      axialPlacementHalfRange(*op.tools, required) > tolerance;
+                        continue;
+                    }
+                    for (auto &member : resolved)
+                        member.workpieceOffsetMm = offset;
+                    reversed.push_back({op.id, op.bendIndex, fixedSecond,
+                                        std::get<BendPreviewPtr>(std::move(preview)),
+                                        std::move(resolved)});
+                    const auto original = std::find_if(
+                        request.operations.begin(), request.operations.end(),
+                        [&](const auto &value) { return value.bendIndex == op.bendIndex; });
+                    if (op.assignment != original->assignment)
+                        reversed.back().assemblyAssignment =
+                            std::shared_ptr<const core::ToolAssignment>(
+                                wanted.inputs, &*wanted.inputs->operation.assignment);
+                    reversedKeys.push_back(wanted);
+                    if (search(mask ^ bit))
+                        return true;
+                    reversed.pop_back();
+                    reversedKeys.pop_back();
+                    break;
+                } catch (const BendRouteError &e) {
+                    if (e.code == BendRouteErrorCode::Cancelled ||
+                        e.code == BendRouteErrorCode::SearchLimit)
+                        throw;
+                    reversed.resize(depth);
+                    reversedKeys.resize(depth);
+                    incomplete = true;
+                    lastFailure = e.detail;
+                    lastOperationError.reset();
                     failedBend = op.bendIndex;
-                    incomplete |= failure->code == BendPreviewErrorCode::Failed ||
-                                  failure->code == BendPreviewErrorCode::UnsupportedGeometry;
-                    continue;
                 }
-                reversed.push_back({op.id, op.bendIndex, fixedSecond,
-                                    std::get<BendPreviewPtr>(std::move(preview)),
-                                    std::move(resolved)});
-                const auto original = std::find_if(
-                    request.operations.begin(), request.operations.end(),
-                    [&](const auto &value) { return value.bendIndex == op.bendIndex; });
-                if (op.assignment != original->assignment)
-                    reversed.back().assemblyAssignment =
-                        std::shared_ptr<const core::ToolAssignment>(
-                            wanted.inputs, &*wanted.inputs->operation.assignment);
-                reversedKeys.push_back(wanted);
-                if (search(mask ^ bit))
-                    return true;
-                reversed.pop_back();
-                reversedKeys.pop_back();
-            } catch (const BendRouteError &e) {
-                if (e.code == BendRouteErrorCode::Cancelled ||
-                    e.code == BendRouteErrorCode::SearchLimit)
-                    throw;
-                reversed.resize(depth);
-                reversedKeys.resize(depth);
-                incomplete = true;
-                lastFailure = e.detail;
-                lastOperationError.reset();
-                failedBend = op.bendIndex;
             }
         }
         return false;
@@ -897,6 +987,8 @@ class RouteSearch {
                 const auto &member = request.operations[other];
                 const Mask bit = Mask{1} << member.bendIndex;
                 if (!(mask & bit) || !(jointNeighbours[op.bendIndex] & bit) ||
+                    (!request.allowAxialPlacement && request.withTools &&
+                     member.workpieceOffsetMm != op.workpieceOffsetMm) ||
                     std::abs(member.target.angleRadians - op.target.angleRadians) >
                         analysis.angleToleranceRadians ||
                     std::abs(member.target.innerRadiusMm - op.target.innerRadiusMm) > tolerance ||
@@ -956,6 +1048,7 @@ struct SingleBendPreviewBuilder::SingleCache {
         core::PressTools tools;
         std::optional<core::ToolAssignment> assignment;
         std::optional<double> supportLimit;
+        double axialOffset;
         bool operator==(const Key &) const = default;
     };
     DocumentPtr source;
@@ -965,7 +1058,8 @@ struct SingleBendPreviewBuilder::SingleCache {
 BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
     DocumentPtr document, std::size_t index, core::BendTarget target, bool reversed,
     std::stop_token stop, core::PressTools tools, bool motion,
-    std::optional<core::ToolAssignment> assignment, std::optional<double> limit) const {
+    std::optional<core::ToolAssignment> assignment, std::optional<double> limit,
+    double workpieceOffsetMm) const {
     if (stop.stop_requested())
         return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
     std::shared_ptr<SingleCache> cache;
@@ -977,7 +1071,8 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
         }
         cache = singleCache_;
     }
-    const SingleCache::Key key{index, target, reversed, motion, tools, assignment, limit};
+    const SingleCache::Key key{index, target,     reversed, motion,
+                               tools, assignment, limit,    workpieceOffsetMm};
     {
         std::lock_guard guard(cache->mutex);
         for (auto it = cache->entries.begin(); it != cache->entries.end(); ++it)
@@ -992,7 +1087,8 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
                                ? std::optional{normalBendAxis(*native, index)}
                                : std::nullopt;
     auto result = buildBendOperation(document, index, target, reversed, stop, tools, motion,
-                                     std::move(assignment), !limit || *limit > 0, limit, reference);
+                                     std::move(assignment), !limit || *limit > 0, limit, reference,
+                                     true, nullptr, {}, workpieceOffsetMm);
     const auto *error = std::get_if<BendPreviewError>(&result);
     if (!stop.stop_requested() && (!error || stableRejection(error->code))) {
         std::lock_guard guard(cache->mutex);
@@ -1027,7 +1123,8 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
         std::set<std::size_t> indices;
         std::set<std::string> ids;
         for (const auto &op : request.operations) {
-            if (op.bendIndex >= n || !indices.insert(op.bendIndex).second || op.id.empty() ||
+            if (!validWorkpieceOffset(op.workpieceOffsetMm) || op.bendIndex >= n ||
+                !indices.insert(op.bendIndex).second || op.id.empty() ||
                 !ids.insert(op.id).second || !core::validBendTarget(op.target))
                 return BendRouteError{BendRouteErrorCode::InvalidInput, "Invalid draft operations"};
             const auto &b = analysis.bends[op.bendIndex];
@@ -1125,7 +1222,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
              (!std::isfinite(*request.manualThicknessMm) || *request.manualThicknessMm <= 0)))
             return BendRouteError{BendRouteErrorCode::InvalidInput,
                                   "Requires every recognized bend, up to 32 zones"};
-        if (!validRouteAssemblySearch(request))
+        if ((request.allowAxialPlacement && (!request.automatic || !request.withTools)) ||
+            !validRouteAssemblySearch(request))
             return BendRouteError{BendRouteErrorCode::InvalidInput,
                                   "Invalid assembly search scope"};
         if (!request.toolVariants.empty()) {
@@ -1278,7 +1376,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         std::set<std::size_t> indices;
         std::set<std::string> ids;
         for (const auto &op : request.operations) {
-            if (op.bendIndex >= n || !indices.insert(op.bendIndex).second || op.id.empty() ||
+            if (!validWorkpieceOffset(op.workpieceOffsetMm) || op.bendIndex >= n ||
+                !indices.insert(op.bendIndex).second || op.id.empty() ||
                 !ids.insert(op.id).second || !core::validBendTarget(op.target))
                 return BendRouteError{BendRouteErrorCode::InvalidInput, "Invalid route operations"};
             const auto &b = analysis.bends[op.bendIndex];
@@ -1382,6 +1481,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         for (auto operation : search.request.operations) {
             // This flag is a preference; the resolved physical side belongs to the key.
             operation.workpieceReversed = false;
+            operation.workpieceOffsetMm = 0;
             if (!search.request.withTools) {
                 operation.tools.reset();
                 operation.assignment.reset();

@@ -594,6 +594,7 @@ class MainWindow::Impl {
         application::BendRouteRequest request;
         request.automatic = automatic;
         request.allowWorkpieceRotation = automatic;
+        request.allowAxialPlacement = automatic && withTools;
         request.withTools = withTools;
         request.toolVariants = std::move(variants);
         const bool checkedTooling = !request.toolVariants.empty();
@@ -646,7 +647,8 @@ class MainWindow::Impl {
                 return;
             request.operations.push_back(
                 {entry->id, index, *target, !withTools ? std::nullopt : operationTools,
-                 !withTools ? std::nullopt : operationAssignment, entry->workpieceReversed});
+                 !withTools ? std::nullopt : operationAssignment, entry->workpieceReversed,
+                 withTools ? entry->workpieceOffsetMm : 0});
         }
         if (checkedTooling) {
             application::RouteAssemblySearch scope;
@@ -1755,7 +1757,8 @@ class MainWindow::Impl {
             if ((tools || assignment) && !requireRealTool(assignment, index))
                 return;
             request.operations.push_back({entry->id, index, *target, entry->tools,
-                                          entry->catalogTools, entry->workpieceReversed});
+                                          entry->catalogTools, entry->workpieceReversed,
+                                          entry->workpieceOffsetMm});
         }
         stopPlayback();
         viewingDraft = true;

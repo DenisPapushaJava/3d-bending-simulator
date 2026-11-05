@@ -47,6 +47,7 @@ QJsonObject withoutWorkpieceOrientation(QJsonObject root) {
     for (qsizetype i = 0; i < bends.size(); ++i) {
         auto entry = bends[i].toObject();
         entry.remove("workpieceReversed");
+        entry.remove("workpieceOffsetMm");
         bends[i] = entry;
     }
     root.insert("bends", bends);
@@ -202,7 +203,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 16, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 17, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -558,6 +559,7 @@ void testMachineProfile() {
                         : session.setBendTools(0, tools),
                 "Cannot set machine profile");
         require(session.setBendWorkpieceOrientation(0, modern), "Cannot orient workpiece");
+        require(session.setBendWorkpieceOffset(0, modern ? 12.5 : -7.25), "Cannot place workpiece");
         require(!files.save(path, *session.document(), {}, session.bends(), {}),
                 "Cannot save machine");
         const auto opened = files.load(path, {}, {});
@@ -565,9 +567,34 @@ void testMachineProfile() {
         const auto &b = std::get<OpenedProject>(opened).bends.at(0);
         require(b.tools && b.tools->machineModel == assignment.machineModel &&
                     b.tools->punchReversed == modern && b.workpieceReversed == modern &&
+                    b.workpieceOffsetMm == (modern ? 12.5 : -7.25) &&
                     (!catalog || b.catalogTools == assignment),
                 "Lost saved machine profile");
         const auto root = QJsonDocument::fromJson(read(destination)).object();
+        for (const auto &badValue :
+             {QJsonValue("12.5"), QJsonValue(QJsonValue::Null), QJsonValue(1000001.)}) {
+            auto bad = root;
+            auto rows = bad.value("bends").toArray();
+            auto entry = rows[0].toObject();
+            entry.insert("workpieceOffsetMm", badValue);
+            rows[0] = entry;
+            bad.insert("bends", rows);
+            write(destination, QJsonDocument(bad).toJson());
+            require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                    "Invalid axial workpiece offset accepted");
+        }
+        auto v16 = root;
+        auto oldRows = v16.value("bends").toArray();
+        auto oldEntry = oldRows[0].toObject();
+        oldEntry.remove("workpieceOffsetMm");
+        oldRows[0] = oldEntry;
+        v16.insert("bends", oldRows);
+        v16.insert("version", 16);
+        write(destination, QJsonDocument(v16).toJson());
+        const auto legacyOffset = files.load(path, {}, {});
+        require(std::holds_alternative<OpenedProject>(legacyOffset) &&
+                    std::get<OpenedProject>(legacyOffset).bends.front().workpieceOffsetMm == 0,
+                "v16 did not retain a centred installation");
         auto old = withoutWorkpieceOrientation(root);
         old.insert("version", 13);
         write(destination, QJsonDocument(old).toJson());

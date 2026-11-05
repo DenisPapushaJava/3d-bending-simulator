@@ -296,6 +296,15 @@ void testBendPreparation() {
                 !session.setBendWorkpieceOrientation(99, true) &&
                 session.editRevision() == unchangedSideEdit,
             "Invalid/unchanged orientation edited the project");
+    const auto placementEdit = session.editRevision();
+    require(
+        session.setBendWorkpieceOffset(0, 17.25) && session.bend(0)->workpieceOffsetMm == 17.25 &&
+            session.bend(1)->workpieceOffsetMm == 0 && session.editRevision() == placementEdit + 1,
+        "Axial placement changed another operation or missed its revision");
+    require(session.setBendWorkpieceOffset(0, 17.25) && !session.setBendWorkpieceOffset(99, 0) &&
+                !session.setBendWorkpieceOffset(0, 1000001.) &&
+                session.editRevision() == placementEdit + 1,
+            "Invalid/unchanged placement edited the session");
     const auto secondId = session.bend(1)->id;
     const auto orderEdit = session.editRevision();
     require(session.setBendOrder({secondId, id}) &&

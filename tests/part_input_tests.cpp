@@ -256,6 +256,7 @@ void workflowTests(const QString &snapshot) {
     for (qsizetype i = 0; i < legacyBends.size(); ++i) {
         auto bend = legacyBends[i].toObject();
         bend.remove("workpieceReversed"); // Introduced in v14; not a valid v5 input.
+        bend.remove("workpieceOffsetMm");
         legacyBends[i] = bend;
     }
     root.insert("bends", legacyBends);

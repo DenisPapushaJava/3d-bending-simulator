@@ -41,6 +41,9 @@ class SingleBendPreview {
     [[nodiscard]] virtual bool workpieceReversed() const noexcept {
         return false;
     }
+    [[nodiscard]] virtual double workpieceOffsetMm() const noexcept {
+        return 0;
+    }
     // True only when every published position includes the checked floor scope.
     [[nodiscard]] virtual bool floorChecked() const noexcept {
         return false;
@@ -207,13 +210,13 @@ class SingleBendPreviewBuilder {
     buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
                            core::ToolAssignment assignment, std::stop_token stop,
                            std::optional<double> maximumEndSupportLossMm = 0,
-                           bool workpieceReversed = false) const {
+                           bool workpieceReversed = false, double workpieceOffsetMm = 0) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF setup unavailable"};
         const auto tools = core::toolParameters(assignment);
         return tools ? buildToolSetup(document, index, target, *tools, stop,
-                                      maximumEndSupportLossMm, workpieceReversed)
+                                      maximumEndSupportLossMm, workpieceReversed, workpieceOffsetMm)
                      : BendPreviewResult(BendPreviewError{
                            BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
     }
@@ -223,25 +226,26 @@ class SingleBendPreviewBuilder {
     buildAssignedToolMotion(DocumentPtr document, std::size_t index, core::BendTarget target,
                             core::ToolAssignment assignment, std::stop_token stop,
                             std::optional<double> maximumEndSupportLossMm = 0,
-                            bool workpieceReversed = false) const {
+                            bool workpieceReversed = false, double workpieceOffsetMm = 0) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                     "DXF tool contact unavailable"};
         const auto tools = core::toolParameters(assignment);
-        return tools ? buildToolMotion(document, index, target, *tools, stop,
-                                       maximumEndSupportLossMm, workpieceReversed)
-                     : BendPreviewResult(BendPreviewError{
-                           BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
+        return tools
+                   ? buildToolMotion(document, index, target, *tools, stop, maximumEndSupportLossMm,
+                                     workpieceReversed, workpieceOffsetMm)
+                   : BendPreviewResult(BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                                        "Invalid assignment"});
     }
     [[nodiscard]] virtual BendPreviewResult
     buildToolMotion(DocumentPtr, std::size_t, core::BendTarget, core::PressTools, std::stop_token,
-                    std::optional<double> = 0, bool = false) const {
+                    std::optional<double> = 0, bool = false, double = 0) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool motion unavailable"};
     }
     [[nodiscard]] virtual BendPreviewResult
     buildToolSetup(DocumentPtr, std::size_t, core::BendTarget, core::PressTools, std::stop_token,
-                   std::optional<double> = 0, bool = false) const {
+                   std::optional<double> = 0, bool = false, double = 0) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool setup unavailable"};
     }

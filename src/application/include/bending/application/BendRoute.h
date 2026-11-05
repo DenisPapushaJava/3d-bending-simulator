@@ -2,6 +2,7 @@
 #include "bending/application/Backgauge.h"
 #include "bending/application/Document.h"
 #include "bending/application/FlatPattern.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/BendTarget.h"
 #include "bending/core/ToolCatalog.h"
 #include <cmath>
@@ -20,6 +21,7 @@ struct RouteOperation {
     std::optional<core::PressTools> tools;
     std::optional<core::ToolAssignment> assignment;
     bool workpieceReversed = false;
+    double workpieceOffsetMm = 0;
     bool operator==(const RouteOperation &) const = default;
 };
 struct RouteToolVariant {
@@ -71,6 +73,8 @@ struct BendRouteRequest {
     // Informational callback on the CAD worker. Not part of a geometric cache key.
     std::function<void(BendRouteProgress)> onProgress;
     std::optional<RouteAssemblySearch> assemblySearch = {};
+    // Explicit automatic search only; fixed/manual requests retain their exact offset.
+    bool allowAxialPlacement = false;
 };
 // Apply one input snapshot without changing IDs, targets, order or workpiece orientations.
 [[nodiscard]] bool applyRouteToolVariant(BendRouteRequest &, std::size_t variant);

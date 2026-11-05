@@ -834,8 +834,11 @@ application::BendPreviewResult buildBendOperation(
     std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
     std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis,
     bool prepareDiagnostic, BackgaugeSearchStatistics *gaugeStatistics,
-    std::span<const std::size_t> jointBends) {
+    std::span<const std::size_t> jointBends, double workpieceOffsetMm) {
     const bool requestedReversed = fixedSecond;
+    if (!validWorkpieceOffset(workpieceOffsetMm) || (!toolParameters && workpieceOffsetMm != 0))
+        return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                "Invalid axial workpiece placement"};
     const auto unsupported = [](const char *detail) -> BendPreviewResult {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
     };
@@ -1086,6 +1089,7 @@ application::BendPreviewResult buildBendOperation(
         preview->supportLimit =
             allowPartialEndSupport ? maximumEndSupportLossMm : std::optional<double>(0);
         preview->reversed = requestedReversed;
+        preview->axialOffset = workpieceOffsetMm;
         preview->activeBends = joint ? jointBends.size() : 1;
         preview->components = flanges;
         preview->otherBends = multi ? analysis.bends.size() - preview->activeBends : 0;
@@ -1280,14 +1284,19 @@ application::BendPreviewResult buildBendOperation(
             }
             std::sort(preview->supportIntervals.begin(), preview->supportIntervals.end(),
                       [](const auto &a, const auto &b) { return a.fromMm < b.fromMm; });
+            if (!toolCoversAxialPlacement(*toolParameters, model.widthMm, workpieceOffsetMm,
+                                          analysis.lengthToleranceMm))
+                return BendPreviewError{BendPreviewErrorCode::ToolTooShort,
+                                        "Tool assemblies do not cover the axial bend placement"};
             basis = {{-simulation::bendAllowanceMm(model) / 2.0, model.thicknessMm,
-                      (toolParameters->lengthMm - model.widthMm) / 2.0},
+                      (toolParameters->lengthMm - model.widthMm) / 2.0 + workpieceOffsetMm},
                      {1, 0, 0},
                      {0, 1, 0},
                      {0, 0, 1}};
         }
         if (withMotion) {
-            basis.origin = gp_Pnt(0, 0, (toolParameters->lengthMm - model.widthMm) / 2.0);
+            basis.origin =
+                gp_Pnt(0, 0, (toolParameters->lengthMm - model.widthMm) / 2.0 + workpieceOffsetMm);
         }
         std::array<TopoDS_Shape, 2> initialTools;
         std::array<std::vector<ToolDisplaySegment>, 2> initialSegments;
@@ -1586,6 +1595,7 @@ application::BendPreviewResult buildBendOperation(
                         auto diagnostic = std::make_shared<CadPreview>();
                         diagnostic->activeBends = preview->activeBends;
                         diagnostic->reversed = requestedReversed;
+                        diagnostic->axialOffset = workpieceOffsetMm;
                         diagnostic->geometry = model;
                         diagnostic->seatedMount = preview->seatedMount;
                         diagnostic->setup = preview->setup;
@@ -1766,42 +1776,45 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildToolSetup(
     DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
-    std::stop_token stop, std::optional<double> maximumEndSupportLossMm,
-    bool workpieceReversed) const {
+    std::stop_token stop, std::optional<double> maximumEndSupportLossMm, bool workpieceReversed,
+    double workpieceOffsetMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     return cachedOperation(std::move(document), bendIndex, target, workpieceReversed, stop, tools,
-                           false, {}, maximumEndSupportLossMm);
+                           false, {}, maximumEndSupportLossMm, workpieceOffsetMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildToolMotion(
     DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
-    std::stop_token stop, std::optional<double> maximumEndSupportLossMm,
-    bool workpieceReversed) const {
+    std::stop_token stop, std::optional<double> maximumEndSupportLossMm, bool workpieceReversed,
+    double workpieceOffsetMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     return cachedOperation(std::move(document), bendIndex, target, workpieceReversed, stop, tools,
-                           true, {}, maximumEndSupportLossMm);
+                           true, {}, maximumEndSupportLossMm, workpieceOffsetMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion(
     DocumentPtr document, std::size_t index, core::BendTarget target,
     core::ToolAssignment assignment, std::stop_token stop,
-    std::optional<double> maximumEndSupportLossMm, bool workpieceReversed) const {
+    std::optional<double> maximumEndSupportLossMm, bool workpieceReversed,
+    double workpieceOffsetMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
     return cachedOperation(std::move(document), index, target, workpieceReversed, stop, *tools,
-                           true, std::move(assignment), maximumEndSupportLossMm);
+                           true, std::move(assignment), maximumEndSupportLossMm, workpieceOffsetMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
     DocumentPtr document, std::size_t index, core::BendTarget target,
     core::ToolAssignment assignment, std::stop_token stop,
-    std::optional<double> maximumEndSupportLossMm, bool workpieceReversed) const {
+    std::optional<double> maximumEndSupportLossMm, bool workpieceReversed,
+    double workpieceOffsetMm) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
         return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
                                 "Invalid DXF tool geometry/parameters"};
     return cachedOperation(std::move(document), index, target, workpieceReversed, stop, *tools,
-                           false, std::move(assignment), maximumEndSupportLossMm);
+                           false, std::move(assignment), maximumEndSupportLossMm,
+                           workpieceOffsetMm);
 }
 } // namespace bending::cad

@@ -44,6 +44,7 @@ int main(int argc, char **argv) {
     try {
         const bool tools = !app.arguments().contains("--geometry");
         const bool assemblies = app.arguments().contains("--assemblies");
+        const bool axial = app.arguments().contains("--axial");
         QTemporaryDir temporary;
         require(temporary.isValid(), "No temporary folder");
         ui::setPreferencesFile(temporary.path() + "/settings.ini");
@@ -58,8 +59,12 @@ int main(int argc, char **argv) {
         require(writer.Transfer(source, STEPControl_AsIs) == IFSelect_RetDone &&
                     writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
                 "Joint workflow fixture write failed");
-        const core::PressTools parameters{16, std::numbers::pi / 3,    std::numbers::pi / 6,
-                                          .8, assemblies ? 80. : 120., 10};
+        const core::PressTools parameters{16,
+                                          std::numbers::pi / 3,
+                                          std::numbers::pi / 6,
+                                          .8,
+                                          assemblies ? 80. : axial ? 200. : 120.,
+                                          10};
         auto assignment = tool_fixture::explicitPair(parameters);
         if (assemblies) {
             assignment.punch.segments = assignment.die.segments =
@@ -86,6 +91,7 @@ int main(int argc, char **argv) {
         request.withTools = tools;
         request.allowPartialEndSupport = tools;
         request.automatic = true;
+        request.allowAxialPlacement = axial;
         request.maximumChecks = 64;
         for (const auto index : controller.session().orderedBends()) {
             const auto *entry = controller.session().bend(index);
@@ -103,6 +109,22 @@ int main(int argc, char **argv) {
         require(route && route->steps.size() == steps &&
                     controller.session().orderedBends().size() == zones,
                 "Controller did not accept a complete grouped route");
+        if (axial) {
+            const double offset = route->steps.front().preview->workpieceOffsetMm();
+            require(std::abs(offset) == 40, "Joint end placement lost its full envelope");
+            for (std::size_t i = 0; i < zones; ++i)
+                require(controller.session().bend(i)->workpieceOffsetMm == offset,
+                        "Controller did not accept the complete joint placement atomically");
+            const auto destination = temporary.path().toStdString() + "/placed.bend";
+            require(!files->save(destination, *document, {}, controller.session().bends(), {}),
+                    "Cannot save placed route");
+            const auto reopened = files->load(destination, {}, {});
+            const auto *saved = std::get_if<application::OpenedProject>(&reopened);
+            require(saved &&
+                        std::all_of(saved->bends.begin(), saved->bends.end(),
+                                    [&](const auto &b) { return b.workpieceOffsetMm == offset; }),
+                    "Joint placement lost on project reopening");
+        }
         if (assemblies) {
             require(route->steps.front().assemblyAssignment &&
                         route->steps.front().preview->model().widthMm == 120 &&

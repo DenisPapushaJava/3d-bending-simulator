@@ -222,6 +222,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     std::optional<MachineAssembly> machineAssembly;
     const bool withTools =
         request.withTools && active.tools && core::validPressTools(*active.tools);
+    visual->axialOffset = withTools ? active.workpieceOffsetMm : 0;
     if (request.withTools && !withTools)
         result->toolNotice = "Инструмент этого гиба не задан; столкновения не проверены.";
     if (withTools) {
@@ -230,7 +231,11 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         if (!lengths.coversBend(analysis.lengthToleranceMm)) {
             result->toolLengths = lengths;
             result->toolNotice = "Инструмент короче линии гиба; полная длина не обеспечена.";
-        }
+        } else if (!toolCoversAxialPlacement(*active.tools, bend.lengthMm, active.workpieceOffsetMm,
+                                             analysis.lengthToleranceMm))
+            throw BendRouteError{BendRouteErrorCode::InvalidInput,
+                                 "Положение детали выходит за пределы инструмента",
+                                 active.bendIndex, 0, BendPreviewErrorCode::ToolTooShort};
         require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
                 "Inconsistent draft tool assignment");
         tools = makeRouteDraftTools(*active.tools, active.assignment, stop, segments);
@@ -275,6 +280,9 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                                  std::numbers::pi);
                 machine = turn * machine;
             }
+            gp_Trsf axial;
+            axial.SetTranslation(gp_Vec(0, 0, active.workpieceOffsetMm));
+            machine = axial * machine;
             frame.tools = tools;
             frame.toolSegments = segments;
             gp_Trsf lift;

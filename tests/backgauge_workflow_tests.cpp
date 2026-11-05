@@ -328,6 +328,7 @@ int main(int argc, char **argv) {
         legacyJson.insert("version", 15);
         auto legacyBends = legacyJson.value("bends").toArray();
         auto legacyBend = legacyBends[0].toObject();
+        legacyBend.remove("workpieceOffsetMm");
         auto legacyTools = legacyBend.value("catalogTools").toObject();
         auto legacyGauge = legacyTools.value("backgauge").toObject();
         legacyGauge.remove("allowOffsetContacts");
