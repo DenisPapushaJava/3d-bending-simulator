@@ -378,14 +378,14 @@ class RouteSearch {
                         referenceAxes[b.bendIndex],
                         source->metadata().bendAnalysis.angleToleranceRadians))
                     continue;
-                std::optional<std::size_t> far;
+                std::optional<std::size_t> farWall;
                 if (a.parent == b.parent || a.child == b.parent)
-                    far = b.child;
+                    farWall = b.child;
                 else if (a.parent == b.child || a.child == b.child)
-                    far = b.parent;
-                if (!far || wallBounds[*far].IsVoid() || wallBounds[*far].IsOpen())
+                    farWall = b.parent;
+                if (!farWall || wallBounds[*farWall].IsVoid() || wallBounds[*farWall].IsOpen())
                     continue;
-                const auto &box = wallBounds[*far];
+                const auto &box = wallBounds[*farWall];
                 const auto min = box.CornerMin(), max = box.CornerMax();
                 double low = std::numeric_limits<double>::infinity(), high = -low;
                 for (int corner = 0; corner < 8; ++corner) {
