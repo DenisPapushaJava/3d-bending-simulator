@@ -17,9 +17,9 @@ struct DrawingViewRecording {
 namespace bending::ui::drawing {
 class LayoutContext {
   public:
-    LayoutContext(std::stop_token token, DrawingLayoutLimits limits)
-        : token(token), limits(limits),
-          deadline(std::chrono::steady_clock::now() + limits.maximumTime) {}
+    LayoutContext(std::stop_token cancellationToken, DrawingLayoutLimits requestedLimits)
+        : token(cancellationToken), limits(requestedLimits),
+          deadline(std::chrono::steady_clock::now() + requestedLimits.maximumTime) {}
     void checkpoint(bool dimension = false) {
         if (token.stop_requested())
             throw DrawingLayoutInterrupted(DrawingLayoutInterruption::Cancelled,

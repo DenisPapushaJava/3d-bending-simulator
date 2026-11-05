@@ -59,8 +59,8 @@ struct DrawingLayoutLimits {
 enum class DrawingLayoutInterruption { Cancelled, LimitExceeded };
 class DrawingLayoutInterrupted final : public std::runtime_error {
   public:
-    DrawingLayoutInterrupted(DrawingLayoutInterruption reason, const char *message)
-        : std::runtime_error(message), reason(reason) {}
+    DrawingLayoutInterrupted(DrawingLayoutInterruption cause, const char *message)
+        : std::runtime_error(message), reason(cause) {}
     DrawingLayoutInterruption reason;
 };
 struct DrawingSheetPlan {

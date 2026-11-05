@@ -1380,7 +1380,7 @@ class MainWindow::Impl {
         const int step = routePanel->selected();
         stopPlayback();
         if (!joint.empty()) {
-            std::vector<application::BendToolUpdate> updates;
+            std::vector<application::BendToolUpdate> jointUpdates;
             for (const auto member : joint) {
                 const auto *part = session.bend(member);
                 auto actual = part->catalogTools;
@@ -1388,9 +1388,9 @@ class MainWindow::Impl {
                 parameters.punchReversed = reversed;
                 if (actual)
                     actual->punchReversed = reversed;
-                updates.push_back({member, parameters, std::move(actual)});
+                jointUpdates.push_back({member, parameters, std::move(actual)});
             }
-            if (controller->setBendToolAssignments(updates))
+            if (controller->setBendToolAssignments(jointUpdates))
                 prepareRoute(false, true);
             return;
         }
