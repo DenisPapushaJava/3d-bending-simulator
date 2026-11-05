@@ -41,6 +41,7 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -252,12 +253,15 @@ std::optional<TopoDS_Shape> extractFlange(const TopoDS_Shape &source, const Topo
     }
     return BRepBuilderAPI_Copy(solids(1), true, false).Shape();
 }
-// Removing one complete zone from an open sheet must yield exactly two material components.
-// Keep all geometry of those components, including the already formed other bends.
-std::optional<std::array<TopoDS_Shape, 2>> splitAtBend(const TopoDS_Shape &source,
-                                                       const PreviewFrame &seed, double tolerance,
-                                                       std::stop_token stop,
-                                                       bool multiple = false) {
+// Cutting the actual sector(s) must separate the material. Assign each resulting
+// solid by the surviving REAL adjacent faces, not their rectangular envelopes:
+// a remote folded wall can occupy an empty part of such an envelope (D166).
+// Ambiguous/deleted anchors or an unassigned solid remain unsupported; complete
+// reconstruction and the independent route-state proof still follow this split.
+std::optional<std::array<TopoDS_Shape, 2>>
+splitAtBend(const TopoDS_Shape &source, const PreviewFrame &seed,
+            const std::array<std::vector<TopoDS_Face>, 2> &anchors, double tolerance,
+            std::stop_token stop, bool multiple = false) {
     BRepAlgoAPI_Cut cut;
     TopTools_ListOfShape args, tools;
     args.Append(source);
@@ -266,36 +270,90 @@ std::optional<std::array<TopoDS_Shape, 2>> splitAtBend(const TopoDS_Shape &sourc
     cut.SetTools(tools);
     cut.SetNonDestructive(true);
     cut.SetFuzzyValue(tolerance);
+    cut.SetToFillHistory(true);
     cut.Build();
     if (stop.stop_requested() || !cut.IsDone() || cut.HasErrors() ||
         !BRepCheck_Analyzer(cut.Shape()).IsValid())
         return {};
-    TopTools_IndexedMapOfShape solids;
+    TopTools_IndexedMapOfShape solids, outputFaces;
     TopExp::MapShapes(cut.Shape(), TopAbs_SOLID, solids);
     if (solids.Extent() < 2 || (!multiple && solids.Extent() != 2))
         return {};
-    std::array<TopoDS_Shape, 2> result;
+    std::vector<int> owners{0};
+    for (int i = 1; i <= solids.Extent(); ++i) {
+        if (stop.stop_requested())
+            return {};
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(solids(i), TopAbs_FACE, faces);
+        for (int f = 1; f <= faces.Extent(); ++f) {
+            const auto at = outputFaces.Add(faces(f));
+            if (at == static_cast<int>(owners.size()))
+                owners.push_back(i);
+            else if (owners[static_cast<std::size_t>(at)] != i)
+                owners[static_cast<std::size_t>(at)] = 0;
+        }
+    }
+    std::vector<std::optional<std::size_t>> sides(static_cast<std::size_t>(solids.Extent()) + 1);
+    for (std::size_t side = 0; side < anchors.size(); ++side) {
+        if (anchors[side].empty())
+            return {};
+        for (const auto &anchor : anchors[side]) {
+            if (stop.stop_requested())
+                return {};
+            TopTools_IndexedMapOfShape descendants;
+            const auto &modified = cut.Modified(anchor);
+            for (TopTools_ListIteratorOfListOfShape it(modified); it.More(); it.Next()) {
+                if (it.Value().ShapeType() != TopAbs_FACE)
+                    return {};
+                descendants.Add(it.Value());
+            }
+            if (descendants.IsEmpty() && !cut.IsDeleted(anchor))
+                descendants.Add(anchor);
+            if (descendants.IsEmpty())
+                return {};
+            std::optional<int> owner;
+            double covered = 0;
+            for (int f = 1; f <= descendants.Extent(); ++f) {
+                if (stop.stop_requested())
+                    return {};
+                const auto index = outputFaces.FindIndex(descendants(f));
+                if (!index || !owners[static_cast<std::size_t>(index)])
+                    return {};
+                const int current = owners[static_cast<std::size_t>(index)];
+                if (owner && *owner != current)
+                    return {};
+                owner = current;
+                covered += area(descendants(f));
+            }
+            // A face may be split into descendants, but must survive on one
+            // component without losing more than the existing CAD boundary budget.
+            GProp_GProps edgeProperties;
+            BRepGProp::LinearProperties(anchor, edgeProperties);
+            const double expected = area(anchor);
+            const double coverageTolerance =
+                std::max(expected * 1e-7, edgeProperties.Mass() * tolerance * 2);
+            if (!owner || !std::isfinite(expected) || expected <= 0 || !std::isfinite(covered) ||
+                !std::isfinite(coverageTolerance) ||
+                std::abs(covered - expected) > coverageTolerance)
+                return {};
+            auto &assigned = sides[static_cast<std::size_t>(*owner)];
+            if (assigned && *assigned != side)
+                return {};
+            assigned = side;
+        }
+    }
     std::array<std::vector<TopoDS_Shape>, 2> parts;
     for (int i = 1; i <= solids.Extent(); ++i) {
         if (stop.stop_requested())
             return {};
-        std::optional<std::size_t> side;
-        for (std::size_t s = 0; s < 2; ++s) {
-            const auto overlap = extractFlange(solids(i), seed.regions[s * 2], tolerance, multiple);
-            if (overlap && volume(*overlap) > 1.e-6) {
-                if (side)
-                    return {};
-                side = s;
-            }
-        }
+        const auto side = sides[static_cast<std::size_t>(i)];
         if (!side || (!multiple && !parts[*side].empty()))
             return {};
         parts[*side].push_back(BRepBuilderAPI_Copy(solids(i), true, false).Shape());
     }
-    for (std::size_t s = 0; s < 2; ++s)
-        if (!parts[s].empty())
-            result[s] = compound(parts[s]);
-    return result[0].IsNull() || result[1].IsNull() ? std::nullopt : std::optional{result};
+    if (parts[0].empty() || parts[1].empty())
+        return {};
+    return std::array<TopoDS_Shape, 2>{compound(parts[0]), compound(parts[1])};
 }
 struct SkinNode {
     gp_Pnt point;
@@ -955,8 +1013,26 @@ application::BendPreviewResult buildBendOperation(
         const auto sourceSector = finalFrame.regions[1];
         std::array<TopoDS_Shape, 2> flanges;
         if (multi) {
+            std::array<std::vector<TopoDS_Face>, 2> anchors;
+            std::array<TopTools_IndexedMapOfShape, 2> uniqueAnchors;
+            const auto addAnchors = [&](const RecognizedBend &zone) {
+                for (std::size_t side = 0; side < anchors.size(); ++side)
+                    for (std::size_t offset = 0; offset < 2; ++offset) {
+                        const auto &face = TopoDS::Face(
+                            faces(static_cast<int>(zone.flangeFaces[innerIndices[side] + offset])));
+                        if (!uniqueAnchors[side].Contains(face)) {
+                            uniqueAnchors[side].Add(face);
+                            anchors[side].push_back(face);
+                        }
+                    }
+            };
+            if (joint)
+                for (const auto &zone : jointZones)
+                    addAnchors(zone);
+            else
+                addAnchors(bend);
             const auto split =
-                splitAtBend(source, finalFrame, analysis.lengthToleranceMm, stop, joint);
+                splitAtBend(source, finalFrame, anchors, analysis.lengthToleranceMm, stop, joint);
             if (stop.stop_requested())
                 return cancelled();
             if (!split)

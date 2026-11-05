@@ -10,6 +10,7 @@
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
@@ -20,6 +21,7 @@
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
 #include <STEPControl_Writer.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <chrono>
@@ -85,6 +87,87 @@ void checkBoundaryMembership() {
     stop.request_stop();
     require(cad::skinBoundaryMembership({0, 1, 2}, bodies, .001, stop.get_token()) == 0,
             "Cancelled boundary fallback returned partial memberships");
+}
+// An open cut-out in one flange contains a rigid return attached to the other
+// side, around the axial end. Its rectangle overlaps both components, while the
+// actual tangency faces do not. Sharp corners of the rigid return are deliberate:
+// this tests a CAD transition, not recognition of additional forming operations.
+TopoDS_Shape flangeWithRigidReturn(bool bridge = false) {
+    auto shape = BRepAlgoAPI_Cut(fixtures::bentStrip(4, 2, std::numbers::pi / 2, 120),
+                                 BRepPrimAPI_MakeBox(gp_Pnt(-31, 3, 40), 23, 4, 81).Shape())
+                     .Shape();
+    for (const auto &part : {BRepPrimAPI_MakeBox(gp_Pnt(-28, 4, 50), 2, 2, 78).Shape(),
+                             BRepPrimAPI_MakeBox(gp_Pnt(-28, 4, 126), 34, 2, 2).Shape(),
+                             BRepPrimAPI_MakeBox(gp_Pnt(4, -5, 120), 2, 4, 8).Shape(),
+                             BRepPrimAPI_MakeBox(gp_Pnt(4, -5, 126), 2, 11, 2).Shape()})
+        shape = BRepAlgoAPI_Fuse(shape, part).Shape();
+    if (bridge)
+        shape = BRepAlgoAPI_Fuse(shape, BRepPrimAPI_MakeBox(gp_Pnt(-28, 4, 70), 22, 2, 2).Shape())
+                    .Shape();
+    ShapeUpgrade_UnifySameDomain unify(shape, true, true, true);
+    unify.Build();
+    return unify.Shape();
+}
+void checkFlangeOwnership(const std::filesystem::path &folder) {
+    for (const bool bridged : {false, true})
+        for (const bool rotated : {false, true}) {
+            auto shape = flangeWithRigidReturn(bridged);
+            if (rotated) {
+                gp_Trsf placement;
+                placement.SetRotation(gp_Ax1(gp_Pnt(), gp_Dir(1, 2, 3)), .73);
+                placement.SetTranslationPart(gp_Vec(217, -92, 13));
+                shape = BRepBuilderAPI_Transform(shape, placement, true).Shape();
+            }
+            require(BRepCheck_Analyzer(shape).IsValid(), "Invalid ownership fixture");
+            const auto file = folder / "flange-return.step";
+            STEPControl_Writer writer;
+            require(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone &&
+                        writer.Write(file.string().c_str()) == IFSelect_RetDone,
+                    "Ownership fixture write failed");
+            const auto source = std::dynamic_pointer_cast<const cad::CadDocument>(load(file));
+            // The final remaining bend of a route still needs the whole-part split.
+            const auto state = cad::OcctDocumentAccess::routeState(
+                *source, cad::OcctDocumentAccess::simulationShape(*source),
+                cad::OcctDocumentAccess::shape(*source), {});
+            const auto &bends = cad::OcctDocumentAccess::simulationBends(*state).bends;
+            require(bends.size() == 1, "Ownership fixture lost its active cylinder pair");
+            const auto &bend = bends.front();
+            const core::BendTarget target{bend.angleRadians, bend.innerRadiusMm};
+            std::ostringstream before;
+            BRepTools::Write(cad::OcctDocumentAccess::shape(*state), before);
+            for (const bool reversed : {false, true}) {
+                const auto result = cad::buildBendOperation(state, 0, target, reversed, {}, {});
+                if (bridged) {
+                    const auto *error = std::get_if<application::BendPreviewError>(&result);
+                    require(error && error->code ==
+                                         application::BendPreviewErrorCode::UnsupportedGeometry,
+                            "A material bridge was assigned to two moving sides");
+                    continue;
+                }
+                if (const auto *error = std::get_if<application::BendPreviewError>(&result))
+                    throw std::runtime_error("Real flange ownership: " + error->detail);
+                const auto preview = std::get<application::BendPreviewPtr>(result);
+                require(preview->frameCount() == 21, "Ownership bypassed complete motion");
+                for (std::size_t f = 0; f < preview->frameCount(); ++f) {
+                    const auto &frame = cad::OcctPreviewAccess::frame(*preview, f);
+                    require(BRepCheck_Analyzer(frame.shape).IsValid() &&
+                                std::abs(volume(frame.shape) - source->metadata().volumeMm3) < .001,
+                            "Real flange ownership lost material");
+                    if (f == 0 || f == 10 || f == 20)
+                        checkSkin(frame);
+                }
+            }
+            std::stop_source stop;
+            stop.request_stop();
+            const auto cancelled =
+                cad::buildBendOperation(state, 0, target, false, stop.get_token(), {});
+            const auto *error = std::get_if<application::BendPreviewError>(&cancelled);
+            require(error && error->code == application::BendPreviewErrorCode::Cancelled,
+                    "Cancelled ownership check returned a preview");
+            std::ostringstream after;
+            BRepTools::Write(cad::OcctDocumentAccess::shape(*state), after);
+            require(before.str() == after.str(), "Ownership changed the source BRep");
+        }
 }
 void checkJointOperation(const std::filesystem::path &path) {
     const auto source = fixtures::jointBend();
@@ -422,8 +505,10 @@ int main(int argc, char **argv) {
     try {
         checkBoundaryMembership();
         std::filesystem::create_directories(folder);
-        if (argc == 1)
+        if (argc == 1) {
+            checkFlangeOwnership(folder);
             checkJointOperation(folder / "joint.step");
+        }
         const bool sample = argc >= 2;
         auto file = sample ? std::filesystem::path(argv[1]) : folder / "tray.step";
         if (!sample) {
