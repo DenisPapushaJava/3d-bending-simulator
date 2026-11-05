@@ -190,7 +190,8 @@ std::vector<MachineDisplayComponent> fingers(const core::BackgaugePlacement &p,
         position.SetTranslation(gp_Vec(p.xMm, p.rMm, p.zMm[i] - setup.fingerWidthMm / 2));
         result.push_back({"backgauge-" + std::to_string(i),
                           i ? "Правый палец упора" : "Левый палец упора",
-                          prototype.Moved(TopLoc_Location(position)), false, false, false, true});
+                          prototype.Moved(TopLoc_Location(position)), false, false, false, true,
+                          MachineDisplayRole::Backgauge});
     }
     return result;
 }

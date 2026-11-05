@@ -113,10 +113,12 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
     const double tableTop = adapterTop - 30, floor = tableTop - 900;
     const auto add = [&](std::string id, std::string name,
                          std::vector<std::array<double, 2>> points, double from, double to,
-                         bool moving = false) {
+                         bool moving = false,
+                         MachineDisplayRole role = MachineDisplayRole::Structure) {
         checkStop(stop);
         components_.push_back(
             {std::move(id), std::move(name), prism(points, centre + from, centre + to), moving});
+        components_.back().displayRole = role;
     };
     add("table", "Стол", {{-45, floor}, {45, floor}, {45, tableTop}, {-45, tableTop}}, -1550, 1550);
     // Retain V1's flat adapter. V2 uses the measured nominal pocket below;
@@ -128,7 +130,7 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
          {39, dieSeat},
          {-39, dieSeat},
          {-40, dieSeat - 1}},
-        -1550, 1550);
+        -1550, 1550, false, MachineDisplayRole::ToolMount);
     components_.back().allowDieContact = tools.machineModel == core::MachineModel::DemoPressV1;
     if (modern) {
         // 9 mm is the straight inner wall; .8/.2 chamfers make 10 mm total depth.
@@ -179,7 +181,7 @@ MachineAssembly::MachineAssembly(const core::PressTools &tools,
             }
         }
         add("holder-" + std::to_string(i + 4), "Держатель пуансона " + std::to_string(i + 4),
-            profile, z - 50, z + 50, true);
+            profile, z - 50, z + 50, true, MachineDisplayRole::ToolMount);
         components_.back().allowPunchContact =
             tools.machineModel == core::MachineModel::DemoPressV1;
     }

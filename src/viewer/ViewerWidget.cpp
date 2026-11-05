@@ -78,6 +78,32 @@ struct FaceHighlights {
     std::optional<application::RecognizedBend> measuredBend{};
 };
 
+struct MachineAppearance {
+    Quantity_Color color;
+    double transparency;
+    bool boundaries;
+};
+MachineAppearance machineAppearance(const cad::MachineDisplayComponent &component) {
+    switch (component.displayRole) {
+    case cad::MachineDisplayRole::Structure:
+        return {Quantity_Color(component.moving ? .60 : .52, component.moving ? .66 : .58,
+                               component.moving ? .72 : .64, Quantity_TOC_sRGB),
+                .80, false};
+    case cad::MachineDisplayRole::ToolMount:
+        return {Quantity_Color(.61, .66, .70, Quantity_TOC_sRGB), .15, true};
+    case cad::MachineDisplayRole::Backgauge:
+        return {Quantity_Color(.40, .55, .57, Quantity_TOC_sRGB), .08, true};
+    case cad::MachineDisplayRole::Unknown:
+        // Unclassified/legacy display data retains the previous readable appearance.
+        return {component.gauging
+                    ? Quantity_Color(.28, .49, .58, Quantity_TOC_RGB)
+                    : Quantity_Color(component.moving ? .40 : .31, component.moving ? .47 : .40,
+                                     component.moving ? .55 : .48, Quantity_TOC_RGB),
+                component.gauging ? .12 : .55, true};
+    }
+    throw std::logic_error("Unknown machine display role");
+}
+
 class OcctCanvas final : public QWidget {
     enum class CameraSpace : std::size_t { Cad, Flat, Kinematic, Press };
     enum class DisplayStyle { Edges, Shaded, Wireframe };
@@ -506,12 +532,11 @@ class OcctCanvas final : public QWidget {
             bodies.push_back(std::move(body));
         }
         for (const auto &c : frame.machine) {
-            const Quantity_Color color =
-                c.gauging ? Quantity_Color(.28, .49, .58, Quantity_TOC_RGB)
-                          : Quantity_Color(c.moving ? .40 : .31, c.moving ? .47 : .40,
-                                           c.moving ? .55 : .48, Quantity_TOC_RGB);
-            bodies.push_back(
-                {c.id, c.shape, color, c.gauging ? .12 : .55, machineVisibleAction_->isChecked()});
+            const auto appearance = machineAppearance(c);
+            RigidDisplayBody body{c.id, c.shape, appearance.color, appearance.transparency,
+                                  machineVisibleAction_->isChecked()};
+            body.boundaries = appearance.boundaries;
+            bodies.push_back(std::move(body));
         }
         if (frame.floor) {
             bodies.push_back({"floor-surface", frame.floor->surface,

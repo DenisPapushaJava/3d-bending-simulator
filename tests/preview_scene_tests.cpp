@@ -103,6 +103,33 @@ void verifyReuse(const cad::PreviewFrame &frame) {
                     first->DisplayMode() == AIS_WireFrame &&
                     !first->Attributes()->FaceBoundaryDraw(),
                 "Hidden style update lost reuse or restored stale aspects");
+        auto structure = body;
+        structure.id = "structure";
+        structure.boundaries = false;
+        structure.colors.clear();
+        scene.update({body, structure}, AIS_Shaded, true);
+        Handle(AIS_InteractiveObject) shell;
+        for (const auto &object : objects())
+            if (object != first)
+                shell = object;
+        require(objects().Size() == 2 && !shell.IsNull() &&
+                    first->Attributes()->FaceBoundaryDraw() &&
+                    !shell->Attributes()->FaceBoundaryDraw(),
+                "Per-body boundary policy was ignored");
+        structure.visible = false;
+        scene.update({body, structure}, AIS_Shaded, true);
+        scene.setStyle(AIS_WireFrame, false);
+        scene.setStyle(AIS_Shaded, true);
+        structure.visible = true;
+        scene.update({body, structure}, AIS_Shaded, true);
+        require(objects().Size() == 2 && context->IsDisplayed(shell) &&
+                    shell->DisplayMode() == AIS_Shaded &&
+                    !shell->Attributes()->FaceBoundaryDraw() &&
+                    first->Attributes()->FaceBoundaryDraw(),
+                "Hidden/style changes lost body-specific boundaries or reused presentations");
+        scene.update({body}, AIS_Shaded, true);
+        require(objects().Size() == 1 && objects().First() == first,
+                "Removed structure leaked or invalidated the remaining body");
         body.colors.front().color = Quantity_Color(Quantity_NOC_BLUE);
         scene.update({body}, AIS_Shaded, true);
         require(objects().Size() == 1 && objects().First() != first,

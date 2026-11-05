@@ -24,6 +24,7 @@ struct ToolDisplaySegment {
     TopoDS_Shape shape; // A subshape of the complete checked tool, at this frame's placement.
     double lengthMm;
 };
+enum class MachineDisplayRole { Unknown, Structure, ToolMount, Backgauge };
 struct MachineDisplayComponent {
     std::string id, name;
     TopoDS_Shape shape;
@@ -31,6 +32,7 @@ struct MachineDisplayComponent {
     bool allowPunchContact = false; // Legacy V1 only; V2 models the open pocket explicitly.
     bool allowDieContact = false;
     bool gauging = false; // Independently positioned, including checks against static machine.
+    MachineDisplayRole displayRole = MachineDisplayRole::Unknown; // Appearance only, never checks.
 };
 // Finite drawing only; the checked floor is the infinite half-space below yMm.
 struct FloorPlane {

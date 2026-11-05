@@ -38,9 +38,10 @@ void PreviewRigidScene::apply(const Entry &entry, int mode, bool boundaries) {
     const auto &location = entry.body.shape.Location();
     if (!sameTransform(object->LocalTransformation(), location.Transformation()))
         context_->SetLocation(object, location);
-    const bool boundaryChange = object->Attributes()->FaceBoundaryDraw() != boundaries;
+    const bool drawBoundaries = boundaries && entry.body.boundaries;
+    const bool boundaryChange = object->Attributes()->FaceBoundaryDraw() != drawBoundaries;
     if (boundaryChange) {
-        object->Attributes()->SetFaceBoundaryDraw(boundaries);
+        object->Attributes()->SetFaceBoundaryDraw(drawBoundaries);
         object->SetToUpdate(); // Hidden presentations must also rebuild when shown again.
     }
     if (object->DisplayMode() != mode)
@@ -65,6 +66,7 @@ void PreviewRigidScene::update(std::vector<RigidDisplayBody> bodies, int mode, b
                    old.body.shape.Orientation() == body.shape.Orientation() &&
                    old.body.color.IsEqual(body.color) &&
                    old.body.transparency == body.transparency &&
+                   old.body.boundaries == body.boundaries &&
                    sameColors(old.body.colors, body.colors) &&
                    std::none_of(next.begin(), next.end(), [&](const auto &entry) {
                        return entry.presentation == old.presentation;
@@ -76,7 +78,7 @@ void PreviewRigidScene::update(std::vector<RigidDisplayBody> bodies, int mode, b
         } else {
             object = new AIS_ColoredShape(body.shape.Located(TopLoc_Location()));
             object->Attributes()->SetAutoTriangulation(false);
-            object->Attributes()->SetFaceBoundaryDraw(boundaries);
+            object->Attributes()->SetFaceBoundaryDraw(boundaries && body.boundaries);
             object->SetColor(body.color);
             if (body.transparency > 0)
                 object->SetTransparency(body.transparency);

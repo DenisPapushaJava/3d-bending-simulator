@@ -19,6 +19,7 @@ struct RigidDisplayBody {
     double transparency = 0;
     bool visible = true;
     std::vector<RigidDisplayColor> colors{};
+    bool boundaries = true; // Global shaded-edge mode can only narrow this body policy.
 };
 
 // One bounded set of the current preview's rigid bodies, owned by its graphics context.

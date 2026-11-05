@@ -106,6 +106,12 @@ int main(int argc, char **argv) {
                 "Missing backgauge scope");
         const auto &frame = cad::OcctPreviewAccess::frame(*p, 0);
         require(std::count_if(frame.machine.begin(), frame.machine.end(),
+                              [](const auto &c) {
+                                  return c.displayRole == cad::MachineDisplayRole::Backgauge &&
+                                         c.gauging;
+                              }) == 2,
+                "Backgauge fingers lost their display role");
+        require(std::count_if(frame.machine.begin(), frame.machine.end(),
                               [](const auto &c) { return c.gauging; }) == 2 &&
                     frame.backgaugeContacts.size() == 2,
                 "Fingers/contacts not prepared");
