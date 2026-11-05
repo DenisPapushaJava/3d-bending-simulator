@@ -40,7 +40,9 @@ std::optional<double> assemblyLength(const std::vector<ToolSegment> &stock,
     return length <= 100000 ? std::optional{length} : std::nullopt;
 }
 static SegmentPlan planWithoutGaps(const std::vector<ToolSegment> &stock, double required,
-                                   std::size_t stateBudget) {
+                                   std::size_t stateBudget, std::stop_token stop) {
+    if (stop.stop_requested())
+        return {SegmentPlanStatus::Cancelled, {}, 0};
     if (!validToolSegments(stock) || !std::isfinite(required) || required < 1 ||
         required > 100000 || !stateBudget || stateBudget > 200000)
         return {};
@@ -75,6 +77,8 @@ static SegmentPlan planWithoutGaps(const std::vector<ToolSegment> &stock, double
             const std::vector<std::pair<std::int64_t, std::size_t>> before(states.begin(),
                                                                            states.end());
             for (const auto &[sum, previous] : before) {
+                if (stop.stop_requested())
+                    return {SegmentPlanStatus::Cancelled, {}, 0};
                 if (sum + delta > ceiling || nodes[previous].count + take > 512)
                     continue;
                 const auto found = states.find(sum + delta);
@@ -100,10 +104,12 @@ static SegmentPlan planWithoutGaps(const std::vector<ToolSegment> &stock, double
     return result;
 }
 SegmentPlan planToolSegments(const std::vector<ToolSegment> &stock, double required,
-                             std::size_t budget, double maximumGap) {
+                             std::size_t budget, double maximumGap, std::stop_token stop) {
+    if (stop.stop_requested())
+        return {SegmentPlanStatus::Cancelled, {}, 0};
     if (!std::isfinite(maximumGap) || maximumGap < 0 || maximumGap > 1000)
         return {};
-    const auto noGaps = planWithoutGaps(stock, required, budget);
+    const auto noGaps = planWithoutGaps(stock, required, budget, stop);
     if (maximumGap == 0 || noGaps.status != SegmentPlanStatus::InsufficientStock)
         return noGaps;
     const auto target = static_cast<std::int64_t>(std::ceil(required * 1000 - 1.e-6));
@@ -127,6 +133,8 @@ SegmentPlan planToolSegments(const std::vector<ToolSegment> &stock, double requi
             const std::vector<std::pair<std::pair<std::int64_t, unsigned>, std::size_t>> before(
                 states.begin(), states.end());
             for (const auto &[key, previous] : before) {
+                if (stop.stop_requested())
+                    return {SegmentPlanStatus::Cancelled, {}, 0};
                 const auto sum = key.first + delta;
                 const auto count = key.second + take;
                 if (sum >= target || count > 512 || states.contains({sum, count}))

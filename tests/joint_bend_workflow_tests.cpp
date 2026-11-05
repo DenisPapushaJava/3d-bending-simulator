@@ -43,6 +43,7 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
         const bool tools = !app.arguments().contains("--geometry");
+        const bool assemblies = app.arguments().contains("--assemblies");
         QTemporaryDir temporary;
         require(temporary.isValid(), "No temporary folder");
         ui::setPreferencesFile(temporary.path() + "/settings.ini");
@@ -57,9 +58,14 @@ int main(int argc, char **argv) {
         require(writer.Transfer(source, STEPControl_AsIs) == IFSelect_RetDone &&
                     writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
                 "Joint workflow fixture write failed");
-        const core::PressTools parameters{16, std::numbers::pi / 3, std::numbers::pi / 6, .8, 120,
-                                          10};
-        const auto assignment = tool_fixture::explicitPair(parameters);
+        const core::PressTools parameters{16, std::numbers::pi / 3,    std::numbers::pi / 6,
+                                          .8, assemblies ? 80. : 120., 10};
+        auto assignment = tool_fixture::explicitPair(parameters);
+        if (assemblies) {
+            assignment.punch.segments = assignment.die.segments =
+                std::vector<core::ToolSegment>{{80, 1}, {40, 1}};
+            assignment.punchAssembly = assignment.dieAssembly = core::ToolAssembly{{0}, 0};
+        }
         auto files = std::make_shared<project::ProjectFiles>();
         auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
         ui::MainWindow window({"test", "test"}, files, files, builder,
@@ -87,6 +93,8 @@ int main(int argc, char **argv) {
             request.operations.push_back({entry->id, index, *controller.session().bendTarget(index),
                                           core::toolParameters(assignment), assignment});
         }
+        if (assemblies)
+            request.assemblySearch = application::RouteAssemblySearch{{0, 1}, 0};
         require(controller.setBendToolAssignments(updates) &&
                     controller.prepareBendRoute(request, builder),
                 "Joint request rejected");
@@ -95,6 +103,34 @@ int main(int argc, char **argv) {
         require(route && route->steps.size() == steps &&
                     controller.session().orderedBends().size() == zones,
                 "Controller did not accept a complete grouped route");
+        if (assemblies) {
+            require(route->steps.front().assemblyAssignment &&
+                        route->steps.front().preview->model().widthMm == 120 &&
+                        route->statistics.plannedAssemblies == 2,
+                    "Joint assembly search lost its gap-inclusive envelope or planning metrics");
+            for (std::size_t i = 0; i < zones; ++i)
+                require(
+                    controller.session().bend(i)->tools->lengthMm == 120 &&
+                        core::punchLengthMm(*controller.session().bend(i)->tools) == 120 &&
+                        controller.session().bend(i)->catalogTools->punchAssembly->pieces.size() ==
+                            2,
+                    "Derived joint assemblies were not accepted atomically");
+            require(core::toolParameters(assignment)->lengthMm == 80,
+                    "Assembly search mutated its original stock/input snapshot");
+            const auto project = temporary.path().toStdString() + "/derived-assemblies.bend";
+            require(!files->save(project, *document, {}, controller.session().bends(), {}),
+                    "Derived assemblies could not be saved");
+            const auto reopened = files->load(project, {}, {});
+            const auto *saved = std::get_if<application::OpenedProject>(&reopened);
+            require(saved && saved->bends.size() == zones &&
+                        std::all_of(saved->bends.begin(), saved->bends.end(),
+                                    [](const auto &b) {
+                                        return b.tools && b.tools->lengthMm == 120 &&
+                                               b.catalogTools &&
+                                               b.catalogTools->punchAssembly->pieces.size() == 2;
+                                    }),
+                    "Derived assemblies were lost on project reopening");
+        }
         if (tools)
             require(route->partialEndSupport &&
                         route->steps.front().preview->endSupportIntervals().size() == 2 &&

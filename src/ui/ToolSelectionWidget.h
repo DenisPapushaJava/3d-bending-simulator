@@ -59,6 +59,7 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] QString lengthIssue() const;
     [[nodiscard]] static QString lengthIssue(const application::BendRouteToolLengthIssue &);
     [[nodiscard]] std::optional<double> maximumEndSupportLossMm() const;
+    [[nodiscard]] double maximumSegmentGapMm() const;
     [[nodiscard]] static QString assignmentIssue(const std::optional<core::ToolAssignment> &);
     void showPicker(core::ToolKind, QWidget *anchor);
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
@@ -75,6 +76,7 @@ class ToolSelectionWidget final : public QWidget {
     std::function<void(Change)> onChanged;
     std::function<void()> onAppearanceChanged;
     std::function<void()> onCheckedRecommend;
+    std::function<void()> onCheckedAssemblies;
     std::function<void()> onCancelChecked;
 
   private:

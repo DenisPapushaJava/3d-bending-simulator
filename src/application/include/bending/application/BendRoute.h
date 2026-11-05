@@ -43,6 +43,12 @@ struct BendRouteProgress {
     std::size_t variant = 0, variants = 0, checkedOperations = 0;
     std::optional<std::size_t> bendIndex;
 };
+// Explicit permission to change assemblies, preserving every captured profile,
+// inventory, groove and installation parameter. Empty/absent means fixed tools.
+struct RouteAssemblySearch {
+    std::vector<std::size_t> bendIndices;
+    double maximumGapMm = 0;
+};
 struct BendRouteRequest {
     // Complete list in the requested forward order; Automatic may reorder it.
     std::vector<RouteOperation> operations;
@@ -64,6 +70,7 @@ struct BendRouteRequest {
     std::vector<RouteToolVariant> toolVariants;
     // Informational callback on the CAD worker. Not part of a geometric cache key.
     std::function<void(BendRouteProgress)> onProgress;
+    std::optional<RouteAssemblySearch> assemblySearch = {};
 };
 // Apply one input snapshot without changing IDs, targets, order or workpiece orientations.
 [[nodiscard]] bool applyRouteToolVariant(BendRouteRequest &, std::size_t variant);
@@ -80,6 +87,7 @@ struct BendRouteStatistics {
     BackgaugeSearchStatistics backgauge;
     std::size_t shapeRankedToolVariants = 0;
     std::uint64_t toolShapeRankingUs = 0;
+    std::size_t plannedAssemblies = 0, reusedAssemblyPlans = 0;
 };
 struct BendRouteStep {
     std::string id;
@@ -90,6 +98,9 @@ struct BendRouteStep {
     // zone above keeps its stable ID; source recognition is never merged.
     // workpieceReversed is resolved relative to each member's own reference axis.
     std::vector<RouteOperation> additionalBends = {};
+    // Only an explicitly authorized assembly search may change this snapshot.
+    // Alias of an interned immutable input, not a new DXF copy for each state.
+    std::shared_ptr<const core::ToolAssignment> assemblyAssignment = {};
 };
 struct BendRoute {
     DocumentPtr source;
@@ -102,6 +113,12 @@ struct BendRoute {
     // The first route is geometric K=0.5; material BA remains a separate flat pattern.
     // Tool mode checks each cycle; extraction/repositioning/machine are NOT certified.
 };
+[[nodiscard]] bool validRouteAssemblySearch(const BendRouteRequest &);
+[[nodiscard]] bool sameToolSetupExceptAssemblies(const core::ToolAssignment &,
+                                                 const core::ToolAssignment &);
+// Validate derived assemblies against the original permission/inventory, then
+// atomically resolve expected inputs for normal preview validation and saving.
+[[nodiscard]] bool applyRouteAssemblyResult(BendRouteRequest &, const BendRoute &);
 // A common uninterrupted material strip on both flanges for the whole forming interval.
 // Axial coordinates along this operation's bend line; end overhangs are NOT certified.
 struct BendEndSupport {

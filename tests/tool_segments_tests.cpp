@@ -10,6 +10,11 @@ void check(bool ok, const char *message) {
 }
 int main() {
     try {
+        std::stop_source stop;
+        stop.request_stop();
+        check(planToolSegments({{40, 3}}, 80, 200000, 3, stop.get_token()).status ==
+                  SegmentPlanStatus::Cancelled,
+              "A cancelled planner returned stock or a search-limit verdict");
         check(planToolSegments({{835, 1}}, 80).lengthMm == 835,
               "A longer tool was rejected for an unrestricted short bend");
         const auto nongreedy = planToolSegments({{8, 1}, {7, 1}, {6, 1}}, 13);

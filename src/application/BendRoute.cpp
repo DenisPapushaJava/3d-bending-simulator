@@ -4,6 +4,106 @@
 #include <set>
 
 namespace bending::application {
+bool sameToolSetupExceptAssemblies(const core::ToolAssignment &a, const core::ToolAssignment &b) {
+    // Compare in place: large immutable DXF contours must not be copied just to
+    // remove the two small assembly fields.
+    return a.punch == b.punch && a.die == b.die && a.groove == b.groove &&
+           a.clearanceMm == b.clearanceMm && a.machineName == b.machineName &&
+           a.useDrawingGeometry == b.useDrawingGeometry && a.machineModel == b.machineModel &&
+           a.punchReversed == b.punchReversed && a.backgauge == b.backgauge;
+}
+bool validRouteAssemblySearch(const BendRouteRequest &request) {
+    if (!request.assemblySearch)
+        return true;
+    const auto &s = *request.assemblySearch;
+    if (!request.automatic || !request.withTools || s.bendIndices.empty() ||
+        s.bendIndices.size() > maximumSheetBends || !std::isfinite(s.maximumGapMm) ||
+        s.maximumGapMm < 0 || s.maximumGapMm > 1000)
+        return false;
+    std::set<std::size_t> seen;
+    for (const auto index : s.bendIndices) {
+        const auto op = std::find_if(request.operations.begin(), request.operations.end(),
+                                     [&](const auto &entry) { return entry.bendIndex == index; });
+        if (!seen.insert(index).second || op == request.operations.end() || !op->assignment ||
+            op->assignment->punch.teaching || op->assignment->die.teaching ||
+            !core::hasCompleteDrawingToolGeometry(*op->assignment))
+            return false;
+    }
+    return true;
+}
+bool applyRouteAssemblyResult(BendRouteRequest &request, const BendRoute &route) {
+    if (!validRouteAssemblySearch(request))
+        return false;
+    // Fixed-tool routes incur no extra DXF copies. Collect changes first;
+    // copy the request only when every changed assignment has been validated.
+    std::vector<std::pair<std::size_t, core::ToolAssignment>> updates;
+    std::set<std::size_t> seen;
+    const auto apply = [&](const std::string &id, std::size_t index,
+                           const core::ToolAssignment *assignment,
+                           const std::optional<core::PressTools> &tools) {
+        const auto input =
+            std::find_if(request.operations.begin(), request.operations.end(),
+                         [&](const auto &op) { return op.id == id && op.bendIndex == index; });
+        if (input == request.operations.end() || !seen.insert(index).second)
+            return false;
+        const bool unchanged = assignment ? input->assignment && *assignment == *input->assignment
+                                          : !input->assignment;
+        if (unchanged && tools == input->tools)
+            return true;
+        if (!request.assemblySearch || !input->assignment || !assignment ||
+            std::find(request.assemblySearch->bendIndices.begin(),
+                      request.assemblySearch->bendIndices.end(),
+                      index) == request.assemblySearch->bendIndices.end() ||
+            !sameToolSetupExceptAssemblies(*input->assignment, *assignment) ||
+            !core::hasCompleteDrawingToolGeometry(*assignment) ||
+            core::toolParameters(*assignment) != tools || !tools)
+            return false;
+        const auto valid = [&](const core::ToolPreset &profile,
+                               const std::optional<core::ToolAssembly> &before,
+                               const std::optional<core::ToolAssembly> &after) {
+            return before == after || (profile.segments && after &&
+                                       after->gapMm <= request.assemblySearch->maximumGapMm &&
+                                       core::assemblyLength(*profile.segments, *after).has_value());
+        };
+        if (!valid(assignment->punch, input->assignment->punchAssembly,
+                   assignment->punchAssembly) ||
+            !valid(assignment->die, input->assignment->dieAssembly, assignment->dieAssembly))
+            return false;
+        updates.emplace_back(static_cast<std::size_t>(input - request.operations.begin()),
+                             *assignment);
+        return true;
+    };
+    for (const auto &step : route.steps) {
+        const auto input =
+            std::find_if(request.operations.begin(), request.operations.end(), [&](const auto &op) {
+                return op.id == step.id && op.bendIndex == step.bendIndex;
+            });
+        if (input == request.operations.end())
+            return false;
+        const auto *assignment = step.assemblyAssignment ? step.assemblyAssignment.get()
+                                 : input->assignment     ? &*input->assignment
+                                                         : nullptr;
+        if (!apply(step.id, step.bendIndex, assignment,
+                   step.assemblyAssignment ? core::toolParameters(*step.assemblyAssignment)
+                                           : input->tools))
+            return false;
+        for (const auto &member : step.additionalBends)
+            if (!apply(member.id, member.bendIndex,
+                       member.assignment ? &*member.assignment : nullptr, member.tools))
+                return false;
+    }
+    if (seen.size() != request.operations.size())
+        return false;
+    if (!updates.empty()) {
+        auto resolved = request.operations;
+        for (auto &[index, assignment] : updates) {
+            resolved[index].tools = core::toolParameters(assignment);
+            resolved[index].assignment = std::move(assignment);
+        }
+        request.operations = std::move(resolved);
+    }
+    return true;
+}
 bool applyRouteToolVariant(BendRouteRequest &request, std::size_t index) {
     if (!request.withTools || !request.automatic || index >= request.toolVariants.size())
         return false;

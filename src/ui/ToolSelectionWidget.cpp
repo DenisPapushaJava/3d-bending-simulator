@@ -110,6 +110,15 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         recommend();
     });
     recommendMore->setMenu(recommendMenu);
+    auto *assemblies = recommendMenu->addAction(QStringLiteral("Порядок и секции выбранной пары"));
+    assemblies->setObjectName("recommendSelectedAssemblies");
+    assemblies->setToolTip(QStringLiteral(
+        "Искать порядок и сборки из наличия. Профили, ручей и ориентация пуансона сохраняются."));
+    connect(assemblies, &QAction::triggered, this, [this] {
+        if (onCheckedAssemblies)
+            onCheckedAssemblies();
+    });
+    recommendMore->setToolTip(QStringLiteral("Другие способы подбора"));
     recommendRow->addWidget(recommendMore);
     layout->addLayout(recommendRow);
     fitSections_ = new QPushButton(QStringLiteral("Подобрать секции"), this);
@@ -518,6 +527,9 @@ bool ToolSelectionWidget::usesCatalog() const {
 }
 std::optional<double> ToolSelectionWidget::maximumEndSupportLossMm() const {
     return allowEndReliefs_->isChecked() ? std::nullopt : std::optional(endSupportLimit_->value());
+}
+double ToolSelectionWidget::maximumSegmentGapMm() const {
+    return segmentGap_->value();
 }
 std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
     const auto *p = preset(punch_);
@@ -1153,6 +1165,9 @@ void ToolSelectionWidget::fitSelectedAssemblies() {
             break;
         case core::SegmentPlanStatus::InvalidInput:
             issues << names[i] + QStringLiteral(": уточните данные секций и длину.");
+            break;
+        case core::SegmentPlanStatus::Cancelled:
+            issues << names[i] + QStringLiteral(": подбор отменён.");
             break;
         }
     }

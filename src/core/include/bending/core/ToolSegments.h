@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <optional>
+#include <stop_token>
 #include <vector>
 
 namespace bending::core {
@@ -16,7 +17,7 @@ struct ToolAssembly {
     double gapMm = 0;                // Uniform clear interval between adjacent pieces.
     bool operator==(const ToolAssembly &) const = default;
 };
-enum class SegmentPlanStatus { Complete, InsufficientStock, SearchLimit, InvalidInput };
+enum class SegmentPlanStatus { Complete, InsufficientStock, SearchLimit, InvalidInput, Cancelled };
 struct SegmentPlan {
     SegmentPlanStatus status = SegmentPlanStatus::InvalidInput;
     ToolAssembly assembly;
@@ -30,5 +31,5 @@ struct SegmentPlan {
 // Horns need their own 3D geometry and are deliberately excluded from this first planner.
 [[nodiscard]] SegmentPlan planToolSegments(const std::vector<ToolSegment> &, double requiredMm,
                                            std::size_t stateBudget = 200000,
-                                           double maximumGapMm = 0);
+                                           double maximumGapMm = 0, std::stop_token stop = {});
 } // namespace bending::core

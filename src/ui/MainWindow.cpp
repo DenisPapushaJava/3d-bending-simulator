@@ -648,6 +648,15 @@ class MainWindow::Impl {
                 {entry->id, index, *target, !withTools ? std::nullopt : operationTools,
                  !withTools ? std::nullopt : operationAssignment, entry->workpieceReversed});
         }
+        if (checkedTooling) {
+            application::RouteAssemblySearch scope;
+            scope.maximumGapMm = toolSelection->maximumSegmentGapMm();
+            for (const auto &operation : request.operations)
+                if (application::routeToolVariantApplies(request.toolVariants.front(),
+                                                         operation.bendIndex))
+                    scope.bendIndices.push_back(operation.bendIndex);
+            request.assemblySearch = std::move(scope);
+        }
         if (!checkedTooling) {
             beginPreviewReplacement();
             stopPlayback();
@@ -698,7 +707,7 @@ class MainWindow::Impl {
             toolSelection->setCheckedSearchState(false, editing ? QString{}
                                                                 : QStringLiteral("Подбор отменён"));
     }
-    void prepareCheckedToolSelection() {
+    void prepareCheckedToolSelection(bool sectionsOnly = false) {
         if (checkedToolJob && controller->hasWork()) {
             cancelCheckedToolSelection();
             return;
@@ -719,7 +728,8 @@ class MainWindow::Impl {
                 entry && std::find(toolContextMembers.begin(), toolContextMembers.end(),
                                    entry->id) != toolContextMembers.end())
                 members.push_back(index);
-        if (!checkedToolVariants.empty() && checkedToolDocument == session.revision() &&
+        if (sectionsOnly == checkedSectionsOnly && !checkedToolVariants.empty() &&
+            checkedToolDocument == session.revision() &&
             checkedToolEdit == session.editRevision() &&
             checkedToolVariants.front().bendIndex == target &&
             checkedToolVariants.front().additionalBendIndices == members) {
@@ -727,8 +737,14 @@ class MainWindow::Impl {
             return;
         }
         std::vector<application::RouteToolVariant> variants;
-        for (auto &a : toolSelection->checkedCandidates())
-            variants.push_back({std::move(a), target, members});
+        if (sectionsOnly) {
+            const auto selected = toolSelection->assignment();
+            if (selected && toolSelection->parameters())
+                variants.push_back({*selected, target, members});
+        } else
+            for (auto &a : toolSelection->checkedCandidates())
+                variants.push_back({std::move(a), target, members});
+        checkedSectionsOnly = sectionsOnly;
         if (variants.empty()) {
             toolSelection->setCheckedSearchState(
                 false, QStringLiteral("Нет подходящих DXF-профилей. Доступен ручной выбор."));
@@ -1565,6 +1581,26 @@ class MainWindow::Impl {
                      QStringLiteral(
                          "Отверстия видимы. Проверки относятся к отдельной "
                          "копии с заполненными вырезами; их физическое влияние не рассчитано.")});
+            if (viewingRoute && route && routePanel->selected() > 1 &&
+                routePanel->operation() < route->steps.size()) {
+                const auto *current = session.bend(route->steps[routePanel->operation()].bendIndex);
+                const auto *previous =
+                    session.bend(route->steps[routePanel->operation() - 1].bendIndex);
+                const auto changedAssembly = [&] {
+                    if (!current || !previous || !current->catalogTools || !previous->catalogTools)
+                        return false;
+                    const auto &a = *current->catalogTools, &b = *previous->catalogTools;
+                    return a.punch != b.punch || a.die != b.die || a.groove != b.groove ||
+                           a.punchReversed != b.punchReversed ||
+                           a.punchAssembly != b.punchAssembly || a.dieAssembly != b.dieAssembly;
+                };
+                if (changedAssembly())
+                    messages.push_back(
+                        {BendMessageKind::SetupChange, BendMessageSeverity::Information,
+                         QStringLiteral("Перед гибом смените сборку инструмента"),
+                         QStringLiteral("Состав показан на этапе «Инструмент». "
+                                        "Переналадка и перенос детали не проверены.")});
+            }
             if (messages.empty() && preview && preview->unverifiedDraft())
                 messages.push_back({BendMessageKind::Scope,
                                     draft && !draft->checkedToolPositions
@@ -2878,6 +2914,7 @@ class MainWindow::Impl {
     QToolButton *shortToolDiagnostic = nullptr;
     bool lastRouteAutomatic = true;
     bool checkedToolJob = false, checkedToolCancelled = false, checkedToolManualOverride = false;
+    bool checkedSectionsOnly = false;
     std::uint64_t checkedToolDocument = 0, checkedToolEdit = 0;
     std::uint64_t initialToolSuggestion = 0;
     std::vector<application::RouteToolVariant> checkedToolVariants;
@@ -3815,7 +3852,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->propertyTabs->setCurrentIndex(3);
         impl_->toolWorkspace->setFocus();
     };
-    impl_->toolSelection->onCheckedRecommend = [this] { impl_->prepareCheckedToolSelection(); };
+    impl_->toolSelection->onCheckedRecommend = [this] {
+        impl_->prepareCheckedToolSelection(!impl_->checkedToolVariants.empty() &&
+                                           impl_->checkedSectionsOnly);
+    };
+    impl_->toolSelection->onCheckedAssemblies = [this] {
+        impl_->prepareCheckedToolSelection(true);
+    };
     impl_->toolSelection->onCancelChecked = [this] { impl_->cancelCheckedToolSelection(true); };
     connect(impl_->clearTools, &QPushButton::clicked, this, [this] {
         std::vector<application::BendToolUpdate> updates;

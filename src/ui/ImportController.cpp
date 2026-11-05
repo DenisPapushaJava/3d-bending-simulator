@@ -1047,6 +1047,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
             return false;
     }
     request.manualThicknessMm = session.manualThicknessMm();
+    if (!validRouteAssemblySearch(request))
+        return false;
     if (!request.toolVariants.empty()) {
         if (request.toolVariants.size() > 64)
             return false;
@@ -1128,6 +1130,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                                : (*route)->selectedToolVariant &&
                                                      applyRouteToolVariant(
                                                          request, *(*route)->selectedToolVariant));
+                            selectedInput = selectedInput && *route &&
+                                            applyRouteAssemblyResult(request, **route);
                             bool valid = selectedInput && *route && (*route)->source == document &&
                                          (*route)->withTools == request.withTools &&
                                          !(*route)->steps.empty() &&
@@ -1233,6 +1237,14 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                             const auto *ret = p->punchRetraction();
                                             valid &= p->frameCount() >= 2 && p->toolSetup() &&
                                                      p->toolSetup()->tools == *found->tools &&
+                                                     core::punchLengthMm(*found->tools) +
+                                                             document->metadata()
+                                                                 .bendAnalysis.lengthToleranceMm >=
+                                                         p->model().widthMm &&
+                                                     found->tools->lengthMm +
+                                                             document->metadata()
+                                                                 .bendAnalysis.lengthToleranceMm >=
+                                                         p->model().widthMm &&
                                                      p->pressState(0) &&
                                                      p->pressState(0)->phase ==
                                                          simulation::PressPhase::Approach &&

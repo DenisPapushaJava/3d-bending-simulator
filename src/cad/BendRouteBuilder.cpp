@@ -251,6 +251,9 @@ class RouteSearch {
     double tolerance = 0, expectedVolume = 0, budget = 0;
     CacheData *cache = nullptr;
     std::vector<std::shared_ptr<const TransitionInputs>> inputs;
+    std::vector<std::shared_ptr<const TransitionInputs>> assemblyInputs;
+    std::map<std::pair<std::size_t, double>, std::array<core::SegmentPlan, 2>> assemblyPlans;
+    bool assemblyLimitReached = false;
     BendRouteStatistics statistics;
     std::vector<Mask> neighbours;
     std::vector<std::size_t> profileRank;
@@ -322,6 +325,7 @@ class RouteSearch {
     }
     std::set<Mask> dead;
     std::vector<BendRouteStep> reversed;
+    std::vector<TransitionKey> reversedKeys;
     std::size_t attempts = 0;
     std::string lastFailure;
     std::optional<std::size_t> failedBend;
@@ -329,6 +333,15 @@ class RouteSearch {
     bool incomplete = false;
     std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 
+    void checkBudget() const {
+        cancelled(stop);
+        if (attempts >= request.maximumChecks ||
+            std::chrono::steady_clock::now() - started >
+                std::chrono::milliseconds(request.maximumTimeMs))
+            throw BendRouteError{BendRouteErrorCode::SearchLimit,
+                                 "Route search budget reached; " + lastFailure, failedBend,
+                                 attempts};
+    }
     void touchState(Mask mask) {
         cache->stateOrder.remove(mask);
         cache->stateOrder.push_front(mask);
@@ -444,6 +457,89 @@ class RouteSearch {
             members.push_back(inputs[member.bendIndex]);
         return {mask, inputs[op.bendIndex], side, std::move(members)};
     }
+    bool mayPlan(std::size_t index) const {
+        return request.assemblySearch &&
+               std::find(request.assemblySearch->bendIndices.begin(),
+                         request.assemblySearch->bendIndices.end(),
+                         index) != request.assemblySearch->bendIndices.end();
+    }
+    std::shared_ptr<const TransitionInputs> assemblyInput(const RouteOperation &op) {
+        if (!request.withTools)
+            return inputs[op.bendIndex];
+        const auto same = [&](const auto &entry) {
+            const auto &stored = entry->operation;
+            return stored.id == op.id && stored.bendIndex == op.bendIndex &&
+                   stored.target == op.target && stored.tools == op.tools &&
+                   stored.assignment == op.assignment;
+        };
+        if (same(inputs[op.bendIndex]))
+            return inputs[op.bendIndex];
+        for (const auto &entry : assemblyInputs)
+            if (same(entry))
+                return entry;
+        auto normalized = op;
+        normalized.workpieceReversed = false;
+        auto entry =
+            cache->intern({std::move(normalized), request.withTools, request.allowPartialEndSupport,
+                           request.maximumEndSupportLossMm});
+        assemblyInputs.push_back(entry);
+        return entry;
+    }
+    TransitionKey assemblyKey(Mask mask, const RouteOperation &op,
+                              const std::vector<RouteOperation> &additional) {
+        TransitionKey result{mask, assemblyInput(op), false};
+        for (const auto &member : additional)
+            result.jointInputs.push_back(assemblyInput(member));
+        return result;
+    }
+    using AssemblyPair =
+        std::pair<std::optional<core::ToolAssembly>, std::optional<core::ToolAssembly>>;
+    std::vector<AssemblyPair> assemblyAlternatives(const RouteOperation &op, double required) {
+        const auto &original = *op.assignment;
+        const auto wanted = std::pair{op.bendIndex, required};
+        auto found = assemblyPlans.find(wanted);
+        if (found == assemblyPlans.end()) {
+            // Bound planning independently of the CAD search. Hitting this quota
+            // leaves a partial answer, never a proof that another assembly cannot fit.
+            if (assemblyPlans.size() >= 128) {
+                assemblyLimitReached = true;
+                return {{original.punchAssembly, original.dieAssembly}};
+            }
+            std::array<core::SegmentPlan, 2> plans;
+            const std::array<const core::ToolPreset *, 2> profiles{&original.punch, &original.die};
+            for (std::size_t i = 0; i < profiles.size(); ++i) {
+                cancelled(stop);
+                if (profiles[i]->segments) {
+                    checkBudget();
+                    plans[i] = core::planToolSegments(*profiles[i]->segments, required, 200000,
+                                                      request.assemblySearch->maximumGapMm, stop);
+                    ++statistics.plannedAssemblies;
+                    cancelled(stop);
+                    assemblyLimitReached |= plans[i].status == core::SegmentPlanStatus::SearchLimit;
+                }
+            }
+            found = assemblyPlans.emplace(wanted, std::move(plans)).first;
+        } else
+            ++statistics.reusedAssemblyPlans;
+        const AssemblyPair originalPair{original.punchAssembly, original.dieAssembly};
+        auto fitted = originalPair;
+        if (found->second[0].status == core::SegmentPlanStatus::Complete)
+            fitted.first = found->second[0].assembly;
+        if (found->second[1].status == core::SegmentPlanStatus::Complete)
+            fitted.second = found->second[1].assembly;
+        std::vector<AssemblyPair> result;
+        const auto add = [&](AssemblyPair candidate) {
+            if (std::find(result.begin(), result.end(), candidate) == result.end())
+                result.push_back(std::move(candidate));
+        };
+        // Four small assembly pairs; the immutable DXF profiles are not copied
+        // into this family or each candidate's unchanged member assignments.
+        add(fitted);
+        add(originalPair);
+        add({fitted.first, originalPair.second});
+        add({originalPair.first, fitted.second});
+        return result;
+    }
     // 0 = verified success, 1 = unknown, 2 = stable rejection of this exact transition.
     int priorResult(Mask mask, const RouteOperation &op, bool side,
                     const std::vector<RouteOperation> &additional = {}) const {
@@ -477,8 +573,8 @@ class RouteSearch {
         }
     }
     BendPreviewResult transition(Mask mask, const RouteOperation &op, bool fixedSecond,
-                                 const std::vector<RouteOperation> &additional = {}) {
-        const auto wanted = key(mask, op, fixedSecond, additional);
+                                 const std::vector<RouteOperation> &additional,
+                                 const TransitionKey &wanted) {
         if (request.reuseCalculations) {
             if (const auto *preview = cache->transitions.find(wanted)) {
                 ++statistics.reusedTransitions;
@@ -611,13 +707,17 @@ class RouteSearch {
                       const std::vector<RouteOperation> &additional = {}) {
         const auto &op = request.operations[order];
         std::vector<bool> reverseReference;
+        double required = OcctDocumentAccess::simulationBends(*native).bends[op.bendIndex].lengthMm;
         if (!additional.empty()) {
             const auto after = state(mask);
             std::vector<std::size_t> indices{*after->indices[op.bendIndex]};
             for (const auto &member : additional)
                 indices.push_back(*after->indices[member.bendIndex]);
-            if (!jointBendEnvelope(OcctDocumentAccess::simulationBends(*after->document), indices))
-                return false; // A flat signature alone is not a current common stroke.
+            const auto envelope =
+                jointBendEnvelope(OcctDocumentAccess::simulationBends(*after->document), indices);
+            if (!envelope)
+                return false;
+            required = envelope->lengthMm; // A flat signature alone is not a current common stroke.
             std::vector<double> progress(request.operations.size());
             for (std::size_t i = 0; i < progress.size(); ++i)
                 progress[i] = (mask & (Mask{1} << i)) ? 1. : 0.;
@@ -636,16 +736,65 @@ class RouteSearch {
                 reverseReference.push_back(axis.Dot(primary) < 0);
             }
         }
+        const bool planning =
+            mayPlan(op.bendIndex) && op.assignment &&
+            std::all_of(additional.begin(), additional.end(), [&](const auto &m) {
+                return mayPlan(m.bendIndex) && m.assignment &&
+                       sameToolSetupExceptAssemblies(*op.assignment, *m.assignment);
+            });
+        if (!planning)
+            return tryInstallation(mask, op, additional, reverseReference,
+                                   key(mask, op, false, additional), required);
+        for (const auto &assemblies : assemblyAlternatives(op, required)) {
+            cancelled(stop);
+            auto candidate = op;
+            candidate.assignment->punchAssembly = assemblies.first;
+            candidate.assignment->dieAssembly = assemblies.second;
+            candidate.tools = core::toolParameters(*candidate.assignment);
+            auto members = additional;
+            for (auto &member : members) {
+                member.assignment->punchAssembly = assemblies.first;
+                member.assignment->dieAssembly = assemblies.second;
+                member.tools = candidate.tools;
+            }
+            const auto wanted = assemblyKey(mask, candidate, members);
+            if (tryInstallation(mask, candidate, members, reverseReference, wanted, required))
+                return true;
+        }
+        return false;
+    }
+    bool tryInstallation(Mask mask, const RouteOperation &op,
+                         const std::vector<RouteOperation> &additional,
+                         const std::vector<bool> &reverseReference, const TransitionKey &baseKey,
+                         double required) {
+        if (request.withTools &&
+            (!op.tools || core::punchLengthMm(*op.tools) + tolerance < required ||
+             op.tools->lengthMm + tolerance < required)) {
+            lastFailure = "The selected tool assembly is shorter than the bend line";
+            lastOperationError = BendPreviewErrorCode::ToolTooShort;
+            failedBend = op.bendIndex;
+            return false;
+        }
         auto bit = Mask{1} << op.bendIndex;
         for (const auto &member : additional)
             bit |= Mask{1} << member.bendIndex;
         const bool preferred = preferredSide(mask, op, bit);
         std::array<bool, 2> sides{preferred, !preferred};
+        const auto prior = [&](bool side) {
+            auto wanted = baseKey;
+            wanted.fixedSecond = side;
+            int verdict = 1;
+            std::array<double, 2> support{};
+            if (request.reuseCalculations) {
+                if (const auto *v = cache->verdicts.peek(wanted))
+                    verdict = v->has_value() ? 2 : 0;
+                if (const auto *p = cache->transitions.peek(wanted))
+                    support = endSupportLossRank(**p);
+            }
+            return std::pair{verdict, support};
+        };
         if (request.allowWorkpieceRotation && request.rankCandidates &&
-            std::pair{priorResult(mask, op, sides[1], additional),
-                      supportRank(mask, op, sides[1], additional)} <
-                std::pair{priorResult(mask, op, sides[0], additional),
-                          supportRank(mask, op, sides[0], additional)})
+            prior(sides[1]) < prior(sides[0]))
             std::swap(sides[0], sides[1]);
         for (std::size_t choice = 0; choice < (request.allowWorkpieceRotation ? 2u : 1u);
              ++choice) {
@@ -671,8 +820,11 @@ class RouteSearch {
             ++attempts;
             if (request.onProgress)
                 request.onProgress({BendRoutePhase::Checking, 0, 0, attempts - 1, op.bendIndex});
+            const auto depth = reversed.size();
             try {
-                auto preview = transition(mask, op, fixedSecond, additional);
+                auto wanted = baseKey;
+                wanted.fixedSecond = fixedSecond;
+                auto preview = transition(mask, op, fixedSecond, additional, wanted);
                 if (request.onProgress)
                     request.onProgress({BendRoutePhase::Checking, 0, 0, attempts, op.bendIndex});
                 if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
@@ -688,13 +840,24 @@ class RouteSearch {
                 reversed.push_back({op.id, op.bendIndex, fixedSecond,
                                     std::get<BendPreviewPtr>(std::move(preview)),
                                     std::move(resolved)});
+                const auto original = std::find_if(
+                    request.operations.begin(), request.operations.end(),
+                    [&](const auto &value) { return value.bendIndex == op.bendIndex; });
+                if (op.assignment != original->assignment)
+                    reversed.back().assemblyAssignment =
+                        std::shared_ptr<const core::ToolAssignment>(
+                            wanted.inputs, &*wanted.inputs->operation.assignment);
+                reversedKeys.push_back(wanted);
                 if (search(mask ^ bit))
                     return true;
                 reversed.pop_back();
+                reversedKeys.pop_back();
             } catch (const BendRouteError &e) {
                 if (e.code == BendRouteErrorCode::Cancelled ||
                     e.code == BendRouteErrorCode::SearchLimit)
                     throw;
+                reversed.resize(depth);
+                reversedKeys.resize(depth);
                 incomplete = true;
                 lastFailure = e.detail;
                 lastOperationError.reset();
@@ -738,7 +901,10 @@ class RouteSearch {
                         analysis.angleToleranceRadians ||
                     std::abs(member.target.innerRadiusMm - op.target.innerRadiusMm) > tolerance ||
                     (request.withTools &&
-                     (member.tools != op.tools || member.assignment != op.assignment)))
+                     (member.tools != op.tools || member.assignment != op.assignment) &&
+                     !(mayPlan(op.bendIndex) && mayPlan(member.bendIndex) && op.assignment &&
+                       member.assignment &&
+                       sameToolSetupExceptAssemblies(*op.assignment, *member.assignment))))
                     continue;
                 if (!request.automatic &&
                     (other >= order || order - other != additional.size() + 1))
@@ -959,6 +1125,9 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
              (!std::isfinite(*request.manualThicknessMm) || *request.manualThicknessMm <= 0)))
             return BendRouteError{BendRouteErrorCode::InvalidInput,
                                   "Requires every recognized bend, up to 32 zones"};
+        if (!validRouteAssemblySearch(request))
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "Invalid assembly search scope"};
         if (!request.toolVariants.empty()) {
             if (!request.automatic || !request.withTools || request.toolVariants.size() > 64)
                 return BendRouteError{
@@ -1034,6 +1203,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.backgauge += s.backgauge;
                 totals.shapeRankedToolVariants += s.shapeRankedToolVariants;
                 totals.toolShapeRankingUs += s.toolShapeRankingUs;
+                totals.plannedAssemblies += s.plannedAssemblies;
+                totals.reusedAssemblyPlans += s.reusedAssemblyPlans;
             };
             for (const auto choice : toolOrder) {
                 cancelled(stop);
@@ -1127,7 +1298,12 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             if (request.withTools) {
                 const BendRouteToolLengthIssue lengths{b.lengthMm, core::punchLengthMm(*op.tools),
                                                        op.tools->lengthMm};
-                if (!lengths.coversBend(analysis.lengthToleranceMm))
+                const bool planning =
+                    request.assemblySearch && op.assignment &&
+                    std::find(request.assemblySearch->bendIndices.begin(),
+                              request.assemblySearch->bendIndices.end(),
+                              op.bendIndex) != request.assemblySearch->bendIndices.end();
+                if (!lengths.coversBend(analysis.lengthToleranceMm) && !planning)
                     return BendRouteError{
                         BendRouteErrorCode::InvalidInput,
                         "The selected tool assembly is shorter than the bend line",
@@ -1310,8 +1486,9 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             throw;
         }
         if (!found)
-            return BendRouteError{search.incomplete ? BendRouteErrorCode::Unsupported
-                                                    : BendRouteErrorCode::NoRoute,
+            return BendRouteError{search.assemblyLimitReached ? BendRouteErrorCode::SearchLimit
+                                  : search.incomplete         ? BendRouteErrorCode::Unsupported
+                                                              : BendRouteErrorCode::NoRoute,
                                   search.lastFailure,
                                   search.failedBend,
                                   search.attempts,
@@ -1328,15 +1505,9 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         if (search.request.reuseCalculations) {
             // A complete path can be longer than the working set of an earlier partial
             // branch. Retain its exact checked cycles, not previews from failed branches.
-            Mask formed = 0;
-            for (const auto &step : result->steps) {
-                formed |= Mask{1} << step.bendIndex;
-                for (const auto &member : step.additionalBends)
-                    formed |= Mask{1} << member.bendIndex;
-                const auto &op = search.inputs[step.bendIndex]->operation;
-                search.remember(search.key(formed, op, step.fixedSecond, step.additionalBends),
-                                step.preview);
-            }
+            for (std::size_t i = 0; i < result->steps.size(); ++i)
+                search.remember(search.reversedKeys[result->steps.size() - 1 - i],
+                                result->steps[i].preview);
         }
         result->partialEndSupport =
             std::any_of(result->steps.begin(), result->steps.end(),

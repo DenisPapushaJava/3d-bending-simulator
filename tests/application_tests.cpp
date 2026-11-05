@@ -1,3 +1,4 @@
+#include "ToolFixtures.h"
 #include "bending/application/BendRoute.h"
 #include "bending/application/DocumentSession.h"
 #include "bending/application/SingleBendPreview.h"
@@ -32,6 +33,80 @@ class TestDocument final : public Document {
     DocumentMetadata metadata_{};
     std::vector<FaceInfo> faces_;
 };
+void testAssemblyResult() {
+    auto original = tool_fixture::pair(16);
+    original.punch.segments = original.die.segments =
+        std::vector<bending::core::ToolSegment>{{80, 1}, {40, 1}};
+    original.punchAssembly = original.dieAssembly = bending::core::ToolAssembly{{0}, 0};
+    auto fitted = original;
+    fitted.punchAssembly = fitted.dieAssembly = bending::core::ToolAssembly{{0, 1}, 0};
+    BendRouteRequest request;
+    request.withTools = request.automatic = true;
+    for (std::size_t i = 0; i < 2; ++i)
+        request.operations.push_back({"bend-" + std::to_string(i),
+                                      i,
+                                      {1.57, 4},
+                                      bending::core::toolParameters(original),
+                                      original});
+    request.assemblySearch = RouteAssemblySearch{{0, 1}, 3};
+    BendRoute route;
+    route.steps.push_back({"bend-0",
+                           0,
+                           false,
+                           {},
+                           {},
+                           std::make_shared<const bending::core::ToolAssignment>(fitted)});
+    auto member = request.operations[1];
+    member.assignment = fitted;
+    member.tools = bending::core::toolParameters(fitted);
+    route.steps.front().additionalBends.push_back(member);
+    auto resolved = request;
+    require(validRouteAssemblySearch(request) && applyRouteAssemblyResult(resolved, route) &&
+                resolved.operations[0].assignment == fitted &&
+                resolved.operations[1].assignment == fitted &&
+                request.operations[0].assignment == original,
+            "Assembly result lost group scope or mutated the request");
+    const auto rejected = [&](BendRouteRequest input, BendRoute broken) {
+        const auto before = input.operations;
+        require(!applyRouteAssemblyResult(input, broken) && input.operations == before,
+                "Invalid derived tooling was accepted or partially applied");
+    };
+    auto locked = request;
+    locked.assemblySearch.reset();
+    rejected(locked, route);
+    locked.assemblySearch = RouteAssemblySearch{{0}, 3};
+    rejected(locked, route); // Primary authorized, additional member locked.
+    locked = request;
+    locked.assemblySearch->bendIndices = {0, 0};
+    require(!validRouteAssemblySearch(locked), "Duplicate assembly scope accepted");
+    auto broken = route;
+    auto forged = fitted;
+    forged.punch.drawing->edges[1].end.x += 1;
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    forged = fitted;
+    forged.punchReversed = !forged.punchReversed;
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    forged = fitted;
+    forged.punchAssembly->pieces = {0, 0}; // Two sections, only one in stock.
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    forged = fitted;
+    forged.punchAssembly->gapMm = 4;
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    broken = route;
+    broken.steps.front().additionalBends.clear();
+    rejected(request, broken);
+    broken = route;
+    broken.steps.front().additionalBends.push_back(member);
+    rejected(request, broken);
+}
 void testSession() {
     DocumentSession session;
     auto first = session.beginImport("first.step");
@@ -403,6 +478,7 @@ void testEndSupportReports() {
 } // namespace
 int main() {
     try {
+        testAssemblyResult();
         testSession();
         testProjectState();
         testPartInputs();
