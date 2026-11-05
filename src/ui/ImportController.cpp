@@ -701,9 +701,10 @@ void ImportController::saveProject(std::filesystem::path path,
 }
 bool ImportController::prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
                                           std::shared_ptr<const SingleBendPreviewBuilder> builder,
-                                          BendPreviewMode mode, double maximumEndSupportLossMm) {
+                                          BendPreviewMode mode,
+                                          std::optional<double> maximumEndSupportLossMm) {
     if (impl_->stopping || hasWork() || !builder || !impl_->session.document() ||
-        !validEndSupportLimitMm(maximumEndSupportLossMm)) {
+        (maximumEndSupportLossMm && !validEndSupportLimitMm(*maximumEndSupportLossMm))) {
         return false;
     }
     const auto *entry = impl_->session.bend(recognizedIndex);
@@ -1191,7 +1192,10 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                                     if (p && found != request.operations.end()) {
                                         partialEndSupport |= p->hasPartialEndSupport();
                                         valid &= validEndSupportIntervals(
-                                            *p, request.maximumEndSupportLossMm,
+                                            *p,
+                                            request.allowPartialEndSupport
+                                                ? request.maximumEndSupportLossMm
+                                                : std::optional<double>(0),
                                             s->session.document()
                                                         ->metadata()
                                                         .bendAnalysis.lengthToleranceMm *

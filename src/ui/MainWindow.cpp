@@ -1126,9 +1126,9 @@ class MainWindow::Impl {
             : viewingDraft && controller->routeDraft() ? QStringLiteral("Ручной порядок")
             : controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
             : controller->bendRoute() && controller->bendRoute()->partialEndSupport
-                ? QStringLiteral("Просмотр: неполная опора")
+                ? QStringLiteral("Торцевые подрезы")
             : scenePreview() && scenePreview()->hasPartialEndSupport()
-                ? QStringLiteral("Просмотр: неполная опора")
+                ? QStringLiteral("Торцевые подрезы")
             : controller->bendRoute()
                 ? QStringLiteral("Порядок: %1 шагов").arg(controller->bendRoute()->steps.size())
             : controller->isPreparingPreview() ? QStringLiteral("Проверяем…")
@@ -1404,8 +1404,9 @@ class MainWindow::Impl {
         else if (controller->bendPreviewError())
             result = operationFailureSummary;
         else if (partial) {
-            result = QStringLiteral("Просмотр с неполной опорой у торца.\n"
-                                    "Пригодность к изготовлению не подтверждена.");
+            result = viewingRoute
+                         ? QStringLiteral("Маршрут найден.\nТорцевые подрезы: возможна деформация.")
+                         : QStringLiteral("Торцевые подрезы: возможна деформация.");
             if (preview)
                 for (const auto &interval : preview->endSupportIntervals()) {
                     const auto &s = interval.material;
@@ -1415,11 +1416,11 @@ class MainWindow::Impl {
                         result += QStringLiteral("\nУчасток %1–%2 мм:")
                                       .arg(interval.fromMm, 0, 'f', 2)
                                       .arg(interval.fromMm + s.bendLengthMm, 0, 'f', 2);
-                    result +=
-                        QStringLiteral("\nНехватка у торцов: %1 / %2 мм; допуск %3 мм на каждый.")
-                            .arg(s.supportedFromMm, 0, 'f', 2)
-                            .arg(s.bendLengthMm - s.supportedToMm, 0, 'f', 2)
-                            .arg(toolSelection->maximumEndSupportLossMm(), 0, 'f', 2);
+                    result += QStringLiteral("\nНехватка опоры у торцов: %1 / %2 мм.")
+                                  .arg(s.supportedFromMm, 0, 'f', 2)
+                                  .arg(s.bendLengthMm - s.supportedToMm, 0, 'f', 2);
+                    if (const auto limit = preview->endSupportLimitMm())
+                        result += QStringLiteral(" Допуск %1 мм на каждый.").arg(*limit, 0, 'f', 2);
                 }
         } else if (preview && preview->pressMotion())
             result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.")
@@ -1530,7 +1531,7 @@ class MainWindow::Impl {
             }
             if (partial)
                 messages.push_back({BendMessageKind::Support, BendMessageSeverity::Warning,
-                                    QStringLiteral("Неполная опора у торцов"),
+                                    QStringLiteral("Торцевые подрезы"),
                                     QStringLiteral("У торца отсутствует часть опоры. Доступен "
                                                    "геометрический просмотр; устойчивость и "
                                                    "пригодность к изготовлению не подтверждены.")});
@@ -2016,7 +2017,10 @@ class MainWindow::Impl {
                 checkedToolDialog->hide();
                 checkedToolVariants.clear();
                 toolSelection->rememberChoice();
-                status = QStringLiteral("Проверенный порядок · %1 гибов").arg(route->steps.size());
+                status =
+                    route->partialEndSupport
+                        ? QStringLiteral("Маршрут найден · торцевые подрезы")
+                        : QStringLiteral("Проверенный порядок · %1 гибов").arg(route->steps.size());
             } else {
                 const auto routeError = controller->bendRouteError();
                 resumable =
@@ -2187,7 +2191,7 @@ class MainWindow::Impl {
                           .arg(failure->endSupport->bendLengthMm -
                                    failure->endSupport->supportedToMm,
                                0, 'f', 2)
-                          .arg(toolSelection->maximumEndSupportLossMm(), 0, 'f', 2)
+                          .arg(toolSelection->maximumEndSupportLossMm().value_or(0), 0, 'f', 2)
                 : failure->code == BendPreviewErrorCode::SupportNotProven
                     ? QStringLiteral(
                           "Не удалось подтвердить сплошной участок опоры обеих полок: проверьте "

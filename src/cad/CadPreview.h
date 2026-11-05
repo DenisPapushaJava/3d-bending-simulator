@@ -41,6 +41,10 @@ class CadPreview : public SingleBendPreview {
     bool realPunch = false, realDie = false;
     std::array<double, 2> gaps{};
     std::vector<BendSupportInterval> supportIntervals;
+    std::optional<double> supportLimit = 0;
+    std::optional<double> endSupportLimitMm() const noexcept override {
+        return supportLimit;
+    }
     std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
         return supportIntervals;
     }

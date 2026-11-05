@@ -9,6 +9,8 @@
 #include "bending/simulation/PressMotion.h"
 #include "bending/simulation/SingleBend.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -74,6 +76,11 @@ class SingleBendPreview {
                 return true;
         return false;
     }
+    // Null: measured external end losses are warnings. Zero: full support only.
+    // This snapshot belongs to the checked cycle, not the current editor setting.
+    [[nodiscard]] virtual std::optional<double> endSupportLimitMm() const noexcept {
+        return 0;
+    }
     [[nodiscard]] virtual bool usesDrawingTools() const noexcept {
         return false;
     }
@@ -110,6 +117,22 @@ class SingleBendPreview {
         return nullptr;
     }
 };
+// Soft comparison of already measured support, never a manufacturing threshold.
+// Gaps between joint zones do not dilute either the worst or total loss ratio.
+[[nodiscard]] inline std::array<double, 2>
+endSupportLossRank(const SingleBendPreview &preview) noexcept {
+    double worst = 0, missing = 0, length = 0;
+    for (const auto &interval : preview.endSupportIntervals()) {
+        const auto &s = interval.material;
+        if (!withinEndSupportLimit(s, s.bendLengthMm))
+            return {1, 1};
+        const double loss = s.supportedFromMm + (s.bendLengthMm - s.supportedToMm);
+        worst = std::max(worst, loss / s.bendLengthMm);
+        missing += loss;
+        length += s.bendLengthMm;
+    }
+    return {worst, length > 0 ? missing / length : 0};
+}
 // Validate the transient CAD report against the operation envelope, independently
 // of whether any of its real intervals has partial support. No gap is filled.
 [[nodiscard]] inline bool validEndSupportIntervals(const SingleBendPreview &preview,
@@ -119,9 +142,9 @@ class SingleBendPreview {
     if (intervals.empty())
         return !preview.toolSetup();
     const double width = preview.model().widthMm;
-    if (!preview.toolSetup() || intervals.size() != preview.activeBendCount() ||
-        !std::isfinite(width) || width <= 0 || !validEndSupportLimitMm(tolerance) ||
-        (limit && !validEndSupportLimitMm(*limit)))
+    if (!preview.toolSetup() || preview.endSupportLimitMm() != limit ||
+        intervals.size() != preview.activeBendCount() || !std::isfinite(width) || width <= 0 ||
+        !validEndSupportLimitMm(tolerance) || (limit && !validEndSupportLimitMm(*limit)))
         return false;
     double end = 0;
     for (const auto &interval : intervals) {
@@ -183,7 +206,7 @@ class SingleBendPreviewBuilder {
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolSetup(DocumentPtr document, std::size_t index, core::BendTarget target,
                            core::ToolAssignment assignment, std::stop_token stop,
-                           double maximumEndSupportLossMm = 0,
+                           std::optional<double> maximumEndSupportLossMm = 0,
                            bool workpieceReversed = false) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
@@ -199,7 +222,7 @@ class SingleBendPreviewBuilder {
     [[nodiscard]] virtual BendPreviewResult
     buildAssignedToolMotion(DocumentPtr document, std::size_t index, core::BendTarget target,
                             core::ToolAssignment assignment, std::stop_token stop,
-                            double maximumEndSupportLossMm = 0,
+                            std::optional<double> maximumEndSupportLossMm = 0,
                             bool workpieceReversed = false) const {
         if (assignment.useDrawingGeometry || assignment.punchAssembly || assignment.dieAssembly)
             return BendPreviewError{BendPreviewErrorCode::UnsupportedToolGeometry,
@@ -210,17 +233,15 @@ class SingleBendPreviewBuilder {
                      : BendPreviewResult(BendPreviewError{
                            BendPreviewErrorCode::UnsupportedParameters, "Invalid assignment"});
     }
-    [[nodiscard]] virtual BendPreviewResult buildToolMotion(DocumentPtr, std::size_t,
-                                                            core::BendTarget, core::PressTools,
-                                                            std::stop_token, double = 0,
-                                                            bool = false) const {
+    [[nodiscard]] virtual BendPreviewResult
+    buildToolMotion(DocumentPtr, std::size_t, core::BendTarget, core::PressTools, std::stop_token,
+                    std::optional<double> = 0, bool = false) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool motion unavailable"};
     }
-    [[nodiscard]] virtual BendPreviewResult buildToolSetup(DocumentPtr, std::size_t,
-                                                           core::BendTarget, core::PressTools,
-                                                           std::stop_token, double = 0,
-                                                           bool = false) const {
+    [[nodiscard]] virtual BendPreviewResult
+    buildToolSetup(DocumentPtr, std::size_t, core::BendTarget, core::PressTools, std::stop_token,
+                   std::optional<double> = 0, bool = false) const {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Tool setup unavailable"};
     }

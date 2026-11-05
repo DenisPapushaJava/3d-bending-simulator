@@ -333,6 +333,10 @@ void testEndSupportReports() {
         std::vector<BendSupportInterval> intervals{{0, {45, .46, 42}}, {65, {55, 1.25, 52.5}}};
         bending::simulation::SingleBend geometry{2, 4, 1.57, 120, 30, 30};
         bending::simulation::FlatToolSetup setup{};
+        std::optional<double> limit = 3;
+        std::optional<double> endSupportLimitMm() const noexcept override {
+            return limit;
+        }
         std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
             return intervals;
         }
@@ -357,6 +361,7 @@ void testEndSupportReports() {
             "Interval validation lost the per-end limit");
     for (const int invalid : {0, 1, 2, 3, 4, 5}) {
         Preview candidate;
+        candidate.limit = 100;
         switch (invalid) {
         case 0:
             candidate.intervals.pop_back();
@@ -381,6 +386,19 @@ void testEndSupportReports() {
         require(!validEndSupportIntervals(candidate, 100, .001),
                 "Incomplete/overlapping/invalid joint support report was accepted");
     }
+    preview.limit.reset();
+    require(validEndSupportIntervals(preview, {}, .001) &&
+                !validEndSupportIntervals(preview, 3, .001),
+            "Unbounded warning report was accepted as a bounded check");
+    const auto rank = endSupportLossRank(preview);
+    require(std::abs(rank[0] - 3.46 / 45) < 1.e-9 && std::abs(rank[1] - 7.21 / 100) < 1.e-9,
+            "Support rank lost a joint interval or diluted losses by the gap");
+    Preview worse;
+    worse.intervals[0].material.supportedFromMm = 5;
+    require(rank < endSupportLossRank(worse), "Greater relative end loss ranked first");
+    for (auto &interval : worse.intervals)
+        interval.material = {interval.material.bendLengthMm, 0, interval.material.bendLengthMm};
+    require(endSupportLossRank(worse) < rank, "Full support did not precede end reliefs");
 }
 } // namespace
 int main() {

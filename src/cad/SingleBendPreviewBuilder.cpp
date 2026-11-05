@@ -1007,6 +1007,8 @@ application::BendPreviewResult buildBendOperation(
         }
         const double rigidVolume = volume(flanges[0]) + volume(flanges[1]);
         auto preview = std::make_shared<CadPreview>();
+        preview->supportLimit =
+            allowPartialEndSupport ? maximumEndSupportLossMm : std::optional<double>(0);
         preview->reversed = requestedReversed;
         preview->activeBends = joint ? jointBends.size() : 1;
         preview->components = flanges;
@@ -1516,6 +1518,7 @@ application::BendPreviewResult buildBendOperation(
                         diagnostic->filledCutouts = preview->filledCutouts;
                         diagnostic->gaps = preview->gaps;
                         diagnostic->supportIntervals = preview->supportIntervals;
+                        diagnostic->supportLimit = preview->supportLimit;
                         diagnostic->otherBends = preview->otherBends;
                         if (pair < pairs.size())
                             diagnostic->conflict = static_cast<ToolCollisionPair>(pair);
@@ -1687,22 +1690,24 @@ application::BendPreviewResult SingleBendPreviewBuilder::build(DocumentPtr docum
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildToolSetup(
     DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
-    std::stop_token stop, double maximumEndSupportLossMm, bool workpieceReversed) const {
+    std::stop_token stop, std::optional<double> maximumEndSupportLossMm,
+    bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     return cachedOperation(std::move(document), bendIndex, target, workpieceReversed, stop, tools,
                            false, {}, maximumEndSupportLossMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildToolMotion(
     DocumentPtr document, std::size_t bendIndex, core::BendTarget target, core::PressTools tools,
-    std::stop_token stop, double maximumEndSupportLossMm, bool workpieceReversed) const {
+    std::stop_token stop, std::optional<double> maximumEndSupportLossMm,
+    bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     return cachedOperation(std::move(document), bendIndex, target, workpieceReversed, stop, tools,
                            true, {}, maximumEndSupportLossMm);
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion(
     DocumentPtr document, std::size_t index, core::BendTarget target,
-    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm,
-    bool workpieceReversed) const {
+    core::ToolAssignment assignment, std::stop_token stop,
+    std::optional<double> maximumEndSupportLossMm, bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)
@@ -1713,8 +1718,8 @@ application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolMotion
 }
 application::BendPreviewResult SingleBendPreviewBuilder::buildAssignedToolSetup(
     DocumentPtr document, std::size_t index, core::BendTarget target,
-    core::ToolAssignment assignment, std::stop_token stop, double maximumEndSupportLossMm,
-    bool workpieceReversed) const {
+    core::ToolAssignment assignment, std::stop_token stop,
+    std::optional<double> maximumEndSupportLossMm, bool workpieceReversed) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     const auto tools = core::toolParameters(assignment);
     if (!tools)

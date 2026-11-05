@@ -59,7 +59,7 @@ struct BendRouteRequest {
     bool reuseCalculations = true;
     bool allowJointBends = true; // Reference/diagnostic switch; no geometric rule is relaxed.
     std::optional<double> maximumEndSupportLossMm =
-        std::nullopt; // Null: legacy explicitly unbounded preview.
+        std::nullopt; // Null with allowPartialEndSupport: measured outer end losses are warnings.
     // Explicit checked tool-selection command only. Empty preserves ordinary route behaviour.
     std::vector<RouteToolVariant> toolVariants;
     // Informational callback on the CAD worker. Not part of a geometric cache key.

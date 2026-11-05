@@ -646,7 +646,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     .arg(step.fixedSecond ? "B" : "A")
                     .arg(stepZones(step));
         }
-        message += route_->partialEndSupport ? QStringLiteral("Неполная опора у торца. ")
+        message += route_->partialEndSupport
+                       ? QStringLiteral("Маршрут найден. Торцевые подрезы: возможна деформация. ")
                    : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
                                        : QStringLiteral("Движение без инструмента. ");
         if (selected_ > 0)

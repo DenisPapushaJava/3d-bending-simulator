@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
         const auto path = temporary.path() + "/joint.step";
         // A third bend supplies another step so a whole grouped operation can move.
         const auto source =
-            tools ? end_support_fixture::joint()
+            tools ? end_support_fixture::joint(.46, 8, 1.25, 2.5)
                   : BRepAlgoAPI_Cut(fixtures::channel(120),
                                     BRepPrimAPI_MakeBox(gp_Pnt(-20, -5, 45), 25, 60, 20).Shape())
                         .Shape();
@@ -79,8 +79,6 @@ int main(int argc, char **argv) {
         application::BendRouteRequest request;
         request.withTools = tools;
         request.allowPartialEndSupport = tools;
-        if (tools)
-            request.maximumEndSupportLossMm = 3;
         request.automatic = true;
         request.maximumChecks = 64;
         for (const auto index : controller.session().orderedBends()) {
@@ -99,7 +97,8 @@ int main(int argc, char **argv) {
                 "Controller did not accept a complete grouped route");
         if (tools)
             require(route->partialEndSupport &&
-                        route->steps.front().preview->endSupportIntervals().size() == 2,
+                        route->steps.front().preview->endSupportIntervals().size() == 2 &&
+                        !route->steps.front().preview->endSupportLimitMm(),
                     "Controller dropped a joint member's partial-support report");
         window.findChild<QToolButton *>("processStage2")->click();
         wait(controller);
@@ -133,6 +132,11 @@ int main(int argc, char **argv) {
                             ->text()
                             .count(QStringLiteral("Материал под опорой"), Qt::CaseInsensitive) == 2,
                     "Joint support warning collapsed two real intervals");
+        if (tools)
+            require(window.findChild<QLabel *>("bendRouteStatus")
+                        ->text()
+                        .contains(QStringLiteral("Торцевые подрезы: возможна деформация")),
+                    "Conditional route did not explain its end-relief scope");
         if (const auto output = qEnvironmentVariable("BENDING_JOINT_SNAPSHOT"); !output.isEmpty()) {
             auto *view = window.findChild<viewer::ViewerWidget *>();
             require(view && view->isVisible() && view->isReady(),

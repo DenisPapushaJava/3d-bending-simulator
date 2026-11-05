@@ -1,6 +1,10 @@
 #include "EndSupportFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
+#include "bending/cad/occt/PreviewAccess.h"
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <chrono>
 #include <iostream>
 #include <limits>
@@ -45,7 +49,7 @@ int main() {
                     "Fixture recognition failed");
             return doc;
         };
-        const auto run = [&](application::DocumentPtr doc, double limit) {
+        const auto run = [&](application::DocumentPtr doc, std::optional<double> limit) {
             const auto &b = doc->metadata().bendAnalysis.bends.front();
             return builder.buildAssignedToolMotion(doc, 0, {b.angleRadians, b.innerRadiusMm}, tool,
                                                    {}, limit);
@@ -56,10 +60,11 @@ int main() {
         collidingTool.die = tool.die;
         const auto &smallBend = small->metadata().bendAnalysis.bends.front();
         const auto collision = builder.buildAssignedToolMotion(
-            small, 0, {smallBend.angleRadians, smallBend.innerRadiusMm}, collidingTool, {}, 100);
+            small, 0, {smallBend.angleRadians, smallBend.innerRadiusMm}, collidingTool, {}, {});
         const auto *conflict = std::get_if<application::BendPreviewError>(&collision);
         require(conflict && conflict->code == application::BendPreviewErrorCode::ToolIntersection &&
-                    conflict->diagnostic && conflict->diagnostic->hasPartialEndSupport(),
+                    conflict->diagnostic && conflict->diagnostic->hasPartialEndSupport() &&
+                    !conflict->diagnostic->endSupportLimitMm(),
                 "End allowance suppressed a real tool collision or its support scope");
         require(std::get<application::BendPreviewError>(run(small, 0)).code ==
                     application::BendPreviewErrorCode::SupportNotProven,
@@ -77,10 +82,53 @@ int main() {
                     error->endSupport,
                 "Exceeding the configured end limit was not rejected/reported");
         accepted(run(excessive, 4));
+        const auto large = load("end-relief.step", 8);
+        const auto conditional = accepted(run(large, {}));
+        require(!conditional->endSupportLimitMm() &&
+                    application::validEndSupportIntervals(*conditional, {}, .001),
+                "External end relief did not retain its unbounded warning scope");
+        for (std::size_t i = 0; i < conditional->frameCount(); ++i) {
+            const auto &frame = cad::OcctPreviewAccess::frame(*conditional, i);
+            double material = 0;
+            for (const auto &region : frame.regions) {
+                GProp_GProps properties;
+                BRepGProp::VolumeProperties(region, properties);
+                material += std::abs(properties.Mass());
+            }
+            require(BRepCheck_Analyzer(frame.shape).IsValid() &&
+                        std::abs(material - large->metadata().volumeMm3) < .001,
+                    "End-relief warning changed the real contour/material during motion");
+        }
+        const auto boundedLarge = run(large, 3);
+        require(std::get<application::BendPreviewError>(boundedLarge).code ==
+                    application::BendPreviewErrorCode::EndSupportLimitExceeded,
+                "A conditional single-cycle cache entry escaped the bounded policy");
+        accepted(run(large, {}));
         const auto centre = load("middle.step", 2, true);
         require(std::get<application::BendPreviewError>(run(centre, 100)).code ==
                     application::BendPreviewErrorCode::SupportNotProven,
                 "An inner support gap was tolerated");
+        require(std::get<application::BendPreviewError>(run(centre, {})).code ==
+                    application::BendPreviewErrorCode::SupportNotProven,
+                "Warning policy admitted an internal support gap");
+        const auto absentCentre = load("no-centre.step", 26);
+        require(std::get<application::BendPreviewError>(run(absentCentre, {})).code ==
+                    application::BendPreviewErrorCode::SupportNotProven,
+                "Warning policy admitted loss of central support");
+        auto shortTool = tool_fixture::explicitPair(
+            core::PressTools{35, std::numbers::pi / 3, std::numbers::pi / 6, .8, 40, 10});
+        const auto &largeBend = large->metadata().bendAnalysis.bends.front();
+        const auto shortResult = builder.buildAssignedToolMotion(
+            large, 0, {largeBend.angleRadians, largeBend.innerRadiusMm}, shortTool, {}, {});
+        require(std::get<application::BendPreviewError>(shortResult).code ==
+                    application::BendPreviewErrorCode::ToolTooShort,
+                "End relief warning suppressed the full tool-length requirement");
+        const auto narrowTool = tool_fixture::explicitPair(
+            core::PressTools{12, std::numbers::pi / 3, std::numbers::pi / 6, .8, 80, 10});
+        const auto narrowResult = builder.buildAssignedToolMotion(
+            large, 0, {largeBend.angleRadians, largeBend.innerRadiusMm}, narrowTool, {}, {});
+        require(std::holds_alternative<application::BendPreviewError>(narrowResult),
+                "End relief warning suppressed the minimum die opening");
         require(std::get<application::BendPreviewError>(
                     run(small, std::numeric_limits<double>::quiet_NaN()))
                         .code == application::BendPreviewErrorCode::UnsupportedParameters,
@@ -104,6 +152,18 @@ int main() {
         route = builder.buildRoute(excessive, request, {});
         require(std::holds_alternative<application::BendRoutePtr>(route),
                 "Restoring the allowance reused a rejection");
+        request.maximumEndSupportLossMm.reset();
+        const auto conditionalRoute = builder.buildRoute(excessive, request, {});
+        require(std::holds_alternative<application::BendRoutePtr>(conditionalRoute) &&
+                    std::get<application::BendRoutePtr>(conditionalRoute)->partialEndSupport &&
+                    !std::get<application::BendRoutePtr>(conditionalRoute)
+                         ->steps.front()
+                         .preview->endSupportLimitMm(),
+                "Conditional route retained a bounded failure or lost its warning");
+        request.maximumEndSupportLossMm = 3;
+        require(std::holds_alternative<application::BendRouteError>(
+                    builder.buildRoute(excessive, request, {})),
+                "A conditional route bypassed the restored strict limit");
         std::cout << "End allowance: .46/3 mm, per-end boundary, strict zero, excess, inner gaps "
                      "and route-cache policy passed\n";
     } catch (const std::exception &e) {

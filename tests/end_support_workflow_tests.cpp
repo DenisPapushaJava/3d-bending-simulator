@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
         require(folder.isValid(), "No temporary folder");
         ui::setPreferencesFile(folder.path() + "/settings.ini");
         const auto path = folder.path() + "/partial.step";
-        end_support_fixture::write(native(path), .46);
+        end_support_fixture::write(native(path), 8);
         auto files = std::make_shared<project::ProjectFiles>();
         auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
         const auto tools = end_support_fixture::tools();
@@ -66,13 +66,19 @@ int main(int argc, char **argv) {
         auto *limit = window.findChild<QDoubleSpinBox *>("maximumEndSupportLoss");
         auto *apply = window.findChild<QPushButton *>("applyToolSetup");
         auto *summary = window.findChild<QLabel *>("bendCheckSummary");
-        require(limit && limit->value() == 3, "Default end allowance is not 3 mm");
+        auto *allowReliefs = window.findChild<QCheckBox *>("allowEndReliefs");
+        require(limit && limit->value() == 3 && allowReliefs && allowReliefs->isChecked() &&
+                    !limit->isEnabled(),
+                "Default relief policy or retained strict limit is wrong");
         apply->click();
         wait([&] { return !controller.hasWork(); });
         if (controller.bendPreviewError())
             throw std::runtime_error(controller.bendPreviewError()->detail);
         require(controller.bendPreview() && controller.bendPreview()->hasPartialEndSupport() &&
-                    summary->text().contains("0.46") && summary->styleSheet().contains("#FFF2CC"),
+                    summary->text().contains("8.00") &&
+                    summary->text().contains(QStringLiteral("возможна деформация")) &&
+                    !controller.bendPreview()->endSupportLimitMm() &&
+                    summary->styleSheet().contains("#FFF2CC"),
                 "Single bend was blocked or presented as fully supported");
         if (const auto output = qEnvironmentVariable("BENDING_SUPPORT_SNAPSHOT");
             !output.isEmpty()) {
@@ -86,6 +92,7 @@ int main(int argc, char **argv) {
         }
         const auto edit = controller.session().editRevision();
         window.findChild<QToolButton *>("processStage1")->click();
+        allowReliefs->setChecked(false);
         limit->setValue(.25);
         require(!controller.bendPreview() && !controller.hasWork(),
                 "Policy edit kept validation or started heavy work");
@@ -97,6 +104,7 @@ int main(int argc, char **argv) {
                     summary->text().contains(QStringLiteral("превышает допуск")),
                 "A tighter allowance did not reject/report the shortage");
         window.findChild<QToolButton *>("processStage1")->click();
+        allowReliefs->setChecked(true);
         limit->setValue(3);
         apply->click();
         wait([&] { return !controller.hasWork(); });
@@ -105,6 +113,28 @@ int main(int argc, char **argv) {
                 "Restoring policy lost the preview or modified the CAD/project");
         require(ui::preferences()->value("checks/maximumEndSupportLossMm").toDouble() == 3,
                 "End allowance was not stored as a local preference");
+        require(ui::preferences()->value("checks/allowEndReliefs").toBool() &&
+                    !controller.bendPreview()->endSupportLimitMm(),
+                "Restored warning policy was not stored or its report lost scope");
+        ui::MainWindow restored({"test", "test"}, files, files, builder, {tools.punch, tools.die});
+        require(restored.findChild<QCheckBox *>("allowEndReliefs")->isChecked() &&
+                    !restored.findChild<QDoubleSpinBox *>("maximumEndSupportLoss")->isEnabled(),
+                "Warning policy was not restored in a new editor");
+        window.findChild<QToolButton *>("processStage1")->click();
+        window.findChild<QCheckBox *>("backgaugeEnabled")->setChecked(false);
+        auto *recommend = window.findChild<QPushButton *>("recommendTools");
+        require(recommend && recommend->isEnabled(), "No checked tool selection for end reliefs");
+        recommend->click();
+        wait([&] { return !controller.hasWork(); });
+        if (const auto error = controller.bendRouteError())
+            throw std::runtime_error("Conditional checked tooling: " + error->detail);
+        require(controller.bendRoute() && controller.bendRoute()->selectedToolVariant &&
+                    controller.bendRoute()->partialEndSupport &&
+                    !controller.bendRoute()->steps.front().preview->endSupportLimitMm() &&
+                    window.findChild<QLabel *>("toolRecommendation")
+                        ->text()
+                        .contains(QStringLiteral("торцевые подрезы")),
+                "Checked tooling hid or lost the conditional route warning");
         std::cout << "Single-bend end allowance: default, warning, rejection, invalidation and "
                      "local persistence passed\n";
     } catch (const std::exception &e) {

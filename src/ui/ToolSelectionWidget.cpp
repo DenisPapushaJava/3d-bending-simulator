@@ -221,6 +221,14 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(clearance_, &QDoubleSpinBox::valueChanged, this, [this] { changed(); });
     auto *clearanceForm = new QFormLayout;
     clearanceForm->addRow(QStringLiteral("Начальный зазор, мм:"), clearance_);
+    allowEndReliefs_ = new QCheckBox(QStringLiteral("Допускать торцевые подрезы"), this);
+    allowEndReliefs_->setObjectName("allowEndReliefs");
+    allowEndReliefs_->setToolTip(QStringLiteral(
+        "При сохранённой центральной опоре расчёт продолжается с предупреждением. "
+        "Местная деформация торцов не рассчитывается. Столкновения, внутренние разрывы "
+        "опоры и ограничения инструмента проверяются."));
+    allowEndReliefs_->setChecked(preferences()->value("checks/allowEndReliefs", true).toBool());
+    clearanceForm->addRow(allowEndReliefs_);
     endSupportLimit_ = new QDoubleSpinBox(this);
     endSupportLimit_->setObjectName("maximumEndSupportLoss");
     endSupportLimit_->setAccessibleName(QStringLiteral("Допуск нехватки опоры у каждого торца"));
@@ -235,9 +243,20 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         "В пределах допуска доступен просмотр с предупреждением; нагрузка и устойчивость "
         "не подтверждаются. Внутренние разрывы и столкновения не разрешаются."));
     clearanceForm->addRow(QStringLiteral("Допуск у торца:"), endSupportLimit_);
+    const auto updateEndLimit = [this, label = clearanceForm->labelForField(endSupportLimit_)] {
+        endSupportLimit_->setEnabled(!allowEndReliefs_->isChecked());
+        label->setEnabled(!allowEndReliefs_->isChecked());
+    };
+    updateEndLimit();
+    connect(allowEndReliefs_, &QCheckBox::toggled, this, [this, updateEndLimit](bool enabled) {
+        preferences()->setValue("checks/allowEndReliefs", enabled);
+        updateEndLimit();
+        changed();
+    });
     connect(endSupportLimit_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         preferences()->setValue("checks/maximumEndSupportLossMm", value);
-        changed();
+        if (!allowEndReliefs_->isChecked())
+            changed();
     });
     realGeometry_ = new QCheckBox(QStringLiteral("Использовать известные формы DXF"), this);
     realGeometry_->setObjectName(QStringLiteral("useDrawingToolGeometry"));
@@ -497,8 +516,8 @@ void ToolSelectionWidget::populateGrooves(std::size_t selected) {
 bool ToolSelectionWidget::usesCatalog() const {
     return mode_->currentIndex() == 0;
 }
-double ToolSelectionWidget::maximumEndSupportLossMm() const {
-    return endSupportLimit_->value();
+std::optional<double> ToolSelectionWidget::maximumEndSupportLossMm() const {
+    return allowEndReliefs_->isChecked() ? std::nullopt : std::optional(endSupportLimit_->value());
 }
 std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
     const auto *p = preset(punch_);

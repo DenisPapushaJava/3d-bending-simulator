@@ -445,12 +445,20 @@ class RouteSearch {
         return {mask, inputs[op.bendIndex], side, std::move(members)};
     }
     // 0 = verified success, 1 = unknown, 2 = stable rejection of this exact transition.
-    int priorResult(Mask mask, const RouteOperation &op, bool side) const {
+    int priorResult(Mask mask, const RouteOperation &op, bool side,
+                    const std::vector<RouteOperation> &additional = {}) const {
         if (!request.reuseCalculations)
             return 1;
-        if (const auto *verdict = cache->verdicts.peek(key(mask, op, side)))
+        if (const auto *verdict = cache->verdicts.peek(key(mask, op, side, additional)))
             return verdict->has_value() ? 2 : 0;
         return 1;
+    }
+    std::array<double, 2> supportRank(Mask mask, const RouteOperation &op, bool side,
+                                      const std::vector<RouteOperation> &additional = {}) const {
+        if (request.withTools && request.reuseCalculations)
+            if (const auto *preview = cache->transitions.peek(key(mask, op, side, additional)))
+                return endSupportLossRank(**preview);
+        return {}; // Unknown is neutral. Ranking never requests a new CAD transition.
     }
     void remember(TransitionKey key, BendPreviewResult result) {
         if (!request.reuseCalculations)
@@ -572,8 +580,11 @@ class RouteSearch {
                 // walls. It changes order only, never rejects a candidate or an orientation.
                 const auto prior =
                     request.allowWorkpieceRotation
-                        ? std::min(priorResult(mask, op, false), priorResult(mask, op, true))
-                        : priorResult(mask, op, op.workpieceReversed);
+                        ? std::min(
+                              std::pair{priorResult(mask, op, false), supportRank(mask, op, false)},
+                              std::pair{priorResult(mask, op, true), supportRank(mask, op, true)})
+                        : std::pair{priorResult(mask, op, op.workpieceReversed),
+                                    supportRank(mask, op, op.workpieceReversed)};
                 // A parallel open chain has a useful continuation direction. This is a
                 // tie-breaker only: interior bends and the other end remain candidates.
                 const auto continuation =
@@ -631,7 +642,10 @@ class RouteSearch {
         const bool preferred = preferredSide(mask, op, bit);
         std::array<bool, 2> sides{preferred, !preferred};
         if (request.allowWorkpieceRotation && request.rankCandidates &&
-            priorResult(mask, op, sides[1]) < priorResult(mask, op, sides[0]))
+            std::pair{priorResult(mask, op, sides[1], additional),
+                      supportRank(mask, op, sides[1], additional)} <
+                std::pair{priorResult(mask, op, sides[0], additional),
+                          supportRank(mask, op, sides[0], additional)})
             std::swap(sides[0], sides[1]);
         for (std::size_t choice = 0; choice < (request.allowWorkpieceRotation ? 2u : 1u);
              ++choice) {
@@ -775,7 +789,7 @@ struct SingleBendPreviewBuilder::SingleCache {
         bool reversed, motion;
         core::PressTools tools;
         std::optional<core::ToolAssignment> assignment;
-        double supportLimit;
+        std::optional<double> supportLimit;
         bool operator==(const Key &) const = default;
     };
     DocumentPtr source;
@@ -785,7 +799,7 @@ struct SingleBendPreviewBuilder::SingleCache {
 BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
     DocumentPtr document, std::size_t index, core::BendTarget target, bool reversed,
     std::stop_token stop, core::PressTools tools, bool motion,
-    std::optional<core::ToolAssignment> assignment, double limit) const {
+    std::optional<core::ToolAssignment> assignment, std::optional<double> limit) const {
     if (stop.stop_requested())
         return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
     std::shared_ptr<SingleCache> cache;
@@ -812,7 +826,7 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
                                ? std::optional{normalBendAxis(*native, index)}
                                : std::nullopt;
     auto result = buildBendOperation(document, index, target, reversed, stop, tools, motion,
-                                     std::move(assignment), limit > 0, limit, reference);
+                                     std::move(assignment), !limit || *limit > 0, limit, reference);
     const auto *error = std::get_if<BendPreviewError>(&result);
     if (!stop.stop_requested() && (!error || stableRejection(error->code))) {
         std::lock_guard guard(cache->mutex);

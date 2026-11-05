@@ -264,9 +264,12 @@ class TestPreview final : public SingleBendPreview {
   public:
     explicit TestPreview(bool tools = false, bool motion = false, bool certified = true,
                          bending::core::MachineModel machine = bending::core::MachineModel::None,
-                         bool support = true)
+                         bool support = true, std::optional<double> supportLimit = 0)
         : withTools_(tools), withMotion_(motion), certified_(certified), machine_(machine),
-          support_(support) {}
+          support_(support), supportLimit_(supportLimit) {}
+    std::optional<double> endSupportLimitMm() const noexcept override {
+        return supportLimit_;
+    }
     std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
         return withTools_ && support_ ? std::span<const BendSupportInterval>(intervals_)
                                       : std::span<const BendSupportInterval>{};
@@ -302,6 +305,7 @@ class TestPreview final : public SingleBendPreview {
     bool certified_;
     bending::core::MachineModel machine_;
     bool support_;
+    std::optional<double> supportLimit_;
     std::array<BendSupportInterval, 1> intervals_{{{0, {80, 0, 80}}}};
     bending::simulation::PressMotion motion_{};
     bending::simulation::PressState state_{};
@@ -315,29 +319,29 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
   public:
     BendPreviewResult buildToolMotion(DocumentPtr document, std::size_t index,
                                       bending::core::BendTarget target, bending::core::PressTools,
-                                      std::stop_token stop, double = 0,
+                                      std::stop_token stop, std::optional<double> limit = 0,
                                       bool = false) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
         }
-        return BendPreviewPtr(std::make_shared<TestPreview>(true, true, !omitRetraction.load(),
-                                                            bending::core::MachineModel::None,
-                                                            !omitSupport.load()));
+        return BendPreviewPtr(std::make_shared<TestPreview>(
+            true, true, !omitRetraction.load(), bending::core::MachineModel::None,
+            !omitSupport.load(), wrongPolicy ? std::optional<double>(0) : limit));
     }
     BendPreviewResult buildToolSetup(DocumentPtr document, std::size_t index,
                                      bending::core::BendTarget target, bending::core::PressTools,
-                                     std::stop_token stop, double = 0,
+                                     std::stop_token stop, std::optional<double> limit = 0,
                                      bool = false) const override {
         const auto result = build(document, index, target, false, stop);
         if (const auto *failure = std::get_if<BendPreviewError>(&result)) {
             return *failure;
         }
-        return BendPreviewPtr(
-            std::make_shared<TestPreview>(true, false, true,
-                                          omitFloor ? bending::core::MachineModel::DemoPressV3
-                                                    : bending::core::MachineModel::None,
-                                          !omitSupport.load()));
+        return BendPreviewPtr(std::make_shared<TestPreview>(
+            true, false, true,
+            omitFloor ? bending::core::MachineModel::DemoPressV3
+                      : bending::core::MachineModel::None,
+            !omitSupport.load(), wrongPolicy ? std::optional<double>(0) : limit));
     }
     BendPreviewResult build(DocumentPtr, std::size_t, bending::core::BendTarget, bool,
                             std::stop_token) const override {
@@ -369,6 +373,7 @@ class GatedPreviewBuilder final : public SingleBendPreviewBuilder {
     std::atomic<bool> omitRetraction{false};
     std::atomic<bool> omitFloor{false};
     std::atomic<bool> omitSupport{false};
+    std::atomic<bool> wrongPolicy{false};
 };
 void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
     const auto importer = std::make_shared<GatedImporter>();
@@ -433,6 +438,21 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
                     controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
                 "Tool preview without its support-interval proof was accepted");
         builder->omitSupport = false;
+        prepare();
+        waitUntil(finished);
+        require(controller.prepareBendPreview(0, false, builder, mode, {}),
+                "Cannot request an end-relief warning cycle");
+        waitUntil(finished);
+        require(controller.bendPreview() && !controller.bendPreview()->endSupportLimitMm(),
+                "Conditional cycle did not retain its scope");
+        builder->wrongPolicy = true;
+        require(controller.prepareBendPreview(0, false, builder, mode, {}),
+                "Cannot request a conditional cycle for scope validation");
+        waitUntil(finished);
+        require(!controller.bendPreview() && controller.bendPreviewError() &&
+                    controller.bendPreviewError()->code == BendPreviewErrorCode::Failed,
+                "A mismatched support-policy snapshot was accepted");
+        builder->wrongPolicy = false;
         prepare();
         waitUntil(finished);
     }

@@ -217,6 +217,23 @@ void checkJointOperation(const std::filesystem::path &path) {
     require(std::holds_alternative<application::BendRoutePtr>(
                 partialBuilder.buildRoute(partial, partialRequest, {})),
             "Joint cache retained a refusal after restoring the limit");
+    partialRequest.maximumEndSupportLossMm.reset();
+    for (const bool automatic : {false, true}) {
+        partialRequest.automatic = automatic;
+        const auto result = partialBuilder.buildRoute(excessive, partialRequest, {});
+        if (const auto *failure = std::get_if<application::BendRouteError>(&result))
+            throw std::runtime_error("Conditional joint route: " + failure->detail);
+        const auto route = std::get<application::BendRoutePtr>(result);
+        const auto preview = route->steps.front().preview;
+        require(route->steps.size() == 1 && route->partialEndSupport &&
+                    preview->endSupportIntervals().size() == 2 && !preview->endSupportLimitMm() &&
+                    application::validEndSupportIntervals(*preview, {}, .001),
+                "Conditional joint route lost a member or its warning scope");
+    }
+    partialRequest.maximumEndSupportLossMm = 3;
+    require(std::holds_alternative<application::BendRouteError>(
+                partialBuilder.buildRoute(excessive, partialRequest, {})),
+            "A conditional group cache entry escaped the restored bounded policy");
     // Composite radial end with a slope and straight cap, identical through thickness.
     const auto trimmed =
         import(BRepAlgoAPI_Cut(composite_fixture::part(120),
