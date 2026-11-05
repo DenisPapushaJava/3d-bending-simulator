@@ -465,10 +465,9 @@ class DrawingDialog::Impl {
     QSlider *sectionSlider;
     QDoubleSpinBox *sectionPercent;
     QPushButton *sectionAuto;
-    QTimer *sectionTimer;
     std::vector<application::DrawingSectionEdit> sectionEdits;
     std::vector<std::size_t> activeCut;
-    bool sectionPending = false, sectionRefresh = false, activeUnit = false;
+    bool sectionDirty = false, sectionRefresh = false, activeUnit = false;
     std::vector<DrawingViewChoice> choices;
     application::BendingDrawingPtr compositionSource;
     std::shared_ptr<const DrawingSheetPlan> plan;
@@ -555,15 +554,14 @@ class DrawingDialog::Impl {
         sectionAuto->setEnabled(edited != sectionEdits.end());
         sectionOptions->setEnabled(!settingsChanged && controller.session().revision() == revision);
     }
-    void queueSection() {
-        sectionPending = true;
+    void invalidateSection() {
+        sectionDirty = true;
         sectionRefresh = true;
         const auto row = views->currentRow();
         activeUnit = compositionSource && row >= 0 &&
                      static_cast<std::size_t>(row) < choices.size() &&
                      choices[row].key.kind == DrawingViewKind::Section &&
                      compositionSource->sections[choices[row].key.index].repeatCount != 0;
-        sectionTimer->start();
         cancelLayout();
         layoutTimer->stop();
         plan.reset();
@@ -589,16 +587,10 @@ class DrawingDialog::Impl {
             sectionEdits.push_back(std::move(edit));
         std::sort(sectionEdits.begin(), sectionEdits.end(),
                   [](const auto &a, const auto &b) { return a.bends < b.bends; });
-        queueSection();
-    }
-    void submitSections() {
-        if (!sectionPending || sectionTimer->isActive() || controller.hasWork())
-            return;
-        sectionPending = false;
-        build();
+        invalidateSection();
     }
     bool ensurePlan(const application::BendingDrawingPtr &drawing) {
-        if (sectionPending)
+        if (sectionDirty)
             return false;
         if (compositionSource != drawing) {
             const auto previousSource = compositionSource;
@@ -753,6 +745,11 @@ class DrawingDialog::Impl {
         exportPdf->setEnabled(false);
         image->clear();
         selectionControls();
+        if (sectionDirty) {
+            layoutTimer->stop();
+            refresh();
+            return;
+        }
         showLayoutProgress();
         layoutTimer->start();
     }
@@ -778,8 +775,7 @@ class DrawingDialog::Impl {
             });
     }
     void invalidate() {
-        sectionTimer->stop();
-        sectionPending = false;
+        sectionDirty = false;
         sectionRefresh = false;
         sectionEdits.clear();
         cancelLayout();
@@ -794,7 +790,7 @@ class DrawingDialog::Impl {
     }
     void render(bool contentChanged = true) {
         const auto drawing = controller.drawing();
-        if (!drawing || settingsChanged || sectionPending || controller.isPreparingDrawing() ||
+        if (!drawing || settingsChanged || sectionDirty || controller.isPreparingDrawing() ||
             layoutBusy || layoutTimer->isActive() || !layoutError.isEmpty() ||
             controller.session().revision() != revision)
             return;
@@ -854,13 +850,14 @@ class DrawingDialog::Impl {
         exportPdf->setEnabled(same && !busy && drawing && !settingsChanged && plan && !layoutBusy &&
                               !layoutTimer->isActive() && layoutError.isEmpty());
         sectionControls();
-        if (sectionPending && same && !settingsChanged) {
-            if (!busy && !sectionTimer->isActive()) {
-                submitSections();
-                return;
-            }
-            preview->showState(QStringLiteral("Подготовка сечения"),
-                               QStringLiteral("Строим сечение и обновляем лист…"), true);
+        if (sectionDirty && same && !settingsChanged) {
+            preview->showState(
+                QStringLiteral("Сечение изменено"),
+                busy ? QStringLiteral("Дождитесь завершения текущей операции.")
+                     : QStringLiteral("Перестройте чертёж, чтобы применить настройки."),
+                busy, busy ? QString{} : QStringLiteral("Перестроить чертёж"), [this] { build(); });
+            status->setText(QStringLiteral("Сечение изменено"));
+            status->setToolTip({});
             exportPdf->setEnabled(false);
             return;
         }
@@ -972,7 +969,8 @@ class DrawingDialog::Impl {
         }
     }
     void build() {
-        if (!controller.session().document() || controller.session().revision() != revision)
+        if (!controller.session().document() || controller.session().revision() != revision ||
+            controller.hasWork())
             return;
         application::DrawingRequest request;
         if (base->currentIndex() == 1)
@@ -981,6 +979,7 @@ class DrawingDialog::Impl {
         request.reverseView = reverse->isChecked();
         request.allowBreaks = breaks->isChecked();
         request.sectionEdits = sectionEdits;
+        sectionDirty = false;
         settingsChanged = false;
         layoutError.clear();
         cancelLayout();
@@ -1205,10 +1204,6 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->layoutTimer->setSingleShot(true);
     impl_->layoutTimer->setInterval(16);
     connect(impl_->layoutTimer, &QTimer::timeout, this, [this] { impl_->refresh(); });
-    impl_->sectionTimer = new QTimer(this);
-    impl_->sectionTimer->setSingleShot(true);
-    impl_->sectionTimer->setInterval(220);
-    connect(impl_->sectionTimer, &QTimer::timeout, this, [this] { impl_->submitSections(); });
     impl_->layouts = std::make_unique<DrawingLayoutController>();
     connect(impl_->layouts.get(), &DrawingLayoutController::ready, this,
             [this](std::shared_ptr<const DrawingSheetPlan> plan) {
@@ -1306,7 +1301,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     connect(impl_->sectionAuto, &QPushButton::clicked, this, [this] {
         std::erase_if(impl_->sectionEdits,
                       [&](const auto &e) { return e.bends == impl_->activeCut; });
-        impl_->queueSection();
+        impl_->invalidateSection();
     });
     connect(impl_->flatSide, &QComboBox::currentIndexChanged, this,
             [this] { impl_->scheduleLayout(); });
@@ -1380,8 +1375,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
     QTimer::singleShot(0, this, [this] { impl_->build(); });
 }
 void DrawingDialog::done(int result) {
-    impl_->sectionTimer->stop();
-    impl_->sectionPending = false;
+    impl_->sectionDirty = false;
     impl_->cancelLayout();
     impl_->refit->stop();
     impl_->layoutTimer->stop();
@@ -1393,7 +1387,6 @@ void DrawingDialog::done(int result) {
     QDialog::done(result);
 }
 DrawingDialog::~DrawingDialog() {
-    impl_->sectionTimer->stop();
     impl_->cancelLayout();
 }
 } // namespace bending::ui

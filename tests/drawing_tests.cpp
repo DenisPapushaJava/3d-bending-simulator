@@ -1975,8 +1975,9 @@ void sectionControlsWorkflow(const QString &folder) {
     auto *percent = dialog->findChild<QDoubleSpinBox *>("drawingSectionPercent");
     auto *slider = dialog->findChild<QSlider *>("drawingSectionSlider");
     auto *automatic = dialog->findChild<QPushButton *>("drawingSectionAuto");
+    auto *rebuild = dialog->findChild<QPushButton *>("drawingPreviewRetry");
     require(list && scale && options && place && flip && percent && slider && automatic &&
-                !options->isVisible(),
+                rebuild && !options->isVisible(),
             "Section-only controls are missing or shown on a projection");
     const auto initial = controller.drawing();
     const auto grouped = std::find_if(initial->sections.begin(), initial->sections.end(),
@@ -2021,21 +2022,40 @@ void sectionControlsWorkflow(const QString &folder) {
             "Position control does not show the actual automatic fraction");
     scale->setCurrentIndex(scale->findData(.5));
     wait([&] { return save->isEnabled(); });
+    const auto awaitManual = [&] {
+        const int calls = builder->calls;
+        QElapsedTimer idle;
+        idle.start();
+        wait([&] { return idle.elapsed() >= 350; });
+        require(builder->calls == calls && !controller.hasWork() && !save->isEnabled() &&
+                    image->pixmap().isNull() && rebuild->isVisible() &&
+                    rebuild->text() == QStringLiteral("Перестроить чертёж"),
+                "Section settings started CAD or restored stale paper without a rebuild click");
+    };
     const int before = builder->calls;
-    percent->setValue(25);
-    percent->setValue(28);
+    slider->setValue(250);
+    slider->setValue(280);
     percent->setValue(35);
     require(!save->isEnabled(), "Stale drawing stayed exportable during section editing");
+    dialog->resize(dialog->size() + QSize(20, 10));
+    awaitManual();
+    require(builder->calls == before && controller.drawing() == initial,
+            "Changing a section submitted CAD before explicit confirmation");
+    const auto snapshot = qEnvironmentVariable("BENDING_SECTION_CONTROLS_SNAPSHOT");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".pending.png"), "Cannot save rebuild overlay");
+    rebuild->click();
     wait([&] { return !controller.hasWork() && save->isEnabled(); });
     require(builder->calls == before + 1 && location() &&
                 std::abs(location()->fraction - .35) < 1e-9 && slider->value() == 350 &&
                 scale->currentData().toDouble() == .5,
-            "Debounce lost the final position, scale or started redundant CAD jobs");
-    const auto snapshot = qEnvironmentVariable("BENDING_SECTION_CONTROLS_SNAPSHOT");
+            "Manual rebuild lost the final position, scale or started redundant CAD jobs");
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".edited.png"), "Cannot save section editor");
     const auto station = location()->station;
     flip->click();
+    awaitManual();
+    rebuild->click();
     wait([&] { return !controller.hasWork() && save->isEnabled(); });
     require(location() && location()->reversed && std::abs(location()->fraction - .35) < 1e-9 &&
                 std::hypot(location()->station.x - station.x, location()->station.y - station.y,
@@ -2062,16 +2082,24 @@ void sectionControlsWorkflow(const QString &folder) {
         require(dialog->grab().save(snapshot + ".reversed.png"), "Cannot save reversed section");
     builder->hold = true;
     percent->setValue(42);
+    rebuild->click();
     wait([&] { return controller.isPreparingDrawing(); });
     percent->setValue(61);
     builder->hold = false;
+    wait([&] { return !controller.hasWork(); });
+    awaitManual();
+    rebuild->click();
     wait([&] { return !controller.hasWork() && save->isEnabled(); });
     require(builder->cancelled > 0 && location() && std::abs(location()->fraction - .61) < 1e-9,
             "A superseded section build published its obsolete position");
     percent->setValue(0);
+    awaitManual();
+    rebuild->click();
     wait([&] { return !controller.hasWork() && (save->isEnabled() || controller.drawingError()); });
     require(automatic->isEnabled(), "A failed boundary cut cannot be reset");
     automatic->click();
+    awaitManual();
+    rebuild->click();
     wait([&] { return !controller.hasWork() && save->isEnabled(); });
     require(location() && !location()->reversed &&
                 std::abs(location()->fraction - grouped->locations[1].fraction) < 1e-9 &&
@@ -2085,7 +2113,7 @@ void sectionControlsWorkflow(const QString &folder) {
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     QApplication::processEvents();
     require(builder->calls == calls && !controller.hasWork(),
-            "Closing the dialog submitted a pending section request");
+            "Closing the dialog submitted unapplied section settings");
     window.close();
 }
 void workflow(const QString &folder) {
