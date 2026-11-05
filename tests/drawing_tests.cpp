@@ -1068,9 +1068,37 @@ void sectionEditLimit(const QString &folder) {
             "An edit sharing an existing section was rejected at the limit");
     request.sectionEdits.front().reversed = true;
     const auto result = cad::BendingDrawingBuilder{}.build(document, request, {});
-    const auto *error = std::get_if<application::DrawingError>(&result);
-    require(error && error->detail.find("16") != std::string::npos && !error->cancelled,
-            "A manual section beyond the limit was silently omitted or misreported");
+    if (const auto *error = std::get_if<application::DrawingError>(&result)) {
+        if (error->detail.find("16") == std::string::npos || error->cancelled)
+            throw std::runtime_error("Unexpected single-edit limit result: " + error->detail);
+    } else {
+        // SDK topology order can admit the edit before a later automatic fallback.
+        // A successful result must actually publish the requested location and direction.
+        const auto edited = std::get<application::BendingDrawingPtr>(result);
+        bool applied = false;
+        for (const auto &section : edited->sections)
+            for (const auto &at : section.locations) {
+                auto key = at.bends;
+                std::sort(key.begin(), key.end());
+                applied =
+                    applied || (key == ids && at.reversed && std::abs(at.fraction - .5) < 1e-9);
+            }
+        require(edited->sections.size() == 16 && applied,
+                "A successful capped drawing omitted or changed the manual section");
+    }
+    // Make every candidate explicit so the seventeenth distinct section is manual
+    // regardless of the kernel's face/profile enumeration order.
+    request.sectionEdits.clear();
+    for (const auto &profile : drawing->profiles) {
+        auto key = profile.bends;
+        std::sort(key.begin(), key.end());
+        request.sectionEdits.push_back({key, .5, key == ids});
+    }
+    const auto overflow = cad::BendingDrawingBuilder{}.build(document, request, {});
+    const auto *limit = std::get_if<application::DrawingError>(&overflow);
+    if (!limit || limit->detail.find("16") == std::string::npos || limit->cancelled)
+        throw std::runtime_error("A manual section beyond the limit was omitted or misreported: " +
+                                 (limit ? limit->detail : "unexpected success"));
     require(document->sourceStep() == bytes, "Section-limit handling modified the source STEP");
 }
 void classicalDrawing(const QString &folder) {

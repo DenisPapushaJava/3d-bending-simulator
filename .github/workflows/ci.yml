@@ -83,7 +83,13 @@ jobs:
           persist-credentials: false
       - name: Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo bash scripts/install-linux-deps.sh
+        run: |
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
+            if [ -f "$source" ]; then
+              sudo sed -i 's|azure.archive.ubuntu.com/ubuntu|archive.ubuntu.com/ubuntu|g' "$source"
+            fi
+          done
+          sudo bash scripts/install-linux-deps.sh
       - name: Windows SDK
         if: runner.os == 'Windows'
         uses: ./.github/actions/windows-sdk
