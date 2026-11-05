@@ -75,6 +75,7 @@ struct BendRouteRequest {
     std::optional<RouteAssemblySearch> assemblySearch = {};
     // Explicit automatic search only; fixed/manual requests retain their exact offset.
     bool allowAxialPlacement = false;
+    bool reusePlacementPreparation = true; // Reference switch; no change to checked scope.
 };
 // Apply one input snapshot without changing IDs, targets, order or workpiece orientations.
 [[nodiscard]] bool applyRouteToolVariant(BendRouteRequest &, std::size_t variant);
@@ -92,6 +93,8 @@ struct BendRouteStatistics {
     std::size_t shapeRankedToolVariants = 0;
     std::uint64_t toolShapeRankingUs = 0;
     std::size_t plannedAssemblies = 0, reusedAssemblyPlans = 0;
+    std::size_t preparedOperations = 0, reusedOperationPreparations = 0;
+    std::uint64_t operationPreparationUs = 0, placementEvaluationUs = 0;
 };
 struct BendRouteStep {
     std::string id;

@@ -581,7 +581,7 @@ class RouteSearch {
     }
     BendPreviewResult transition(Mask mask, const RouteOperation &op, bool fixedSecond,
                                  const std::vector<RouteOperation> &additional,
-                                 const TransitionKey &wanted) {
+                                 const TransitionKey &wanted, PreparedBendOperationPtr &prepared) {
         if (request.reuseCalculations) {
             if (const auto *preview = cache->transitions.find(wanted)) {
                 ++statistics.reusedTransitions;
@@ -625,12 +625,35 @@ class RouteSearch {
             check(memberReference.IsParallel(reference, 1e-6),
                   "Joint zones use different workpiece orientation references");
         }
-        auto preview =
-            buildBendOperation(after->document, *after->indices[op.bendIndex], op.target,
-                               fixedSecond, stop, request.withTools ? op.tools : std::nullopt,
-                               request.withTools, request.withTools ? op.assignment : std::nullopt,
-                               request.allowPartialEndSupport, request.maximumEndSupportLossMm,
-                               reference, false, &statistics.backgauge, joint, wanted.axialOffset);
+        if (!request.reusePlacementPreparation || !request.reuseCalculations)
+            prepared.reset();
+        const auto elapsedUs = [](const auto &start) {
+            return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                  std::chrono::steady_clock::now() - start)
+                                                  .count());
+        };
+        BendPreviewResult preview =
+            BendPreviewError{BendPreviewErrorCode::Failed, "Operation preparation unavailable"};
+        if (!prepared) {
+            const auto start = std::chrono::steady_clock::now();
+            auto result = prepareBendOperation(
+                after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
+                request.withTools ? op.tools : std::nullopt, request.withTools,
+                request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
+                request.maximumEndSupportLossMm, reference, joint);
+            ++statistics.preparedOperations;
+            statistics.operationPreparationUs += elapsedUs(start);
+            if (const auto *failure = std::get_if<BendPreviewError>(&result))
+                preview = *failure;
+            else
+                prepared = std::get<PreparedBendOperationPtr>(std::move(result));
+        } else
+            ++statistics.reusedOperationPreparations;
+        if (prepared) {
+            const auto start = std::chrono::steady_clock::now();
+            preview = prepared->at(wanted.axialOffset, stop, false, &statistics.backgauge);
+            statistics.placementEvaluationUs += elapsedUs(start);
+        }
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
             if (failure->code == BendPreviewErrorCode::BackgaugeUnavailable)
                 ++statistics.backgauge.noReferenceTransitions;
@@ -880,6 +903,7 @@ class RouteSearch {
             }
             if (!matching)
                 continue;
+            PreparedBendOperationPtr prepared;
             for (const double offset :
                  axialPlacements(mask, op, fixedSecond, required, additional, baseKey)) {
                 cancelled(stop);
@@ -900,7 +924,7 @@ class RouteSearch {
                     auto wanted = baseKey;
                     wanted.fixedSecond = fixedSecond;
                     wanted.axialOffset = offset;
-                    auto preview = transition(mask, op, fixedSecond, additional, wanted);
+                    auto preview = transition(mask, op, fixedSecond, additional, wanted, prepared);
                     if (request.onProgress)
                         request.onProgress(
                             {BendRoutePhase::Checking, 0, 0, attempts, op.bendIndex});
@@ -923,6 +947,9 @@ class RouteSearch {
                                       axialPlacementHalfRange(*op.tools, required) > tolerance;
                         continue;
                     }
+                    // Do not retain a preparation for every depth of the route.
+                    // The accepted preview owns its independent frames/components.
+                    prepared.reset();
                     for (auto &member : resolved)
                         member.workpieceOffsetMm = offset;
                     reversed.push_back({op.id, op.bendIndex, fixedSecond,
@@ -1303,6 +1330,10 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.toolShapeRankingUs += s.toolShapeRankingUs;
                 totals.plannedAssemblies += s.plannedAssemblies;
                 totals.reusedAssemblyPlans += s.reusedAssemblyPlans;
+                totals.preparedOperations += s.preparedOperations;
+                totals.reusedOperationPreparations += s.reusedOperationPreparations;
+                totals.operationPreparationUs += s.operationPreparationUs;
+                totals.placementEvaluationUs += s.placementEvaluationUs;
             };
             for (const auto choice : toolOrder) {
                 cancelled(stop);

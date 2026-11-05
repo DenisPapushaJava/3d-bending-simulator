@@ -1,13 +1,19 @@
+#include "BendOperation.h"
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
+#include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include <BRepBndLib.hxx>
+#include <BRepTools.hxx>
+#include <Bnd_Box.hxx>
 #include <STEPControl_Writer.hxx>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 using namespace bending;
 namespace {
@@ -58,6 +64,17 @@ application::BendRoutePtr accepted(const application::BendRouteResult &r) {
         throw std::runtime_error(e->detail);
     return std::get<application::BendRoutePtr>(r);
 }
+void sameBounds(const TopoDS_Shape &a, const TopoDS_Shape &b) {
+    check(a.IsNull() == b.IsNull(), "Prepared evaluation lost a shape");
+    if (a.IsNull())
+        return;
+    Bnd_Box x, y;
+    BRepBndLib::AddOptimal(a, x, false, false);
+    BRepBndLib::AddOptimal(b, y, false, false);
+    check(x.CornerMin().Distance(y.CornerMin()) < 1.e-7 &&
+              x.CornerMax().Distance(y.CornerMax()) < 1.e-7,
+          "Preparation reuse changed the checked/displayed geometry");
+}
 } // namespace
 int main() {
     const auto folder =
@@ -106,6 +123,11 @@ int main() {
         const auto warm = accepted(builder.buildRoute(doc, q, {}));
         check(warm->statistics.builtTransitions == 0 && warm->statistics.reusedTransitions,
               "Warm end route rebuilt a checked pose");
+        check(warm->statistics.preparedOperations == 0 &&
+                  warm->statistics.reusedOperationPreparations == 0 &&
+                  warm->statistics.operationPreparationUs == 0 &&
+                  warm->statistics.placementEvaluationUs == 0,
+              "A cache hit copied historical preparation work into this request");
         auto fixed = q;
         fixed.automatic = fixed.allowWorkpieceRotation = fixed.allowAxialPlacement = false;
         fixed.operations.clear();
@@ -181,6 +203,61 @@ int main() {
         check(std::get<application::BendPreviewError>(outside).code ==
                   application::BendPreviewErrorCode::ToolTooShort,
               "Long die incorrectly certified an uncovered punch end");
+        const auto preparation = cad::prepareBendOperation(
+            simple, 0, target, false, {}, core::toolParameters(unequal), true, unequal);
+        check(std::holds_alternative<cad::PreparedBendOperationPtr>(preparation),
+              "Cannot prepare the isolated operation");
+        const auto &prepared = std::get<cad::PreparedBendOperationPtr>(preparation);
+        const auto initial = prepared->at(0, {});
+        check(std::holds_alternative<application::BendPreviewPtr>(initial),
+              "Prepared centre failed");
+        const auto first = std::get<application::BendPreviewPtr>(initial);
+        std::ostringstream before, after;
+        BRepTools::Write(cad::OcctPreviewAccess::frame(*first, 0).shape, before);
+        check(std::holds_alternative<application::BendPreviewPtr>(prepared->at(20, {})),
+              "Prepared edge failed");
+        BRepTools::Write(cad::OcctPreviewAccess::frame(*first, 0).shape, after);
+        check(before.str() == after.str() && first->workpieceOffsetMm() == 0,
+              "A second placement mutated a previously published frame/mesh");
+        std::stop_source stopped;
+        stopped.request_stop();
+        check(
+            std::get<application::BendPreviewError>(prepared->at(-20, stopped.get_token())).code ==
+                    application::BendPreviewErrorCode::Cancelled &&
+                std::holds_alternative<application::BendPreviewPtr>(prepared->at(-20, {})),
+            "Cancellation poisoned immutable preparation or published an unchecked pose");
+        const auto activeCorner = std::find_if(
+            doc->metadata().bendAnalysis.bends.begin(), doc->metadata().bendAnalysis.bends.end(),
+            [](const auto &b) { return std::abs(b.lengthMm - 80) < .001; });
+        check(activeCorner != doc->metadata().bendAnalysis.bends.end(), "Missing corner bend");
+        const auto cornerIndex =
+            static_cast<std::size_t>(activeCorner - doc->metadata().bendAnalysis.bends.begin());
+        const auto nativeCorner = std::dynamic_pointer_cast<const cad::CadDocument>(doc);
+        const auto cornerPreparation = cad::prepareBendOperation(
+            doc, cornerIndex, {activeCorner->angleRadians, activeCorner->innerRadiusMm}, true, {},
+            original[cornerIndex].tools, true, original[cornerIndex].assignment, false, {},
+            cad::normalBendAxis(*nativeCorner, cornerIndex));
+        check(std::holds_alternative<cad::PreparedBendOperationPtr>(cornerPreparation),
+              "Corner preparation failed");
+        const auto &cp = std::get<cad::PreparedBendOperationPtr>(cornerPreparation);
+        const auto hit = cp->at(0, {});
+        check(std::holds_alternative<application::BendPreviewError>(hit) &&
+                  std::get<application::BendPreviewError>(hit).code ==
+                      application::BendPreviewErrorCode::ToolIntersection &&
+                  std::get<application::BendPreviewError>(hit).diagnostic,
+              "Prepared negative control lost its collision prefix");
+        const auto conflict = std::get<application::BendPreviewError>(hit).diagnostic;
+        std::ostringstream conflictBefore, conflictAfter;
+        BRepTools::Write(cad::OcctPreviewAccess::frame(*conflict, conflict->frameCount() - 1).shape,
+                         conflictBefore);
+        const auto endA = cp->at(-60, {}), endB = cp->at(60, {});
+        check(std::holds_alternative<application::BendPreviewPtr>(endA) ||
+                  std::holds_alternative<application::BendPreviewPtr>(endB),
+              "A rejected pose contaminated a later valid edge");
+        BRepTools::Write(cad::OcctPreviewAccess::frame(*conflict, conflict->frameCount() - 1).shape,
+                         conflictAfter);
+        check(conflictBefore.str() == conflictAfter.str() && conflict->collision(),
+              "A valid edge mutated an earlier collision snapshot");
         const auto gaugeDoc = load(fixtures::bentStrip(4, 2, std::numbers::pi / 2, 300, true, 60),
                                    folder / "gauged.step");
         auto gauged = tool_fixture::tangPair();
@@ -201,6 +278,52 @@ int main() {
                   std::get<application::BendPreviewError>(gaugeMiss).code ==
                       application::BendPreviewErrorCode::BackgaugeUnavailable,
               "Axial translation moved the fixed machine gauge ranges with the part");
+        // Both end placements lack gauge span; the centre is valid. This forces
+        // reuse between three actual installations of exactly the same operation.
+        auto centeredGauge = gauged;
+        centeredGauge.backgauge->zMinMm = -150;
+        centeredGauge.backgauge->zMaxMm = 150;
+        centeredGauge.backgauge->minimumSpacingMm = 200;
+        application::BendRouteRequest positions;
+        positions.automatic = positions.withTools = positions.allowAxialPlacement = true;
+        positions.allowWorkpieceRotation = false;
+        positions.operations.push_back(
+            {"B1", 0, target, core::toolParameters(centeredGauge), centeredGauge});
+        cad::SingleBendPreviewBuilder reusedBuilder, referenceBuilder;
+        const auto reused = accepted(reusedBuilder.buildRoute(gaugeDoc, positions, {}));
+        positions.reusePlacementPreparation = false;
+        const auto reference = accepted(referenceBuilder.buildRoute(gaugeDoc, positions, {}));
+        check(reused->evaluatedOperations == 3 && reference->evaluatedOperations == 3 &&
+                  reused->statistics.preparedOperations == 1 &&
+                  reused->statistics.reusedOperationPreparations == 2 &&
+                  reference->statistics.preparedOperations == 3 &&
+                  reference->statistics.reusedOperationPreparations == 0 &&
+                  reused->statistics.backgauge.contactSearches ==
+                      reference->statistics.backgauge.contactSearches &&
+                  reused->statistics.backgauge.collisionChecks ==
+                      reference->statistics.backgauge.collisionChecks,
+              "Preparation reuse changed placement enumeration or skipped gauge checks");
+        const auto &rp = reused->steps.front().preview, &fp = reference->steps.front().preview;
+        check(rp->workpieceOffsetMm() == 0 && fp->workpieceOffsetMm() == 0 &&
+                  rp->frameCount() == fp->frameCount() && rp->punchRetraction() &&
+                  fp->punchRetraction() && rp->backgauge()->placement == fp->backgauge()->placement,
+              "Preparation reuse changed the accepted cycle/gauge placement");
+        for (std::size_t i = 0; i < rp->frameCount(); ++i) {
+            const auto &a = cad::OcctPreviewAccess::frame(*rp, i),
+                       &b = cad::OcctPreviewAccess::frame(*fp, i);
+            for (std::size_t j = 0; j < a.regions.size(); ++j) {
+                sameBounds(a.regions[j], b.regions[j]);
+                sameBounds(a.displayRegions[j], b.displayRegions[j]);
+            }
+            for (std::size_t j = 0; j < a.tools.size(); ++j)
+                sameBounds(a.tools[j], b.tools[j]);
+            check(a.machine.size() == b.machine.size(), "Prepared machine lost a component");
+            for (std::size_t j = 0; j < a.machine.size(); ++j)
+                sameBounds(a.machine[j].shape, b.machine[j].shape);
+        }
+        std::cout << "preparation reference/reused us: "
+                  << reference->statistics.operationPreparationUs << '/'
+                  << reused->statistics.operationPreparationUs << '\n';
         const auto joint = load(fixtures::jointBend(), folder / "joint.step");
         auto jq = request(joint);
         jq.allowAxialPlacement = true;
