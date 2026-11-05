@@ -26,8 +26,10 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
@@ -1393,6 +1395,27 @@ DrawingDialog::DrawingDialog(ImportController &c,
         file->open();
     });
     QTimer::singleShot(0, this, [this] { impl_->build(); });
+}
+void DrawingDialog::showEvent(QShowEvent *event) {
+    if (!event->spontaneous() && !initialPositionSet_) {
+        initialPositionSet_ = true;
+        if (const auto *owner = parentWidget() ? parentWidget()->window() : nullptr)
+            if (auto *targetScreen = owner->screen()) {
+                setScreen(targetScreen);
+                const auto available = targetScreen->availableGeometry();
+                const auto decoration = frameGeometry().size() - size();
+                resize(size().boundedTo(available.size() - decoration));
+                auto frame = frameGeometry();
+                frame.moveCenter(owner->frameGeometry().center());
+                // Keep the initial window on its owner's monitor, including edge positions.
+                move(
+                    std::clamp(frame.x(), available.left(),
+                               std::max(available.left(), available.right() - frame.width() + 1)),
+                    std::clamp(frame.y(), available.top(),
+                               std::max(available.top(), available.bottom() - frame.height() + 1)));
+            }
+    }
+    QDialog::showEvent(event);
 }
 void DrawingDialog::done(int result) {
     impl_->sectionDirty = false;

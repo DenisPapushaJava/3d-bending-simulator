@@ -11,9 +11,11 @@ class DrawingDialog final : public QDialog {
     ~DrawingDialog() override;
 
   protected:
+    void showEvent(QShowEvent *event) override;
     void done(int result) override;
 
   private:
+    bool initialPositionSet_ = false;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

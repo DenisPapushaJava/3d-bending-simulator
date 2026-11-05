@@ -45,6 +45,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSlider>
@@ -54,6 +55,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QWheelEvent>
+#include <QWindow>
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1943,6 +1945,67 @@ class ControlledDrawingBuilder final : public application::BendingDrawingBuilder
         return cad::BendingDrawingBuilder{}.build(std::move(doc), std::move(request), stop);
     }
 };
+void drawingWindowPlacement() {
+    auto builder = std::make_shared<ControlledDrawingBuilder>();
+    ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
+    window.setAutomaticPartInputPrompt(false);
+    window.setDrawingBuilder(builder);
+    window.resize(1000, 700);
+    window.show();
+    wait([&] { return window.windowHandle() && window.windowHandle()->isExposed(); });
+    auto &controller = window.importController();
+    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step");
+    wait([&] { return !controller.hasWork(); });
+    auto *action = window.findChild<QAction *>("bendingDrawingAction");
+    require(action && action->isEnabled(), "Missing drawing action for monitor test");
+    const auto screens = QApplication::screens();
+    for (int index = 0; index < screens.size(); ++index) {
+        auto *screen = screens[index];
+        const auto available = screen->availableGeometry();
+        for (bool edge : {false, true}) {
+            window.setScreen(screen);
+            auto frame = window.frameGeometry();
+            frame.moveCenter(available.center());
+            window.move(edge ? available.bottomRight() -
+                                   QPoint(frame.width() - 1, frame.height() - 1) + QPoint(40, 40)
+                             : frame.topLeft());
+            wait([&] { return window.screen() == screen; });
+            const auto calls = builder->calls.load();
+            action->trigger();
+            QPointer<QDialog> dialog = window.findChild<QDialog *>("bendingDrawingDialog");
+            require(dialog && !dialog->isModal() && window.isEnabled(),
+                    "Drawing monitor placement changed modality");
+            wait([&] {
+                return builder->calls > calls && dialog->isVisible() && dialog->windowHandle() &&
+                       dialog->windowHandle()->isExposed() && dialog->screen() == screen &&
+                       available.contains(dialog->frameGeometry());
+            });
+            const auto placed = dialog->frameGeometry();
+            std::cout << "Drawing screen " << screen->name().toStdString() << " edge=" << edge
+                      << " frame=" << placed.x() << ',' << placed.y() << ' ' << placed.width()
+                      << 'x' << placed.height() << '\n';
+            // A subsequent activation/hide-show must preserve a deliberate manual placement.
+            auto *manualScreen = screens[(index + 1) % screens.size()];
+            dialog->setScreen(manualScreen);
+            frame = dialog->frameGeometry();
+            frame.moveCenter(manualScreen->availableGeometry().center());
+            dialog->move(frame.topLeft() + QPoint(12, 12));
+            wait([&] { return dialog->screen() == manualScreen; });
+            const auto manual = dialog->frameGeometry();
+            dialog->hide();
+            action->trigger();
+            wait([&] { return dialog->isVisible() && dialog->windowHandle()->isExposed(); });
+            require(window.findChild<QDialog *>("bendingDrawingDialog") == dialog &&
+                        dialog->frameGeometry() == manual,
+                    "Reactivating a drawing window reset its manual placement");
+            dialog->close();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            wait([&] { return !controller.hasWork(); });
+            require(dialog.isNull(), "Closed monitor fixture retained a drawing window");
+        }
+    }
+    window.close();
+}
 void previewStates() {
     auto builder = std::make_shared<ControlledDrawingBuilder>();
     ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
@@ -2735,6 +2798,10 @@ int main(int argc, char **argv) {
     QTemporaryDir temp;
     ui::setPreferencesFile(temp.path() + "/settings.ini");
     try {
+        if (app.arguments().contains(QStringLiteral("--window-placement-only"))) {
+            drawingWindowPlacement();
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--workflow-only"))) {
             pdfDestinations(temp.path());
             previewStates();
@@ -2802,6 +2869,7 @@ int main(int argc, char **argv) {
                       << bool(d->flatPattern) << '\n';
             return 0;
         }
+        drawingWindowPlacement();
         pdfDestinations(temp.path());
         flatDrawing(temp.path());
         drawingLayoutChecks();
