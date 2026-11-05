@@ -25,6 +25,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
@@ -46,6 +47,7 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSlider>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QThread>
@@ -1878,13 +1880,17 @@ void pdfDestinations(const QString &folder) {
 class ControlledDrawingBuilder final : public application::BendingDrawingBuilder {
   public:
     std::atomic_bool hold{true}, fail{true};
+    mutable std::atomic<int> calls{0}, cancelled{0};
     application::DrawingResult build(application::DocumentPtr doc,
                                      application::DrawingRequest request,
                                      std::stop_token stop) const override {
+        ++calls;
         while (hold.load() && !stop.stop_requested())
             QThread::msleep(1);
-        if (stop.stop_requested())
+        if (stop.stop_requested()) {
+            ++cancelled;
             return application::DrawingError{"Cancelled", true};
+        }
         if (fail.load())
             return application::DrawingError{"Choose a planar base face for the drawing"};
         return cad::BendingDrawingBuilder{}.build(std::move(doc), std::move(request), stop);
@@ -1939,6 +1945,147 @@ void previewStates() {
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     wait([&] { return !c.hasWork(); });
     require(closing.isNull() && !c.drawing(), "Closing loading preview published a late drawing");
+    window.close();
+}
+void sectionControlsWorkflow(const QString &folder) {
+    const auto path = folder + "/section-controls.step";
+    (void)load(segmentedWall(), path);
+    auto builder = std::make_shared<ControlledDrawingBuilder>();
+    builder->hold = false;
+    builder->fail = false;
+    ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
+    window.setAutomaticPartInputPrompt(false);
+    window.setDrawingBuilder(builder);
+    window.show();
+    window.openStep(path);
+    auto &controller = window.importController();
+    wait([&] { return !controller.hasWork(); });
+    require(controller.session().document() != nullptr, "Section editor model did not open");
+    const auto revision = controller.session().editRevision();
+    const auto bytes = std::string(controller.session().document()->sourceStep());
+    window.findChild<QAction *>("bendingDrawingAction")->trigger();
+    auto *dialog = window.findChild<QDialog *>("bendingDrawingDialog");
+    auto *save = dialog->findChild<QPushButton *>("exportDrawingPdf");
+    wait([&] { return !controller.hasWork() && save->isEnabled(); });
+    auto *list = dialog->findChild<QListWidget *>("drawingViews");
+    auto *scale = dialog->findChild<QComboBox *>("drawingViewScale");
+    auto *options = dialog->findChild<QWidget *>("drawingSectionOptions");
+    auto *place = dialog->findChild<QComboBox *>("drawingSectionPlace");
+    auto *flip = dialog->findChild<QPushButton *>("drawingSectionReverse");
+    auto *percent = dialog->findChild<QDoubleSpinBox *>("drawingSectionPercent");
+    auto *slider = dialog->findChild<QSlider *>("drawingSectionSlider");
+    auto *automatic = dialog->findChild<QPushButton *>("drawingSectionAuto");
+    require(list && scale && options && place && flip && percent && slider && automatic &&
+                !options->isVisible(),
+            "Section-only controls are missing or shown on a projection");
+    const auto initial = controller.drawing();
+    const auto grouped = std::find_if(initial->sections.begin(), initial->sections.end(),
+                                      [](const auto &s) { return s.locations.size() > 1; });
+    require(grouped != initial->sections.end(), "Fixture has no grouped section");
+    const auto index = static_cast<std::size_t>(grouped - initial->sections.begin());
+    const auto plan = ui::DrawingSheet::compose(initial, ui::DrawingSheet::defaultViews(*initial));
+    const auto at = std::find_if(plan->views.begin(), plan->views.end(), [&](const auto &v) {
+        return v.key == ui::DrawingViewKey{ui::DrawingViewKind::Section, index};
+    });
+    require(at != plan->views.end(), "Grouped section was not placed");
+    auto *page = dialog->findChild<QSpinBox *>("drawingPage");
+    page->setValue(at->page + 1);
+    auto *image = dialog->findChild<QLabel *>("drawingPreviewImage");
+    const QPoint point(
+        qRound(at->selectionBounds.center().x() / ui::DrawingSheet::widthMm * image->width()),
+        qRound(at->selectionBounds.center().y() / ui::DrawingSheet::heightMm * image->height()));
+    for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+        QMouseEvent event(type, QPointF(point), QPointF(image->mapToGlobal(point)), Qt::LeftButton,
+                          type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
+                          Qt::NoModifier);
+        QApplication::sendEvent(image, &event);
+    }
+    require(options->isVisible() && place->count() == 2,
+            "Clicking a section did not expose its location controls");
+    place->setCurrentIndex(1);
+    auto ids = grouped->locations[1].bends;
+    std::sort(ids.begin(), ids.end());
+    const auto location = [&]() -> const application::DrawingSectionLocation * {
+        const auto d = controller.drawing();
+        if (d)
+            for (const auto &s : d->sections)
+                for (const auto &l : s.locations) {
+                    auto key = l.bends;
+                    std::sort(key.begin(), key.end());
+                    if (key == ids)
+                        return &l;
+                }
+        return nullptr;
+    };
+    require(std::abs(percent->value() - grouped->locations[1].fraction * 100) < .051,
+            "Position control does not show the actual automatic fraction");
+    scale->setCurrentIndex(scale->findData(.5));
+    wait([&] { return save->isEnabled(); });
+    const int before = builder->calls;
+    percent->setValue(25);
+    percent->setValue(28);
+    percent->setValue(35);
+    require(!save->isEnabled(), "Stale drawing stayed exportable during section editing");
+    wait([&] { return !controller.hasWork() && save->isEnabled(); });
+    require(builder->calls == before + 1 && location() &&
+                std::abs(location()->fraction - .35) < 1e-9 && slider->value() == 350 &&
+                scale->currentData().toDouble() == .5,
+            "Debounce lost the final position, scale or started redundant CAD jobs");
+    const auto snapshot = qEnvironmentVariable("BENDING_SECTION_CONTROLS_SNAPSHOT");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".edited.png"), "Cannot save section editor");
+    const auto station = location()->station;
+    flip->click();
+    wait([&] { return !controller.hasWork() && save->isEnabled(); });
+    require(location() && location()->reversed && std::abs(location()->fraction - .35) < 1e-9 &&
+                std::hypot(location()->station.x - station.x, location()->station.y - station.y,
+                           location()->station.z - station.z) < 1e-7 &&
+                scale->currentData().toDouble() == .5,
+            "Reverse side moved the plane or lost selection after a grouped section split");
+    for (const auto &section : initial->sections)
+        for (const auto &old : section.locations) {
+            auto key = old.bends;
+            std::sort(key.begin(), key.end());
+            if (key == ids)
+                continue;
+            bool unchanged = false;
+            for (const auto &now : controller.drawing()->sections)
+                for (const auto &entry : now.locations) {
+                    auto actual = entry.bends;
+                    std::sort(actual.begin(), actual.end());
+                    unchanged = unchanged || (actual == key && entry.reversed == old.reversed &&
+                                              std::abs(entry.fraction - old.fraction) < 1e-9);
+                }
+            require(unchanged, "Editing one section changed another source location");
+        }
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot + ".reversed.png"), "Cannot save reversed section");
+    builder->hold = true;
+    percent->setValue(42);
+    wait([&] { return controller.isPreparingDrawing(); });
+    percent->setValue(61);
+    builder->hold = false;
+    wait([&] { return !controller.hasWork() && save->isEnabled(); });
+    require(builder->cancelled > 0 && location() && std::abs(location()->fraction - .61) < 1e-9,
+            "A superseded section build published its obsolete position");
+    percent->setValue(0);
+    wait([&] { return !controller.hasWork() && (save->isEnabled() || controller.drawingError()); });
+    require(automatic->isEnabled(), "A failed boundary cut cannot be reset");
+    automatic->click();
+    wait([&] { return !controller.hasWork() && save->isEnabled(); });
+    require(location() && !location()->reversed &&
+                std::abs(location()->fraction - grouped->locations[1].fraction) < 1e-9 &&
+                scale->currentData().toDouble() == .5 &&
+                controller.session().editRevision() == revision &&
+                controller.session().document()->sourceStep() == bytes,
+            "Auto reset lost the selected scale or changed the part/session");
+    const int calls = builder->calls;
+    percent->setValue(44);
+    dialog->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QApplication::processEvents();
+    require(builder->calls == calls && !controller.hasWork(),
+            "Closing the dialog submitted a pending section request");
     window.close();
 }
 void workflow(const QString &folder) {
@@ -2338,10 +2485,10 @@ void workflow(const QString &folder) {
                 "PDF dialog lost its save mode, suffix or overwrite confirmation");
         const auto source =
             c.session().document()->metadata().sourcePath.filename().stem().u8string();
-        const auto expected = QString::fromUtf8(reinterpret_cast<const char *>(source.data()),
-                                                static_cast<qsizetype>(source.size())) +
-                              QStringLiteral(" — чертёж.pdf");
-        require(QFileInfo(file->selectedFiles().front()).fileName() == expected,
+        const auto expectedName = QString::fromUtf8(reinterpret_cast<const char *>(source.data()),
+                                                    static_cast<qsizetype>(source.size())) +
+                                  QStringLiteral(" — чертёж.pdf");
+        require(QFileInfo(file->selectedFiles().front()).fileName() == expectedName,
                 "Save dialog did not suggest the loaded model's name");
         file->reject();
         cancelledSave = true;
@@ -2505,6 +2652,10 @@ int main(int argc, char **argv) {
             drawingSectionOrientationChecks(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--section-controls-only"))) {
+            sectionControlsWorkflow(temp.path());
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--dimension-bases-only"))) {
             dimensionBases(temp.path());
             return 0;
@@ -2545,6 +2696,7 @@ int main(int argc, char **argv) {
         repeatedWaveDrawing(temp.path());
         perforatedAngleDrawing(temp.path());
         previewStates();
+        sectionControlsWorkflow(temp.path());
         workflow(temp.path());
         std::cout << "Drawing geometry, layout and PDF workflow passed\n";
     } catch (const std::exception &e) {

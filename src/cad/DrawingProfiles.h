@@ -15,6 +15,10 @@ struct DrawingBendCorner {
     std::array<gp_Dir, 2> directions;
     double interior;
 };
+struct DrawingProfilePose {
+    std::optional<gp_Dir> positionAxis;
+    bool reversed = false;
+};
 [[nodiscard]] std::optional<DrawingBendCorner>
 drawingBendCorner(const application::RecognizedBend &bend, const TopTools_IndexedMapOfShape &faces,
                   gp_Pnt station);
@@ -26,5 +30,5 @@ drawingProfiles(const std::vector<application::RecognizedBend> &bends,
 drawingProfileAt(const std::vector<std::size_t> &members,
                  const std::vector<application::RecognizedBend> &bends,
                  const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference, double tolerance,
-                 double fraction, std::stop_token stop);
+                 double fraction, std::stop_token stop, DrawingProfilePose pose = {});
 } // namespace bending::cad

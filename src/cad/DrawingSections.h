@@ -9,5 +9,6 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                              const std::vector<application::RecognizedBend> &bends,
                              const std::array<gp_Ax2, 3> &frames,
                              application::BendingDrawing &drawing, double tolerance,
-                             std::size_t &budget, std::stop_token stop);
+                             std::size_t &budget, std::stop_token stop,
+                             const std::vector<application::DrawingSectionEdit> &edits = {});
 } // namespace bending::cad

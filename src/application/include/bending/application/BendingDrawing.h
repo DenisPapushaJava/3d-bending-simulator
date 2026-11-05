@@ -134,6 +134,8 @@ struct DrawingSectionLocation {
     DrawingSectionMarker marker;
     PointMm station{0, 0, 0};
     std::vector<std::size_t> bends;
+    double fraction = .5; // Along the original profile axis, independent of viewing side.
+    bool reversed = false;
 };
 struct DrawingSectionBasis {
     PointMm origin;
@@ -157,6 +159,12 @@ struct DrawingAuxiliaryView {
     std::size_t projection = 0;
 };
 enum class DrawingVariableProfile { None, Measured, NotMeasured };
+struct DrawingSectionEdit {
+    std::vector<std::size_t> bends; // Sorted exact source-zone identity, not a section index/name.
+    std::optional<double> fraction; // [0,1]; absent retains automatic position selection.
+    bool reversed = false;
+    bool operator==(const DrawingSectionEdit &) const = default;
+};
 struct DrawingRequest {
     std::optional<std::size_t> baseFace;
     bool reverseView = false;
@@ -165,11 +173,12 @@ struct DrawingRequest {
     std::optional<double> manualThicknessMm;
     std::optional<core::UnfoldSettings> unfoldSettings = {};
     FlatPatternPtr preparedFlatPattern = {}; // Optional cache; not an input affecting equality.
+    std::vector<DrawingSectionEdit> sectionEdits;
     bool operator==(const DrawingRequest &other) const {
         return baseFace == other.baseFace && reverseView == other.reverseView &&
                quarterTurns == other.quarterTurns && allowBreaks == other.allowBreaks &&
                manualThicknessMm == other.manualThicknessMm &&
-               unfoldSettings == other.unfoldSettings;
+               unfoldSettings == other.unfoldSettings && sectionEdits == other.sectionEdits;
     }
 };
 struct DrawingFlatPattern {

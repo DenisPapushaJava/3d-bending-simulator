@@ -6,6 +6,7 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -28,6 +29,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QSpinBox>
 #include <QTimer>
 #include <QToolButton>
@@ -233,9 +235,9 @@ class DrawingPreviewArea final : public QScrollArea {
         stateLayout->addWidget(retry_, 0, Qt::AlignHCenter);
         stateLayout->addStretch();
         connect(retry_, &QPushButton::clicked, this, [this] {
-            const auto action = retryAction_;
-            if (action)
-                action();
+            const auto retry = retryAction_;
+            if (retry)
+                retry();
         });
         state_->hide();
         setPageCount(0);
@@ -457,6 +459,16 @@ class DrawingDialog::Impl {
     QLabel *scaleCaption;
     QComboBox *flatSide;
     QLabel *sideInfo;
+    QWidget *sectionOptions;
+    QComboBox *sectionPlace;
+    QPushButton *sectionFlip;
+    QSlider *sectionSlider;
+    QDoubleSpinBox *sectionPercent;
+    QPushButton *sectionAuto;
+    QTimer *sectionTimer;
+    std::vector<application::DrawingSectionEdit> sectionEdits;
+    std::vector<std::size_t> activeCut;
+    bool sectionPending = false, sectionRefresh = false, activeUnit = false;
     std::vector<DrawingViewChoice> choices;
     application::BendingDrawingPtr compositionSource;
     std::shared_ptr<const DrawingSheetPlan> plan;
@@ -476,11 +488,156 @@ class DrawingDialog::Impl {
                 DrawingLayout::Classical,
                 plan};
     }
+    static std::vector<std::size_t> cutKey(const application::DrawingSectionLocation &location) {
+        auto key = location.bends;
+        std::sort(key.begin(), key.end());
+        return key;
+    }
+    static const application::DrawingSection *cutSection(const application::BendingDrawing &d,
+                                                         DrawingViewKey key) {
+        if (key.kind != DrawingViewKind::Section || key.index >= d.sections.size())
+            return nullptr;
+        const auto &s = d.sections[key.index];
+        if (!s.locations.empty())
+            return &s;
+        if (s.repeatCount)
+            for (const auto &parent : d.sections)
+                if (!parent.repeatCount && parent.designation == s.designation &&
+                    !parent.locations.empty())
+                    return &parent;
+        return nullptr;
+    }
+    static bool sameView(const application::BendingDrawing &before, DrawingViewKey old,
+                         const application::BendingDrawing &after, DrawingViewKey now) {
+        if (now.kind != DrawingViewKind::Section)
+            return old == now;
+        const auto *a = cutSection(before, old), *b = cutSection(after, now);
+        if (!a || !b ||
+            (before.sections[old.index].repeatCount != 0) !=
+                (after.sections[now.index].repeatCount != 0))
+            return false;
+        return std::any_of(a->locations.begin(), a->locations.end(), [&](const auto &x) {
+            return std::any_of(b->locations.begin(), b->locations.end(),
+                               [&](const auto &y) { return cutKey(x) == cutKey(y); });
+        });
+    }
+    void sectionControls() {
+        const int row = views->currentRow();
+        const auto *s =
+            compositionSource && row >= 0 && static_cast<std::size_t>(row) < choices.size()
+                ? cutSection(*compositionSource, choices[row].key)
+                : nullptr;
+        sectionOptions->setVisible(s != nullptr);
+        if (!s)
+            return;
+        const QSignalBlocker a(sectionPlace), b(sectionFlip), c(sectionSlider), d(sectionPercent);
+        std::size_t selectedPlace = 0;
+        for (std::size_t i = 0; i < s->locations.size(); ++i)
+            if (cutKey(s->locations[i]) == activeCut)
+                selectedPlace = i;
+        sectionPlace->clear();
+        for (std::size_t i = 0; i < s->locations.size(); ++i)
+            sectionPlace->addItem(
+                QStringLiteral("Место %1 из %2").arg(i + 1).arg(s->locations.size()));
+        sectionPlace->setCurrentIndex(static_cast<int>(selectedPlace));
+        sectionPlace->setVisible(s->locations.size() > 1);
+        const auto &location = s->locations[selectedPlace];
+        activeCut = cutKey(location);
+        const auto edited = std::find_if(sectionEdits.begin(), sectionEdits.end(),
+                                         [&](const auto &e) { return e.bends == activeCut; });
+        const double fraction = edited != sectionEdits.end()
+                                    ? edited->fraction.value_or(location.fraction)
+                                    : location.fraction;
+        sectionSlider->setValue(qRound(fraction * 1000));
+        sectionPercent->setValue(fraction * 100);
+        sectionFlip->setChecked(edited != sectionEdits.end() ? edited->reversed
+                                                             : location.reversed);
+        sectionAuto->setEnabled(edited != sectionEdits.end());
+        sectionOptions->setEnabled(!settingsChanged && controller.session().revision() == revision);
+    }
+    void queueSection() {
+        sectionPending = true;
+        sectionRefresh = true;
+        const auto row = views->currentRow();
+        activeUnit = compositionSource && row >= 0 &&
+                     static_cast<std::size_t>(row) < choices.size() &&
+                     choices[row].key.kind == DrawingViewKind::Section &&
+                     compositionSource->sections[choices[row].key.index].repeatCount != 0;
+        sectionTimer->start();
+        cancelLayout();
+        layoutTimer->stop();
+        plan.reset();
+        layoutError.clear();
+        exportPdf->setEnabled(false);
+        image->clear();
+        if (started && controller.isPreparingDrawing())
+            controller.cancelDrawing();
+        refresh();
+    }
+    void editSection() {
+        if (activeCut.empty())
+            return;
+        application::DrawingSectionEdit edit{activeCut, sectionPercent->value() / 100,
+                                             sectionFlip->isChecked()};
+        const auto old = std::find_if(sectionEdits.begin(), sectionEdits.end(),
+                                      [&](const auto &e) { return e.bends == activeCut; });
+        if (old != sectionEdits.end() && *old == edit)
+            return;
+        if (old != sectionEdits.end())
+            *old = std::move(edit);
+        else
+            sectionEdits.push_back(std::move(edit));
+        std::sort(sectionEdits.begin(), sectionEdits.end(),
+                  [](const auto &a, const auto &b) { return a.bends < b.bends; });
+        queueSection();
+    }
+    void submitSections() {
+        if (!sectionPending || sectionTimer->isActive() || controller.hasWork())
+            return;
+        sectionPending = false;
+        build();
+    }
     bool ensurePlan(const application::BendingDrawingPtr &drawing) {
+        if (sectionPending)
+            return false;
         if (compositionSource != drawing) {
+            const auto previousSource = compositionSource;
+            const auto previousChoices = choices;
+            const bool preserve = sectionRefresh && previousSource;
             cancelLayout();
             compositionSource = drawing;
             choices = DrawingSheet::defaultViews(*drawing);
+            int selectedRow = 0;
+            bool selectedExact = false;
+            if (preserve)
+                for (std::size_t i = 0; i < choices.size(); ++i) {
+                    auto &choice = choices[i];
+                    bool assigned = false;
+                    for (const auto &old : previousChoices)
+                        if (sameView(*previousSource, old.key, *drawing, choice.key)) {
+                            const auto *prior = cutSection(*previousSource, old.key);
+                            const bool active =
+                                prior &&
+                                std::any_of(prior->locations.begin(), prior->locations.end(),
+                                            [&](const auto &l) { return cutKey(l) == activeCut; });
+                            if (!assigned || active) {
+                                choice.visible = old.visible;
+                                choice.scale = old.scale;
+                                assigned = true;
+                            }
+                            if (active || choice.key.kind != DrawingViewKind::Section)
+                                break;
+                        }
+                    const auto *section = cutSection(*drawing, choice.key);
+                    if (section && !selectedExact &&
+                        std::any_of(section->locations.begin(), section->locations.end(),
+                                    [&](const auto &l) { return cutKey(l) == activeCut; })) {
+                        selectedRow = static_cast<int>(i);
+                        selectedExact =
+                            (drawing->sections[choice.key.index].repeatCount != 0) == activeUnit;
+                    }
+                }
+            sectionRefresh = false;
             plan.reset();
             layoutError.clear();
             const QSignalBlocker block(views), blockSide(flatSide);
@@ -491,14 +648,15 @@ class DrawingDialog::Impl {
                 item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
                 item->setCheckState(choice.visible ? Qt::Checked : Qt::Unchecked);
             }
-            flatSide->setCurrentIndex(0);
+            if (!preserve)
+                flatSide->setCurrentIndex(0);
             const bool known =
                 drawing->flatPattern && drawing->flatPattern->info.positiveZIsSideA.has_value();
             flatSide->setItemText(1,
                                   known ? QStringLiteral("Сторона A") : QStringLiteral("Исходная"));
             flatSide->setItemText(2,
                                   known ? QStringLiteral("Сторона B") : QStringLiteral("Обратная"));
-            views->setCurrentRow(0);
+            views->setCurrentRow(selectedRow);
         }
         selectionControls();
         if (!plan) {
@@ -569,6 +727,7 @@ class DrawingDialog::Impl {
                     label += QStringLiteral(" · %1").arg(scaleLabel(at->scale));
                 views->item(static_cast<int>(i))->setText(label);
             }
+        sectionControls();
     }
     void followSelection() {
         const int row = views->currentRow();
@@ -619,6 +778,10 @@ class DrawingDialog::Impl {
             });
     }
     void invalidate() {
+        sectionTimer->stop();
+        sectionPending = false;
+        sectionRefresh = false;
+        sectionEdits.clear();
         cancelLayout();
         settingsChanged = true;
         exportPdf->setEnabled(false);
@@ -631,8 +794,8 @@ class DrawingDialog::Impl {
     }
     void render(bool contentChanged = true) {
         const auto drawing = controller.drawing();
-        if (!drawing || settingsChanged || controller.isPreparingDrawing() || layoutBusy ||
-            layoutTimer->isActive() || !layoutError.isEmpty() ||
+        if (!drawing || settingsChanged || sectionPending || controller.isPreparingDrawing() ||
+            layoutBusy || layoutTimer->isActive() || !layoutError.isEmpty() ||
             controller.session().revision() != revision)
             return;
         try {
@@ -690,6 +853,17 @@ class DrawingDialog::Impl {
         flatSide->setEnabled(same && !busy && drawing && !settingsChanged);
         exportPdf->setEnabled(same && !busy && drawing && !settingsChanged && plan && !layoutBusy &&
                               !layoutTimer->isActive() && layoutError.isEmpty());
+        sectionControls();
+        if (sectionPending && same && !settingsChanged) {
+            if (!busy && !sectionTimer->isActive()) {
+                submitSections();
+                return;
+            }
+            preview->showState(QStringLiteral("Подготовка сечения"),
+                               QStringLiteral("Строим сечение и обновляем лист…"), true);
+            exportPdf->setEnabled(false);
+            return;
+        }
         if (!same) {
             image->clear();
             preview->showState(QStringLiteral("Документ изменился"),
@@ -806,6 +980,7 @@ class DrawingDialog::Impl {
         request.quarterTurns = turn->currentIndex() - 1;
         request.reverseView = reverse->isChecked();
         request.allowBreaks = breaks->isChecked();
+        request.sectionEdits = sectionEdits;
         settingsChanged = false;
         layoutError.clear();
         cancelLayout();
@@ -868,6 +1043,47 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->scaleCaption->setBuddy(impl_->viewScale);
     viewForm->addRow(impl_->scaleCaption, impl_->viewScale);
     optionLayout->addLayout(viewForm);
+    impl_->sectionOptions = new QWidget(panel);
+    impl_->sectionOptions->setObjectName(QStringLiteral("drawingSectionOptions"));
+    auto *sectionLayout = new QVBoxLayout(impl_->sectionOptions);
+    sectionLayout->setContentsMargins(0, 0, 0, 0);
+    impl_->sectionPlace = new QComboBox(impl_->sectionOptions);
+    impl_->sectionPlace->setObjectName(QStringLiteral("drawingSectionPlace"));
+    impl_->sectionPlace->setAccessibleName(QStringLiteral("Место сечения"));
+    sectionLayout->addWidget(impl_->sectionPlace);
+    impl_->sectionFlip =
+        new QPushButton(QStringLiteral("Сменить сторону взгляда"), impl_->sectionOptions);
+    impl_->sectionFlip->setObjectName(QStringLiteral("drawingSectionReverse"));
+    impl_->sectionFlip->setCheckable(true);
+    impl_->sectionFlip->setToolTip(QStringLiteral("Обратная сторона взгляда. Стрелки и сечение "
+                                                  "меняются вместе; плоскость остаётся на месте."));
+    sectionLayout->addWidget(impl_->sectionFlip);
+    sectionLayout->addWidget(
+        new QLabel(QStringLiteral("Положение сечения"), impl_->sectionOptions));
+    auto *position = new QHBoxLayout;
+    impl_->sectionSlider = new QSlider(Qt::Horizontal, impl_->sectionOptions);
+    impl_->sectionSlider->setObjectName(QStringLiteral("drawingSectionSlider"));
+    impl_->sectionSlider->setAccessibleName(QStringLiteral("Положение сечения, проценты"));
+    impl_->sectionSlider->setRange(0, 1000);
+    impl_->sectionSlider->setPageStep(100);
+    impl_->sectionSlider->setToolTip(QStringLiteral(
+        "0–100% общего участка выбранных гибов. Смена стороны взгляда не меняет отсчёт."));
+    impl_->sectionPercent = new QDoubleSpinBox(impl_->sectionOptions);
+    impl_->sectionPercent->setObjectName(QStringLiteral("drawingSectionPercent"));
+    impl_->sectionPercent->setAccessibleName(QStringLiteral("Положение сечения, проценты"));
+    impl_->sectionPercent->setRange(0, 100);
+    impl_->sectionPercent->setDecimals(1);
+    impl_->sectionPercent->setSuffix(QStringLiteral(" %"));
+    position->addWidget(impl_->sectionSlider, 1);
+    position->addWidget(impl_->sectionPercent);
+    sectionLayout->addLayout(position);
+    impl_->sectionAuto = new QPushButton(QStringLiteral("Авто"), impl_->sectionOptions);
+    impl_->sectionAuto->setObjectName(QStringLiteral("drawingSectionAuto"));
+    impl_->sectionAuto->setToolTip(
+        QStringLiteral("Вернуть автоматические положение и сторону взгляда этого места сечения."));
+    sectionLayout->addWidget(impl_->sectionAuto);
+    optionLayout->addWidget(impl_->sectionOptions);
+    impl_->sectionOptions->hide();
     impl_->flatSide = new QComboBox(panel);
     impl_->flatSide->setObjectName(QStringLiteral("drawingFlatSide"));
     impl_->flatSide->setAccessibleName(QStringLiteral("Показанная сторона развёртки"));
@@ -986,6 +1202,10 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->layoutTimer->setSingleShot(true);
     impl_->layoutTimer->setInterval(16);
     connect(impl_->layoutTimer, &QTimer::timeout, this, [this] { impl_->refresh(); });
+    impl_->sectionTimer = new QTimer(this);
+    impl_->sectionTimer->setSingleShot(true);
+    impl_->sectionTimer->setInterval(220);
+    connect(impl_->sectionTimer, &QTimer::timeout, this, [this] { impl_->submitSections(); });
     impl_->layouts = std::make_unique<DrawingLayoutController>();
     connect(impl_->layouts.get(), &DrawingLayoutController::ready, this,
             [this](std::shared_ptr<const DrawingSheetPlan> plan) {
@@ -1027,9 +1247,9 @@ DrawingDialog::DrawingDialog(ImportController &c,
     layout->addWidget(panel);
     layout->addWidget(scroll, 1);
     // No edit signal runs before all controls and the preview exist.
-    const auto utf8 = c.session().document()->metadata().sourcePath.stem().u8string();
-    impl_->name->setText(QString::fromUtf8(reinterpret_cast<const char *>(utf8.data()),
-                                           static_cast<qsizetype>(utf8.size())));
+    const auto stemUtf8 = c.session().document()->metadata().sourcePath.stem().u8string();
+    impl_->name->setText(QString::fromUtf8(reinterpret_cast<const char *>(stemUtf8.data()),
+                                           static_cast<qsizetype>(stemUtf8.size())));
     setWindowTitle(QStringLiteral("Чертёж — %1").arg(impl_->name->text()));
     connect(impl_->quantity, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
     connect(impl_->views, &QListWidget::currentRowChanged, this,
@@ -1057,6 +1277,33 @@ DrawingDialog::DrawingDialog(ImportController &c,
                 (key.kind == DrawingViewKind::Projection && choice.key.kind == key.kind))
                 choice.scale = scale;
         impl_->scheduleLayout();
+    });
+    connect(impl_->sectionPlace, &QComboBox::currentIndexChanged, this, [this](int index) {
+        const int row = impl_->views->currentRow();
+        const auto *s = impl_->compositionSource && row >= 0 &&
+                                static_cast<std::size_t>(row) < impl_->choices.size()
+                            ? Impl::cutSection(*impl_->compositionSource, impl_->choices[row].key)
+                            : nullptr;
+        if (s && index >= 0 && static_cast<std::size_t>(index) < s->locations.size()) {
+            impl_->activeCut = Impl::cutKey(s->locations[index]);
+            impl_->sectionControls();
+        }
+    });
+    connect(impl_->sectionSlider, &QSlider::valueChanged, this, [this](int value) {
+        const QSignalBlocker block(impl_->sectionPercent);
+        impl_->sectionPercent->setValue(value / 10.);
+        impl_->editSection();
+    });
+    connect(impl_->sectionPercent, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        const QSignalBlocker block(impl_->sectionSlider);
+        impl_->sectionSlider->setValue(qRound(value * 10));
+        impl_->editSection();
+    });
+    connect(impl_->sectionFlip, &QPushButton::toggled, this, [this] { impl_->editSection(); });
+    connect(impl_->sectionAuto, &QPushButton::clicked, this, [this] {
+        std::erase_if(impl_->sectionEdits,
+                      [&](const auto &e) { return e.bends == impl_->activeCut; });
+        impl_->queueSection();
     });
     connect(impl_->flatSide, &QComboBox::currentIndexChanged, this,
             [this] { impl_->scheduleLayout(); });
@@ -1130,6 +1377,8 @@ DrawingDialog::DrawingDialog(ImportController &c,
     QTimer::singleShot(0, this, [this] { impl_->build(); });
 }
 void DrawingDialog::done(int result) {
+    impl_->sectionTimer->stop();
+    impl_->sectionPending = false;
     impl_->cancelLayout();
     impl_->refit->stop();
     impl_->layoutTimer->stop();
@@ -1141,6 +1390,7 @@ void DrawingDialog::done(int result) {
     QDialog::done(result);
 }
 DrawingDialog::~DrawingDialog() {
+    impl_->sectionTimer->stop();
     impl_->cancelLayout();
 }
 } // namespace bending::ui

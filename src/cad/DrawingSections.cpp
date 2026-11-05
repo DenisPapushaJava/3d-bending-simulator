@@ -274,7 +274,8 @@ void axialDimensions(const std::vector<RecognizedBend> &bends, const gp_Ax2 &fra
 void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMapOfShape &faces,
                              const std::vector<RecognizedBend> &bends,
                              const std::array<gp_Ax2, 3> &frames, BendingDrawing &drawing,
-                             double tolerance, std::size_t &budget, std::stop_token stop) {
+                             double tolerance, std::size_t &budget, std::stop_token stop,
+                             const std::vector<DrawingSectionEdit> &edits) {
     if (!drawing.classicalViews)
         return;
     tolerance = std::max(1e-5, tolerance);
@@ -285,6 +286,24 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
     axialDimensions(bends, frames[0], (*drawing.classicalViews)[0]);
     std::vector<ActualSection> geometries;
     std::vector<DrawingProfile> representatives;
+    const auto key = [](const auto &zones) {
+        auto result = zones;
+        std::sort(result.begin(), result.end());
+        return result;
+    };
+    std::vector<bool> applied(edits.size());
+    for (std::size_t i = 0; i < edits.size(); ++i) {
+        const auto &edit = edits[i];
+        if (edit.bends.empty() || edit.bends != key(edit.bends) ||
+            std::adjacent_find(edit.bends.begin(), edit.bends.end()) != edit.bends.end() ||
+            (edit.fraction &&
+             (!std::isfinite(*edit.fraction) || *edit.fraction < 0 || *edit.fraction > 1)) ||
+            std::any_of(edits.begin(), edits.begin() + i,
+                        [&](const auto &e) { return e.bends == edit.bends; }) ||
+            std::none_of(drawing.profiles.begin(), drawing.profiles.end(),
+                         [&](const auto &p) { return key(p.bends) == edit.bends; }))
+            throw DrawingError{"Не удалось сопоставить настройки с исходным сечением"};
+    }
     for (const auto &original : drawing.profiles) {
         cancelled(stop);
         try {
@@ -292,18 +311,27 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             if (!initialLocation)
                 continue;
             const auto &reference = frames[initialLocation->sourceView];
+            const auto edit = std::find_if(edits.begin(), edits.end(), [&](const auto &e) {
+                return e.bends == key(original.bends);
+            });
+            const bool manual = edit != edits.end() && edit->fraction.has_value();
+            const bool reversed = edit != edits.end() && edit->reversed;
+            const gp_Dir positionAxis(original.normal.x, original.normal.y, original.normal.z);
             std::optional<ActualSection> best;
             DrawingProfile measured = original;
-            for (double fraction : {.5, .382, .618, .25, .75}) {
-                auto candidate = drawingProfileAt(original.bends, bends, faces, reference,
-                                                  tolerance, fraction, stop);
+            const auto fractions = manual ? std::vector<double>{*edit->fraction}
+                                          : std::vector<double>{.5, .382, .618, .25, .75};
+            for (double fraction : fractions) {
+                auto candidate = drawingProfileAt(
+                    original.bends, bends, faces, reference, tolerance, fraction, stop,
+                    {edit != edits.end() ? std::optional(positionAxis) : std::nullopt, reversed});
                 if (!candidate || candidate->segments.size() != original.segments.size())
                     continue;
                 bool same = true;
                 for (std::size_t i = 0; i < original.segments.size(); ++i)
                     same = same && std::abs(candidate->segments[i].dimension.valueMm -
                                             original.segments[i].dimension.valueMm) <= tolerance;
-                if (!same)
+                if (!same && !manual)
                     continue; // Moving a section must not silently shorten a rounded flange.
                 std::optional<ActualSection> actual;
                 try {
@@ -327,6 +355,24 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             const auto basis = sectionFrame(measured, reference);
             if (!aligned(basis, reference, at->marker, tolerance))
                 continue; // Never publish an ordinary section with an unproved orientation.
+            double low = -1e100, high = 1e100;
+            for (auto index : original.bends) {
+                const auto &bend = bends[index];
+                const double a = gp_Vec(point(bend.axisStart).XYZ()).Dot(gp_Vec(positionAxis));
+                const double b = gp_Vec(point(bend.axisEnd).XYZ()).Dot(gp_Vec(positionAxis));
+                low = std::max(low, std::min(a, b));
+                high = std::min(high, std::max(a, b));
+            }
+            at->fraction =
+                manual
+                    ? *edit->fraction
+                    : std::clamp(
+                          (gp_Vec(point(measured.station).XYZ()).Dot(gp_Vec(positionAxis)) - low) /
+                              (high - low),
+                          0., 1.);
+            at->reversed = reversed;
+            if (edit != edits.end())
+                applied[static_cast<std::size_t>(edit - edits.begin())] = true;
             std::size_t index = 0;
             for (; index < geometries.size(); ++index)
                 if (drawing.sections[index].basis &&
@@ -373,6 +419,9 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             // Optional real sections cannot discard the source views or simulation analysis.
         }
     }
+    if (std::find(applied.begin(), applied.end(), false) != applied.end())
+        throw DrawingError{"В выбранном положении сечение построить не удалось. Измените положение "
+                           "или верните «Авто»."};
     if (drawing.profiles.size() == 1 && drawing.sections.size() == 1 && geometries.size() == 1) {
         std::optional<RepeatedDrawingSection> repeat;
         try {

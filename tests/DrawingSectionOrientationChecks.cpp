@@ -113,6 +113,7 @@ void material(const QString &path, const TopoDS_Shape &input, const gp_Ax2 &refe
     }
     const auto &bends = document->metadata().bendAnalysis.bends;
     drawing.profiles = cad::drawingProfiles(bends, faces, source[0], 1e-5, {});
+    const auto unprepared = drawing;
     std::size_t budget = 0;
     cad::prepareClassicalDrawing(shape, faces, bends, source, drawing, 1e-5, budget, {});
     require(drawing.sections.size() == 1 && drawing.sections[0].basis &&
@@ -143,8 +144,8 @@ void material(const QString &path, const TopoDS_Shape &input, const gp_Ax2 &refe
         const gp_Vec delta(origin, corner);
         const application::DrawingPoint expected{delta.Dot(expectedRight), delta.Dot(expectedUp)};
         bool found = false;
-        for (const auto &path : section.view.paths)
-            for (const auto &p : path.points)
+        for (const auto &curve : section.view.paths)
+            for (const auto &p : curve.points)
                 found = found || std::hypot(p.x - expected.x, p.y - expected.y) < 1e-4;
         require(found, "A known asymmetric CAD corner is on the wrong side of the section");
     }
@@ -156,6 +157,56 @@ void material(const QString &path, const TopoDS_Shape &input, const gp_Ax2 &refe
                 std::abs(section.view.angles[0].radians - std::numbers::pi / 2) < 1e-7 &&
                 document->sourceStep() == bytes,
             "Section orientation changed the true angle or source STEP");
+    auto ids = location.bends;
+    std::sort(ids.begin(), ids.end());
+    const auto edited = [&](double fraction, bool reverse) {
+        auto result = unprepared;
+        std::size_t work = 0;
+        cad::prepareClassicalDrawing(shape, faces, bends, source, result, 1e-5, work, {},
+                                     {{ids, fraction, reverse}});
+        require(result.sections.size() == 1 && result.sections[0].locations.size() == 1,
+                "Manual section changed the identity of its source profile");
+        const auto &at = result.sections[0].locations[0];
+        require(std::abs(at.fraction - fraction) < 1e-10 && at.reversed == reverse,
+                "Manual position was silently replaced or the view flag was lost");
+        return result.sections[0];
+    };
+    const auto quarter = edited(.25, false);
+    const auto reverse = edited(.25, true);
+    const auto pointDistance = [](auto a, auto b) { return (vector(a) - vector(b)).Magnitude(); };
+    require(pointDistance(quarter.locations[0].station, reverse.locations[0].station) < 1e-7 &&
+                (vector(quarter.normal) + vector(reverse.normal)).Magnitude() < 1e-7 &&
+                std::hypot(quarter.locations[0].marker.viewDirection.x +
+                               reverse.locations[0].marker.viewDirection.x,
+                           quarter.locations[0].marker.viewDirection.y +
+                               reverse.locations[0].marker.viewDirection.y) < 1e-7,
+            "Changing view side moved the cut plane or failed to reverse the arrows");
+    const auto threeQuarters = edited(.75, false);
+    require(
+        std::abs(pointDistance(quarter.locations[0].station, threeQuarters.locations[0].station) -
+                 40) < 1e-5,
+        "Percent position is not relative to the real common bend span");
+    for (double edge : {0., 1.}) {
+        try {
+            (void)edited(edge, false);
+        } catch (const application::DrawingError &error) {
+            require(!error.detail.empty(), "An unsupported end cut has no explanation");
+        }
+    }
+    auto invalid = unprepared;
+    bool rejected = false;
+    try {
+        std::size_t work = 0;
+        cad::prepareClassicalDrawing(shape, faces, bends, source, invalid, 1e-5, work, {},
+                                     {{ids, 1.1, false}});
+    } catch (const application::DrawingError &) {
+        rejected = true;
+    }
+    require(rejected, "Out-of-range manual cut was silently clamped");
+    application::DrawingRequest first, second;
+    first.sectionEdits = {{ids, .25, false}};
+    second.sectionEdits = {{ids, .25, true}};
+    require(!(first == second), "Drawing request cache ignores the section viewing side");
 }
 } // namespace
 void drawingSectionOrientationChecks(const QString &folder) {

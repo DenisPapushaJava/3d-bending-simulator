@@ -189,7 +189,8 @@ bool supportedFreeCap(const std::array<gp_Pnt, 2> &end, Wall wall, gp_Dir axis,
 DrawingProfile buildProfile(const std::vector<std::size_t> &members,
                             const std::vector<RecognizedBend> &bends,
                             const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference,
-                            double tolerance, std::stop_token stop, double fraction = .5) {
+                            double tolerance, std::stop_token stop, double fraction = .5,
+                            DrawingProfilePose pose = {}) {
     std::map<Wall, std::vector<std::size_t>> graph;
     for (auto index : members)
         for (std::size_t side = 0; side < 2; ++side)
@@ -226,6 +227,8 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
                 axis.Reverse();
             break;
         }
+    if (pose.positionAxis)
+        axis = *pose.positionAxis;
     double low = -1e100, high = 1e100;
     const double thickness = bends[ordered.front()].thicknessMm;
     for (auto index : ordered) {
@@ -243,7 +246,8 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
     if (high - low <= 20 * tolerance)
         throw Unmeasured{};
     const gp_Pnt station(gp_XYZ(axis.X(), axis.Y(), axis.Z()) * (low + (high - low) * fraction));
-    const auto frame = drawingSectionFrame(station, axis, reference);
+    const auto viewAxis = pose.reversed ? axis.Reversed() : axis;
+    const auto frame = drawingSectionFrame(station, viewAxis, reference);
     std::vector<DrawingBendCorner> corners;
     for (auto index : ordered) {
         const auto corner = drawingBendCorner(bends[index], faces, station);
@@ -254,7 +258,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
     DrawingProfile profile;
     profile.bends = ordered;
     profile.station = pointDto(station);
-    profile.normal = {axis.X(), axis.Y(), axis.Z()};
+    profile.normal = {viewAxis.X(), viewAxis.Y(), viewAxis.Z()};
     std::vector<std::array<gp_Pnt, 2>> middleEnds;
     std::vector<std::array<std::array<gp_Pnt, 2>, 2>> contourEnds;
     for (std::size_t w = 0; w < walls.size(); ++w) {
@@ -352,7 +356,8 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
              bend.innerRadiusMm / std::sin(corner.interior / 2) - bend.innerRadiusMm});
         const auto before = gp_Vec(middleEnds[k][0], middleEnds[k][1]).Normalized();
         const auto after = gp_Vec(middleEnds[k + 1][0], middleEnds[k + 1][1]).Normalized();
-        const double turn = std::atan2(gp_Vec(axis).Dot(before.Crossed(after)), before.Dot(after));
+        const double turn =
+            std::atan2(gp_Vec(viewAxis).Dot(before.Crossed(after)), before.Dot(after));
         if (std::abs(std::abs(turn) - bend.angleRadians) > 1e-5)
             throw Unmeasured{};
         profile.turnSigns.push_back(turn > 0 ? 1 : -1);
@@ -534,10 +539,10 @@ std::optional<application::DrawingProfile>
 drawingProfileAt(const std::vector<std::size_t> &members,
                  const std::vector<application::RecognizedBend> &bends,
                  const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference, double tolerance,
-                 double fraction, std::stop_token stop) {
+                 double fraction, std::stop_token stop, DrawingProfilePose pose) {
     try {
         return buildProfile(members, bends, faces, reference, std::max(1e-6, tolerance), stop,
-                            fraction);
+                            fraction, pose);
     } catch (const Unmeasured &) {
         return {};
     } catch (const Standard_Failure &) {
