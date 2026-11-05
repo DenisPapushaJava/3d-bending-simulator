@@ -1608,7 +1608,10 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         }
         if (drawing->variableProfile != DrawingVariableProfile::Measured)
             prepareClassicalDrawing(shape, faces, bendAnalysis.bends, classicalFrames, *drawing,
-                                    bendAnalysis.lengthToleranceMm, budget, stop);
+                                    bendAnalysis.lengthToleranceMm, budget, stop,
+                                    request.sectionEdits);
+        else if (!request.sectionEdits.empty())
+            throw DrawingError{"Для этого типа сечения ручная настройка пока недоступна"};
         try {
             prepareFlatDrawing(*drawing, document, request, budget, stop);
         } catch (const DrawingError &error) {

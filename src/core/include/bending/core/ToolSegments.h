@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <optional>
+#include <stop_token>
 #include <vector>
 
 namespace bending::core {
@@ -13,15 +14,38 @@ struct ToolSegment {
 };
 struct ToolAssembly {
     std::vector<std::size_t> pieces; // Stock row indices, in installation order.
-    double gapMm = 0;                // Uniform clear interval between adjacent pieces.
+    double gapMm = 0;                // Uniform spacing when jointGapsMm is empty.
+    // Otherwise exactly pieces.size()-1 gaps, in installation order; gapMm must be zero.
+    std::vector<double> jointGapsMm = {};
     bool operator==(const ToolAssembly &) const = default;
 };
-enum class SegmentPlanStatus { Complete, InsufficientStock, SearchLimit, InvalidInput };
+struct ToolSectionInterval {
+    std::size_t stockRow;
+    double fromMm, toMm; // Assembly-local axial coordinates, beginning at zero.
+};
+[[nodiscard]] double assemblyGapAfter(const ToolAssembly &, std::size_t piece) noexcept;
+[[nodiscard]] double maximumAssemblyGap(const ToolAssembly &) noexcept;
+[[nodiscard]] std::optional<std::vector<ToolSectionInterval>>
+assemblyIntervals(const std::vector<ToolSegment> &, const ToolAssembly &);
+// Missing section length inside an axial interval; invalid input has no value.
+[[nodiscard]] std::optional<double> assemblyUncoveredLength(const std::vector<ToolSegment> &,
+                                                            const ToolAssembly &, double fromMm,
+                                                            double toMm);
+enum class SegmentPlanStatus { Complete, InsufficientStock, SearchLimit, InvalidInput, Cancelled };
 struct SegmentPlan {
     SegmentPlanStatus status = SegmentPlanStatus::InvalidInput;
     ToolAssembly assembly;
     double lengthMm = 0;
 };
+// One forbidden axial interval inside a material-free corridor, in assembly coordinates.
+// The outer span is retained; straight sections on both sides share the same stock.
+struct ToolWindow {
+    double lengthMm, freeFromMm, conflictFromMm, conflictToMm, freeToMm;
+    bool operator==(const ToolWindow &) const = default;
+};
+[[nodiscard]] SegmentPlan planToolWindow(const std::vector<ToolSegment> &, const ToolWindow &,
+                                         double maximumGapMm, std::size_t workBudget = 200000,
+                                         std::stop_token stop = {});
 [[nodiscard]] bool validToolSegments(const std::vector<ToolSegment> &);
 [[nodiscard]] std::optional<double> assemblyLength(const std::vector<ToolSegment> &,
                                                    const ToolAssembly &);
@@ -30,5 +54,5 @@ struct SegmentPlan {
 // Horns need their own 3D geometry and are deliberately excluded from this first planner.
 [[nodiscard]] SegmentPlan planToolSegments(const std::vector<ToolSegment> &, double requiredMm,
                                            std::size_t stateBudget = 200000,
-                                           double maximumGapMm = 0);
+                                           double maximumGapMm = 0, std::stop_token stop = {});
 } // namespace bending::core

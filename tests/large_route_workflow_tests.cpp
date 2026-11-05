@@ -12,10 +12,13 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSlider>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <STEPControl_Writer.hxx>
+#include <algorithm>
 #include <atomic>
 #include <iostream>
 #include <stdexcept>
@@ -39,6 +42,8 @@ class Builder final : public application::SingleBendPreviewBuilder {
   public:
     mutable cad::SingleBendPreviewBuilder impl;
     mutable std::atomic<unsigned> searches = 0;
+    mutable std::atomic<unsigned> cancelledDrafts = 0;
+    mutable std::atomic<qint64> lastDraftNs = 0;
     application::BendRouteResult buildRoute(application::DocumentPtr d,
                                             application::BendRouteRequest r,
                                             std::stop_token s) const override {
@@ -48,7 +53,13 @@ class Builder final : public application::SingleBendPreviewBuilder {
     application::RouteDraftResult buildRouteDraft(application::DocumentPtr d,
                                                   application::RouteDraftRequest r,
                                                   std::stop_token s) const override {
-        return impl.buildRouteDraft(std::move(d), std::move(r), s);
+        QElapsedTimer timer;
+        timer.start();
+        auto result = impl.buildRouteDraft(std::move(d), std::move(r), s);
+        if (s.stop_requested())
+            ++cancelledDrafts;
+        lastDraftNs = timer.nsecsElapsed();
+        return result;
     }
     void discardRouteCache() const override {
         impl.discardRouteCache();
@@ -134,6 +145,81 @@ int main(int argc, char **argv) {
                   !panel->findChild<QPushButton *>("routeMoveEarlier")->isEnabled() &&
                   builder->searches == 0,
               "Flat step became reorderable");
+        const bool fastPrefetch = app.arguments().contains("--audit-prefetch-fast");
+        const bool auditPrefetch = fastPrefetch || app.arguments().contains("--audit-prefetch");
+        if (app.arguments().contains("--audit-transitions") || auditPrefetch) {
+            QElapsedTimer heartbeat, total;
+            QTimer pulse;
+            pulse.setInterval(10);
+            qint64 maxGuiGapMs = 0;
+            QObject::connect(&pulse, &QTimer::timeout,
+                             [&] { maxGuiGapMs = std::max(maxGuiGapMs, heartbeat.restart()); });
+            for (const int step : {1, 2, 3, 2, 3}) {
+                maxGuiGapMs = 0;
+                heartbeat.start();
+                total.start();
+                pulse.start();
+                panel->select(step);
+                const auto selectNs = total.nsecsElapsed();
+                wait([&] { return !c.hasWork(); });
+                const auto totalNs = total.nsecsElapsed();
+                pulse.stop();
+                check(c.routeDraft() &&
+                          c.routeDraft()->request.step == static_cast<std::size_t>(step),
+                      "Audited step was not prepared");
+                std::cout << "transition step=" << step
+                          << " selectMs=" << static_cast<double>(selectNs) / 1.e6
+                          << " workerMs=" << static_cast<double>(builder->lastDraftNs.load()) / 1.e6
+                          << " totalMs=" << static_cast<double>(totalNs) / 1.e6
+                          << " maxGuiGapMs=" << maxGuiGapMs << '\n';
+                if (auditPrefetch && step < 3) {
+                    const auto current = c.routeDraft();
+                    const auto revision = c.session().editRevision();
+                    QElapsedTimer preparation;
+                    preparation.start();
+                    check(c.prefetchNextRouteDraft(builder), "Cannot prefetch the next step");
+                    check(!c.hasWork() && !c.isPreparingDraft(), "Speculation blocked playback");
+                    wait([&] { return !c.isPrefetchingRouteDraft(); });
+                    check(c.routeDraft() == current && c.session().editRevision() == revision,
+                          "Speculation changed the current step or document");
+                    std::cout << "prefetch next=" << step + 1
+                              << " backgroundMs=" << preparation.elapsed() << '\n';
+                }
+            }
+            if (auditPrefetch) {
+                builder->impl.discardRouteCache();
+                panel->select(1);
+                wait([&] { return !c.hasWork(); });
+                auto *slider = window.findChild<QSlider *>("bendFrame");
+                auto *play = window.findChild<QPushButton *>("playBend");
+                auto *timer = window.findChild<QTimer *>("bendPlaybackTimer");
+                check(slider && play && timer, "Playback controls missing");
+                auto *speed = window.findChild<QSlider *>("bendPlaybackSpeed");
+                speed->setValue(fastPrefetch ? speed->maximum() : 0);
+                slider->setValue(0);
+                const auto first = c.routeDraft();
+                const auto cancellations = builder->cancelledDrafts.load();
+                check(first && play->isEnabled(), "Playback fixture is blocked at its first frame");
+                play->click();
+                check(timer->isActive() && c.isPrefetchingRouteDraft() && !c.hasWork(),
+                      "Playback did not start background preparation");
+                wait([&] { return slider->value() >= 2 || !timer->isActive(); });
+                check(timer->isActive() && c.routeDraft() == first && slider->value() >= 2 &&
+                          !c.hasWork(),
+                      "Speculation paused/replaced the current animation");
+                wait([&] {
+                    return c.routeDraft() && c.routeDraft()->request.step == 3 && timer->isActive();
+                });
+                check(builder->cancelledDrafts == cancellations,
+                      "Auto-advance cancelled and restarted a matching speculative job");
+                play->click();
+                check(!timer->isActive(), "Pause did not stop playback");
+                wait([&] { return !c.isPrefetchingRouteDraft(); });
+                check(c.routeDraft()->request.step == 3 && builder->searches == 0,
+                      "Pause applied speculative geometry or started a route search");
+                std::cout << "playback advanced 1 -> 2 -> 3 with read-ahead and paused safely\n";
+            }
+        }
         c.shutdown();
         std::cout << "32-step strip, scroll, identity and checked tool frames passed\n";
     } catch (const std::exception &e) {

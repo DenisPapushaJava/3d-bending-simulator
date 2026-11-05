@@ -1,6 +1,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include "CollisionPresentation.h"
 #include "Dimensions.h"
+#include "PreviewRigidScene.h"
 #include "SheetOrientationPresentation.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -22,6 +23,7 @@
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Image_PixMap.hxx>
+#include <OpenGl_Caps.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
@@ -75,6 +77,32 @@ struct FaceHighlights {
     std::vector<std::size_t> cutouts{};
     std::optional<application::RecognizedBend> measuredBend{};
 };
+
+struct MachineAppearance {
+    Quantity_Color color;
+    double transparency;
+    bool boundaries;
+};
+MachineAppearance machineAppearance(const cad::MachineDisplayComponent &component) {
+    switch (component.displayRole) {
+    case cad::MachineDisplayRole::Structure:
+        return {Quantity_Color(component.moving ? .60 : .52, component.moving ? .66 : .58,
+                               component.moving ? .72 : .64, Quantity_TOC_sRGB),
+                .80, false};
+    case cad::MachineDisplayRole::ToolMount:
+        return {Quantity_Color(.61, .66, .70, Quantity_TOC_sRGB), .15, true};
+    case cad::MachineDisplayRole::Backgauge:
+        return {Quantity_Color(.40, .55, .57, Quantity_TOC_sRGB), .08, true};
+    case cad::MachineDisplayRole::Unknown:
+        // Unclassified/legacy display data retains the previous readable appearance.
+        return {component.gauging
+                    ? Quantity_Color(.28, .49, .58, Quantity_TOC_RGB)
+                    : Quantity_Color(component.moving ? .40 : .31, component.moving ? .47 : .40,
+                                     component.moving ? .55 : .48, Quantity_TOC_RGB),
+                component.gauging ? .12 : .55, true};
+    }
+    throw std::logic_error("Unknown machine display role");
+}
 
 class OcctCanvas final : public QWidget {
     enum class CameraSpace : std::size_t { Cad, Flat, Kinematic, Press };
@@ -388,6 +416,7 @@ class OcctCanvas final : public QWidget {
                 context_->RecomputePrsOnly(object, false, true);
             for (const auto &object : sideMarkers_)
                 context_->RecomputePrsOnly(object, false, true);
+            rigidScene_->refresh();
             view_->MustBeResized();
             view_->ZFitAll();
             view_->Invalidate();
@@ -436,6 +465,7 @@ class OcctCanvas final : public QWidget {
                 if (!presentation_.IsNull()) {
                     context_->Remove(presentation_, false);
                 }
+                rigidScene_->clear();
                 removeDimensions();
                 if (!restoreSceneCamera(CameraSpace::Cad)) {
                     view_->SetProj(V3d_XposYnegZpos);
@@ -482,6 +512,44 @@ class OcctCanvas final : public QWidget {
             presentPreview(preview, previewFrame_, revision_);
         }
     }
+    void updateRigidScene(const cad::PreviewFrame &frame) {
+        std::vector<RigidDisplayBody> bodies;
+        bodies.reserve(frame.machine.size() + 4);
+        const std::array<Quantity_Color, 2> toolColors{
+            Quantity_Color(.30, .36, .44, Quantity_TOC_RGB),
+            Quantity_Color(.64, .70, .77, Quantity_TOC_RGB)};
+        for (std::size_t tool = 0; tool < frame.tools.size(); ++tool) {
+            if (frame.tools[tool].IsNull())
+                continue;
+            RigidDisplayBody body{tool == 0 ? "die" : "punch", frame.tools[tool], toolColors[tool]};
+            const auto toLocal = frame.tools[tool].Location().Inverted();
+            for (const auto &segment : frame.toolSegments[tool]) {
+                const auto color = toolSegmentColor(segment.lengthMm, segmentColors_);
+                body.colors.push_back({segment.shape.Moved(toLocal),
+                                       Quantity_Color(color.redF(), color.greenF(), color.blueF(),
+                                                      Quantity_TOC_sRGB)});
+            }
+            bodies.push_back(std::move(body));
+        }
+        for (const auto &c : frame.machine) {
+            const auto appearance = machineAppearance(c);
+            RigidDisplayBody body{c.id, c.shape, appearance.color, appearance.transparency,
+                                  machineVisibleAction_->isChecked()};
+            body.boundaries = appearance.boundaries;
+            bodies.push_back(std::move(body));
+        }
+        if (frame.floor) {
+            bodies.push_back({"floor-surface", frame.floor->surface,
+                              Quantity_Color(.14, .19, .22, Quantity_TOC_RGB), .82,
+                              floorVisibleAction_->isChecked()});
+            bodies.push_back({"floor-grid", frame.floor->grid,
+                              Quantity_Color(.25, .31, .36, Quantity_TOC_sRGB), 0,
+                              floorVisibleAction_->isChecked()});
+        }
+        rigidScene_->update(std::move(bodies),
+                            displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame : AIS_Shaded,
+                            displayStyle_ == DisplayStyle::Edges);
+    }
     QString presentPreview(application::BendPreviewPtr preview, std::size_t index,
                            quint64 revision) {
         if (revision != revision_ || !document_ || !preview || index >= preview->frameCount()) {
@@ -501,15 +569,13 @@ class OcctCanvas final : public QWidget {
                 TopoDS_Compound display;
                 BRep_Builder builder;
                 builder.MakeCompound(display);
-                builder.Add(display,
-                            frame.displayShape.IsNull() ? frame.shape : frame.displayShape);
-                if (machineVisibleAction_->isChecked())
-                    for (const auto &c : frame.machine)
-                        builder.Add(display, c.shape);
-                if (frame.floor && floorVisibleAction_->isChecked()) {
-                    builder.Add(display, frame.floor->surface);
-                    builder.Add(display, frame.floor->grid);
-                }
+                // Both arrays describe the complete sheet. Keep the original cutout skin,
+                // with its face identities; rigid tools are displayed independently below.
+                const auto &regions =
+                    frame.displayShape.IsNull() ? frame.regions : frame.displayRegions;
+                for (const auto &region : regions)
+                    if (!region.IsNull())
+                        builder.Add(display, region);
                 candidate = new CollisionPresentation(
                     display, frame.collisionHighlights, machineVisibleAction_->isChecked(),
                     floorVisibleAction_->isChecked(), frame.floorContacts, frame.backgaugeContacts);
@@ -519,8 +585,6 @@ class OcctCanvas final : public QWidget {
                     Quantity_Color(0.15, 0.48, 0.65, Quantity_TOC_RGB),
                     Quantity_Color(1.0, 0.25, 0.04, Quantity_TOC_RGB),
                     Quantity_Color(0.16, 0.70, 0.51, Quantity_TOC_RGB)};
-                const auto &regions =
-                    frame.displayShape.IsNull() ? frame.regions : frame.displayRegions;
                 for (std::size_t region = 0; region < regions.size(); ++region) {
                     TopTools_IndexedMapOfShape regionFaces;
                     TopExp::MapShapes(regions[region], TopAbs_FACE, regionFaces);
@@ -549,43 +613,11 @@ class OcctCanvas final : public QWidget {
                         candidate->SetCustomColor(faces(f),
                                                   Quantity_Color(.92, .65, .22, Quantity_TOC_RGB));
                 }
-                const std::array<Quantity_Color, 2> toolColors{
-                    Quantity_Color(0.30, 0.36, 0.44, Quantity_TOC_RGB),
-                    Quantity_Color(0.64, 0.70, 0.77, Quantity_TOC_RGB)};
-                for (std::size_t tool = 0; tool < frame.tools.size(); ++tool) {
-                    if (!frame.tools[tool].IsNull()) {
-                        candidate->SetCustomColor(frame.tools[tool], toolColors[tool]);
-                    }
-                    for (const auto &segment : frame.toolSegments[tool]) {
-                        const auto color = toolSegmentColor(segment.lengthMm, segmentColors_);
-                        const Quantity_Color native(color.redF(), color.greenF(), color.blueF(),
-                                                    Quantity_TOC_sRGB);
-                        TopTools_IndexedMapOfShape faces;
-                        TopExp::MapShapes(segment.shape, TopAbs_FACE, faces);
-                        for (int face = 1; face <= faces.Extent(); ++face)
-                            candidate->SetCustomColor(faces(face), native);
-                    }
-                }
-                for (const auto &c : frame.machine) {
-                    const Quantity_Color color(c.moving ? .40 : .31, c.moving ? .47 : .40,
-                                               c.moving ? .55 : .48, Quantity_TOC_RGB);
-                    candidate->SetCustomColor(c.shape, color);
-                    if (c.gauging)
-                        candidate->SetCustomColor(c.shape,
-                                                  Quantity_Color(.28, .49, .58, Quantity_TOC_RGB));
-                    candidate->SetCustomTransparency(c.shape, c.gauging ? .12 : .55);
-                }
-                if (frame.floor) {
-                    candidate->SetCustomColor(frame.floor->surface,
-                                              Quantity_Color(.14, .19, .22, Quantity_TOC_RGB));
-                    candidate->SetCustomTransparency(frame.floor->surface, .82);
-                    candidate->SetCustomColor(frame.floor->grid,
-                                              Quantity_Color(.25, .31, .36, Quantity_TOC_RGB));
-                }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
                                                                            : AIS_Shaded,
                                   -1, false);
+                updateRigidScene(frame);
                 if (!presentation_.IsNull()) {
                     context_->Remove(presentation_, false);
                 }
@@ -676,6 +708,7 @@ class OcctCanvas final : public QWidget {
                 for (const auto &old : {Handle(AIS_Shape)(presentation_), evidence_, support_})
                     if (!old.IsNull())
                         context_->Remove(old, false);
+                rigidScene_->clear();
                 removeDimensions();
                 context_->ClearSelected(false);
                 if (entering && !restoreSceneCamera(CameraSpace::Flat)) {
@@ -705,6 +738,7 @@ class OcctCanvas final : public QWidget {
 
     void clearDocument(quint64 revision) {
         guarded([&] {
+            rigidScene_->clear();
             context_->RemoveAll(false);
             context_->ClearSelected(false);
             view_->Redraw();
@@ -921,6 +955,8 @@ class OcctCanvas final : public QWidget {
     void setDisplayStyle(DisplayStyle value) {
         displayStyle_ = value;
         guarded([&] {
+            rigidScene_->setStyle(value == DisplayStyle::Wireframe ? AIS_WireFrame : AIS_Shaded,
+                                  value == DisplayStyle::Edges);
             if (!presentation_.IsNull()) {
                 presentation_->Attributes()->SetFaceBoundaryDraw(value == DisplayStyle::Edges);
                 context_->SetDisplayMode(
@@ -1252,6 +1288,10 @@ class OcctCanvas final : public QWidget {
                                   (preview_ || flat_) ? -1 : AIS_Shape::SelectionMode(TopAbs_FACE),
                                   false);
             }
+            if (preview_)
+                updateRigidScene(cad::OcctPreviewAccess::frame(*preview_, previewFrame_));
+            else
+                rigidScene_->clear();
             view_->Redraw();
             refreshDimensions();
         } catch (const Standard_Failure &error) {
@@ -1320,6 +1360,9 @@ class OcctCanvas final : public QWidget {
             // app configures runtime resources before starting any CAD worker.
             display_ = new Aspect_DisplayConnection();
             driver_ = new OpenGl_GraphicDriver(display_);
+            // Explicit developer benchmark only; normal interactive rendering retains VSync.
+            if (qEnvironmentVariableIntValue("BENDING_VIEWER_BENCHMARK_NO_VSYNC") == 1)
+                driver_->ChangeOptions().swapInterval = 0;
             scene_ = new V3d_Viewer(driver_);
             Handle(V3d_AmbientLight) ambient = new V3d_AmbientLight();
             scene_->AddLight(ambient);
@@ -1336,6 +1379,7 @@ class OcctCanvas final : public QWidget {
             }
             scene_->SetLightOn();
             context_ = new AIS_InteractiveContext(scene_);
+            rigidScene_ = std::make_unique<PreviewRigidScene>(context_);
             view_ = scene_->CreateView();
             window_ = new Aspect_NeutralWindow();
 #ifdef _WIN32
@@ -1405,6 +1449,7 @@ class OcctCanvas final : public QWidget {
 
     void release() noexcept {
         ready_ = false;
+        rigidScene_.reset();
         try {
             if (!view_.IsNull()) {
                 view_->Remove();
@@ -1430,6 +1475,7 @@ class OcctCanvas final : public QWidget {
     QPoint lastPosition_;
     TopoDS_Shape shape_;
     Handle(AIS_ColoredShape) presentation_;
+    std::unique_ptr<PreviewRigidScene> rigidScene_;
     Handle(AIS_Shape) evidence_;
     Handle(AIS_Shape) support_;
     FaceHighlights highlights_;
@@ -1743,7 +1789,11 @@ void ViewerWidget::layoutOverlays() {
         if (widget->layout())
             widget->layout()->activate();
         const auto size = widget->parentWidget()->size();
-        const int width = std::max(1, std::min(size.width() - 24, widget->sizeHint().width()));
+        const int availableWidth = std::max(1, size.width() - 24);
+        const bool expands = widget->sizePolicy().expandingDirections().testFlag(Qt::Horizontal);
+        const int width = expands
+                              ? availableWidth
+                              : std::max(1, std::min(availableWidth, widget->sizeHint().width()));
         const int height = std::max(1, std::min(size.height() - 24, widget->sizeHint().height()));
         const QRect target((size.width() - width) / 2, size.height() - height - 12, width, height);
         if (widget->geometry() != target)

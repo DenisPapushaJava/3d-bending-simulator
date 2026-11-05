@@ -27,6 +27,14 @@
       "thicknessMm": 2
     },
     {
+      "id": "reverse-tab",
+      "file": "reverse-tab-2mm.step",
+      "title": "Деталь с обратным язычком",
+      "description": "3 гиба · 2 мм — совместный гиб и окно между секциями матрицы",
+      "bends": 3,
+      "thicknessMm": 2
+    },
+    {
       "id": "panel",
       "file": "wall-panel-1000mm.step",
       "title": "Стеновая панель · 16 гибов",

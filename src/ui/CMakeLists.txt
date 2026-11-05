@@ -5,7 +5,7 @@ target_sources(bending_ui PRIVATE DrawingComposition.cpp DrawingSheetInternal.h 
 target_sources(bending_ui PRIVATE DrawingLayoutController.cpp DrawingLayoutController.h)
 target_sources(bending_ui PRIVATE BendMessagePanel.cpp BendMessagePanel.h)
 target_sources(bending_ui PRIVATE ToolSearchDialog.cpp ToolSearchDialog.h)
-target_sources(bending_ui PRIVATE ToolLibraryDialog.cpp ToolLibraryDialog.h)
+target_sources(bending_ui PRIVATE ToolLibraryDialog.cpp ToolLibraryDialog.h ToolAssemblyDialog.cpp ToolAssemblyDialog.h)
 set_target_properties(bending_ui PROPERTIES AUTOMOC ON)
 target_include_directories(bending_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(bending_ui PUBLIC Qt6::Widgets Bending::Application PRIVATE Bending::Viewer Bending::Simulation Bending::Update bending_options)

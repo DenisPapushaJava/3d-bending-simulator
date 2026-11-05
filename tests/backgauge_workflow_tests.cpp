@@ -106,6 +106,12 @@ int main(int argc, char **argv) {
                 "Missing backgauge scope");
         const auto &frame = cad::OcctPreviewAccess::frame(*p, 0);
         require(std::count_if(frame.machine.begin(), frame.machine.end(),
+                              [](const auto &c) {
+                                  return c.displayRole == cad::MachineDisplayRole::Backgauge &&
+                                         c.gauging;
+                              }) == 2,
+                "Backgauge fingers lost their display role");
+        require(std::count_if(frame.machine.begin(), frame.machine.end(),
                               [](const auto &c) { return c.gauging; }) == 2 &&
                     frame.backgaugeContacts.size() == 2,
                 "Fingers/contacts not prepared");
@@ -328,6 +334,7 @@ int main(int argc, char **argv) {
         legacyJson.insert("version", 15);
         auto legacyBends = legacyJson.value("bends").toArray();
         auto legacyBend = legacyBends[0].toObject();
+        legacyBend.remove("workpieceOffsetMm");
         auto legacyTools = legacyBend.value("catalogTools").toObject();
         auto legacyGauge = legacyTools.value("backgauge").toObject();
         legacyGauge.remove("allowOffsetContacts");

@@ -158,14 +158,16 @@ inline bending::core::ToolPreset fourWayDie(std::vector<double> openings = {12, 
 
 namespace tool_fixture {
 // Owned, explicit finite contours for GUI regressions. Never part of the application catalogue.
-inline bending::core::ToolAssignment explicitPair(const bending::core::PressTools &tools) {
+inline bending::core::ToolAssignment explicitPair(const bending::core::PressTools &tools,
+                                                  double shoulderRadiusMm = .2) {
     using namespace bending::core;
     constexpr double pi = std::numbers::pi;
     ToolAssignment a;
-    const auto key = std::to_string(tools.openingMm) + "-" + std::to_string(tools.dieAngleRadians) +
-                     "-" + std::to_string(tools.punchAngleRadians) + "-" +
-                     std::to_string(tools.noseRadiusMm) + "-" + std::to_string(tools.lengthMm) +
-                     "-" + std::to_string(punchLengthMm(tools));
+    auto key = std::to_string(tools.openingMm) + "-" + std::to_string(tools.dieAngleRadians) + "-" +
+               std::to_string(tools.punchAngleRadians) + "-" + std::to_string(tools.noseRadiusMm) +
+               "-" + std::to_string(tools.lengthMm) + "-" + std::to_string(punchLengthMm(tools));
+    if (shoulderRadiusMm != .2)
+        key += "-shoulder-" + std::to_string(shoulderRadiusMm);
     a.punch = {"fixture-p-" + key,
                "Own GUI fixture",
                "Owned punch",
@@ -206,7 +208,7 @@ inline bending::core::ToolAssignment explicitPair(const bending::core::PressTool
     punch.edges = {line({-x, tools.openingMm}, nose.start), nose,
                    line(nose.end, {x, tools.openingMm}),
                    line({x, tools.openingMm}, {-x, tools.openingMm})};
-    const double tilt = (pi - tools.dieAngleRadians) / 2, r = .2,
+    const double tilt = (pi - tools.dieAngleRadians) / 2, r = shoulderRadiusMm,
                  c = tools.openingMm / 2 + r * std::tan(tilt / 2);
     const auto left = arc({-c, -r}, r, pi / 2, -tilt),
                right = arc({c, -r}, r, pi / 2 + tilt, -tilt);

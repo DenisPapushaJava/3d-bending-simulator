@@ -257,6 +257,7 @@ int main(int argc, char **argv) {
         for (qsizetype i = 0; i < legacyBends.size(); ++i) {
             auto bend = legacyBends[i].toObject();
             bend.remove("workpieceReversed"); // v14 field is invalid in a v5 fixture.
+            bend.remove("workpieceOffsetMm");
             legacyBends[i] = bend;
         }
         root.insert("bends", legacyBends);

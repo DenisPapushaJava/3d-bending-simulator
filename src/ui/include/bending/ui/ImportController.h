@@ -53,7 +53,7 @@ class ImportController final : public QObject {
     prepareBendPreview(std::size_t recognizedIndex, bool fixedSecond,
                        std::shared_ptr<const application::SingleBendPreviewBuilder> builder,
                        application::BendPreviewMode mode = application::BendPreviewMode::Kinematic,
-                       double maximumEndSupportLossMm = 0);
+                       std::optional<double> maximumEndSupportLossMm = 0);
     void discardBendPreview();
     bool prepareBendRoute(application::BendRouteRequest,
                           std::shared_ptr<const application::SingleBendPreviewBuilder>);
@@ -66,6 +66,12 @@ class ImportController final : public QObject {
     [[nodiscard]] std::optional<application::BendRouteProgress> bendRouteProgress() const;
     bool prepareRouteDraft(application::RouteDraftRequest,
                            std::shared_ptr<const application::SingleBendPreviewBuilder>);
+    // Warm only the next draft in the existing CAD cache. Never publishes a scene or marks
+    // foreground work busy; an explicit matching request follows the normal acceptance path.
+    bool prefetchNextRouteDraft(std::shared_ptr<const application::SingleBendPreviewBuilder>);
+    // Cancels speculation, preserving work already needed by an explicit draft request.
+    void cancelRouteDraftPrefetch();
+    [[nodiscard]] bool isPrefetchingRouteDraft() const;
     void discardRouteDraft();
     [[nodiscard]] application::RouteDraftPtr routeDraft() const;
     [[nodiscard]] std::optional<application::BendRouteError> routeDraftError() const;

@@ -215,6 +215,11 @@ int main(int argc, char **argv) {
                         ->text()
                         .contains(QStringLiteral("переналадка не проверена")),
                     "Tool change has no scope warning");
+        if (!sample)
+            require(window.findChild<QLabel *>("bendMessagesText")
+                        ->text()
+                        .contains(QStringLiteral("Перед гибом смените сборку инструмента")),
+                    "The viewport omitted the actual tool-change message");
         if (!sample) {
             std::vector<std::string> order;
             for (auto it = route->steps.rbegin(); it != route->steps.rend(); ++it)

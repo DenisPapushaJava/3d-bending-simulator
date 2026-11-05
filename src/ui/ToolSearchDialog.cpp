@@ -17,6 +17,7 @@ ToolSearchDialog::ToolSearchDialog(QWidget *parent) : QDialog(parent) {
     layout->setContentsMargins(24, 20, 24, 20);
     layout->setSpacing(12);
     title_ = new QLabel(this);
+    title_->setObjectName("checkedToolTitle");
     auto font = title_->font();
     font.setPointSize(font.pointSize() + 3);
     font.setBold(true);
@@ -41,8 +42,10 @@ ToolSearchDialog::ToolSearchDialog(QWidget *parent) : QDialog(parent) {
         "QProgressBar::chunk{background:#087F85;width:40px;border-radius:3px;}");
     layout->addWidget(busyIndicator_);
     detail_ = new QLabel(this);
+    detail_->setObjectName("checkedToolDetail");
     detail_->setTextFormat(Qt::PlainText);
     detail_->setWordWrap(true);
+    detail_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     detail_->setStyleSheet("color:#526171");
     layout->addWidget(detail_);
     auto *buttons = new QHBoxLayout;
@@ -111,19 +114,27 @@ void ToolSearchDialog::progress(const application::BendRouteProgress &p, const Q
                          ? QStringLiteral("Проверено установок: %1").arg(p.checkedOperations)
                          : QString{});
 }
-void ToolSearchDialog::finish(bool resumable, const QString &reason) {
+void ToolSearchDialog::finish(application::BendRouteErrorCode code, const QString &reason) {
     busy_ = false;
-    resumable_ = resumable;
+    using Code = application::BendRouteErrorCode;
+    resumable_ = code == Code::SearchLimit;
     busyIndicator_->hide();
-    title_->setText(resumable ? QStringLiteral("Проверка не завершена")
-                              : QStringLiteral("Проверенный вариант не найден"));
+    title_->setText(resumable_ ? QStringLiteral("Проверка не завершена")
+                    : code == Code::Unsupported ? QStringLiteral("Проверка ограничена")
+                    : code == Code::NoRoute ? QStringLiteral("Проверенный вариант не найден")
+                                            : QStringLiteral("Не удалось завершить проверку"));
     detail_->setText(
-        resumable ? QStringLiteral("Можно продолжить с готовыми проверками или выбрать "
-                                   "инструмент другим способом.")
-                  : QStringLiteral("Можно попробовать быстрый или ручной выбор инструмента."));
+        resumable_ ? QStringLiteral("Можно продолжить с готовыми проверками или выбрать "
+                                    "инструмент другим способом.")
+        : code == Code::Unsupported
+            ? QStringLiteral("Попробуйте другой инструмент или ручной порядок.")
+            : QStringLiteral("Можно попробовать быстрый или ручной выбор инструмента."));
     if (!reason.isEmpty())
         detail_->setText(reason + QStringLiteral("\n\n") + detail_->text());
-    action_->setText(resumable ? QStringLiteral("Продолжить") : QStringLiteral("Закрыть"));
+    action_->setText(resumable_ ? QStringLiteral("Продолжить") : QStringLiteral("Закрыть"));
+    adjustSize();
+    if (const auto *owner = parentWidget())
+        move(pos() + owner->window()->frameGeometry().center() - frameGeometry().center());
 }
 void ToolSearchDialog::reject() {
     if (onCancel)

@@ -2,6 +2,7 @@
 #include "bending/application/Backgauge.h"
 #include "bending/application/Document.h"
 #include "bending/application/FlatPattern.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/BendTarget.h"
 #include "bending/core/ToolCatalog.h"
 #include <cmath>
@@ -20,18 +21,36 @@ struct RouteOperation {
     std::optional<core::PressTools> tools;
     std::optional<core::ToolAssignment> assignment;
     bool workpieceReversed = false;
+    double workpieceOffsetMm = 0;
     bool operator==(const RouteOperation &) const = default;
 };
 struct RouteToolVariant {
     core::ToolAssignment assignment;
-    // Null: common pair for the whole part; otherwise replace only this bend's tooling.
+    // Null: common pair for the whole part; otherwise primary + additional zones only.
     std::optional<std::size_t> bendIndex;
+    std::vector<std::size_t> additionalBendIndices = {};
 };
+[[nodiscard]] inline bool routeToolVariantApplies(const RouteToolVariant &variant,
+                                                  std::size_t index) {
+    if (!variant.bendIndex || *variant.bendIndex == index)
+        return true;
+    for (const auto member : variant.additionalBendIndices)
+        if (member == index)
+            return true;
+    return false;
+}
 enum class BendRoutePhase { Preparing, ToolCandidate, Checking };
 struct BendRouteProgress {
     BendRoutePhase phase = BendRoutePhase::Preparing;
     std::size_t variant = 0, variants = 0, checkedOperations = 0;
     std::optional<std::size_t> bendIndex;
+};
+// Explicit permission to change assemblies, preserving every captured profile,
+// inventory, groove and installation parameter. Empty/absent means fixed tools.
+struct RouteAssemblySearch {
+    std::vector<std::size_t> bendIndices;
+    double maximumGapMm = 0;
+    bool allowDieWindows = false; // Only after an actual sheet-die collision.
 };
 struct BendRouteRequest {
     // Complete list in the requested forward order; Automatic may reorder it.
@@ -47,12 +66,19 @@ struct BendRouteRequest {
     bool rankCandidates = true;
     bool rankToolShapes = true; // Soft source-profile ranking; no feasibility pruning.
     bool reuseCalculations = true;
+    bool allowJointBends = true; // Reference/diagnostic switch; no geometric rule is relaxed.
     std::optional<double> maximumEndSupportLossMm =
-        std::nullopt; // Null: legacy explicitly unbounded preview.
+        std::nullopt; // Null with allowPartialEndSupport: measured outer end losses are warnings.
     // Explicit checked tool-selection command only. Empty preserves ordinary route behaviour.
     std::vector<RouteToolVariant> toolVariants;
     // Informational callback on the CAD worker. Not part of a geometric cache key.
     std::function<void(BendRouteProgress)> onProgress;
+    std::optional<RouteAssemblySearch> assemblySearch = {};
+    // Explicit automatic search only; fixed/manual requests retain their exact offset.
+    bool allowAxialPlacement = false;
+    bool reusePlacementPreparation = true; // Reference switch; no change to checked scope.
+    bool rankToolAccess = true;       // Soft axial obstruction ranking; never a collision verdict.
+    bool preferCommonAssembly = true; // Bounded original-assembly pass, then normal planning.
 };
 // Apply one input snapshot without changing IDs, targets, order or workpiece orientations.
 [[nodiscard]] bool applyRouteToolVariant(BendRouteRequest &, std::size_t variant);
@@ -69,12 +95,26 @@ struct BendRouteStatistics {
     BackgaugeSearchStatistics backgauge;
     std::size_t shapeRankedToolVariants = 0;
     std::uint64_t toolShapeRankingUs = 0;
+    std::size_t plannedAssemblies = 0, reusedAssemblyPlans = 0;
+    std::size_t plannedDieWindows = 0, reusedDieWindowPlans = 0;
+    std::size_t preparedOperations = 0, reusedOperationPreparations = 0;
+    std::uint64_t operationPreparationUs = 0, placementEvaluationUs = 0;
+    std::size_t toolAccessRankedStates = 0;
+    std::size_t commonAssemblyPasses = 0, commonAssemblyChecks = 0;
+    bool usedCommonAssembly = false;
 };
 struct BendRouteStep {
     std::string id;
     std::size_t bendIndex;
     bool fixedSecond; // Resolved workpiece Y half-turn (legacy field name), not punch orientation.
     std::shared_ptr<const SingleBendPreview> preview;
+    // Additional original zones formed in this same press stroke. The primary
+    // zone above keeps its stable ID; source recognition is never merged.
+    // workpieceReversed is resolved relative to each member's own reference axis.
+    std::vector<RouteOperation> additionalBends = {};
+    // Only an explicitly authorized assembly search may change this snapshot.
+    // Alias of an interned immutable input, not a new DXF copy for each state.
+    std::shared_ptr<const core::ToolAssignment> assemblyAssignment = {};
 };
 struct BendRoute {
     DocumentPtr source;
@@ -87,12 +127,24 @@ struct BendRoute {
     // The first route is geometric K=0.5; material BA remains a separate flat pattern.
     // Tool mode checks each cycle; extraction/repositioning/machine are NOT certified.
 };
+[[nodiscard]] bool validRouteAssemblySearch(const BendRouteRequest &);
+[[nodiscard]] bool sameToolSetupExceptAssemblies(const core::ToolAssignment &,
+                                                 const core::ToolAssignment &);
+// Validate derived assemblies against the original permission/inventory, then
+// atomically resolve expected inputs for normal preview validation and saving.
+[[nodiscard]] bool applyRouteAssemblyResult(BendRouteRequest &, const BendRoute &);
 // A common uninterrupted material strip on both flanges for the whole forming interval.
 // Axial coordinates along this operation's bend line; end overhangs are NOT certified.
 struct BendEndSupport {
     double bendLengthMm;
     double supportedFromMm;
     double supportedToMm;
+};
+// One real axial interval of an operation. Empty space between joint zones is
+// not material and must not be collapsed into a single central support strip.
+struct BendSupportInterval {
+    double fromMm;
+    BendEndSupport material;
 };
 [[nodiscard]] inline bool validEndSupportLimitMm(double limit) noexcept {
     return std::isfinite(limit) && limit >= 0;

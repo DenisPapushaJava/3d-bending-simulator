@@ -58,9 +58,11 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] QString geometryIssue() const;
     [[nodiscard]] QString lengthIssue() const;
     [[nodiscard]] static QString lengthIssue(const application::BendRouteToolLengthIssue &);
-    [[nodiscard]] double maximumEndSupportLossMm() const;
+    [[nodiscard]] std::optional<double> maximumEndSupportLossMm() const;
+    [[nodiscard]] double maximumSegmentGapMm() const;
     [[nodiscard]] static QString assignmentIssue(const std::optional<core::ToolAssignment> &);
     void showPicker(core::ToolKind, QWidget *anchor);
+    void editAssembly(core::ToolKind);
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
                              bool allBends = false, double lengthToleranceMm = 1.e-5);
@@ -75,6 +77,7 @@ class ToolSelectionWidget final : public QWidget {
     std::function<void(Change)> onChanged;
     std::function<void()> onAppearanceChanged;
     std::function<void()> onCheckedRecommend;
+    std::function<void()> onCheckedAssemblies;
     std::function<void()> onCancelChecked;
 
   private:
@@ -135,6 +138,7 @@ class ToolSelectionWidget final : public QWidget {
     double lengthToleranceMm_ = 1.e-5;
     QDoubleSpinBox *clearance_;
     QDoubleSpinBox *endSupportLimit_;
+    QCheckBox *allowEndReliefs_;
     QCheckBox *backgauge_;
     core::BackgaugeSetup backgaugeSetup_;
     std::vector<Pair> favoritePairs_;

@@ -44,12 +44,13 @@ void wait(const std::function<bool()> &ready) {
 }
 class Builder final : public SingleBendPreviewBuilder {
   public:
-    enum class Mode { Real, WrongIndex, Wait };
+    enum class Mode { Real, WrongIndex, DuplicateJointZone, WrongAssembly, Error, Wait };
     mutable cad::SingleBendPreviewBuilder impl;
     mutable BendRouteRequest last;
     mutable BendRoutePtr accepted;
     mutable std::atomic<unsigned> calls = 0;
     std::atomic<Mode> mode = Mode::Real;
+    BendRouteError error{BendRouteErrorCode::Failed, "Failure"};
     mutable std::atomic<bool> entered = false, release = false, stopObserved = false;
     BendPreviewResult build(DocumentPtr d, std::size_t i, core::BendTarget t, bool reverse,
                             std::stop_token stop) const override {
@@ -66,9 +67,24 @@ class Builder final : public SingleBendPreviewBuilder {
                                std::stop_token stop) const override {
         last = r;
         ++calls;
+        if (mode == Mode::Error)
+            return error;
         if (mode == Mode::WrongIndex) {
             auto broken = std::make_shared<BendRoute>(*accepted);
             broken->selectedToolVariant = r.toolVariants.size();
+            return BendRoutePtr(broken);
+        }
+        if (mode == Mode::DuplicateJointZone) {
+            auto broken = std::make_shared<BendRoute>(*accepted);
+            broken->steps.front().additionalBends.push_back(r.operations.front());
+            return BendRoutePtr(broken);
+        }
+        if (mode == Mode::WrongAssembly) {
+            auto broken = std::make_shared<BendRoute>(*accepted);
+            auto assignment = r.toolVariants[*broken->selectedToolVariant].assignment;
+            assignment.punchReversed = !assignment.punchReversed;
+            broken->steps.front().assemblyAssignment =
+                std::make_shared<const core::ToolAssignment>(std::move(assignment));
             return BendRoutePtr(broken);
         }
         if (mode == Mode::Wait) {
@@ -156,6 +172,8 @@ int main(int argc, char **argv) {
         wait([&] { return !c.hasWork(); });
         if (const auto e = c.bendRouteError())
             throw std::runtime_error("Checked selection: " + e->detail);
+        check(builder->last.assemblySearch && builder->last.assemblySearch->bendIndices.size() == 2,
+              "Checked tool selection did not authorize coupled assembly search");
         const auto route = c.bendRoute();
         check(route && route->steps.size() == 2 && route->selectedToolVariant &&
                   *route->selectedToolVariant < builder->last.toolVariants.size() &&
@@ -214,10 +232,57 @@ int main(int argc, char **argv) {
                   c.bendRouteError()->code == BendRouteErrorCode::Failed &&
                   c.session().bend(0)->catalogTools == saved,
               "Invalid selected index changed the document");
+        builder->mode = Builder::Mode::DuplicateJointZone;
+        recommend->click();
+        wait([&] { return !c.hasWork(); });
+        check(!c.bendRoute() && c.bendRouteError() &&
+                  c.bendRouteError()->code == BendRouteErrorCode::Failed &&
+                  c.session().bend(0)->catalogTools == saved,
+              "Duplicate joint zone changed the document");
+        builder->mode = Builder::Mode::WrongAssembly;
+        recommend->click();
+        wait([&] { return !c.hasWork(); });
+        check(!c.bendRoute() && c.bendRouteError() &&
+                  c.bendRouteError()->code == BendRouteErrorCode::Failed &&
+                  c.session().bend(0)->catalogTools == saved,
+              "A forged derived punch orientation changed the session");
+        auto *progress = window.findChild<QDialog *>("checkedToolProgress");
+        check(progress, "No checked-result dialog");
+        auto *title = progress->findChild<QLabel *>("checkedToolTitle");
+        auto *detail = progress->findChild<QLabel *>("checkedToolDetail");
+        auto *action = progress->findChild<QPushButton *>("checkedToolProgressAction");
+        check(title && detail && action, "No checked-result fields");
+        builder->mode = Builder::Mode::Error;
+        for (const auto code : {BendRouteErrorCode::Unsupported, BendRouteErrorCode::NoRoute,
+                                BendRouteErrorCode::SearchLimit}) {
+            builder->error = {code, "Contact motion parameters rejected", 1, 27,
+                              BendPreviewErrorCode::SupportNotProven};
+            recommend->click();
+            wait([&] { return !c.hasWork(); });
+            check(progress->isVisible() && detail->text().contains("B02") &&
+                      detail->text().contains(QStringLiteral("опора на матрицу")) &&
+                      !detail->text().contains(QStringLiteral("Contact motion")) &&
+                      c.session().bend(0)->catalogTools == saved && !c.bendRoute(),
+                  "Failed selection hid its localized bend reason or applied tooling");
+            check(title->text() == (code == BendRouteErrorCode::Unsupported
+                                        ? QStringLiteral("Проверка ограничена")
+                                    : code == BendRouteErrorCode::SearchLimit
+                                        ? QStringLiteral("Проверка не завершена")
+                                        : QStringLiteral("Проверенный вариант не найден")) &&
+                      action->text() == (code == BendRouteErrorCode::SearchLimit
+                                             ? QStringLiteral("Продолжить")
+                                             : QStringLiteral("Закрыть")),
+                  "Unknown, limited and exhausted searches became the same result");
+            check((progress->frameGeometry().center() - window.frameGeometry().center())
+                          .manhattanLength() <= 4,
+                  "Result message resizing moved the dialog off centre");
+            check(detail->height() >= detail->heightForWidth(detail->width()) &&
+                      progress->rect().contains(detail->geometry()),
+                  "Localized result reason was clipped");
+        }
         builder->mode = Builder::Mode::Wait;
         recommend->click();
         wait([&] { return builder->entered.load(); });
-        auto *progress = window.findChild<QDialog *>("checkedToolProgress");
         auto *indicator = window.findChild<QProgressBar *>("checkedToolBusy");
         check(progress && progress->isVisible() && progress->windowModality() == Qt::WindowModal &&
                   QApplication::activeModalWidget() == progress && indicator &&
@@ -274,6 +339,22 @@ int main(int argc, char **argv) {
                   c.session().bend(0)->catalogTools == saved,
               "Late progress/result survived global cancellation");
         check(document->sourceStep() == source, "Selection changed original CAD bytes");
+        auto *sectionsOnly = window.findChild<QAction *>("recommendSelectedAssemblies");
+        check(sectionsOnly, "No coupled search command for the selected pair");
+        builder->mode = Builder::Mode::Error;
+        builder->error = {BendRouteErrorCode::SearchLimit, "Limited assembly search"};
+        sectionsOnly->trigger();
+        wait([&] { return !c.hasWork(); });
+        check(
+            builder->last.toolVariants.size() == 1 && builder->last.assemblySearch &&
+                builder->last.toolVariants.front().assignment.punch.id == blocked.id &&
+                c.session().bend(0)->catalogTools == saved,
+            "Selected-pair assembly search replaced the profile or committed an incomplete result");
+        recommend->click(); // Resume exactly the same fixed-profile search.
+        wait([&] { return !c.hasWork(); });
+        check(builder->last.toolVariants.size() == 1 &&
+                  builder->last.toolVariants.front().assignment.punch.id == blocked.id,
+              "Resume expanded a selected-pair search to unrelated profiles");
         c.shutdown();
         std::cout << "Checked alternate profiles, sections, guards, cancellation and quick "
                      "fallback passed\n";

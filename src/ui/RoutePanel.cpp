@@ -23,8 +23,88 @@
 #include <algorithm>
 #include <numbers>
 namespace bending::ui {
+QString routeFailureReason(const application::BendRouteError &error) {
+    QString message;
+    if (error.bendIndex)
+        message += (error.toolLengths ? QStringLiteral(" Гиб B%1.")
+                                      : QStringLiteral(" Последняя попытка: B%1."))
+                       .arg(*error.bendIndex + 1, 2, 10, QLatin1Char('0'));
+    if (error.toolLengths) {
+        const auto &lengths = *error.toolLengths;
+        message += QStringLiteral(" Нужно %1 мм; пуансон %2 мм, матрица %3 мм. "
+                                  "Подберите секции на этапе «Инструмент».")
+                       .arg(lengths.bendLengthMm, 0, 'f', 2)
+                       .arg(lengths.punchLengthMm, 0, 'f', 2)
+                       .arg(lengths.dieLengthMm, 0, 'f', 2);
+    }
+    if (error.operationError) {
+        using Code = application::BendPreviewErrorCode;
+        switch (*error.operationError) {
+        case Code::ToolTooShort:
+            if (!error.toolLengths)
+                message += QStringLiteral(" Инструмент короче линии гиба.");
+            break;
+        case Code::MissingLeftSupport:
+        case Code::MissingRightSupport:
+        case Code::SupportNotProven:
+            message += QStringLiteral(" Не подтверждена опора на матрицу во время гиба.");
+            break;
+        case Code::EndSupportLimitExceeded:
+            message += QStringLiteral(" Нехватка опоры у торца превышает заданный допуск.");
+            break;
+        case Code::ToolIntersection:
+            message += QStringLiteral(" Обнаружено столкновение с инструментом.");
+            break;
+        case Code::MachineIntersection:
+            message += QStringLiteral(" Столкновение с узлом демонстрационного станка: %1.")
+                           .arg(QString::fromStdString(error.detail));
+            break;
+        case Code::BackgaugeUnavailable:
+            message += QStringLiteral(" Не найдена база заднего упора.");
+            if (!error.detail.empty())
+                message += QLatin1Char(' ') + QString::fromStdString(error.detail);
+            break;
+        case Code::SheetIntersection:
+            message += QStringLiteral(" Стенки детали пересекаются при движении.");
+            break;
+        case Code::ToolAngleConflict:
+            message += QStringLiteral(" Угол инструмента не подходит.");
+            break;
+        case Code::NoseTooLarge:
+            message += QStringLiteral(" Радиус пуансона слишком велик.");
+            break;
+        case Code::NarrowDieOpening:
+            message += QStringLiteral(" Раскрытие V слишком мало для толщины.");
+            break;
+        case Code::RetractionNotProven:
+            message += QStringLiteral(" Не подтверждён свободный отвод пуансона.");
+            break;
+        case Code::ContactLost:
+            message += QStringLiteral(" Не подтверждён контакт с инструментом.");
+            break;
+        case Code::UnsupportedToolGeometry:
+            message += QStringLiteral(" Контакт этого профиля пока не поддержан.");
+            break;
+        case Code::UnsupportedGeometry:
+            message += QStringLiteral(" Промежуточная геометрия пока не поддерживается.");
+            break;
+        case Code::UnsupportedParameters:
+            message += QStringLiteral(" Параметры этой установки пока не поддерживаются.");
+            break;
+        default:
+            break;
+        }
+    }
+    return message.trimmed();
+}
 namespace {
 const char *stepMime = "application/x-bending-route-step";
+QString stepZones(const application::BendRouteStep &step) {
+    auto result = QStringLiteral("B%1").arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
+    for (const auto &member : step.additionalBends)
+        result += QStringLiteral(" + B%1").arg(member.bendIndex + 1, 2, 10, QLatin1Char('0'));
+    return result;
+}
 class StepButton final : public QPushButton {
   public:
     using QPushButton::QPushButton;
@@ -154,14 +234,6 @@ class StepCanvas final : public QWidget {
   private:
     int marker_ = -1;
 };
-class StepStrip final : public QWidget {
-  public:
-    using QWidget::QWidget;
-    int count = 1;
-    QSize sizeHint() const override {
-        return {count * 44 + 12, QWidget::sizeHint().height()};
-    }
-};
 } // namespace
 RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     setObjectName("bendRoutePanel");
@@ -194,7 +266,7 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(automatic_);
     layout->addWidget(expandSearch_);
     advancedLayout->addLayout(actions);
-    stepStrip_ = new StepStrip(this);
+    stepStrip_ = new QWidget(this);
     stepStrip_->setObjectName("routeStepStrip");
     auto *stripLayout = new QHBoxLayout(stepStrip_);
     stripLayout->setContentsMargins(2, 2, 2, 2);
@@ -202,18 +274,14 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setFixedHeight(40);
-    connect(scroll->horizontalScrollBar(), &QScrollBar::rangeChanged, this,
-            [this, scroll](int, int maximum) {
-                scroll->setFixedHeight(
-                    40 + (maximum > 0 ? scroll->horizontalScrollBar()->sizeHint().height() : 0));
-                stepStrip_->updateGeometry();
-            });
+    // Reserve the scrollbar band even when all steps fit; no vertical jump.
+    scroll->setFixedHeight(40 + scroll->horizontalScrollBar()->sizeHint().height());
     auto *strip = new StepCanvas(scroll);
     strip->moved = [this](int from, int to) { moveTo(from, to); };
     strip_ = new QHBoxLayout(strip);
     strip_->setContentsMargins(0, 0, 0, 0);
     strip_->setSpacing(4);
+    strip_->setAlignment(Qt::AlignTop);
     scroll->setWidget(strip);
     stripLayout->addWidget(scroll);
     earlier_ = new QPushButton(QStringLiteral("← Раньше"), this);
@@ -340,7 +408,30 @@ void RoutePanel::moveTo(int from, int to) {
     const auto before = ids_;
     const auto selected = ids_[static_cast<std::size_t>(from)];
     selected_ = to + 1;
-    if (onReorder(sequence.bendIds())) {
+    if (route_ && std::any_of(route_->steps.begin(), route_->steps.end(),
+                              [](const auto &step) { return !step.additionalBends.empty(); })) {
+        std::vector<std::string> expanded;
+        for (const auto &id : sequence.bendIds()) {
+            const auto step = std::find_if(route_->steps.begin(), route_->steps.end(),
+                                           [&](const auto &value) { return value.id == id; });
+            if (step == route_->steps.end())
+                return;
+            expanded.push_back(step->id);
+            for (const auto &member : step->additionalBends)
+                expanded.push_back(member.id);
+        }
+        // A group moved to another state must be checked there again. Keep all
+        // source IDs; a rejected grouping may legitimately split into single steps.
+        const auto beforeSources = sourceIds_;
+        if (onReorder(expanded, true)) {
+            undo_.push_back({beforeSources, expanded, selected, true});
+            redo_.clear();
+            if (undo_.size() > 50)
+                undo_.erase(undo_.begin());
+        }
+        return;
+    }
+    if (onReorder(sequence.bendIds(), false)) {
         undo_.push_back({before, sequence.bendIds(), selected});
         redo_.clear();
         if (undo_.size() > 50)
@@ -350,13 +441,13 @@ void RoutePanel::moveTo(int from, int to) {
     redoButton_->setEnabled(!redo_.empty());
 }
 void RoutePanel::undo() {
-    if (undo_.empty() || !onReorder || ids_ != undo_.back().after)
+    if (undo_.empty() || !onReorder || sourceIds_ != undo_.back().after)
         return;
     const auto edit = undo_.back();
     selected_ = static_cast<int>(std::find(edit.before.begin(), edit.before.end(), edit.selected) -
                                  edit.before.begin()) +
                 1;
-    if (onReorder(edit.before)) {
+    if (onReorder(edit.before, edit.grouped)) {
         undo_.pop_back();
         redo_.push_back(edit);
     }
@@ -364,13 +455,13 @@ void RoutePanel::undo() {
     redoButton_->setEnabled(!redo_.empty());
 }
 void RoutePanel::redo() {
-    if (redo_.empty() || !onReorder || ids_ != redo_.back().before)
+    if (redo_.empty() || !onReorder || sourceIds_ != redo_.back().before)
         return;
     const auto edit = redo_.back();
     selected_ = static_cast<int>(std::find(edit.after.begin(), edit.after.end(), edit.selected) -
                                  edit.after.begin()) +
                 1;
-    if (onReorder(edit.after)) {
+    if (onReorder(edit.after, edit.grouped)) {
         redo_.pop_back();
         undo_.push_back(edit);
     }
@@ -389,17 +480,34 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         undo_.clear();
         redo_.clear();
     }
-    const auto indices = session.orderedBends();
+    const auto sourceIndices = session.orderedBends();
+    sourceIds_.clear();
+    for (const auto index : sourceIndices)
+        if (const auto *entry = session.bend(index))
+            sourceIds_.push_back(entry->id);
+    auto indices = sourceIndices;
     std::vector<std::string> ids;
-    for (auto i : indices)
-        if (const auto *b = session.bend(i))
-            ids.push_back(b->id);
+    if (route) {
+        indices.clear();
+        for (const auto &step : route->steps) {
+            ids.push_back(step.id);
+            indices.push_back(step.bendIndex);
+        }
+    } else
+        for (auto i : indices)
+            if (const auto *b = session.bend(i))
+                ids.push_back(b->id);
     const bool changed = ids != ids_ || route != route_;
     const bool newRoute = route && route != route_;
+    const bool leavingJointRoute =
+        !route && route_ &&
+        std::any_of(route_->steps.begin(), route_->steps.end(),
+                    [](const auto &step) { return !step.additionalBends.empty(); });
     ids_ = std::move(ids);
     indices_ = indices;
     route_ = std::move(route);
-    selected_ = newRoute ? 0 : std::clamp(selected_, 0, static_cast<int>(ids_.size()));
+    selected_ =
+        newRoute || leavingJointRoute ? 0 : std::clamp(selected_, 0, static_cast<int>(ids_.size()));
     if (changed && steps_.size() != ids_.size() + 1) {
         while (auto *item = strip_->takeAt(0)) {
             delete item->widget();
@@ -433,8 +541,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     [this, i] { select(static_cast<int>(i)); });
         }
         strip_->addStretch();
-        static_cast<StepStrip *>(stepStrip_)->count = static_cast<int>(ids_.size() + 1);
-        stepStrip_->adjustSize();
+        stepStrip_->updateGeometry();
     }
     auto *canvas = static_cast<StepCanvas *>(strip_->parentWidget());
     canvas->buttons = steps_;
@@ -443,18 +550,21 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         steps_[i]->setProperty("routeId", i ? QString::fromStdString(ids_[i - 1]) : QString{});
         steps_[i]->setToolTip(
             i ? (route_ ? QString{} : QStringLiteral("Черновик · ")) +
-                    QStringLiteral("Шаг %1 · B%2 · форма после гиба. Перетащите между шагами.")
+                    QStringLiteral("Шаг %1 · %2 · форма после гиба. Перетащите между шагами.")
                         .arg(i)
-                        .arg(indices_[i - 1] + 1, 2, 10, QLatin1Char('0'))
+                        .arg(route_ ? stepZones(route_->steps[i - 1])
+                                    : QStringLiteral("B%1").arg(indices_[i - 1] + 1, 2, 10,
+                                                                QLatin1Char('0')))
               : QStringLiteral("0 — заготовка: все гибы разогнуты"));
         steps_[i]->setAccessibleName(i ? QStringLiteral("Показать результат шага %1").arg(i)
                                        : QStringLiteral("Показать заготовку"));
     }
-    bool included = !ids_.empty() && session.document() &&
-                    ids_.size() == session.document()->metadata().bendAnalysis.bends.size();
+    bool included =
+        !ids_.empty() && session.document() &&
+        sourceIndices.size() == session.document()->metadata().bendAnalysis.bends.size();
     bool assigned = included;
     std::optional<std::size_t> missingTool;
-    for (auto index : indices_)
+    for (auto index : sourceIndices)
         if (const auto *entry = session.bend(index)) {
             included &= application::included(entry->review);
             if (!entry->tools) {
@@ -481,8 +591,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         steps_[i]->setEnabled(!busy && included);
         steps_[i]->setChecked(static_cast<int>(i) == selected_);
     }
-    undoButton_->setEnabled(!busy && !undo_.empty() && ids_ == undo_.back().after);
-    redoButton_->setEnabled(!busy && !redo_.empty() && ids_ == redo_.back().before);
+    undoButton_->setEnabled(!busy && !undo_.empty() && sourceIds_ == undo_.back().after);
+    redoButton_->setEnabled(!busy && !redo_.empty() && sourceIds_ == redo_.back().before);
     QString message;
     if (preparing)
         message = QStringLiteral("Строим 3D-состояния и проверяем порядок… Можно отменить расчёт.");
@@ -503,68 +613,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                       "В проверенных вариантах порядок не найден. Измените порядок или инструмент.")
                 : QStringLiteral(
                       "Не удалось подготовить полный порядок для этой геометрии/настройки.");
-        if (error->bendIndex)
-            message += (error->toolLengths ? QStringLiteral(" Гиб B%1.")
-                                           : QStringLiteral(" Последняя попытка: B%1."))
-                           .arg(*error->bendIndex + 1, 2, 10, QLatin1Char('0'));
-        if (error->toolLengths) {
-            const auto &lengths = *error->toolLengths;
-            message += QStringLiteral(" Нужно %1 мм; пуансон %2 мм, матрица %3 мм. "
-                                      "Подберите секции на этапе «Инструмент».")
-                           .arg(lengths.bendLengthMm, 0, 'f', 2)
-                           .arg(lengths.punchLengthMm, 0, 'f', 2)
-                           .arg(lengths.dieLengthMm, 0, 'f', 2);
-        }
-        if (error->operationError) {
-            using Code = application::BendPreviewErrorCode;
-            switch (*error->operationError) {
-            case Code::ToolTooShort:
-                if (!error->toolLengths)
-                    message += QStringLiteral(" Инструмент короче линии гиба.");
-                break;
-            case Code::MissingLeftSupport:
-            case Code::MissingRightSupport:
-            case Code::SupportNotProven:
-                message += QStringLiteral(" Не подтверждена опора на матрицу.");
-                break;
-            case Code::EndSupportLimitExceeded:
-                message += QStringLiteral("Нехватка опоры у торца превышает заданный допуск.");
-                break;
-            case Code::ToolIntersection:
-                message += QStringLiteral(" Обнаружено столкновение с инструментом.");
-                break;
-            case Code::MachineIntersection:
-                message += QStringLiteral(" Столкновение с узлом демонстрационного станка: %1.")
-                               .arg(QString::fromStdString(error->detail));
-                break;
-            case Code::BackgaugeUnavailable:
-                message += QStringLiteral(" Не найдена база заднего упора.");
-                break;
-            case Code::SheetIntersection:
-                message += QStringLiteral(" Стенки детали пересекаются при движении.");
-                break;
-            case Code::ToolAngleConflict:
-                message += QStringLiteral(" Угол инструмента не подходит.");
-                break;
-            case Code::NoseTooLarge:
-                message += QStringLiteral(" Радиус пуансона слишком велик.");
-                break;
-            case Code::NarrowDieOpening:
-                message += QStringLiteral(" Раскрытие V слишком мало для толщины.");
-                break;
-            case Code::RetractionNotProven:
-                message += QStringLiteral(" Не подтверждён свободный отвод пуансона.");
-                break;
-            case Code::ContactLost:
-                message += QStringLiteral(" Не подтверждён контакт с инструментом.");
-                break;
-            case Code::UnsupportedToolGeometry:
-                message += QStringLiteral(" Контакт этого профиля пока не поддержан.");
-                break;
-            default:
-                break;
-            }
-        }
+        const auto reason = routeFailureReason(*error);
+        if (!reason.isEmpty())
+            message += QLatin1Char(' ') + reason;
     } else if (route_) {
         if (selected_ == 0)
             message = QStringLiteral("Плоская геометрическая заготовка · %1 операций. ")
@@ -573,24 +624,31 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             const auto &step = route_->steps[operation()];
             const auto &b = session.document()->metadata().bendAnalysis.bends[step.bendIndex];
             message =
-                QStringLiteral("Шаг %1/%2 · B%6 · целевой внутренний угол %3° · L %4 мм · подача "
+                QStringLiteral("Шаг %1/%2 · %6 · целевой внутренний угол %3° · L %4 мм · подача "
                                "со стороны %5. ")
                     .arg(selected_)
                     .arg(route_->steps.size())
                     .arg((std::numbers::pi - b.angleRadians) * 180 / std::numbers::pi, 0, 'f', 1)
-                    .arg(b.lengthMm, 0, 'f', 1)
+                    .arg(step.preview->model().widthMm, 0, 'f', 1)
                     .arg(step.fixedSecond ? "B" : "A")
-                    .arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
+                    .arg(stepZones(step));
         }
-        message += route_->partialEndSupport ? QStringLiteral("Неполная опора у торца. ")
+        message += route_->partialEndSupport
+                       ? QStringLiteral("Маршрут найден. Торцевые подрезы: возможна деформация. ")
                    : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
                                        : QStringLiteral("Движение без инструмента. ");
         if (selected_ > 0)
-            if (const auto *support = route_->steps[operation()].preview->partialEndSupport())
-                message += QStringLiteral("Материал под опорой: %1–%2 из %3 мм. ")
-                               .arg(support->supportedFromMm, 0, 'f', 2)
-                               .arg(support->supportedToMm, 0, 'f', 2)
-                               .arg(support->bendLengthMm, 0, 'f', 2);
+            for (const auto &interval : route_->steps[operation()].preview->endSupportIntervals()) {
+                const auto &support = interval.material;
+                if (support.supportedFromMm == 0 && support.supportedToMm == support.bendLengthMm)
+                    continue;
+                message += QStringLiteral("Участок %1–%2 мм: материал под опорой %3–%4 из %5 мм. ")
+                               .arg(interval.fromMm, 0, 'f', 2)
+                               .arg(interval.fromMm + support.bendLengthMm, 0, 'f', 2)
+                               .arg(support.supportedFromMm, 0, 'f', 2)
+                               .arg(support.supportedToMm, 0, 'f', 2)
+                               .arg(support.bendLengthMm, 0, 'f', 2);
+            }
         if (selected_ > 0 && route_->withTools) {
             const auto *entry = session.bend(route_->steps[operation()].bendIndex);
             if (entry && entry->catalogTools)

@@ -181,6 +181,19 @@ bool DocumentSession::setBendWorkpieceOrientation(std::size_t index, bool revers
     return true;
 }
 
+bool DocumentSession::setBendWorkpieceOffset(std::size_t index, double offsetMm) {
+    const auto *entry = bend(index);
+    if (!document_ || active_ || !entry || !included(entry->review) ||
+        !validWorkpieceOffset(offsetMm))
+        return false;
+    if (entry->workpieceOffsetMm != offsetMm) {
+        bends_[*bendBindings_.byRecognizedBend[index]].workpieceOffsetMm = offsetMm;
+        modified_ = true;
+        ++editRevision_;
+    }
+    return true;
+}
+
 bool DocumentSession::setBendTools(std::size_t recognizedIndex,
                                    std::optional<core::PressTools> tools) {
     const auto *entry = bend(recognizedIndex);

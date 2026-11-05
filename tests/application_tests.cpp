@@ -1,5 +1,7 @@
+#include "ToolFixtures.h"
 #include "bending/application/BendRoute.h"
 #include "bending/application/DocumentSession.h"
+#include "bending/application/SingleBendPreview.h"
 
 #include <algorithm>
 #include <iostream>
@@ -31,6 +33,80 @@ class TestDocument final : public Document {
     DocumentMetadata metadata_{};
     std::vector<FaceInfo> faces_;
 };
+void testAssemblyResult() {
+    auto original = tool_fixture::pair(16);
+    original.punch.segments = original.die.segments =
+        std::vector<bending::core::ToolSegment>{{80, 1}, {40, 1}};
+    original.punchAssembly = original.dieAssembly = bending::core::ToolAssembly{{0}, 0};
+    auto fitted = original;
+    fitted.punchAssembly = fitted.dieAssembly = bending::core::ToolAssembly{{0, 1}, 0};
+    BendRouteRequest request;
+    request.withTools = request.automatic = true;
+    for (std::size_t i = 0; i < 2; ++i)
+        request.operations.push_back({"bend-" + std::to_string(i),
+                                      i,
+                                      {1.57, 4},
+                                      bending::core::toolParameters(original),
+                                      original});
+    request.assemblySearch = RouteAssemblySearch{{0, 1}, 3};
+    BendRoute route;
+    route.steps.push_back({"bend-0",
+                           0,
+                           false,
+                           {},
+                           {},
+                           std::make_shared<const bending::core::ToolAssignment>(fitted)});
+    auto member = request.operations[1];
+    member.assignment = fitted;
+    member.tools = bending::core::toolParameters(fitted);
+    route.steps.front().additionalBends.push_back(member);
+    auto resolved = request;
+    require(validRouteAssemblySearch(request) && applyRouteAssemblyResult(resolved, route) &&
+                resolved.operations[0].assignment == fitted &&
+                resolved.operations[1].assignment == fitted &&
+                request.operations[0].assignment == original,
+            "Assembly result lost group scope or mutated the request");
+    const auto rejected = [&](BendRouteRequest input, BendRoute broken) {
+        const auto before = input.operations;
+        require(!applyRouteAssemblyResult(input, broken) && input.operations == before,
+                "Invalid derived tooling was accepted or partially applied");
+    };
+    auto locked = request;
+    locked.assemblySearch.reset();
+    rejected(locked, route);
+    locked.assemblySearch = RouteAssemblySearch{{0}, 3};
+    rejected(locked, route); // Primary authorized, additional member locked.
+    locked = request;
+    locked.assemblySearch->bendIndices = {0, 0};
+    require(!validRouteAssemblySearch(locked), "Duplicate assembly scope accepted");
+    auto broken = route;
+    auto forged = fitted;
+    forged.punch.drawing->edges[1].end.x += 1;
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    forged = fitted;
+    forged.punchReversed = !forged.punchReversed;
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    forged = fitted;
+    forged.punchAssembly->pieces = {0, 0}; // Two sections, only one in stock.
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    forged = fitted;
+    forged.punchAssembly->gapMm = 4;
+    broken.steps.front().assemblyAssignment =
+        std::make_shared<const bending::core::ToolAssignment>(forged);
+    rejected(request, broken);
+    broken = route;
+    broken.steps.front().additionalBends.clear();
+    rejected(request, broken);
+    broken = route;
+    broken.steps.front().additionalBends.push_back(member);
+    rejected(request, broken);
+}
 void testSession() {
     DocumentSession session;
     auto first = session.beginImport("first.step");
@@ -220,6 +296,15 @@ void testBendPreparation() {
                 !session.setBendWorkpieceOrientation(99, true) &&
                 session.editRevision() == unchangedSideEdit,
             "Invalid/unchanged orientation edited the project");
+    const auto placementEdit = session.editRevision();
+    require(
+        session.setBendWorkpieceOffset(0, 17.25) && session.bend(0)->workpieceOffsetMm == 17.25 &&
+            session.bend(1)->workpieceOffsetMm == 0 && session.editRevision() == placementEdit + 1,
+        "Axial placement changed another operation or missed its revision");
+    require(session.setBendWorkpieceOffset(0, 17.25) && !session.setBendWorkpieceOffset(99, 0) &&
+                !session.setBendWorkpieceOffset(0, 1000001.) &&
+                session.editRevision() == placementEdit + 1,
+            "Invalid/unchanged placement edited the session");
     const auto secondId = session.bend(1)->id;
     const auto orderEdit = session.editRevision();
     require(session.setBendOrder({secondId, id}) &&
@@ -327,13 +412,87 @@ void testBendPreparation() {
     require(session.bends().empty() && !session.bend(0), "Close retained preparations");
 }
 
+void testEndSupportReports() {
+    struct Preview : SingleBendPreview {
+        std::vector<BendSupportInterval> intervals{{0, {45, .46, 42}}, {65, {55, 1.25, 52.5}}};
+        bending::simulation::SingleBend geometry{2, 4, 1.57, 120, 30, 30};
+        bending::simulation::FlatToolSetup setup{};
+        std::optional<double> limit = 3;
+        std::optional<double> endSupportLimitMm() const noexcept override {
+            return limit;
+        }
+        std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
+            return intervals;
+        }
+        std::size_t activeBendCount() const noexcept override {
+            return 2;
+        }
+        const bending::simulation::SingleBend &model() const noexcept override {
+            return geometry;
+        }
+        const bending::simulation::FlatToolSetup *toolSetup() const noexcept override {
+            return &setup;
+        }
+        std::size_t frameCount() const noexcept override {
+            return 0;
+        }
+        BoundsMm bounds() const noexcept override {
+            return {};
+        }
+    } preview;
+    require(preview.hasPartialEndSupport() && validEndSupportIntervals(preview, 3, .001) &&
+                !validEndSupportIntervals(preview, 2.9, .001),
+            "Interval validation lost the per-end limit");
+    for (const int invalid : {0, 1, 2, 3, 4, 5}) {
+        Preview candidate;
+        candidate.limit = 100;
+        switch (invalid) {
+        case 0:
+            candidate.intervals.pop_back();
+            break;
+        case 1:
+            candidate.intervals[1].fromMm = 44;
+            break;
+        case 2:
+            candidate.intervals[1].fromMm = 66;
+            break;
+        case 3:
+            candidate.intervals[0].fromMm = 1;
+            break;
+        case 4:
+            candidate.intervals[1].material.supportedFromMm = 30;
+            break;
+        case 5:
+            candidate.intervals[1].material.supportedToMm =
+                std::numeric_limits<double>::quiet_NaN();
+            break;
+        }
+        require(!validEndSupportIntervals(candidate, 100, .001),
+                "Incomplete/overlapping/invalid joint support report was accepted");
+    }
+    preview.limit.reset();
+    require(validEndSupportIntervals(preview, {}, .001) &&
+                !validEndSupportIntervals(preview, 3, .001),
+            "Unbounded warning report was accepted as a bounded check");
+    const auto rank = endSupportLossRank(preview);
+    require(std::abs(rank[0] - 3.46 / 45) < 1.e-9 && std::abs(rank[1] - 7.21 / 100) < 1.e-9,
+            "Support rank lost a joint interval or diluted losses by the gap");
+    Preview worse;
+    worse.intervals[0].material.supportedFromMm = 5;
+    require(rank < endSupportLossRank(worse), "Greater relative end loss ranked first");
+    for (auto &interval : worse.intervals)
+        interval.material = {interval.material.bendLengthMm, 0, interval.material.bendLengthMm};
+    require(endSupportLossRank(worse) < rank, "Full support did not precede end reliefs");
+}
 } // namespace
 int main() {
     try {
+        testAssemblyResult();
         testSession();
         testProjectState();
         testPartInputs();
         testBendPreparation();
+        testEndSupportReports();
         require(withinEndSupportLimit({50, .46, 49.54}, 3) &&
                     withinEndSupportLimit({50, 3, 47}, 3) &&
                     !withinEndSupportLimit({50, 3.01, 47}, 3) &&

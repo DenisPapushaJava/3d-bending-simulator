@@ -13,7 +13,8 @@ enum class BendMessageKind {
     CheckIssue,
     Approximation,
     Scope,
-    Backgauge
+    Backgauge,
+    SetupChange
 };
 enum class BendMessageSeverity { Information, Warning, Error };
 struct BendMessage {

@@ -17,26 +17,24 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
     [[nodiscard]] application::BendRouteResult buildRoute(application::DocumentPtr,
                                                           application::BendRouteRequest,
                                                           std::stop_token) const override;
-    [[nodiscard]] application::BendPreviewResult
-    buildAssignedToolSetup(application::DocumentPtr, std::size_t, core::BendTarget,
-                           core::ToolAssignment, std::stop_token,
-                           double maximumEndSupportLossMm = 0,
-                           bool workpieceReversed = false) const override;
-    [[nodiscard]] application::BendPreviewResult
-    buildAssignedToolMotion(application::DocumentPtr, std::size_t, core::BendTarget,
-                            core::ToolAssignment, std::stop_token,
-                            double maximumEndSupportLossMm = 0,
-                            bool workpieceReversed = false) const override;
+    [[nodiscard]] application::BendPreviewResult buildAssignedToolSetup(
+        application::DocumentPtr, std::size_t, core::BendTarget, core::ToolAssignment,
+        std::stop_token, std::optional<double> maximumEndSupportLossMm = 0,
+        bool workpieceReversed = false, double workpieceOffsetMm = 0) const override;
+    [[nodiscard]] application::BendPreviewResult buildAssignedToolMotion(
+        application::DocumentPtr, std::size_t, core::BendTarget, core::ToolAssignment,
+        std::stop_token, std::optional<double> maximumEndSupportLossMm = 0,
+        bool workpieceReversed = false, double workpieceOffsetMm = 0) const override;
     [[nodiscard]] application::BendPreviewResult
     buildToolMotion(application::DocumentPtr document, std::size_t bendIndex,
                     core::BendTarget target, core::PressTools tools, std::stop_token stop,
-                    double maximumEndSupportLossMm = 0,
-                    bool workpieceReversed = false) const override;
+                    std::optional<double> maximumEndSupportLossMm = 0,
+                    bool workpieceReversed = false, double workpieceOffsetMm = 0) const override;
     [[nodiscard]] application::BendPreviewResult
     buildToolSetup(application::DocumentPtr document, std::size_t bendIndex,
                    core::BendTarget target, core::PressTools tools, std::stop_token stop,
-                   double maximumEndSupportLossMm = 0,
-                   bool workpieceReversed = false) const override;
+                   std::optional<double> maximumEndSupportLossMm = 0,
+                   bool workpieceReversed = false, double workpieceOffsetMm = 0) const override;
     [[nodiscard]] application::BendPreviewResult build(application::DocumentPtr document,
                                                        std::size_t bendIndex,
                                                        core::BendTarget target, bool fixedSecond,
@@ -47,7 +45,8 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
                                                    core::BendTarget, bool reversed, std::stop_token,
                                                    core::PressTools, bool motion,
                                                    std::optional<core::ToolAssignment>,
-                                                   double maximumEndSupportLossMm) const;
+                                                   std::optional<double> maximumEndSupportLossMm,
+                                                   double workpieceOffsetMm) const;
     struct SingleCache;
     mutable std::shared_ptr<SingleCache> singleCache_;
     struct RouteCache;

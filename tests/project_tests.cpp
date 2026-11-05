@@ -47,6 +47,7 @@ QJsonObject withoutWorkpieceOrientation(QJsonObject root) {
     for (qsizetype i = 0; i < bends.size(); ++i) {
         auto entry = bends[i].toObject();
         entry.remove("workpieceReversed");
+        entry.remove("workpieceOffsetMm");
         bends[i] = entry;
     }
     root.insert("bends", bends);
@@ -202,7 +203,7 @@ void testBendProject() {
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
         auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 16, "Wrong output version");
+        require(root.value(QStringLiteral("version")).toInt() == 18, "Wrong output version");
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -531,6 +532,61 @@ void testCatalogProject() {
             "Unbounded catalogue accepted");
 }
 
+void testLocalAssemblies() {
+    using namespace bending;
+    QTemporaryDir folder;
+    const auto destination = folder.filePath("local.bend");
+    const auto path = nativePath(destination);
+    project::ProjectFiles files;
+    DocumentSession session;
+    session.complete(
+        session.beginImport("source.step"),
+        files.load(nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/trimmed-bend-2mm.step"),
+                   {}, {}));
+    require(session.document() && session.bend(0), "No local assembly fixture");
+    auto a = tool_fixture::pair();
+    a.punch.segments = a.die.segments = std::vector<core::ToolSegment>{{30, 2}, {40, 1}};
+    a.punchAssembly = core::ToolAssembly{{0, 1, 0}, 0, {0, 15}};
+    a.dieAssembly = core::ToolAssembly{{1, 0, 0}, 0, {8, 2}};
+    require(session.setBendToolAssignment(0, a) &&
+                !files.save(path, *session.document(), {}, session.bends(), {}),
+            "Cannot save independent local assemblies");
+    auto loaded = files.load(path, {}, {});
+    require(std::holds_alternative<OpenedProject>(loaded) &&
+                std::get<OpenedProject>(loaded).bends.front().catalogTools == a,
+            "Per-joint gaps/stock/order lost in project");
+    const auto root = QJsonDocument::fromJson(read(destination)).object();
+    for (int test = 0; test < 8; ++test) {
+        auto bad = root;
+        auto bends = bad.value("bends").toArray();
+        auto bend = bends[0].toObject();
+        auto pair = bend.value("catalogTools").toObject();
+        auto assembly = pair.value("dieAssembly").toObject();
+        if (test == 0)
+            bad.insert("version", 17);
+        if (test == 1)
+            assembly.insert("jointGapsMm", QJsonArray{8});
+        if (test == 2)
+            assembly.insert("jointGapsMm", QJsonArray{8, -2});
+        if (test == 3)
+            assembly.insert("jointGapsMm", QJsonArray{8, "2"});
+        if (test == 4)
+            assembly.insert("jointGapsMm", QJsonValue(QJsonValue::Null));
+        if (test == 5)
+            assembly.insert("gapMm", 1);
+        if (test == 6)
+            assembly.insert("pieces", QJsonArray{1, 1, 1});
+        if (test == 7)
+            assembly.insert("jointGapsMm", QJsonArray{});
+        pair.insert("dieAssembly", assembly);
+        bend.insert("catalogTools", pair);
+        bends[0] = bend;
+        bad.insert("bends", bends);
+        write(destination, QJsonDocument(bad).toJson());
+        require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                "Malformed gap layout, old schema or stock overuse accepted");
+    }
+}
 void testMachineProfile() {
     bending::project::ProjectFiles files;
     QTemporaryDir folder;
@@ -558,6 +614,7 @@ void testMachineProfile() {
                         : session.setBendTools(0, tools),
                 "Cannot set machine profile");
         require(session.setBendWorkpieceOrientation(0, modern), "Cannot orient workpiece");
+        require(session.setBendWorkpieceOffset(0, modern ? 12.5 : -7.25), "Cannot place workpiece");
         require(!files.save(path, *session.document(), {}, session.bends(), {}),
                 "Cannot save machine");
         const auto opened = files.load(path, {}, {});
@@ -565,9 +622,34 @@ void testMachineProfile() {
         const auto &b = std::get<OpenedProject>(opened).bends.at(0);
         require(b.tools && b.tools->machineModel == assignment.machineModel &&
                     b.tools->punchReversed == modern && b.workpieceReversed == modern &&
+                    b.workpieceOffsetMm == (modern ? 12.5 : -7.25) &&
                     (!catalog || b.catalogTools == assignment),
                 "Lost saved machine profile");
         const auto root = QJsonDocument::fromJson(read(destination)).object();
+        for (const auto &badValue :
+             {QJsonValue("12.5"), QJsonValue(QJsonValue::Null), QJsonValue(1000001.)}) {
+            auto bad = root;
+            auto rows = bad.value("bends").toArray();
+            auto entry = rows[0].toObject();
+            entry.insert("workpieceOffsetMm", badValue);
+            rows[0] = entry;
+            bad.insert("bends", rows);
+            write(destination, QJsonDocument(bad).toJson());
+            require(std::holds_alternative<ImportError>(files.load(path, {}, {})),
+                    "Invalid axial workpiece offset accepted");
+        }
+        auto v16 = root;
+        auto oldRows = v16.value("bends").toArray();
+        auto oldEntry = oldRows[0].toObject();
+        oldEntry.remove("workpieceOffsetMm");
+        oldRows[0] = oldEntry;
+        v16.insert("bends", oldRows);
+        v16.insert("version", 16);
+        write(destination, QJsonDocument(v16).toJson());
+        const auto legacyOffset = files.load(path, {}, {});
+        require(std::holds_alternative<OpenedProject>(legacyOffset) &&
+                    std::get<OpenedProject>(legacyOffset).bends.front().workpieceOffsetMm == 0,
+                "v16 did not retain a centred installation");
         auto old = withoutWorkpieceOrientation(root);
         old.insert("version", 13);
         write(destination, QJsonDocument(old).toJson());
@@ -641,6 +723,7 @@ int main(int argc, char **argv) {
         testCatalogProject();
         testPrivatePreparation();
         testMachineProfile();
+        testLocalAssemblies();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

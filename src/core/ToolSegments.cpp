@@ -22,25 +22,78 @@ bool validToolSegments(const std::vector<ToolSegment> &stock) {
     }
     return true;
 }
+double assemblyGapAfter(const ToolAssembly &a, std::size_t piece) noexcept {
+    if (a.pieces.empty() || piece >= a.pieces.size() - 1)
+        return 0;
+    return a.jointGapsMm.empty()          ? a.gapMm
+           : piece < a.jointGapsMm.size() ? a.jointGapsMm[piece]
+                                          : 0;
+}
+double maximumAssemblyGap(const ToolAssembly &a) noexcept {
+    if (a.pieces.size() < 2)
+        return 0;
+    return a.jointGapsMm.empty() ? a.gapMm
+                                 : *std::max_element(a.jointGapsMm.begin(), a.jointGapsMm.end());
+}
 std::optional<double> assemblyLength(const std::vector<ToolSegment> &stock,
                                      const ToolAssembly &assembly) {
+    const auto validGap = [](double gap) {
+        return std::isfinite(gap) && gap >= 0 && gap <= 1000 &&
+               std::abs(gap * 1000 - std::round(gap * 1000)) <= 1.e-6;
+    };
     if (!validToolSegments(stock) || assembly.pieces.empty() || assembly.pieces.size() > 512 ||
-        !std::isfinite(assembly.gapMm) || assembly.gapMm < 0 || assembly.gapMm > 1000 ||
-        std::abs(assembly.gapMm * 1000 - std::round(assembly.gapMm * 1000)) > 1.e-6)
+        !validGap(assembly.gapMm) ||
+        (!assembly.jointGapsMm.empty() &&
+         (assembly.gapMm != 0 || assembly.jointGapsMm.size() != assembly.pieces.size() - 1 ||
+          !std::all_of(assembly.jointGapsMm.begin(), assembly.jointGapsMm.end(), validGap))))
         return {};
     std::vector<unsigned> used(stock.size());
     double length = 0;
-    for (const auto row : assembly.pieces) {
+    for (std::size_t i = 0; i < assembly.pieces.size(); ++i) {
+        const auto row = assembly.pieces[i];
         if (row >= stock.size() || stock[row].shape != SegmentShape::Straight ||
             ++used[row] > stock[row].quantity)
             return {};
         length += stock[row].lengthMm;
     }
-    length += assembly.gapMm * static_cast<double>(assembly.pieces.size() - 1);
+    // Preserve the exact legacy arithmetic for saved uniform-gap PressTools lengths.
+    if (assembly.jointGapsMm.empty())
+        length += assembly.gapMm * static_cast<double>(assembly.pieces.size() - 1);
+    else
+        for (const auto gap : assembly.jointGapsMm)
+            length += gap;
     return length <= 100000 ? std::optional{length} : std::nullopt;
 }
+std::optional<std::vector<ToolSectionInterval>>
+assemblyIntervals(const std::vector<ToolSegment> &stock, const ToolAssembly &assembly) {
+    if (!assemblyLength(stock, assembly))
+        return {};
+    std::vector<ToolSectionInterval> intervals;
+    intervals.reserve(assembly.pieces.size());
+    double start = 0;
+    for (std::size_t i = 0; i < assembly.pieces.size(); ++i) {
+        const auto row = assembly.pieces[i];
+        const double end = start + stock[row].lengthMm;
+        intervals.push_back({row, start, end});
+        start = end + assemblyGapAfter(assembly, i);
+    }
+    return intervals;
+}
+std::optional<double> assemblyUncoveredLength(const std::vector<ToolSegment> &stock,
+                                              const ToolAssembly &assembly, double fromMm,
+                                              double toMm) {
+    const auto intervals = assemblyIntervals(stock, assembly);
+    if (!intervals || !std::isfinite(fromMm) || !std::isfinite(toMm) || fromMm > toMm)
+        return {};
+    double covered = 0;
+    for (const auto &s : *intervals)
+        covered += std::max(0., std::min(toMm, s.toMm) - std::max(fromMm, s.fromMm));
+    return std::max(0., toMm - fromMm - covered);
+}
 static SegmentPlan planWithoutGaps(const std::vector<ToolSegment> &stock, double required,
-                                   std::size_t stateBudget) {
+                                   std::size_t stateBudget, std::stop_token stop) {
+    if (stop.stop_requested())
+        return {SegmentPlanStatus::Cancelled, {}, 0};
     if (!validToolSegments(stock) || !std::isfinite(required) || required < 1 ||
         required > 100000 || !stateBudget || stateBudget > 200000)
         return {};
@@ -75,6 +128,8 @@ static SegmentPlan planWithoutGaps(const std::vector<ToolSegment> &stock, double
             const std::vector<std::pair<std::int64_t, std::size_t>> before(states.begin(),
                                                                            states.end());
             for (const auto &[sum, previous] : before) {
+                if (stop.stop_requested())
+                    return {SegmentPlanStatus::Cancelled, {}, 0};
                 if (sum + delta > ceiling || nodes[previous].count + take > 512)
                     continue;
                 const auto found = states.find(sum + delta);
@@ -100,10 +155,12 @@ static SegmentPlan planWithoutGaps(const std::vector<ToolSegment> &stock, double
     return result;
 }
 SegmentPlan planToolSegments(const std::vector<ToolSegment> &stock, double required,
-                             std::size_t budget, double maximumGap) {
+                             std::size_t budget, double maximumGap, std::stop_token stop) {
+    if (stop.stop_requested())
+        return {SegmentPlanStatus::Cancelled, {}, 0};
     if (!std::isfinite(maximumGap) || maximumGap < 0 || maximumGap > 1000)
         return {};
-    const auto noGaps = planWithoutGaps(stock, required, budget);
+    const auto noGaps = planWithoutGaps(stock, required, budget, stop);
     if (maximumGap == 0 || noGaps.status != SegmentPlanStatus::InsufficientStock)
         return noGaps;
     const auto target = static_cast<std::int64_t>(std::ceil(required * 1000 - 1.e-6));
@@ -127,6 +184,8 @@ SegmentPlan planToolSegments(const std::vector<ToolSegment> &stock, double requi
             const std::vector<std::pair<std::pair<std::int64_t, unsigned>, std::size_t>> before(
                 states.begin(), states.end());
             for (const auto &[key, previous] : before) {
+                if (stop.stop_requested())
+                    return {SegmentPlanStatus::Cancelled, {}, 0};
                 const auto sum = key.first + delta;
                 const auto count = key.second + take;
                 if (sum >= target || count > 512 || states.contains({sum, count}))

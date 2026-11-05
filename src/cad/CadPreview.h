@@ -5,12 +5,20 @@ namespace bending::cad {
 using namespace application;
 class CadPreview : public SingleBendPreview {
   public:
+    std::size_t activeBends = 1;
+    std::size_t activeBendCount() const noexcept override {
+        return activeBends;
+    }
     std::optional<BackgaugeReport> gauging;
     const BackgaugeReport *backgauge() const noexcept override {
         return gauging ? &*gauging : nullptr;
     }
     bool draft = false;
     bool reversed = false;
+    double axialOffset = 0;
+    double workpieceOffsetMm() const noexcept override {
+        return axialOffset;
+    }
     bool workpieceReversed() const noexcept override {
         return reversed;
     }
@@ -35,10 +43,17 @@ class CadPreview : public SingleBendPreview {
     }
     bool filledCutouts = false;
     bool realPunch = false, realDie = false;
-    std::array<double, 2> gaps{};
-    std::optional<BendEndSupport> endSupport;
-    const BendEndSupport *partialEndSupport() const noexcept override {
-        return endSupport ? &*endSupport : nullptr;
+    std::array<double, 2> gaps{}, uncoveredToolLength{};
+    std::array<double, 2> uncoveredToolLengthMm() const noexcept override {
+        return uncoveredToolLength;
+    }
+    std::vector<BendSupportInterval> supportIntervals;
+    std::optional<double> supportLimit = 0;
+    std::optional<double> endSupportLimitMm() const noexcept override {
+        return supportLimit;
+    }
+    std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
+        return supportIntervals;
     }
     std::size_t otherBends = 0;
     std::size_t otherFormedBends() const noexcept override {

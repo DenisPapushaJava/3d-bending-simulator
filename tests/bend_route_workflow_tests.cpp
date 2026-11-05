@@ -86,8 +86,6 @@ int main(int argc, char **argv) {
         auto previewBuilder = std::make_shared<cad::SingleBendPreviewBuilder>();
         ui::MainWindow window({"test", "test"}, files, files, previewBuilder, std::move(catalog));
         window.setAutomaticPartInputPrompt(false);
-        if (partialSupport)
-            window.findChild<QDoubleSpinBox *>("maximumEndSupportLoss")->setValue(10);
         window.resize(1280, 850);
         window.show();
         const bool sample = app.arguments().size() > 1 && !app.arguments()[1].startsWith("--");
@@ -254,7 +252,7 @@ int main(int argc, char **argv) {
             require(route->partialEndSupport &&
                         window.findChild<QLabel *>("bendCheckSummary")
                             ->text()
-                            .contains(QStringLiteral("неполной опорой")) &&
+                            .contains(QStringLiteral("Торцевые подрезы: возможна деформация")) &&
                         !window.findChild<QLabel *>("bendCheckSummary")
                              ->text()
                              .contains(QStringLiteral("проверка пройдена")),
@@ -324,7 +322,9 @@ int main(int argc, char **argv) {
         if (sample) {
             if (route->partialEndSupport)
                 for (std::size_t i = 0; i < route->steps.size(); ++i)
-                    if (const auto *support = route->steps[i].preview->partialEndSupport()) {
+                    if (route->steps[i].preview->hasPartialEndSupport()) {
+                        const auto *support =
+                            &route->steps[i].preview->endSupportIntervals().front().material;
                         std::cout << "B" << route->steps[i].bendIndex + 1 << " support material "
                                   << support->supportedFromMm << ".." << support->supportedToMm
                                   << " / " << support->bendLengthMm << " mm\n";

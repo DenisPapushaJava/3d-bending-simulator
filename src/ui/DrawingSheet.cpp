@@ -1394,7 +1394,15 @@ double classicalLeftWidth(const BendingDrawing &d, bool flat = false) {
         return 183;
     return d.sections.size() == 1 ? 183 : 238;
 }
+bool verticalRepeatedSections(const BendingDrawing &d) {
+    if (d.sections.size() != 2 || !d.sections[1].repeatCount)
+        return false;
+    const auto &v = d.sections[0].view;
+    return v.maximum.y - v.minimum.y > v.maximum.x - v.minimum.x;
+}
 double sectionScale(const BendingDrawing &d, std::size_t index) {
+    if (verticalRepeatedSections(d))
+        return fittedScale(d.sections[index].view, 60, 139);
     if (d.sections[index].repeatCount)
         return fittedScale(d.sections[index].view, 162, 70);
     if (d.sections.size() == 2 && d.sections[1].repeatCount)
@@ -1574,8 +1582,15 @@ double classicalSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &
                 } else if (d.sections.size() == 1)
                     section(0, QRectF(x, 37, width, 175));
                 else if (d.sections[1].repeatCount) {
-                    section(0, QRectF(x, 37, width, 65));
-                    section(1, QRectF(x, 108, width, 109));
+                    if (verticalRepeatedSections(d)) {
+                        // Keep the true cut upright. Tall overviews and their
+                        // units use columns rather than rotated horizontal strips.
+                        section(0, QRectF(x, 37, width / 2 - 3, 175));
+                        section(1, QRectF(x + width / 2 + 3, 37, width / 2 - 3, 175));
+                    } else {
+                        section(0, QRectF(x, 37, width, 65));
+                        section(1, QRectF(x, 108, width, 109));
+                    }
                 } else {
                     section(0, QRectF(x, 37, width, 87.5));
                     section(1, QRectF(x, 129.5, width, 87.5));

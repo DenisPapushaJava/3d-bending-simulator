@@ -331,7 +331,7 @@ int main(int argc, char **argv) {
         require(saved.open(QIODevice::ReadOnly), "Cannot read saved assembly");
         auto older = QJsonDocument::fromJson(saved.readAll()).object();
         saved.close();
-        require(older.value("version").toInt() == 16, "Wrong project schema for assembly");
+        require(older.value("version").toInt() == 18, "Wrong project schema for assembly");
         older.insert("version", 9);
         QFile forged(folder.path() + "/forged-v9.bend");
         require(forged.open(QIODevice::WriteOnly), "Cannot create version test");

@@ -4,6 +4,7 @@
 #include <optional>
 class QLabel;
 class QHBoxLayout;
+class QPushButton;
 namespace bending::ui {
 class ToolContourButton;
 class ToolSelectionWidget;
@@ -23,5 +24,6 @@ class ToolWorkspace final : public QWidget {
     QWidget *grooveRow_;
     std::optional<core::ToolPreset> shownDie_;
     QLabel *context_, *punch_, *die_;
+    QPushButton *editPunch_, *editDie_;
 };
 } // namespace bending::ui

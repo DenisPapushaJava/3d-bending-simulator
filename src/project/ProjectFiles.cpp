@@ -148,6 +148,7 @@ QJsonArray bendsJson(const std::vector<BendPreparation> &bends) {
             QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
                         {QStringLiteral("review"), reviewName(bend.review)},
                         {QStringLiteral("workpieceReversed"), bend.workpieceReversed},
+                        {QStringLiteral("workpieceOffsetMm"), bend.workpieceOffsetMm},
                         {QStringLiteral("geometry"), geometry},
                         {QStringLiteral("target"), target},
                         {QStringLiteral("tools"), toolsJson(bend.tools)},
@@ -174,6 +175,11 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
             (version < 14 && !orientation.isUndefined()))
             return false;
         bend.workpieceReversed = orientation.toBool(false);
+        const auto offset = object.value(QStringLiteral("workpieceOffsetMm"));
+        if ((version >= 17 && (!offset.isDouble() || !validWorkpieceOffset(offset.toDouble()))) ||
+            (version < 17 && !offset.isUndefined()))
+            return false;
+        bend.workpieceOffsetMm = offset.toDouble(0);
         bend.id = object.value(QStringLiteral("id")).toString().toStdString();
         const auto review = object.value(QStringLiteral("review")).toString();
         if (review == QStringLiteral("automatic") && version >= 4) {
@@ -228,6 +234,12 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
                 ? !readAssignment(object.value(QStringLiteral("catalogTools")), bend.catalogTools)
                 : object.contains(QStringLiteral("catalogTools"))) {
             return false;
+        }
+        if (version < 18) {
+            const auto catalog = object.value(QStringLiteral("catalogTools")).toObject();
+            for (const auto key : {"punchAssembly", "dieAssembly"})
+                if (catalog.value(QLatin1String(key)).toObject().contains("jointGapsMm"))
+                    return false;
         }
         if (version < 15 && ((bend.tools && bend.tools->backgauge) ||
                              (bend.catalogTools && bend.catalogTools->backgauge)))
@@ -313,9 +325,9 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
          version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0 &&
          version.toDouble() != 10.0 && version.toDouble() != 11.0 && version.toDouble() != 12.0 &&
          version.toDouble() != 13.0 && version.toDouble() != 14.0 && version.toDouble() != 15.0 &&
-         version.toDouble() != 16.0)) {
+         version.toDouble() != 16.0 && version.toDouble() != 17.0 && version.toDouble() != 18.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 16",
+                           "Supported project format versions are 1 through 18",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -440,7 +452,7 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 16},
+        {QStringLiteral("version"), 18},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},

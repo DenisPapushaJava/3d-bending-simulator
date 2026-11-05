@@ -1,4 +1,5 @@
 #include "ToolSelectionWidget.h"
+#include "ToolAssemblyDialog.h"
 #include "ToolLibraryDialog.h"
 #include "ToolPickerPopup.h"
 #include "bending/application/BendRoute.h"
@@ -110,6 +111,15 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         recommend();
     });
     recommendMore->setMenu(recommendMenu);
+    auto *assemblies = recommendMenu->addAction(QStringLiteral("Порядок и секции выбранной пары"));
+    assemblies->setObjectName("recommendSelectedAssemblies");
+    assemblies->setToolTip(QStringLiteral(
+        "Искать порядок и сборки из наличия. Профили, ручей и ориентация пуансона сохраняются."));
+    connect(assemblies, &QAction::triggered, this, [this] {
+        if (onCheckedAssemblies)
+            onCheckedAssemblies();
+    });
+    recommendMore->setToolTip(QStringLiteral("Другие способы подбора"));
     recommendRow->addWidget(recommendMore);
     layout->addLayout(recommendRow);
     fitSections_ = new QPushButton(QStringLiteral("Подобрать секции"), this);
@@ -221,6 +231,14 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(clearance_, &QDoubleSpinBox::valueChanged, this, [this] { changed(); });
     auto *clearanceForm = new QFormLayout;
     clearanceForm->addRow(QStringLiteral("Начальный зазор, мм:"), clearance_);
+    allowEndReliefs_ = new QCheckBox(QStringLiteral("Допускать торцевые подрезы"), this);
+    allowEndReliefs_->setObjectName("allowEndReliefs");
+    allowEndReliefs_->setToolTip(QStringLiteral(
+        "При сохранённой центральной опоре расчёт продолжается с предупреждением. "
+        "Местная деформация торцов не рассчитывается. Столкновения, внутренние разрывы "
+        "опоры и ограничения инструмента проверяются."));
+    allowEndReliefs_->setChecked(preferences()->value("checks/allowEndReliefs", true).toBool());
+    clearanceForm->addRow(allowEndReliefs_);
     endSupportLimit_ = new QDoubleSpinBox(this);
     endSupportLimit_->setObjectName("maximumEndSupportLoss");
     endSupportLimit_->setAccessibleName(QStringLiteral("Допуск нехватки опоры у каждого торца"));
@@ -235,9 +253,20 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
         "В пределах допуска доступен просмотр с предупреждением; нагрузка и устойчивость "
         "не подтверждаются. Внутренние разрывы и столкновения не разрешаются."));
     clearanceForm->addRow(QStringLiteral("Допуск у торца:"), endSupportLimit_);
+    const auto updateEndLimit = [this, label = clearanceForm->labelForField(endSupportLimit_)] {
+        endSupportLimit_->setEnabled(!allowEndReliefs_->isChecked());
+        label->setEnabled(!allowEndReliefs_->isChecked());
+    };
+    updateEndLimit();
+    connect(allowEndReliefs_, &QCheckBox::toggled, this, [this, updateEndLimit](bool enabled) {
+        preferences()->setValue("checks/allowEndReliefs", enabled);
+        updateEndLimit();
+        changed();
+    });
     connect(endSupportLimit_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         preferences()->setValue("checks/maximumEndSupportLossMm", value);
-        changed();
+        if (!allowEndReliefs_->isChecked())
+            changed();
     });
     realGeometry_ = new QCheckBox(QStringLiteral("Использовать известные формы DXF"), this);
     realGeometry_->setObjectName(QStringLiteral("useDrawingToolGeometry"));
@@ -308,14 +337,14 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(gaugeOptions, &QPushButton::clicked, this, [this] {
         QDialog dialog(this);
         dialog.setWindowTitle(QStringLiteral("Задний упор · абстрактный станок"));
-        auto *form = new QFormLayout(&dialog);
+        auto *gaugeForm = new QFormLayout(&dialog);
         auto *note = wrapped(&dialog);
         note->setText(
             QStringLiteral("Три ступени: 0 / 28,8 / 65,9 мм; высоты 10,5 / 21 / 25,5 мм. "
                            "X — первый носик, R — низ пальца; Z — относительно центра инструмента. "
                            "Нули и корпус демонстрационные. Это не координаты для ЧПУ."));
         note->setMinimumWidth(420);
-        form->addRow(note);
+        gaugeForm->addRow(note);
         const std::array<QString, 9> labels{
             QStringLiteral("X от:"),          QStringLiteral("X до:"),
             QStringLiteral("R от:"),          QStringLiteral("R до:"),
@@ -332,17 +361,17 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
             input->setKeyboardTracking(false);
             input->setObjectName(QStringLiteral("backgauge_") +
                                  QLatin1String(gaugeFields[i].first));
-            form->addRow(labels[i], input);
+            gaugeForm->addRow(labels[i], input);
         }
         auto *shared = new QCheckBox(QStringLiteral("Контакты по всей ширине пальцев"), &dialog);
         shared->setChecked(backgaugeSetup_.allowOffsetContacts);
         shared->setToolTip(QStringLiteral(
             "Контакт может находиться вне центра пальца. Оба пальца остаются в проверке "
             "столкновений. 0 мм — без дополнительного минимума разноса контактов."));
-        form->addRow(shared);
+        gaugeForm->addRow(shared);
         auto *buttons =
             new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-        form->addRow(buttons);
+        gaugeForm->addRow(buttons);
         const auto read = [&] {
             core::BackgaugeSetup s;
             s.allowOffsetContacts = shared->isChecked();
@@ -497,8 +526,11 @@ void ToolSelectionWidget::populateGrooves(std::size_t selected) {
 bool ToolSelectionWidget::usesCatalog() const {
     return mode_->currentIndex() == 0;
 }
-double ToolSelectionWidget::maximumEndSupportLossMm() const {
-    return endSupportLimit_->value();
+std::optional<double> ToolSelectionWidget::maximumEndSupportLossMm() const {
+    return allowEndReliefs_->isChecked() ? std::nullopt : std::optional(endSupportLimit_->value());
+}
+double ToolSelectionWidget::maximumSegmentGapMm() const {
+    return segmentGap_->value();
 }
 std::optional<core::ToolAssignment> ToolSelectionWidget::assignment() const {
     const auto *p = preset(punch_);
@@ -724,6 +756,25 @@ void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
     else if (result == QDialog::Accepted && dialog.choice())
         chooseTool(dialog.choice()->first, dialog.choice()->second);
 }
+void ToolSelectionWidget::editAssembly(core::ToolKind kind) {
+    if (updating_ || checkedBusy_ || !isEnabled() || !usesCatalog())
+        return;
+    const auto *profile = preset(kind == core::ToolKind::Punch ? punch_ : die_);
+    if (!profile || !profile->segments || !core::validToolSegments(*profile->segments))
+        return;
+    const auto captured = *profile;
+    const auto before = selectedAssembly(kind);
+    ToolAssemblyDialog dialog(captured, before, window());
+    if (dialog.exec() != QDialog::Accepted || !isEnabled() || checkedBusy_)
+        return;
+    const auto *current = preset(kind == core::ToolKind::Punch ? punch_ : die_);
+    if (!current || *current != captured || selectedAssembly(kind) != before ||
+        !dialog.assembly() || !core::assemblyLength(*captured.segments, *dialog.assembly()) ||
+        dialog.assembly() == before)
+        return;
+    (kind == core::ToolKind::Punch ? punchAssembly_ : dieAssembly_) = dialog.assembly();
+    changed();
+}
 void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools,
                                     const std::optional<core::ToolAssignment> &a) {
     if (picker_)
@@ -856,11 +907,12 @@ void ToolSelectionWidget::updateDetails() {
         QStringList pieces;
         for (const auto row : a->pieces)
             pieces << QString::number((*tool->segments)[row].lengthMm);
-        assemblyLines << name + QStringLiteral(": %1 · общая длина %2 мм · %3 секц. · зазор %4 мм")
+        assemblyLines << name + QStringLiteral(
+                                    ": %1 · общая длина %2 мм · %3 секц. · макс. зазор %4 мм")
                                     .arg(pieces.join(QStringLiteral(" + ")))
                                     .arg(*core::toolLength(*tool, a))
                                     .arg(a->pieces.size())
-                                    .arg(a->gapMm);
+                                    .arg(core::maximumAssemblyGap(*a));
     };
     describe(preset(punch_), punchAssembly_, QStringLiteral("Пуансон"));
     describe(preset(die_), dieAssembly_, QStringLiteral("Матрица"));
@@ -977,7 +1029,12 @@ void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionR
     if (different) {
         allBends_ = allBends;
         selectionRequest_ = request;
-        fitAssemblies();
+        // A context refresh must not silently replace a captured/manual layout.
+        // Explicit fitting or choosing a different profile may still rebuild it.
+        if (!punchAssembly_)
+            fitAssemblies(core::ToolKind::Punch);
+        if (!dieAssembly_)
+            fitAssemblies(core::ToolKind::Die);
         recommendation_->clear();
         recommendation_->hide();
     }
@@ -1134,6 +1191,9 @@ void ToolSelectionWidget::fitSelectedAssemblies() {
             break;
         case core::SegmentPlanStatus::InvalidInput:
             issues << names[i] + QStringLiteral(": уточните данные секций и длину.");
+            break;
+        case core::SegmentPlanStatus::Cancelled:
+            issues << names[i] + QStringLiteral(": подбор отменён.");
             break;
         }
     }

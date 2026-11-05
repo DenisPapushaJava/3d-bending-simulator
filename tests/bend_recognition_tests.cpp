@@ -1,20 +1,27 @@
 #include "BendFixtures.h"
+#include "BendRecognizer.h"
 #include "bending/cad/StepImporter.h"
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRep_Builder.hxx>
+#include <Geom_Plane.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
 #include <STEPControl_Writer.hxx>
+#include <TopExp_Explorer.hxx>
 
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 
@@ -202,6 +209,54 @@ void testInteriorContours(const std::filesystem::path &directory) {
                 mixed->metadata().bendAnalysis.interiorContourDiagnostics.size() == 1,
             "An interrupted zone hid the separate complete bend");
 }
+void testToleranceBounds() {
+    // A tolerant BRep must not widen the analytic matching or the downstream
+    // collision budget beyond the already supported 0.01 mm comparisons.
+    const auto shape = fixtures::bentStrip();
+    for (double raw : {.002, .006, .01}) {
+        const auto analysis = cad::recognizeBends(shape, raw, {});
+        require(analysis.status == application::BendRecognitionStatus::Completed &&
+                    analysis.bends.size() == 1,
+                "Bounded BRep tolerance blocked precise analytic geometry");
+        requireNear(analysis.lengthToleranceMm, .01, 1e-12,
+                    "Raw BRep tolerance inflated simulation comparisons");
+    }
+    for (double raw : {-.001, .010001, std::numeric_limits<double>::infinity(),
+                       std::numeric_limits<double>::quiet_NaN()}) {
+        const auto analysis = cad::recognizeBends(shape, raw, {});
+        require(analysis.status == application::BendRecognitionStatus::Unsupported &&
+                    analysis.bends.empty(),
+                "Invalid or excessive BRep tolerance was accepted");
+    }
+    const auto drawing =
+        cad::recognizeBends(shape, .006, {}, cad::BendRecognitionPurpose::DrawingMeasurements);
+    requireNear(drawing.lengthToleranceMm, .012, 1e-12,
+                "Simulation policy changed drawing measurements");
+    // Deliberately inconsistent analytic wall on an owned copy. 0.03 mm would
+    // pass an unbounded 10 * 0.006 comparison, but is outside the preserved cap.
+    auto mismatch = BRepBuilderAPI_Copy(shape, true, false).Shape();
+    bool changed = false;
+    for (TopExp_Explorer ex(mismatch, TopAbs_FACE); ex.More(); ex.Next()) {
+        const auto face = TopoDS::Face(ex.Current());
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane ||
+            !surface.Plane().Axis().Direction().IsParallel(gp_Dir(1, 0, 0), 1e-8) ||
+            std::abs(surface.Plane().Location().X() - 4) > 1e-8)
+            continue;
+        auto plane = surface.Plane();
+        plane.Translate(gp_Vec(.03, 0, 0));
+        BRep_Builder{}.UpdateFace(face, new Geom_Plane(plane), TopLoc_Location{}, .006);
+        changed = true;
+        break;
+    }
+    require(changed, "Missing analytic mismatch fixture");
+    require(cad::recognizeBends(mismatch, .006, {}).bends.empty(),
+            "High BRep tolerance hid a non-tangent wall");
+    std::stop_source stop;
+    stop.request_stop();
+    require(cad::recognizeBends(shape, .006, stop.get_token()).bends.empty(),
+            "Cancelled tolerant analysis published bends");
+}
 } // namespace
 int main() {
     try {
@@ -209,6 +264,7 @@ int main() {
         Temporary temporary;
         test(temporary.path);
         testInteriorContours(temporary.path);
+        testToleranceBounds();
         if (const auto *path = std::getenv("BENDING_RECOGNITION_STEP")) {
             const auto document = read(path);
             const auto &analysis = document->metadata().bendAnalysis;

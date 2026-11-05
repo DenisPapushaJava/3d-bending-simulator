@@ -168,7 +168,11 @@ static TopoDS_Shape buildSegmentToolBody(const TopoDS_Shape &whole, const core::
     BRep_Builder builder;
     TopoDS_Compound parts;
     builder.MakeCompound(parts);
-    for (const auto row : assembly->pieces) {
+    const double originZ = startZ;
+    const auto intervals = core::assemblyIntervals(*tool.segments, *assembly);
+    for (const auto &interval : *intervals) {
+        const auto row = interval.stockRow;
+        startZ = originZ + interval.fromMm;
         if (stop.stop_requested())
             return {};
         const double length = (*tool.segments)[row].lengthMm;
@@ -193,7 +197,6 @@ static TopoDS_Shape buildSegmentToolBody(const TopoDS_Shape &whole, const core::
         builder.Add(parts, cut.Shape());
         if (display)
             display->push_back({cut.Shape(), length});
-        startZ += length + assembly->gapMm;
     }
     return parts;
 }
@@ -213,11 +216,13 @@ TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &
     const auto source = translation ? whole.Located(TopLoc_Location()) : whole;
     const double localStart =
         translation ? startZ - location.Transformation().TranslationPart().Z() : startZ;
-    auto key = geometryKey("segments/fuzzy=1e-7");
+    auto key = geometryKey("segments/joint-gaps-v2/fuzzy=1e-7");
     const auto sourceKey = GeometryCacheScope::descriptor(source);
     key << sourceKey.size() << ':' << sourceKey << ' ' << localStart << ' ' << assembly->gapMm
         << ' ' << assembly->pieces.size();
-    for (auto row : assembly->pieces) {
+    for (std::size_t i = 0; i < assembly->pieces.size(); ++i) {
+        const auto row = assembly->pieces[i];
+        key << ' ' << core::assemblyGapAfter(*assembly, i);
         const auto &piece = tool.segments->at(row);
         key << ' ' << piece.lengthMm << ' ' << static_cast<int>(piece.shape);
     }

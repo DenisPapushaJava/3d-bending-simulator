@@ -5,6 +5,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeHalfSpace.hxx>
@@ -71,6 +72,13 @@ inline TopoDS_Shape trimmedBend() {
     const auto plane = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(-1, 0, 1))).Face();
     const auto below = BRepPrimAPI_MakeHalfSpace(plane, gp_Pnt(0, 0, -10)).Solid();
     return BRepAlgoAPI_Cut(bentStrip(), below).Shape();
+}
+// Two collinear bend zones and disconnected moving tabs share one rigid web.
+// The open relief is material-free, unlike a gap inside either real support interval.
+inline TopoDS_Shape jointBend() {
+    return BRepAlgoAPI_Cut(bentStrip(4, 2, std::numbers::pi / 2, 120),
+                           BRepPrimAPI_MakeBox(gp_Pnt(-40, -5, 45), 55, 20, 20).Shape())
+        .Shape();
 }
 // Only part of one cap is cut obliquely. The cap is split into two edges,
 // while both cylindrical walls still have one uninterrupted common core.

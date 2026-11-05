@@ -82,6 +82,11 @@ void test(const std::filesystem::path &path) {
         require(!cad::MachineAssembly::check(assembly, 1.e-6, {}),
                 "Seated punch intersects holder");
         const auto adapter = find(assembly, "die-adapter");
+        require(adapter.displayRole == cad::MachineDisplayRole::ToolMount &&
+                    find(assembly, "holder-4").displayRole == cad::MachineDisplayRole::ToolMount &&
+                    find(assembly, "ram").displayRole == cad::MachineDisplayRole::Structure &&
+                    find(assembly, "table").displayRole == cad::MachineDisplayRole::Structure,
+                "Assembly did not distinguish mounts from large structure");
         const double top = box(adapter.shape).CornerMax().Y();
         const double dieBottom = box(bodies[0]).CornerMin().Y();
         require(std::abs(top - dieBottom - 10) < 1.e-6 && !adapter.allowDieContact,
@@ -136,6 +141,9 @@ void test(const std::filesystem::path &path) {
         require(!p->machineCollisionAtFrame(f), "Unexpected baseline machine collision");
         const double lift = p->pressState(f)->punchTipYmm - p->pressState(0)->punchTipYmm;
         for (const auto &c : frame.machine) {
+            require(c.displayRole == find(first, c.id).displayRole &&
+                        c.displayRole != cad::MachineDisplayRole::Unknown,
+                    "Machine motion dropped the display role");
             require(BRepCheck_Analyzer(c.shape).IsValid(), "Invalid machine solid");
             const double moved =
                 box(c.shape).CornerMin().Y() - box(find(first, c.id).shape).CornerMin().Y();

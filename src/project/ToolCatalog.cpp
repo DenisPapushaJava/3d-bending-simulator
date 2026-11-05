@@ -314,7 +314,14 @@ QJsonValue assignmentJson(const std::optional<core::ToolAssignment> &a) {
         QJsonArray rows;
         for (const auto row : value->pieces)
             rows.append(static_cast<int>(row));
-        return QJsonValue(QJsonObject{{"pieces", rows}, {"gapMm", value->gapMm}});
+        QJsonObject object{{"pieces", rows}, {"gapMm", value->gapMm}};
+        if (!value->jointGapsMm.empty()) {
+            QJsonArray gaps;
+            for (const auto gap : value->jointGapsMm)
+                gaps.append(gap);
+            object.insert("jointGapsMm", gaps);
+        }
+        return QJsonValue(object);
     };
     return QJsonObject{{"punch", presetJson(a->punch)},
                        {"die", presetJson(a->die)},
@@ -382,6 +389,16 @@ bool readAssignment(const QJsonValue &value, std::optional<core::ToolAssignment>
             return false;
         out.emplace();
         out->gapMm = v.toObject().value("gapMm").toDouble();
+        const auto gaps = v.toObject().value("jointGapsMm");
+        if (!gaps.isUndefined()) {
+            if (!gaps.isArray() || gaps.toArray().isEmpty() || gaps.toArray().size() > 511)
+                return false;
+            for (const auto gap : gaps.toArray()) {
+                if (!gap.isDouble())
+                    return false;
+                out->jointGapsMm.push_back(gap.toDouble());
+            }
+        }
         for (const auto &row : v.toObject().value("pieces").toArray()) {
             const double n = row.toDouble(-1);
             if (n < 0 || n >= 64 || std::floor(n) != n)

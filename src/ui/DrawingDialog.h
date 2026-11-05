@@ -9,6 +9,7 @@ class DrawingDialog final : public QDialog {
                   std::shared_ptr<const application::BendingDrawingBuilder> builder,
                   std::optional<std::size_t> selectedFace, QWidget *parent);
     ~DrawingDialog() override;
+    void showAtParent();
 
   protected:
     void done(int result) override;
