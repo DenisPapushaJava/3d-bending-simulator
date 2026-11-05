@@ -225,6 +225,113 @@ void unevenProjectionDimensions() {
     }
     require(rejected, "Fixed oversized scale was silently reduced or named the wrong view");
 }
+void sameLayout(const ui::DrawingSheetPlan &a, const ui::DrawingSheetPlan &b) {
+    require(a.source == b.source && a.pages == b.pages && a.views.size() == b.views.size() &&
+                a.recordingBytes == b.recordingBytes && a.coverage.total == b.coverage.total &&
+                a.coverage.dimensioned == b.coverage.dimensioned &&
+                a.coverage.missing == b.coverage.missing,
+            "Fit reuse changed the drawing sheets, coverage or vector output size");
+    for (std::size_t i = 0; i < a.views.size(); ++i) {
+        const auto &x = a.views[i];
+        const auto &y = b.views[i];
+        require(x.key == y.key && x.page == y.page && x.area == y.area && x.centre == y.centre &&
+                    x.scale == y.scale && x.selectionBounds == y.selectionBounds &&
+                    x.dimensions.size() == y.dimensions.size(),
+                "Fit reuse changed a view or reused another item's placement");
+        for (std::size_t j = 0; j < x.dimensions.size(); ++j) {
+            const auto &m = x.dimensions[j];
+            const auto &n = y.dimensions[j];
+            require(m.source == n.source && m.index == n.index && m.text == n.text &&
+                        m.textBounds == n.textBounds && m.lines == n.lines &&
+                        m.measurement.valueMm == n.measurement.valueMm,
+                    "Fit reuse changed a recorded dimension or its witnesses");
+        }
+    }
+    ui::DrawingTitle first, second;
+    first.plan = std::make_shared<const ui::DrawingSheetPlan>(a);
+    second.plan = std::make_shared<const ui::DrawingSheetPlan>(b);
+    for (int page = 0; page < a.pages; ++page)
+        require(ui::DrawingSheet::preview(*a.source, first, page) ==
+                    ui::DrawingSheet::preview(*b.source, second, page),
+                "Fit reuse changed the rendered drawing");
+    for (const int dpi : {96, 254}) {
+        Device x(dpi), y(dpi);
+        QPainter firstPainter(&x), secondPainter(&y);
+        for (int page = 0; page < a.pages; ++page) {
+            ui::DrawingSheet::paint(firstPainter, *a.source, first, page);
+            ui::DrawingSheet::paint(secondPainter, *b.source, second, page);
+        }
+        firstPainter.end();
+        secondPainter.end();
+        require(x.engine.lines == y.engine.lines && x.engine.texts == y.engine.texts &&
+                    x.engine.rasters == 0 && y.engine.rasters == 0,
+                "Fit reuse changed vector replay at the output device DPI");
+    }
+}
+void fitCache() {
+    auto d = std::make_shared<application::BendingDrawing>();
+    auto &v = d->views[0];
+    v.minimum = {0, 0};
+    v.maximum = {1800, 500};
+    v.paths = {{{{0, 0}, {1800, 0}, {1800, 500}, {0, 500}, {0, 0}}, false}};
+    v.dimensions = {{{0, 0}, {1800, 0}, 1800, ""}, {{0, 0}, {0, 500}, 500, ""}};
+    std::vector<ui::DrawingViewChoice> choices{{{ui::DrawingViewKind::Projection, 0}, true, .1}};
+    for (std::size_t i = 0; i < 5; ++i) {
+        application::DrawingSection section;
+        section.view = v;
+        section.designation = std::string(1, static_cast<char>('A' + i));
+        d->sections.push_back(std::move(section));
+        choices.push_back({{ui::DrawingViewKind::Section, i}, true, .1});
+    }
+    ui::DrawingLayoutLimits disabled;
+    disabled.maximumCachedFits = 0;
+    const auto reference = ui::DrawingSheet::compose(d, choices, {}, {}, disabled);
+    const auto cached = ui::DrawingSheet::compose(d, choices);
+    require(cached->pages > 1 && cached->fitCacheHits > 0 && cached->fitCacheEntries > 1 &&
+                cached->fitCacheEntries <= 4096 && reference->fitCacheHits == 0 &&
+                reference->fitCacheEntries == 0 &&
+                cached->fitCalls + cached->fitCacheHits == reference->fitCalls &&
+                cached->dimensionProbes <= reference->dimensionProbes,
+            "Fit cache did not reduce actual work or reported work from cached attempts");
+    sameLayout(*reference, *cached);
+    ui::DrawingLayoutLimits bounded;
+    bounded.maximumCachedFits = 1;
+    const auto spilled = ui::DrawingSheet::compose(d, choices, {}, {}, bounded);
+    require(spilled->fitCacheEntries == 1 && spilled->fitCalls > cached->fitCalls,
+            "Full fit cache exceeded its bound or stopped normal search");
+    sameLayout(*reference, *spilled);
+
+    // A new input/selection/scale owns a new cache even if all item indices coincide.
+    auto changed = std::make_shared<application::BendingDrawing>(*d);
+    changed->sections[0].view.dimensions.push_back({{0, 250}, {700, 250}, 700, ""});
+    choices[1].scale = .05;
+    choices.back().visible = false;
+    const auto updated = ui::DrawingSheet::compose(changed, choices);
+    sameLayout(*ui::DrawingSheet::compose(changed, choices, {}, {}, disabled), *updated);
+
+    for (auto bounds : {ui::DrawingLayoutLimits{}, disabled}) {
+        bounds.maximumDimensionProbes = std::max(std::size_t{1}, updated->dimensionProbes / 2);
+        bool limited = false;
+        try {
+            (void)ui::DrawingSheet::compose(changed, choices, {}, {}, bounds);
+        } catch (const ui::DrawingLayoutInterrupted &e) {
+            limited = e.reason == ui::DrawingLayoutInterruption::LimitExceeded;
+        }
+        require(limited, "Fit reuse turned an interrupted layout into a partial success");
+    }
+    choices.front().scale = .2;
+    const auto failure = [&](ui::DrawingLayoutLimits bounds) {
+        try {
+            (void)ui::DrawingSheet::compose(changed, choices, {}, {}, bounds);
+        } catch (const std::runtime_error &e) {
+            return std::string(e.what());
+        }
+        return std::string{};
+    };
+    const auto error = failure({});
+    require(!error.empty() && error == failure(disabled),
+            "Fit reuse hid an impossible explicit scale or changed its diagnostic");
+}
 void worker() {
     struct Gate {
         std::mutex mutex;
@@ -389,5 +496,6 @@ void verifyRecordedDimensions(const bending::application::BendingDrawing &drawin
 void drawingLayoutChecks() {
     limits();
     unevenProjectionDimensions();
+    fitCache();
     worker();
 }

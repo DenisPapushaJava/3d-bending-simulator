@@ -2,8 +2,12 @@
 #include <QImage>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
+#include <compare>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <set>
 #include <stdexcept>
 namespace bending::ui {
@@ -107,6 +111,48 @@ namespace {
 struct Item {
     std::vector<DrawingViewChoice> choices;
 };
+struct FitKey {
+    // items and the drawing/side/render policy are immutable for this compose.
+    // Use the stable full item index, not its position on the current page.
+    std::size_t item;
+    int page;
+    std::array<std::uint64_t, 4> area;
+    auto operator<=>(const FitKey &) const = default;
+};
+FitKey fitKey(std::size_t item, int page, const QRectF &area) {
+    return {item,
+            page,
+            {std::bit_cast<std::uint64_t>(area.x()), std::bit_cast<std::uint64_t>(area.y()),
+             std::bit_cast<std::uint64_t>(area.width()),
+             std::bit_cast<std::uint64_t>(area.height())}};
+}
+struct FitPlacement {
+    DrawingViewKey key;
+    QRectF area;
+    QPointF centre;
+    double scale;
+    QRectF selectionBounds;
+};
+// No CAD, paths, dimension recordings or painter state retained by the cache.
+// nullopt is an ordinary fit failure, never cancellation or a spent budget.
+using CachedFit = std::optional<std::vector<FitPlacement>>;
+CachedFit cacheFit(const std::vector<DrawingPlacedView> &views) {
+    std::vector<FitPlacement> result;
+    result.reserve(views.size());
+    for (const auto &view : views)
+        result.push_back({view.key, view.area, view.centre, view.scale, view.selectionBounds});
+    return result;
+}
+std::optional<std::vector<DrawingPlacedView>> restoreFit(const CachedFit &cached, int page) {
+    if (!cached)
+        return {};
+    std::vector<DrawingPlacedView> result;
+    result.reserve(cached->size());
+    for (const auto &view : *cached)
+        result.push_back(
+            {view.key, page, view.area, view.centre, view.scale, view.selectionBounds});
+    return result;
+}
 double width(const DrawingView &v) {
     return v.maximum.x - v.minimum.x - (v.omittedX ? (*v.omittedX)[1] - (*v.omittedX)[0] : 0);
 }
@@ -379,6 +425,8 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
             iso.reset();
         }
     }
+    const auto cacheLimit = std::min(limits.maximumCachedFits, std::size_t{4096});
+    std::map<FitKey, CachedFit> fitCache;
     std::size_t begin = 0;
     while (begin < items.size()) {
         context.checkpoint();
@@ -388,14 +436,28 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
                 std::vector<std::vector<std::optional<std::vector<DrawingPlacedView>>>> fits(
                     count, std::vector<std::optional<std::vector<DrawingPlacedView>>>(count));
                 for (std::size_t i = 0; i < count; ++i)
-                    for (std::size_t j = 0; j < count; ++j)
+                    for (std::size_t j = 0; j < count; ++j) {
+                        // Check cancellation/deadline even for a cached negative result.
+                        context.checkpoint();
+                        const auto key = fitKey(begin + i, plan->pages, areas[j]);
+                        if (const auto cached = fitCache.find(key); cached != fitCache.end()) {
+                            fits[i][j] = restoreFit(cached->second, plan->pages);
+                            ++plan->fitCacheHits;
+                            continue;
+                        }
+                        ++plan->fitCalls;
                         try {
                             fits[i][j] = fitItem(*source, items[begin + i], areas[j], side,
                                                  plan->pages, context);
+                            if (fitCache.size() < cacheLimit)
+                                fitCache.emplace(key, cacheFit(*fits[i][j]));
                         } catch (const DrawingLayoutInterrupted &) {
                             throw;
                         } catch (const std::runtime_error &) {
+                            if (fitCache.size() < cacheLimit)
+                                fitCache.emplace(key, std::nullopt);
                         }
+                    }
                 std::vector<int> owner(count, -1);
                 const auto match = [&](auto &&self, std::size_t i,
                                        std::vector<bool> &visited) -> bool {
@@ -478,6 +540,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     drawing::recordViews(*plan, context);
     plan->dimensionProbes = context.probes;
     plan->recordingBytes = context.bytes;
+    plan->fitCacheEntries = fitCache.size();
     return plan;
 }
 namespace drawing {

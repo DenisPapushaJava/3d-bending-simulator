@@ -52,6 +52,9 @@ struct DrawingLayoutLimits {
     std::chrono::milliseconds maximumTime{30000};
     std::size_t maximumDimensionProbes = 1000000;
     std::size_t maximumRecordingBytes = 64 * 1024 * 1024;
+    // Numeric fits within one compose only. Zero selects the uncached reference path;
+    // larger values are capped at 4096. Exhaustion stops caching, not layout search.
+    std::size_t maximumCachedFits = 4096;
 };
 enum class DrawingLayoutInterruption { Cancelled, LimitExceeded };
 class DrawingLayoutInterrupted final : public std::runtime_error {
@@ -69,6 +72,7 @@ struct DrawingSheetPlan {
     application::DrawingMeasurementCoverage coverage;
     std::size_t dimensionProbes = 0;
     std::size_t recordingBytes = 0;
+    std::size_t fitCalls = 0, fitCacheHits = 0, fitCacheEntries = 0;
 };
 struct DrawingTitle {
     QString name;
