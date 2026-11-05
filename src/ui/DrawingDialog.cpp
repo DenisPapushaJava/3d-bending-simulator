@@ -1072,11 +1072,12 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->sectionPlace->setAccessibleName(QStringLiteral("Место сечения"));
     sectionLayout->addWidget(impl_->sectionPlace);
     impl_->sectionFlip =
-        new QPushButton(QStringLiteral("Сменить сторону взгляда"), impl_->sectionOptions);
+        new QPushButton(QStringLiteral("Сменить направление"), impl_->sectionOptions);
     impl_->sectionFlip->setObjectName(QStringLiteral("drawingSectionReverse"));
     impl_->sectionFlip->setCheckable(true);
-    impl_->sectionFlip->setToolTip(QStringLiteral("Обратная сторона взгляда. Стрелки и сечение "
-                                                  "меняются вместе; плоскость остаётся на месте."));
+    impl_->sectionFlip->setToolTip(
+        QStringLiteral("Сменить направление взгляда на сечение. Положение секущей плоскости "
+                       "сохраняется."));
     sectionLayout->addWidget(impl_->sectionFlip);
     sectionLayout->addWidget(
         new QLabel(QStringLiteral("Положение сечения"), impl_->sectionOptions));
