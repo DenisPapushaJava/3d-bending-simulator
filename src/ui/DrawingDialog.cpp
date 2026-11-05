@@ -1138,12 +1138,6 @@ DrawingDialog::DrawingDialog(ImportController &c,
         field(QStringLiteral("Обозначение (если задано)"), "drawingDesignation", 48);
     impl_->material = field(QStringLiteral("Материал (если известен)"), "drawingMaterial", 60);
     impl_->execution = field(QStringLiteral("Исполнение / ориентир"), "drawingExecution", 60);
-    impl_->quantity = new QSpinBox(panel);
-    impl_->quantity->setObjectName(QStringLiteral("drawingQuantity"));
-    impl_->quantity->setRange(0, 1000000);
-    impl_->quantity->setSpecialValueText(QStringLiteral("Не указано"));
-    impl_->quantity->setAccessibleName(QStringLiteral("Количество в партии, штук"));
-    form->addRow(QStringLiteral("Количество, шт."), impl_->quantity);
     auto *geometryOptions =
         section(QStringLiteral("Ориентация и разрывы"), "drawingGeometryOptions");
     form = new QFormLayout(geometryOptions);
@@ -1178,6 +1172,15 @@ DrawingDialog::DrawingDialog(ImportController &c,
         "Размеры справочные. Развёртка теоретическая, по выбранным материалу и K; калибровка "
         "станка не выполнена. Размеры от края развёртки не являются X упора."));
     optionLayout->addStretch();
+    auto *quantityForm = new QFormLayout;
+    quantityForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    impl_->quantity = new QSpinBox(panel);
+    impl_->quantity->setObjectName(QStringLiteral("drawingQuantity"));
+    impl_->quantity->setRange(0, 1000000);
+    impl_->quantity->setSpecialValueText(QStringLiteral("Не указано"));
+    impl_->quantity->setAccessibleName(QStringLiteral("Количество в партии, штук"));
+    quantityForm->addRow(QStringLiteral("Количество, шт."), impl_->quantity);
+    left->addLayout(quantityForm);
     impl_->exportPdf = new QPushButton(QStringLiteral("Сохранить PDF…"), panel);
     impl_->exportPdf->setEnabled(false);
     impl_->exportPdf->setObjectName(QStringLiteral("exportDrawingPdf"));
