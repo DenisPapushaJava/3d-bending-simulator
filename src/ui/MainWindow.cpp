@@ -105,21 +105,28 @@ QIcon workpieceOrientationIcon(bool reversed) {
     return icon;
 }
 QIcon punchOrientationIcon(bool reversed) {
+    // Simplified gooseneck punch: mounting tang, deep relief and long tapered nose.
     QPainterPath profile;
-    profile.moveTo(8, 3);
-    profile.lineTo(15, 3);
-    profile.lineTo(15, 8);
-    profile.lineTo(24, 8);
-    profile.lineTo(24, 13);
-    profile.lineTo(19, 15);
-    profile.lineTo(17, 23);
-    profile.lineTo(16, 29);
-    profile.lineTo(13, 27);
-    profile.lineTo(10, 21);
-    profile.quadTo(6, 15, 10, 13);
-    profile.lineTo(4, 12);
-    profile.lineTo(4, 8);
-    profile.lineTo(8, 8);
+    profile.moveTo(6.5, 2);
+    profile.lineTo(9.7, 2);
+    profile.lineTo(9.7, 4.3);
+    profile.lineTo(8.8, 4.3);
+    profile.lineTo(8.8, 5.4);
+    profile.lineTo(9.7, 5.4);
+    profile.lineTo(9.7, 6.1);
+    profile.lineTo(17.1, 6.1);
+    profile.lineTo(22, 8.8);
+    profile.lineTo(22, 19.4);
+    profile.lineTo(6.4, 29);
+    profile.lineTo(4.8, 30);
+    profile.lineTo(3.1, 29);
+    profile.lineTo(13.2, 21.1);
+    profile.cubicTo(14.4, 20, 14.8, 19.1, 14.8, 17.9);
+    profile.lineTo(14.8, 13.3);
+    profile.cubicTo(14.8, 11.9, 13.8, 10.9, 12, 10.3);
+    profile.lineTo(3.1, 8.4);
+    profile.lineTo(3.1, 6.1);
+    profile.lineTo(6.5, 6.1);
     profile.closeSubpath();
     QIcon icon;
     for (int ratio : {1, 2}) {
