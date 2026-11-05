@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
         require(json.open(QIODevice::ReadOnly), "Read saved");
         auto root = QJsonDocument::fromJson(json.readAll()).object();
         json.close();
-        require(root.value("version").toInt() == 17, "Wrong current project version");
+        require(root.value("version").toInt() == 18, "Wrong current project version");
         {
             auto legacyBends = root["bends"].toArray();
             for (qsizetype i = 0; i < legacyBends.size(); ++i) {

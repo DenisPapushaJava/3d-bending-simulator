@@ -1530,7 +1530,13 @@ class MainWindow::Impl {
             if (preview->toolSetup() &&
                 (!preview->usesDrawingPunch() || !preview->usesDrawingDie()))
                 result += QStringLiteral("\nЕсть условные профили инструмента.");
-            if (preview->toolSegmentGaps()[0] > 0 || preview->toolSegmentGaps()[1] > 0)
+            const auto unsupported = preview->uncoveredToolLengthMm();
+            if (unsupported[0] > 1.e-5 || unsupported[1] > 1.e-5)
+                result += QStringLiteral("\nНеполная опора по длине: матрица %1 мм, пуансон %2 мм. "
+                                         "Пригодность этой установки не подтверждена.")
+                              .arg(unsupported[0], 0, 'f', 2)
+                              .arg(unsupported[1], 0, 'f', 2);
+            else if (preview->toolSegmentGaps()[0] > 0 || preview->toolSegmentGaps()[1] > 0)
                 result += QStringLiteral("\nВлияние зазоров секций не проверено.");
             if (viewingRoute && route && routePanel->operation() > 0) {
                 const auto *current = session.bend(route->steps[routePanel->operation()].bendIndex);
@@ -1604,6 +1610,18 @@ class MainWindow::Impl {
                                     QStringLiteral("У торца отсутствует часть опоры. Доступен "
                                                    "геометрический просмотр; устойчивость и "
                                                    "пригодность к изготовлению не подтверждены.")});
+            if (preview) {
+                const auto missing = preview->uncoveredToolLengthMm();
+                if (missing[0] > 1.e-5 || missing[1] > 1.e-5)
+                    messages.push_back({BendMessageKind::Support, BendMessageSeverity::Warning,
+                                        QStringLiteral("Зазор под линией гиба"),
+                                        QStringLiteral("Без инструмента по длине: матрица %1 мм, "
+                                                       "пуансон %2 мм. Доступен геометрический "
+                                                       "просмотр; местная опора и деформация "
+                                                       "не подтверждены.")
+                                            .arg(missing[0], 0, 'f', 2)
+                                            .arg(missing[1], 0, 'f', 2)});
+            }
             if (preview && preview->backgauge()) {
                 const auto &g = *preview->backgauge();
                 QString gaugeTitle = QStringLiteral("База упора не найдена");
@@ -2143,7 +2161,9 @@ class MainWindow::Impl {
                 checkedToolDialog->progress(*routeProgress, tool);
             }
         }
-        assignBendTool->setEnabled(toolEditable && supported && matchingThickness &&
+        // Capturing an assembly is not a cycle certificate. Trimmed zones can use
+        // the shared route checker; the old single-bend UI gate must not prevent editing.
+        assignBendTool->setEnabled(toolEditable && !hasInteriorContours && matchingThickness &&
                                    toolSelection->parameters().has_value());
         toolWorkspace->setContext(multiple ? toolAssignmentScope->currentText() : QString{});
         toolWorkspace->refresh();

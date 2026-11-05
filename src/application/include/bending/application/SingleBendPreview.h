@@ -65,7 +65,13 @@ class SingleBendPreview {
     [[nodiscard]] virtual std::size_t otherFormedBends() const noexcept {
         return 0;
     }
+    // Maximum actual joint gap in each assembly (die, punch), not uniform spacing.
     [[nodiscard]] virtual std::array<double, 2> toolSegmentGaps() const noexcept {
+        return {0, 0};
+    }
+    // Axial length of active bend material without tool, independently for die/punch.
+    // Geometric accounting only; no strength/deformation claim for the remaining material.
+    [[nodiscard]] virtual std::array<double, 2> uncoveredToolLengthMm() const noexcept {
         return {0, 0};
     }
     [[nodiscard]] virtual std::span<const BendSupportInterval>
@@ -192,6 +198,8 @@ struct BendPreviewError {
     std::optional<std::size_t> frameIndex = std::nullopt;
     BendPreviewPtr diagnostic = {}; // Safe prefix + failed state, never a successful ToolMotion.
     std::optional<BendEndSupport> endSupport = std::nullopt;
+    // This exact tool-gap refusal may change with workpiece Z; source-strip failures do not.
+    bool axialSupportGap = false;
 };
 using BendPreviewResult = std::variant<BendPreviewPtr, BendPreviewError>;
 class SingleBendPreviewBuilder {

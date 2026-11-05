@@ -1108,8 +1108,9 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
         preview->realDie = toolGeometry && toolGeometry->hasDie;
         preview->filledCutouts = metadata.closedCutouts.status == ClosedCutoutStatus::Filled;
         if (realTools)
-            preview->gaps = {realTools->dieAssembly ? realTools->dieAssembly->gapMm : 0,
-                             realTools->punchAssembly ? realTools->punchAssembly->gapMm : 0};
+            preview->gaps = {
+                realTools->dieAssembly ? core::maximumAssemblyGap(*realTools->dieAssembly) : 0,
+                realTools->punchAssembly ? core::maximumAssemblyGap(*realTools->punchAssembly) : 0};
         const auto displaySource = !OcctDocumentAccess::routeSkin(*native).IsNull()
                                        ? OcctDocumentAccess::routeSkin(*native)
                                    : preview->filledCutouts || bend.trimmedEnds
@@ -1374,6 +1375,42 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                         "Tool assemblies do not cover the axial bend placement"};
             auto preview = std::make_shared<CadPreview>(*prototype);
             preview->axialOffset = workpieceOffsetMm;
+            if (realTools && toolParameters) {
+                const double from =
+                    (toolParameters->lengthMm - model.widthMm) / 2 + workpieceOffsetMm;
+                const auto countMissing = [&](const core::ToolPreset &tool,
+                                              const std::optional<core::ToolAssembly> &assembly,
+                                              double toolStart) {
+                    double missing = 0;
+                    if (assembly && tool.segments)
+                        for (const auto &interval : prototype->supportIntervals) {
+                            double start = from + interval.fromMm - toolStart;
+                            double end = start + interval.material.bendLengthMm;
+                            if (tool.kind == core::ToolKind::Punch && toolParameters->punchReversed) {
+                                const double extent = core::punchLengthMm(*toolParameters);
+                                const double oldStart = start;
+                                start = extent - end;
+                                end = extent - oldStart;
+                            }
+                            missing += *core::assemblyUncoveredLength(
+                                *tool.segments, *assembly, start, end);
+                        }
+                    return missing;
+                };
+                preview->uncoveredToolLength = {
+                    countMissing(realTools->die, realTools->dieAssembly, 0),
+                    countMissing(realTools->punch, realTools->punchAssembly,
+                                 (toolParameters->lengthMm - core::punchLengthMm(*toolParameters)) /
+                                     2)};
+            }
+            if (!prepareDiagnostic && (preview->uncoveredToolLength[0] > tolerance ||
+                                       preview->uncoveredToolLength[1] > tolerance)) {
+                BendPreviewError failure{BendPreviewErrorCode::SupportNotProven,
+                                         "Internal tool gap crosses active bend material; "
+                                         "local support is not proven"};
+                failure.axialSupportGap = true;
+                return failure;
+            }
             auto basis = centralBasis;
             if (toolParameters)
                 basis.origin.Translate(gp_Vec(0, 0, workpieceOffsetMm));
@@ -1636,6 +1673,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                             diagnostic->realDie = preview->realDie;
                             diagnostic->filledCutouts = preview->filledCutouts;
                             diagnostic->gaps = preview->gaps;
+                            diagnostic->uncoveredToolLength = preview->uncoveredToolLength;
                             diagnostic->supportIntervals = preview->supportIntervals;
                             diagnostic->supportLimit = preview->supportLimit;
                             diagnostic->otherBends = preview->otherBends;

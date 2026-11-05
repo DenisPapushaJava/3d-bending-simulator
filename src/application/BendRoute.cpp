@@ -61,9 +61,10 @@ bool applyRouteAssemblyResult(BendRouteRequest &request, const BendRoute &route)
         const auto valid = [&](const core::ToolPreset &profile,
                                const std::optional<core::ToolAssembly> &before,
                                const std::optional<core::ToolAssembly> &after) {
-            return before == after || (profile.segments && after &&
-                                       after->gapMm <= request.assemblySearch->maximumGapMm &&
-                                       core::assemblyLength(*profile.segments, *after).has_value());
+            return before == after ||
+                   (profile.segments && after &&
+                    core::maximumAssemblyGap(*after) <= request.assemblySearch->maximumGapMm &&
+                    core::assemblyLength(*profile.segments, *after).has_value());
         };
         if (!valid(assignment->punch, input->assignment->punchAssembly,
                    assignment->punchAssembly) ||

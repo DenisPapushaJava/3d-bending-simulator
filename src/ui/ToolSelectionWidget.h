@@ -62,6 +62,7 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] double maximumSegmentGapMm() const;
     [[nodiscard]] static QString assignmentIssue(const std::optional<core::ToolAssignment> &);
     void showPicker(core::ToolKind, QWidget *anchor);
+    void editAssembly(core::ToolKind);
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
                              bool allBends = false, double lengthToleranceMm = 1.e-5);

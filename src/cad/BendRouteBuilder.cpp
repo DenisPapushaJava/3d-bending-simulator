@@ -572,8 +572,8 @@ class RouteSearch {
             // diagnostic BReps/meshes here; single/manual previews have their own cache.
             cache->verdicts.put(
                 std::move(key),
-                BendPreviewError{
-                    error->code, error->detail, error->frameIndex, {}, error->endSupport});
+                BendPreviewError{error->code, error->detail, error->frameIndex, {},
+                                  error->endSupport, error->axialSupportGap});
         } else {
             cache->transitions.put(key, std::get<BendPreviewPtr>(std::move(result)));
             cache->verdicts.put(std::move(key), std::nullopt);
@@ -662,6 +662,15 @@ class RouteSearch {
             return preview;
         }
         const auto p = std::get<BendPreviewPtr>(preview);
+        const auto missing = p->uncoveredToolLengthMm();
+        if (missing[0] > tolerance || missing[1] > tolerance) {
+            BendPreviewError failure{
+                BendPreviewErrorCode::SupportNotProven,
+                "Internal tool gap crosses active bend material; local support is not proven"};
+            failure.axialSupportGap = true;
+            remember(wanted, failure);
+            return failure;
+        }
         // A rejected cycle never needs a canonical predecessor. Successful cycles still
         // undergo both independent volume differences against the complete before state.
         const auto before = state(mask ^ removed);
@@ -941,7 +950,8 @@ class RouteSearch {
                             failure->code != BendPreviewErrorCode::BackgaugeUnavailable &&
                             failure->code != BendPreviewErrorCode::ContactLost &&
                             failure->code != BendPreviewErrorCode::RetractionNotProven &&
-                            failure->code != BendPreviewErrorCode::Failed)
+                            failure->code != BendPreviewErrorCode::Failed &&
+                            !failure->axialSupportGap)
                             break;
                         incomplete |= request.allowAxialPlacement &&
                                       axialPlacementHalfRange(*op.tools, required) > tolerance;

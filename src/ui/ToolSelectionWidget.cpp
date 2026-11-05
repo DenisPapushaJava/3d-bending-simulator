@@ -1,4 +1,5 @@
 #include "ToolSelectionWidget.h"
+#include "ToolAssemblyDialog.h"
 #include "ToolLibraryDialog.h"
 #include "ToolPickerPopup.h"
 #include "bending/application/BendRoute.h"
@@ -755,6 +756,25 @@ void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
     else if (result == QDialog::Accepted && dialog.choice())
         chooseTool(dialog.choice()->first, dialog.choice()->second);
 }
+void ToolSelectionWidget::editAssembly(core::ToolKind kind) {
+    if (updating_ || checkedBusy_ || !isEnabled() || !usesCatalog())
+        return;
+    const auto *profile = preset(kind == core::ToolKind::Punch ? punch_ : die_);
+    if (!profile || !profile->segments || !core::validToolSegments(*profile->segments))
+        return;
+    const auto captured = *profile;
+    const auto before = selectedAssembly(kind);
+    ToolAssemblyDialog dialog(captured, before, window());
+    if (dialog.exec() != QDialog::Accepted || !isEnabled() || checkedBusy_)
+        return;
+    const auto *current = preset(kind == core::ToolKind::Punch ? punch_ : die_);
+    if (!current || *current != captured || selectedAssembly(kind) != before ||
+        !dialog.assembly() || !core::assemblyLength(*captured.segments, *dialog.assembly()) ||
+        dialog.assembly() == before)
+        return;
+    (kind == core::ToolKind::Punch ? punchAssembly_ : dieAssembly_) = dialog.assembly();
+    changed();
+}
 void ToolSelectionWidget::setChoice(const std::optional<core::PressTools> &tools,
                                     const std::optional<core::ToolAssignment> &a) {
     if (picker_)
@@ -887,11 +907,12 @@ void ToolSelectionWidget::updateDetails() {
         QStringList pieces;
         for (const auto row : a->pieces)
             pieces << QString::number((*tool->segments)[row].lengthMm);
-        assemblyLines << name + QStringLiteral(": %1 · общая длина %2 мм · %3 секц. · зазор %4 мм")
+        assemblyLines << name + QStringLiteral(
+                                    ": %1 · общая длина %2 мм · %3 секц. · макс. зазор %4 мм")
                                     .arg(pieces.join(QStringLiteral(" + ")))
                                     .arg(*core::toolLength(*tool, a))
                                     .arg(a->pieces.size())
-                                    .arg(a->gapMm);
+                                    .arg(core::maximumAssemblyGap(*a));
     };
     describe(preset(punch_), punchAssembly_, QStringLiteral("Пуансон"));
     describe(preset(die_), dieAssembly_, QStringLiteral("Матрица"));
@@ -1008,7 +1029,12 @@ void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionR
     if (different) {
         allBends_ = allBends;
         selectionRequest_ = request;
-        fitAssemblies();
+        // A context refresh must not silently replace a captured/manual layout.
+        // Explicit fitting or choosing a different profile may still rebuild it.
+        if (!punchAssembly_)
+            fitAssemblies(core::ToolKind::Punch);
+        if (!dieAssembly_)
+            fitAssemblies(core::ToolKind::Die);
         recommendation_->clear();
         recommendation_->hide();
     }

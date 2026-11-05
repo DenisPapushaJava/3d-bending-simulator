@@ -43,7 +43,10 @@ class CadPreview : public SingleBendPreview {
     }
     bool filledCutouts = false;
     bool realPunch = false, realDie = false;
-    std::array<double, 2> gaps{};
+    std::array<double, 2> gaps{}, uncoveredToolLength{};
+    std::array<double, 2> uncoveredToolLengthMm() const noexcept override {
+        return uncoveredToolLength;
+    }
     std::vector<BendSupportInterval> supportIntervals;
     std::optional<double> supportLimit = 0;
     std::optional<double> endSupportLimitMm() const noexcept override {

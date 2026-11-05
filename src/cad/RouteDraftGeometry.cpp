@@ -202,9 +202,12 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     visual->reversed = active.workpieceReversed;
     visual->otherBends = request.step ? request.step - 1 : 0;
     if (active.assignment)
-        visual->gaps = {active.assignment->dieAssembly ? active.assignment->dieAssembly->gapMm : 0,
-                        active.assignment->punchAssembly ? active.assignment->punchAssembly->gapMm
-                                                         : 0};
+        visual->gaps = {active.assignment->dieAssembly
+                            ? core::maximumAssemblyGap(*active.assignment->dieAssembly)
+                            : 0,
+                        active.assignment->punchAssembly
+                            ? core::maximumAssemblyGap(*active.assignment->punchAssembly)
+                            : 0};
     visual->geometry = {
         bend.thicknessMm, bend.innerRadiusMm, bend.angleRadians, bend.lengthMm, 1, 1};
     visual->filledCutouts =
@@ -238,6 +241,28 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                                  active.bendIndex, 0, BendPreviewErrorCode::ToolTooShort};
         require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
                 "Inconsistent draft tool assignment");
+        if (active.assignment) {
+            const double start =
+                (active.tools->lengthMm - bend.lengthMm) / 2 + active.workpieceOffsetMm;
+            const auto countMissing = [&](const core::ToolPreset &tool,
+                                          const std::optional<core::ToolAssembly> &assembly,
+                                          double origin) {
+                if (!assembly || !tool.segments)
+                    return 0.;
+                double from = start - origin, to = from + bend.lengthMm;
+                if (tool.kind == core::ToolKind::Punch && active.tools->punchReversed) {
+                    const double extent = core::punchLengthMm(*active.tools);
+                    const double oldFrom = from;
+                    from = extent - to;
+                    to = extent - oldFrom;
+                }
+                return core::assemblyUncoveredLength(*tool.segments, *assembly, from, to).value();
+            };
+            visual->uncoveredToolLength = {
+                countMissing(active.assignment->die, active.assignment->dieAssembly, 0),
+                countMissing(active.assignment->punch, active.assignment->punchAssembly,
+                             (active.tools->lengthMm - core::punchLengthMm(*active.tools)) / 2)};
+        }
         tools = makeRouteDraftTools(*active.tools, active.assignment, stop, segments);
         if (active.assignment && active.assignment->useDrawingGeometry) {
             const auto geometry = core::drawingToolGeometry(*active.assignment);

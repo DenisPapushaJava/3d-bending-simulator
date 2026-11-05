@@ -1,6 +1,7 @@
 #include "bending/core/ToolSegments.h"
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <tuple>
 using namespace bending::core;
@@ -93,6 +94,33 @@ int main() {
               "Search budget was ignored");
         check(!assemblyLength({{100, 1}}, {{0, 0}}) && !assemblyLength({{100, 1}}, {{1}}),
               "Stock overuse or foreign row accepted");
+        const std::vector<ToolSegment> localStock{{20, 1}, {30, 1}, {40, 1}};
+        const ToolAssembly local{{0, 1, 2}, 0, {0, 12.5}};
+        const auto intervals = assemblyIntervals(localStock, local);
+        check(assemblyLength(localStock, local) == 102.5 && intervals && intervals->size() == 3 &&
+                  intervals->at(0).fromMm == 0 && intervals->at(0).toMm == 20 &&
+                  intervals->at(1).fromMm == 20 && intervals->at(1).toMm == 50 &&
+                  intervals->at(2).fromMm == 62.5 && intervals->at(2).toMm == 102.5 &&
+                  maximumAssemblyGap(local) == 12.5 && assemblyGapAfter(local, 2) == 0,
+              "A local window changed another joint or total span");
+        check(assemblyUncoveredLength(localStock, local, 0, 50) == 0 &&
+                  assemblyUncoveredLength(localStock, local, 62.5, 102.5) == 0 &&
+                  assemblyUncoveredLength(localStock, local, 45, 70) == 12.5 &&
+                  assemblyUncoveredLength(localStock, local, -10, 5) == 10 &&
+                  !assemblyUncoveredLength(localStock, local, 5, 1),
+              "Axial support accounting filled a gap or lost an end");
+        for (const auto &bad : std::vector<ToolAssembly>{
+                 {{0, 1, 2}, 1, {0, 12.5}},
+                 {{0, 1, 2}, 0, {1}},
+                 {{0, 1, 2}, 0, {0, -1}},
+                 {{0, 1, 2}, 0, {0, 1001}},
+                 {{0, 1, 2}, 0, {0, .0001}},
+                 {{0, 1, 2}, 0, {0, std::numeric_limits<double>::quiet_NaN()}},
+                 {{0, 1, 2}, 0, {0, std::numeric_limits<double>::infinity()}},
+                 {{0}, 0, {0}},
+                 {{0, 0, 2}, 0, {0, 10}}})
+            check(!assemblyLength(localStock, bad) && !assemblyIntervals(localStock, bad),
+                  "Invalid per-joint layout or stock overuse accepted");
         const auto precise = planToolSegments({{80.001, 1}}, 80.0008);
         const auto gap = planToolSegments({{100, 2}}, 210, 200000, 10);
         check(gap.status == SegmentPlanStatus::Complete && gap.assembly.gapMm == 10 &&
