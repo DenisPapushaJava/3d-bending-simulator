@@ -57,12 +57,13 @@ inline TopoDS_Shape part(double length = 80) {
     sew.Perform();
     auto sector = BRepBuilderAPI_MakeSolid(TopoDS::Shell(sew.SewedShape())).Solid();
     require(BRepLib::OrientClosedSolid(sector), "Fixture shell failed");
-    const auto wall = [](std::array<gp_Pnt, 4> p, double z, double length) {
+    const auto wall = [](std::array<gp_Pnt, 4> p, double z, double wallLength) {
         BRepBuilderAPI_MakeWire wire;
         for (std::size_t i = 0; i < p.size(); ++i)
             wire.Add(BRepBuilderAPI_MakeEdge(p[i], p[(i + 1) % p.size()]));
-        auto s = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, length))
-                     .Shape();
+        auto s =
+            BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, wallLength))
+                .Shape();
         gp_Trsf shift;
         shift.SetTranslation(gp_Vec(0, 0, z));
         return BRepBuilderAPI_Transform(s, shift, true).Shape();

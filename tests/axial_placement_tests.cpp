@@ -228,7 +228,7 @@ int main() {
             "Cancellation poisoned immutable preparation or published an unchecked pose");
         const auto activeCorner = std::find_if(
             doc->metadata().bendAnalysis.bends.begin(), doc->metadata().bendAnalysis.bends.end(),
-            [](const auto &b) { return std::abs(b.lengthMm - 80) < .001; });
+            [](const auto &candidate) { return std::abs(candidate.lengthMm - 80) < .001; });
         check(activeCorner != doc->metadata().bendAnalysis.bends.end(), "Missing corner bend");
         const auto cornerIndex =
             static_cast<std::size_t>(activeCorner - doc->metadata().bendAnalysis.bends.begin());
@@ -310,16 +310,17 @@ int main() {
               "Preparation reuse changed the accepted cycle/gauge placement");
         for (std::size_t i = 0; i < rp->frameCount(); ++i) {
             const auto &a = cad::OcctPreviewAccess::frame(*rp, i),
-                       &b = cad::OcctPreviewAccess::frame(*fp, i);
+                       &referenceFrame = cad::OcctPreviewAccess::frame(*fp, i);
             for (std::size_t j = 0; j < a.regions.size(); ++j) {
-                sameBounds(a.regions[j], b.regions[j]);
-                sameBounds(a.displayRegions[j], b.displayRegions[j]);
+                sameBounds(a.regions[j], referenceFrame.regions[j]);
+                sameBounds(a.displayRegions[j], referenceFrame.displayRegions[j]);
             }
             for (std::size_t j = 0; j < a.tools.size(); ++j)
-                sameBounds(a.tools[j], b.tools[j]);
-            check(a.machine.size() == b.machine.size(), "Prepared machine lost a component");
+                sameBounds(a.tools[j], referenceFrame.tools[j]);
+            check(a.machine.size() == referenceFrame.machine.size(),
+                  "Prepared machine lost a component");
             for (std::size_t j = 0; j < a.machine.size(); ++j)
-                sameBounds(a.machine[j].shape, b.machine[j].shape);
+                sameBounds(a.machine[j].shape, referenceFrame.machine[j].shape);
         }
         std::cout << "preparation reference/reused us: "
                   << reference->statistics.operationPreparationUs << '/'

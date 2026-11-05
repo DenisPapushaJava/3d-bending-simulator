@@ -2878,12 +2878,15 @@ class MainWindow::Impl {
         if (!controller->session().modified()) {
             return true;
         }
-        return QMessageBox::warning(
-                   window, QStringLiteral("Несохранённые изменения"),
-                   QStringLiteral(
-                       "В проекте есть несохранённые параметры. Продолжить без сохранения?"),
-                   QMessageBox::Discard | QMessageBox::Cancel,
-                   QMessageBox::Cancel) == QMessageBox::Discard;
+        QMessageBox dialog(
+            QMessageBox::Warning, QStringLiteral("Несохранённые изменения"),
+            QStringLiteral("В проекте есть несохранённые параметры. Продолжить без сохранения?"),
+            QMessageBox::Discard | QMessageBox::Cancel, window);
+        dialog.button(QMessageBox::Discard)->setText(QStringLiteral("Не сохранять"));
+        dialog.button(QMessageBox::Cancel)->setText(QStringLiteral("Отмена"));
+        dialog.setDefaultButton(QMessageBox::Cancel);
+        dialog.setEscapeButton(QMessageBox::Cancel);
+        return dialog.exec() == QMessageBox::Discard;
     }
     void advanceUpdate() {
         if (!updatePending || !updateInstaller)

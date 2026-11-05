@@ -337,14 +337,14 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     connect(gaugeOptions, &QPushButton::clicked, this, [this] {
         QDialog dialog(this);
         dialog.setWindowTitle(QStringLiteral("Задний упор · абстрактный станок"));
-        auto *form = new QFormLayout(&dialog);
+        auto *gaugeForm = new QFormLayout(&dialog);
         auto *note = wrapped(&dialog);
         note->setText(
             QStringLiteral("Три ступени: 0 / 28,8 / 65,9 мм; высоты 10,5 / 21 / 25,5 мм. "
                            "X — первый носик, R — низ пальца; Z — относительно центра инструмента. "
                            "Нули и корпус демонстрационные. Это не координаты для ЧПУ."));
         note->setMinimumWidth(420);
-        form->addRow(note);
+        gaugeForm->addRow(note);
         const std::array<QString, 9> labels{
             QStringLiteral("X от:"),          QStringLiteral("X до:"),
             QStringLiteral("R от:"),          QStringLiteral("R до:"),
@@ -361,17 +361,17 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
             input->setKeyboardTracking(false);
             input->setObjectName(QStringLiteral("backgauge_") +
                                  QLatin1String(gaugeFields[i].first));
-            form->addRow(labels[i], input);
+            gaugeForm->addRow(labels[i], input);
         }
         auto *shared = new QCheckBox(QStringLiteral("Контакты по всей ширине пальцев"), &dialog);
         shared->setChecked(backgaugeSetup_.allowOffsetContacts);
         shared->setToolTip(QStringLiteral(
             "Контакт может находиться вне центра пальца. Оба пальца остаются в проверке "
             "столкновений. 0 мм — без дополнительного минимума разноса контактов."));
-        form->addRow(shared);
+        gaugeForm->addRow(shared);
         auto *buttons =
             new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-        form->addRow(buttons);
+        gaugeForm->addRow(buttons);
         const auto read = [&] {
             core::BackgaugeSetup s;
             s.allowOffsetContacts = shared->isChecked();
