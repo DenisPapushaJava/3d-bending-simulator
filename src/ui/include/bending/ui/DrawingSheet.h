@@ -47,6 +47,8 @@ struct DrawingPlacedView {
     QRectF selectionBounds = {}; // Body and annotations; independent of allocated layout cell.
     std::vector<DrawingPlacedDimension> dimensions = {};
     std::shared_ptr<const DrawingViewRecording> recording = {};
+    bool compactDimensions = false;
+    QString sheetLinks = {}; // References to related projections on other sheets.
 };
 struct DrawingLayoutLimits {
     std::chrono::milliseconds maximumTime{30000};

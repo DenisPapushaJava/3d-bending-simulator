@@ -1,5 +1,6 @@
 #include "DrawingLayoutChecks.h"
 #include "DrawingLayoutController.h"
+#include "DrawingPaginationChecks.h"
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QPaintEngine>
@@ -213,17 +214,21 @@ void unevenProjectionDimensions() {
     check(ui::DrawingSheet::compose(d, choices));
     for (auto &choice : choices)
         choice.scale = .2;
-    bool rejected = false;
+    std::shared_ptr<const ui::DrawingSheetPlan> enlarged;
     try {
-        (void)ui::DrawingSheet::compose(d, choices);
+        enlarged = ui::DrawingSheet::compose(d, choices);
     } catch (const std::runtime_error &e) {
         const auto error = QString::fromUtf8(e.what());
-        rejected = error.contains(QStringLiteral("Связанные виды")) &&
-                   (error.contains(QStringLiteral("Главный вид")) ||
-                    error.contains(QStringLiteral("Вид сверху")) ||
-                    error.contains(QStringLiteral("Вид слева")));
+        require(error.contains(QStringLiteral("Связанные виды")),
+                "Wrong oversized-view diagnostic");
     }
-    require(rejected, "Fixed oversized scale was silently reduced or named the wrong view");
+    if (enlarged) {
+        require(enlarged->views.size() == 3,
+                "Oversized group dropped a projection while splitting");
+        for (const auto &at : enlarged->views)
+            require(at.scale == .2, "Oversized group silently reduced its explicit scale");
+        verifyRecordedDimensions(*d, *enlarged);
+    }
 }
 void sameLayout(const ui::DrawingSheetPlan &a, const ui::DrawingSheetPlan &b) {
     require(a.source == b.source && a.pages == b.pages && a.views.size() == b.views.size() &&
@@ -236,7 +241,8 @@ void sameLayout(const ui::DrawingSheetPlan &a, const ui::DrawingSheetPlan &b) {
         const auto &y = b.views[i];
         require(x.key == y.key && x.page == y.page && x.area == y.area && x.centre == y.centre &&
                     x.scale == y.scale && x.selectionBounds == y.selectionBounds &&
-                    x.dimensions.size() == y.dimensions.size(),
+                    x.dimensions.size() == y.dimensions.size() &&
+                    x.compactDimensions == y.compactDimensions && x.sheetLinks == y.sheetLinks,
                 "Fit reuse changed a view or reused another item's placement");
         for (std::size_t j = 0; j < x.dimensions.size(); ++j) {
             const auto &m = x.dimensions[j];
@@ -493,9 +499,14 @@ void verifyRecordedDimensions(const bending::application::BendingDrawing &drawin
     }
 }
 
+void verifySameDrawingLayout(const bending::ui::DrawingSheetPlan &a,
+                             const bending::ui::DrawingSheetPlan &b) {
+    sameLayout(a, b);
+}
 void drawingLayoutChecks() {
     limits();
     unevenProjectionDimensions();
+    drawingPaginationChecks();
     fitCache();
     worker();
 }

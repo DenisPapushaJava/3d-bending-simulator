@@ -1,5 +1,6 @@
 #include "DrawingSheetInternal.h"
 #include <QImage>
+#include <QStringList>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <numeric>
 #include <set>
 #include <stdexcept>
 namespace bending::ui {
@@ -110,10 +112,11 @@ std::vector<DrawingViewChoice> DrawingSheet::defaultViews(const BendingDrawing &
 namespace {
 struct Item {
     std::vector<DrawingViewChoice> choices;
+    bool compactDimensions = false;
 };
 struct FitKey {
-    // items and the drawing/side/render policy are immutable for this compose.
-    // Use the stable full item index, not its position on the current page.
+    // Source/side are constant. A stable full item ID identifies immutable
+    // choices, scale and annotation policy, not its position in a trial order.
     std::size_t item;
     int page;
     std::array<std::uint64_t, 4> area;
@@ -132,6 +135,7 @@ struct FitPlacement {
     QPointF centre;
     double scale;
     QRectF selectionBounds;
+    bool compactDimensions;
 };
 // No CAD, paths, dimension recordings or painter state retained by the cache.
 // nullopt is an ordinary fit failure, never cancellation or a spent budget.
@@ -140,7 +144,8 @@ CachedFit cacheFit(const std::vector<DrawingPlacedView> &views) {
     std::vector<FitPlacement> result;
     result.reserve(views.size());
     for (const auto &view : views)
-        result.push_back({view.key, view.area, view.centre, view.scale, view.selectionBounds});
+        result.push_back({view.key, view.area, view.centre, view.scale, view.selectionBounds,
+                          view.compactDimensions});
     return result;
 }
 std::optional<std::vector<DrawingPlacedView>> restoreFit(const CachedFit &cached, int page) {
@@ -148,9 +153,11 @@ std::optional<std::vector<DrawingPlacedView>> restoreFit(const CachedFit &cached
         return {};
     std::vector<DrawingPlacedView> result;
     result.reserve(cached->size());
-    for (const auto &view : *cached)
+    for (const auto &view : *cached) {
         result.push_back(
             {view.key, page, view.area, view.centre, view.scale, view.selectionBounds});
+        result.back().compactDimensions = view.compactDimensions;
+    }
     return result;
 }
 double width(const DrawingView &v) {
@@ -282,6 +289,8 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
                     placed.push_back({choice.key, page, cell,
                                       cell.center() + QPointF(0, allocation == 2 ? 6 : 0), *scale});
                 }
+                for (auto &at : placed)
+                    at.compactDimensions = item.compactDimensions;
                 QImage scratch(420, 297, QImage::Format_RGB32);
                 QPainter painter(&scratch);
                 std::vector<QRectF> occupied;
@@ -318,6 +327,7 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
             if (*scale > fit + 1.e-9)
                 throw std::runtime_error("Вид не помещается в выбранном масштабе");
             DrawingPlacedView at{choice.key, page, area, area.center() + QPointF(0, 4), *scale};
+            at.compactDimensions = item.compactDimensions;
             QImage scratch(420, 297, QImage::Format_RGB32);
             QPainter painter(&scratch);
             std::vector<QRectF> occupied;
@@ -377,6 +387,209 @@ std::vector<std::vector<QRectF>> cells(std::size_t count) {
                 }
     return result;
 }
+
+struct UnplacedItem {
+    std::size_t item;
+    std::string reason;
+};
+std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
+                                      const std::vector<std::size_t> &order, DrawingSheetPlan &plan,
+                                      std::map<FitKey, CachedFit> &fitCache,
+                                      drawing::LayoutContext &context) {
+    const auto cacheLimit = std::min(context.limits.maximumCachedFits, std::size_t{4096});
+    std::size_t begin = 0;
+    while (begin < order.size()) {
+        context.checkpoint();
+        bool packed = false;
+        for (auto count = std::min(std::size_t{6}, order.size() - begin); count && !packed; --count)
+            for (const auto &areas : cells(count)) {
+                std::vector<std::vector<std::optional<std::vector<DrawingPlacedView>>>> fits(
+                    count, std::vector<std::optional<std::vector<DrawingPlacedView>>>(count));
+                for (std::size_t i = 0; i < count; ++i)
+                    for (std::size_t j = 0; j < count; ++j) {
+                        // Check cancellation/deadline even for a cached negative result.
+                        context.checkpoint();
+                        const auto key = fitKey(order[begin + i], plan.pages, areas[j]);
+                        if (const auto cached = fitCache.find(key); cached != fitCache.end()) {
+                            fits[i][j] = restoreFit(cached->second, plan.pages);
+                            ++plan.fitCacheHits;
+                            continue;
+                        }
+                        ++plan.fitCalls;
+                        try {
+                            fits[i][j] = fitItem(*plan.source, items[order[begin + i]], areas[j],
+                                                 plan.flatSide, plan.pages, context);
+                            if (fitCache.size() < cacheLimit)
+                                fitCache.emplace(key, cacheFit(*fits[i][j]));
+                        } catch (const DrawingLayoutInterrupted &) {
+                            throw;
+                        } catch (const std::runtime_error &) {
+                            if (fitCache.size() < cacheLimit)
+                                fitCache.emplace(key, std::nullopt);
+                        }
+                    }
+                std::vector<int> owner(count, -1);
+                const auto match = [&](auto &&self, std::size_t i,
+                                       std::vector<bool> &visited) -> bool {
+                    for (std::size_t j = 0; j < count; ++j)
+                        if (!visited[j] && fits[i][j]) {
+                            visited[j] = true;
+                            if (owner[j] < 0 ||
+                                self(self, static_cast<std::size_t>(owner[j]), visited)) {
+                                owner[j] = static_cast<int>(i);
+                                return true;
+                            }
+                        }
+                    return false;
+                };
+                bool complete = true;
+                for (std::size_t i = 0; i < count && complete; ++i) {
+                    std::vector<bool> visited(count);
+                    complete = match(match, i, visited);
+                }
+                if (!complete)
+                    continue;
+                for (std::size_t j = 0; j < count; ++j) {
+                    const auto &at = *fits[static_cast<std::size_t>(owner[j])][j];
+                    plan.views.insert(plan.views.end(), at.begin(), at.end());
+                }
+                begin += count;
+                ++plan.pages;
+                packed = true;
+                break;
+            }
+        if (!packed) {
+            std::string reason;
+            try {
+                (void)fitItem(*plan.source, items[order[begin]], drawing::contentArea,
+                              plan.flatSide, plan.pages, context);
+            } catch (const DrawingLayoutInterrupted &) {
+                throw;
+            } catch (const std::runtime_error &e) {
+                reason = e.what();
+            }
+            const auto name =
+                items[order[begin]].choices.size() > 1
+                    ? QStringLiteral("Связанные виды")
+                    : DrawingSheet::viewName(*plan.source, items[order[begin]].choices.front().key);
+            return UnplacedItem{order[begin],
+                                (name +
+                                 QStringLiteral(": размеры или выноски не помещаются на A3. "
+                                                "Выберите «Авто» или меньший масштаб. ") +
+                                 QString::fromStdString(reason))
+                                    .toStdString()};
+        }
+    }
+    return {};
+}
+// Stable IDs describe immutable inputs, including the annotation policy. Never
+// overwrite an item that already participated in a FitKey.
+std::size_t internItem(std::vector<Item> &items, Item item) {
+    const auto same = [&](const auto &old) {
+        return old.compactDimensions == item.compactDimensions &&
+               old.choices.size() == item.choices.size() &&
+               std::equal(old.choices.begin(), old.choices.end(), item.choices.begin(),
+                          [](const auto &a, const auto &b) {
+                              return a.key == b.key && a.visible == b.visible && a.scale == b.scale;
+                          });
+    };
+    const auto found = std::find_if(items.begin(), items.end(), same);
+    if (found != items.end())
+        return static_cast<std::size_t>(found - items.begin());
+    items.push_back(std::move(item));
+    return items.size() - 1;
+}
+std::vector<double> familyScales(const BendingDrawing &drawing, const Item &family) {
+    std::array<std::optional<DrawingView>, 3> views;
+    std::optional<double> fixed;
+    for (const auto &choice : family.choices) {
+        views.at(choice.key.index) = drawing::preparedView(drawing, choice.key);
+        if (choice.scale) {
+            if (fixed && fixed != choice.scale)
+                throw std::runtime_error("Масштабы связанных видов должны совпадать");
+            fixed = choice.scale;
+        }
+    }
+    if (fixed)
+        return {*fixed};
+    const double primaryW =
+        std::max(views[0] ? width(*views[0]) : 0., views[1] ? width(*views[1]) : 0.);
+    const double primaryH =
+        std::max(views[0] ? height(*views[0]) : 0., views[2] ? height(*views[2]) : 0.);
+    const bool top = views[1] && (views[0] || views[2]);
+    const bool lateral = views[2] && (views[0] || views[1]);
+    const double rawW =
+        (primaryW > 0 ? primaryW : width(*views[2])) + (lateral ? width(*views[2]) : 0.);
+    const double rawH =
+        (primaryH > 0 ? primaryH : height(*views[1])) + (top ? height(*views[1]) : 0.);
+    constexpr double margin = 22, gap = 6;
+    const double fit =
+        std::min((drawing::contentArea.width() - (lateral ? 4 * margin + gap : 2 * margin) - 8) /
+                     std::max(rawW, 1.e-8),
+                 (drawing::contentArea.height() - (top ? 4 * margin + gap : 2 * margin)) /
+                     std::max(rawH, 1.e-8));
+    const double minimum = std::max(.001, standardDrawingScale(fit * .5).value_or(.001));
+    std::vector<double> result;
+    for (auto scale = standardDrawingScale(fit);
+         scale && result.size() < 7 && *scale + 1.e-9 >= minimum;
+         scale = standardDrawingScale(*scale * .8))
+        result.push_back(*scale);
+    return result;
+}
+std::vector<std::vector<unsigned>> familyPartitions(const Item &family) {
+    unsigned mask = 0;
+    for (const auto &choice : family.choices)
+        mask |= 1u << choice.key.index;
+    if (mask == 7)
+        return {{5, 2}, {3, 4}, {1, 6}, {1, 2, 4}};
+    if (std::popcount(mask) == 2) {
+        std::vector<unsigned> parts;
+        for (unsigned i = 0; i < 3; ++i)
+            if (mask & (1u << i))
+                parts.push_back(1u << i);
+        return {parts};
+    }
+    return {};
+}
+void linkProjectionSheets(DrawingSheetPlan &plan, drawing::LayoutContext &context) {
+    std::vector<std::size_t> projections;
+    for (std::size_t i = 0; i < plan.views.size(); ++i)
+        if (plan.views[i].key.kind == DrawingViewKind::Projection)
+            projections.push_back(i);
+    std::sort(projections.begin(), projections.end(),
+              [&](auto a, auto b) { return plan.views[a].key.index < plan.views[b].key.index; });
+    if (projections.size() < 2)
+        return;
+    auto &main = plan.views[projections.front()];
+    const auto reference = [&](const auto &at) {
+        return DrawingSheet::viewName(*plan.source, at.key) +
+               QStringLiteral(" — лист %1").arg(at.page + 1);
+    };
+    QStringList links;
+    for (std::size_t i = 1; i < projections.size(); ++i) {
+        auto &at = plan.views[projections[i]];
+        if (at.scale != main.scale)
+            throw std::runtime_error("Масштабы связанных видов должны совпадать");
+        if (at.page != main.page) {
+            at.sheetLinks = reference(main);
+            links << reference(at);
+        }
+    }
+    main.sheetLinks = links.join(QStringLiteral("; "));
+    if (links.isEmpty())
+        return;
+    // Prove the complete captions/annotations before recording any vector plan.
+    // No late overlay may invalidate an otherwise accepted sheet.
+    for (int page = 0; page < plan.pages; ++page) {
+        QImage scratch(420, 297, QImage::Format_RGB32);
+        QPainter painter(&scratch);
+        std::vector<QRectF> occupied;
+        for (auto &at : plan.views)
+            if (at.page == page)
+                drawing::paintPlaced(painter, *plan.source, at, plan.flatSide, occupied,
+                                     &at.selectionBounds, &context);
+    }
+}
 } // namespace
 std::shared_ptr<const DrawingSheetPlan>
 DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewChoice> &choices,
@@ -425,87 +638,74 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
             iso.reset();
         }
     }
-    const auto cacheLimit = std::min(limits.maximumCachedFits, std::size_t{4096});
     std::map<FitKey, CachedFit> fitCache;
-    std::size_t begin = 0;
-    while (begin < items.size()) {
-        context.checkpoint();
-        bool packed = false;
-        for (auto count = std::min(std::size_t{6}, items.size() - begin); count && !packed; --count)
-            for (const auto &areas : cells(count)) {
-                std::vector<std::vector<std::optional<std::vector<DrawingPlacedView>>>> fits(
-                    count, std::vector<std::optional<std::vector<DrawingPlacedView>>>(count));
-                for (std::size_t i = 0; i < count; ++i)
-                    for (std::size_t j = 0; j < count; ++j) {
-                        // Check cancellation/deadline even for a cached negative result.
+    std::vector<std::size_t> originalOrder(items.size());
+    std::iota(originalOrder.begin(), originalOrder.end(), 0);
+    auto failure = packItems(items, originalOrder, *plan, fitCache, context);
+    if (failure) {
+        const auto originalFailure = *failure;
+        if (family.choices.empty() || failure->item != 0 || plan->pages != 0)
+            throw std::runtime_error(failure->reason);
+        // Validate the common explicit scale before considering any new policy.
+        const auto scales = familyScales(*source, family);
+        const auto reset = [&] {
+            plan->views.clear();
+            plan->pages = 0;
+        };
+        auto compactFamily = family;
+        compactFamily.compactDimensions = true;
+        const auto compactId = internItem(items, std::move(compactFamily));
+        auto order = originalOrder;
+        order.front() = compactId;
+        reset();
+        failure = packItems(items, order, *plan, fitCache, context);
+        if (failure && failure->item != compactId)
+            throw std::runtime_error(failure->reason);
+        if (failure) {
+            bool accepted = false;
+            const auto partitions = familyPartitions(family);
+            for (double scale : scales) {
+                for (const auto &partition : partitions) {
+                    for (bool compact : {false, true}) {
                         context.checkpoint();
-                        const auto key = fitKey(begin + i, plan->pages, areas[j]);
-                        if (const auto cached = fitCache.find(key); cached != fitCache.end()) {
-                            fits[i][j] = restoreFit(cached->second, plan->pages);
-                            ++plan->fitCacheHits;
+                        order.clear();
+                        for (auto mask : partition) {
+                            Item part;
+                            part.compactDimensions = compact;
+                            for (auto choice : family.choices)
+                                if (mask & (1u << choice.key.index)) {
+                                    choice.scale = scale;
+                                    part.choices.push_back(choice);
+                                }
+                            order.push_back(internItem(items, std::move(part)));
+                        }
+                        order.insert(order.end(), originalOrder.begin() + 1, originalOrder.end());
+                        reset();
+                        failure = packItems(items, order, *plan, fitCache, context);
+                        if (failure) {
+                            if (items[failure->item].choices.front().key.kind !=
+                                DrawingViewKind::Projection)
+                                throw std::runtime_error(failure->reason);
                             continue;
                         }
-                        ++plan->fitCalls;
                         try {
-                            fits[i][j] = fitItem(*source, items[begin + i], areas[j], side,
-                                                 plan->pages, context);
-                            if (fitCache.size() < cacheLimit)
-                                fitCache.emplace(key, cacheFit(*fits[i][j]));
+                            linkProjectionSheets(*plan, context);
+                            accepted = true;
                         } catch (const DrawingLayoutInterrupted &) {
                             throw;
                         } catch (const std::runtime_error &) {
-                            if (fitCache.size() < cacheLimit)
-                                fitCache.emplace(key, std::nullopt);
+                            continue;
                         }
+                        break;
                     }
-                std::vector<int> owner(count, -1);
-                const auto match = [&](auto &&self, std::size_t i,
-                                       std::vector<bool> &visited) -> bool {
-                    for (std::size_t j = 0; j < count; ++j)
-                        if (!visited[j] && fits[i][j]) {
-                            visited[j] = true;
-                            if (owner[j] < 0 ||
-                                self(self, static_cast<std::size_t>(owner[j]), visited)) {
-                                owner[j] = static_cast<int>(i);
-                                return true;
-                            }
-                        }
-                    return false;
-                };
-                bool complete = true;
-                for (std::size_t i = 0; i < count && complete; ++i) {
-                    std::vector<bool> visited(count);
-                    complete = match(match, i, visited);
+                    if (accepted)
+                        break;
                 }
-                if (!complete)
-                    continue;
-                for (std::size_t j = 0; j < count; ++j) {
-                    const auto &at = *fits[static_cast<std::size_t>(owner[j])][j];
-                    plan->views.insert(plan->views.end(), at.begin(), at.end());
-                }
-                begin += count;
-                ++plan->pages;
-                packed = true;
-                break;
+                if (accepted)
+                    break;
             }
-        if (!packed) {
-            std::string reason;
-            try {
-                (void)fitItem(*source, items[begin], drawing::contentArea, side, plan->pages,
-                              context);
-            } catch (const DrawingLayoutInterrupted &) {
-                throw;
-            } catch (const std::runtime_error &e) {
-                reason = e.what();
-            }
-            const auto name = items[begin].choices.size() > 1
-                                  ? QStringLiteral("Связанные виды")
-                                  : viewName(*source, items[begin].choices.front().key);
-            throw std::runtime_error((name +
-                                      QStringLiteral(": размеры или выноски не помещаются на A3. "
-                                                     "Выберите «Авто» или меньший масштаб. ") +
-                                      QString::fromStdString(reason))
-                                         .toStdString());
+            if (!accepted)
+                throw std::runtime_error(originalFailure.reason);
         }
     }
     if (iso)

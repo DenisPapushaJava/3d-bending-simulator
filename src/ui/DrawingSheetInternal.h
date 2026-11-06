@@ -12,6 +12,8 @@ struct DrawingViewRecording {
     QPointF centre;
     double scale;
     DrawingFlatSide side;
+    bool compactDimensions;
+    QString sheetLinks;
 };
 } // namespace bending::ui
 namespace bending::ui::drawing {

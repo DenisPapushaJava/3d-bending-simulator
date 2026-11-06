@@ -1,5 +1,6 @@
 #include "BendFixtures.h"
 #include "DrawingLayoutChecks.h"
+#include "DrawingPaginationChecks.h"
 #include "DrawingSectionOrientationChecks.h"
 #include "ProfileFixtures.h"
 #include "TrayFixtures.h"
@@ -1793,6 +1794,12 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
         report.insert("bends", bends);
         application::DrawingRequest request;
         request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+        if (const auto k = qEnvironmentVariable("BENDING_DRAWING_AUDIT_K"); !k.isEmpty()) {
+            bool valid = false;
+            request.unfoldSettings->manualK = k.toDouble(&valid);
+            require(valid && core::validUnfoldSettings(*request.unfoldSettings),
+                    "Invalid audit K factor");
+        }
         const auto result = cad::BendingDrawingBuilder{}.build(doc, request, {});
         if (const auto *error = std::get_if<application::DrawingError>(&result)) {
             report.insert("drawingOk", false);
@@ -1811,6 +1818,8 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
             if (d.flatPattern) {
                 report.insert("flatWidth", d.flatPattern->info.bounds.maximum.x);
                 report.insert("flatLength", d.flatPattern->info.bounds.maximum.y);
+                if (!d.flatPattern->info.bends.empty())
+                    report.insert("flatK", d.flatPattern->info.bends.front().k);
             }
             if (d.flatPatternError)
                 report.insert("flatError", QString::fromStdString(d.flatPatternError->detail));
@@ -1828,6 +1837,22 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
                     title.plan =
                         ui::DrawingSheet::compose(source, ui::DrawingSheet::defaultViews(d));
                     report.insert("compositionMs", static_cast<double>(layoutTimer.elapsed()));
+                    QJsonArray placed;
+                    for (const auto &at : title.plan->views) {
+                        QJsonArray measurements;
+                        for (const auto &dim : at.dimensions)
+                            measurements.append(QJsonObject{{"source", int(dim.source)},
+                                                            {"index", int(dim.index)},
+                                                            {"value", dim.measurement.valueMm}});
+                        placed.append(QJsonObject{{"kind", int(at.key.kind)},
+                                                  {"index", int(at.key.index)},
+                                                  {"page", at.page},
+                                                  {"scale", at.scale},
+                                                  {"compact", at.compactDimensions},
+                                                  {"links", at.sheetLinks},
+                                                  {"dimensions", measurements}});
+                    }
+                    report.insert("placedViews", placed);
                     report.insert("dimensionedBends",
                                   static_cast<int>(title.plan->coverage.dimensioned));
                     QJsonArray missingPlaced;
@@ -2332,7 +2357,11 @@ void workflow(const QString &folder) {
                                      : sample);
     wait([&] { return !c.hasWork(); });
     require(c.session().document() != nullptr, "Workflow import failed");
-    require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, {}, 1}),
+    const auto manualK =
+        QApplication::arguments().contains(QStringLiteral("--workspace-sample-only"))
+            ? std::optional<double>{.45}
+            : std::optional<double>{};
+    require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, manualK, 1}),
             "Cannot select drawing material");
     const auto revision = c.session().editRevision();
     auto *action = window.findChild<QAction *>("bendingDrawingAction");
@@ -2356,6 +2385,41 @@ void workflow(const QString &folder) {
     if (!initialSnapshot.isEmpty())
         require(dialog->grab().save(initialSnapshot + ".default.png"),
                 "Cannot save default drawing workspace");
+    if (QApplication::arguments().contains(QStringLiteral("--workspace-sample-only"))) {
+        const auto source = c.drawing();
+        const auto plan =
+            ui::DrawingSheet::compose(source, ui::DrawingSheet::defaultViews(*source));
+        auto *page = dialog->findChild<QSpinBox *>("drawingPage");
+        auto *views = dialog->findChild<QListWidget *>("drawingViews");
+        auto *scale = dialog->findChild<QComboBox *>("drawingViewScale");
+        require(page && views && scale && page->maximum() == plan->pages && plan->pages > 1,
+                "Paginated workspace has no complete page navigation");
+        const auto top = std::find_if(plan->views.begin(), plan->views.end(), [](const auto &at) {
+            return at.key.kind == ui::DrawingViewKind::Projection && at.key.index == 1;
+        });
+        require(top != plan->views.end(), "Paginated workspace omitted top projection");
+        views->setCurrentRow(1);
+        require(page->value() == top->page + 1 && c.drawing() == source && !c.hasWork(),
+                "Selecting a projection did not follow its page or recomputed CAD");
+        if (!initialSnapshot.isEmpty())
+            require(dialog->grab().save(initialSnapshot + ".top.png"),
+                    "Cannot save separate projection workspace");
+        const int oneToTen = scale->findData(.1);
+        require(oneToTen > 0, "Missing explicit projection scale");
+        scale->setCurrentIndex(oneToTen);
+        wait([&] { return exportButton->isEnabled(); });
+        for (int row = 0; row < 3; ++row)
+            require(views->item(row)->text().endsWith(QStringLiteral("1:10")),
+                    "Cross-sheet projection scale stopped applying to the whole family");
+        page->setValue(page->maximum());
+        require(exportButton->isEnabled() && c.drawing() == source && !c.hasWork() &&
+                    c.session().editRevision() == revision,
+                "Page/scale editing changed the CAD source or project inputs");
+        if (!initialSnapshot.isEmpty())
+            require(dialog->grab().save(initialSnapshot + ".last.png"),
+                    "Cannot save final drawing page");
+        return;
+    }
     dialog->showMinimized();
     action->trigger();
     QApplication::processEvents();
@@ -2855,6 +2919,10 @@ int main(int argc, char **argv) {
             workflow(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--workspace-sample-only"))) {
+            workflow(temp.path());
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--preview-states-only"))) {
             previewStates();
             return 0;
@@ -2877,6 +2945,10 @@ int main(int argc, char **argv) {
         }
         if (app.arguments().contains(QStringLiteral("--composition-only"))) {
             composition(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--pagination-only"))) {
+            drawingPaginationChecks();
             return 0;
         }
         if (app.arguments().contains(QStringLiteral("--layout-worker-only"))) {
