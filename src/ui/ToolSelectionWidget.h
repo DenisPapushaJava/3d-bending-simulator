@@ -62,7 +62,16 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] double maximumSegmentGapMm() const;
     [[nodiscard]] static QString assignmentIssue(const std::optional<core::ToolAssignment> &);
     void showPicker(core::ToolKind, QWidget *anchor);
-    void editAssembly(core::ToolKind);
+    void editAssembly(core::ToolKind, std::optional<std::size_t> selectedPiece = {});
+    QString fitSelectedAssemblies();
+    QString setPunchEnd(const core::ToolPreset &expected, bool right,
+                        std::optional<std::size_t> row);
+    void useInlineAssemblyControls();
+    [[nodiscard]] bool canFitAssemblies() const;
+    [[nodiscard]] bool canEditAssemblies() const;
+    [[nodiscard]] std::optional<double> requiredAssemblyLength() const {
+        return selectionRequest_ ? std::optional{selectionRequest_->bendLengthMm} : std::nullopt;
+    }
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
                              bool allBends = false, double lengthToleranceMm = 1.e-5);
@@ -100,8 +109,8 @@ class ToolSelectionWidget final : public QWidget {
     void resetPunchOrientation();
     void refreshFavorites();
     void recommend();
-    void fitSelectedAssemblies();
-    std::array<core::SegmentPlan, 2> fitAssemblies(std::optional<core::ToolKind> only = {});
+    std::array<core::SegmentPlan, 2> fitAssemblies(std::optional<core::ToolKind> only = {},
+                                                   bool preservePunchEnds = false);
     void importCatalog();
     void importDxf(std::optional<core::ToolKind> initialKind = {});
     void showLibrary(std::optional<core::ToolKind> kind = {}, bool add = false);

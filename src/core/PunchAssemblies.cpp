@@ -1,3 +1,4 @@
+#include "bending/core/ToolAssemblyEdits.h"
 #include "bending/core/ToolSegments.h"
 #include <algorithm>
 #include <array>
@@ -48,9 +49,58 @@ struct Ends {
 };
 using Query = std::pair<Length, unsigned>; // Fixed ends; the straight stock is unchanged.
 } // namespace
+std::optional<PunchAssemblyEnds> punchAssemblyEnds(const std::vector<ToolSegment> &stock,
+                                                   const ToolAssembly &assembly) {
+    if (!assemblyLength(stock, assembly))
+        return {};
+    PunchAssemblyEnds result;
+    if (stock[assembly.pieces.front()].shape == SegmentShape::LeftHorn)
+        result.left = assembly.pieces.front();
+    if (stock[assembly.pieces.back()].shape == SegmentShape::RightHorn)
+        result.right = assembly.pieces.back();
+    return result;
+}
+std::optional<ToolAssembly> withPunchEnd(const std::vector<ToolSegment> &stock,
+                                         const ToolAssembly &source, bool right,
+                                         std::optional<std::size_t> row) {
+    if ((!source.pieces.empty() && !assemblyLength(stock, source)) ||
+        (source.pieces.empty() &&
+         (!validToolSegments(stock) || source.gapMm != 0 || !source.jointGapsMm.empty())))
+        return {};
+    const auto shape = right ? SegmentShape::RightHorn : SegmentShape::LeftHorn;
+    if (row && (*row >= stock.size() || stock[*row].shape != shape || !stock[*row].horn ||
+                !usableToolSegment(stock[*row]) || !stock[*row].quantity))
+        return {};
+    ToolAssembly next{source.pieces, 0, {}};
+    for (std::size_t i = 1; i < source.pieces.size(); ++i)
+        next.jointGapsMm.push_back(assemblyGapAfter(source, i - 1));
+    if (!next.pieces.empty()) {
+        const auto at = right ? next.pieces.size() - 1 : 0;
+        if (stock[next.pieces[at]].shape == shape) {
+            if (row)
+                next.pieces[at] = *row;
+            else {
+                next.pieces.erase(next.pieces.begin() + static_cast<std::ptrdiff_t>(at));
+                if (!next.jointGapsMm.empty())
+                    next.jointGapsMm.erase(right ? next.jointGapsMm.end() - 1
+                                                 : next.jointGapsMm.begin());
+            }
+            row.reset();
+        }
+    }
+    if (row) {
+        if (!next.pieces.empty())
+            next.jointGapsMm.insert(right ? next.jointGapsMm.end() : next.jointGapsMm.begin(), 0);
+        next.pieces.insert(right ? next.pieces.end() : next.pieces.begin(), *row);
+    }
+    if (!next.pieces.empty() && !assemblyLength(stock, next))
+        return {};
+    return next.pieces == source.pieces ? source : next;
+}
 PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, double required,
                                        std::size_t budget, double maximumGap, std::stop_token stop,
-                                       std::size_t maximumPlans) {
+                                       std::size_t maximumPlans,
+                                       std::optional<PunchAssemblyEnds> fixedEnds) {
     PunchAssemblyPlans result;
     if (stop.stop_requested()) {
         result.status = SegmentPlanStatus::Cancelled;
@@ -61,10 +111,23 @@ PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, do
         !budget || budget > 200000 || !maximumPlans || maximumPlans > 32)
         return result;
     std::vector<std::optional<std::size_t>> left{std::nullopt}, right{std::nullopt};
-    for (std::size_t i = 0; i < stock.size(); ++i)
-        if (stock[i].quantity && stock[i].horn && usableToolSegment(stock[i]))
-            (stock[i].shape == SegmentShape::LeftHorn ? left : right).push_back(i);
-    if (left.size() == 1 && right.size() == 1) {
+    if (fixedEnds) {
+        const auto valid = [&](std::optional<std::size_t> row, SegmentShape shape) {
+            return !row ||
+                   (*row < stock.size() && stock[*row].shape == shape && stock[*row].quantity &&
+                    stock[*row].horn && usableToolSegment(stock[*row]));
+        };
+        if (!valid(fixedEnds->left, SegmentShape::LeftHorn) ||
+            !valid(fixedEnds->right, SegmentShape::RightHorn))
+            return result;
+        left = {fixedEnds->left};
+        right = {fixedEnds->right};
+    } else {
+        for (std::size_t i = 0; i < stock.size(); ++i)
+            if (stock[i].quantity && stock[i].horn && usableToolSegment(stock[i]))
+                (stock[i].shape == SegmentShape::LeftHorn ? left : right).push_back(i);
+    }
+    if (left.size() == 1 && !left.front() && right.size() == 1 && !right.front()) {
         const auto old = planToolSegments(stock, required, budget, maximumGap, stop);
         result.status = old.status;
         if (old.status == SegmentPlanStatus::Complete)

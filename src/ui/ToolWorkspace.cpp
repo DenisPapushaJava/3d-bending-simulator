@@ -1,6 +1,9 @@
 #include "ToolWorkspace.h"
+#include "ToolAssemblyDiagram.h"
 #include "ToolContourButton.h"
+#include "ToolEndButtons.h"
 #include "ToolSelectionWidget.h"
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLocale>
@@ -21,12 +24,12 @@ QString sections(const core::ToolPreset &tool, const std::optional<core::ToolAss
     const auto length = assembly ? core::assemblyLength(*tool.segments, *assembly) : std::nullopt;
     if (!length)
         return QStringLiteral("Укажите секции и наличие");
-    QStringList pieces;
-    for (auto row : assembly->pieces)
-        pieces << number((*tool.segments)[row].lengthMm);
-    return QStringLiteral("%1 мм · всего %2 мм · макс. зазор %3 мм")
-        .arg(pieces.join(QStringLiteral(" + ")), number(*length),
-             number(core::maximumAssemblyGap(*assembly)));
+    auto text =
+        QStringLiteral("Сборка %1 мм · %2 секц.").arg(number(*length)).arg(assembly->pieces.size());
+    const auto gap = core::maximumAssemblyGap(*assembly);
+    if (gap > 0)
+        text += QStringLiteral(" · зазор до %1 мм").arg(number(gap));
+    return text;
 }
 } // namespace
 ToolWorkspace::ToolWorkspace(QWidget *parent) : QWidget(parent) {
@@ -39,21 +42,30 @@ ToolWorkspace::ToolWorkspace(QWidget *parent) : QWidget(parent) {
     layout->addWidget(context_);
     profiles_ = new QWidget(this);
     profiles_->setObjectName("toolWorkspaceProfiles");
-    auto *row = new QHBoxLayout(profiles_);
+    auto *row = new QGridLayout(profiles_);
+    row->setColumnStretch(0, 1);
+    row->setColumnStretch(1, 1);
+    row->setRowStretch(0, 1);
     row->setContentsMargins(0, 0, 0, 0);
     punchProfile_ = new ToolContourButton(core::ToolKind::Punch, profiles_);
     dieProfile_ = new ToolContourButton(core::ToolKind::Die, profiles_);
     punchProfile_->setObjectName("punchProfile");
     dieProfile_->setObjectName("dieProfile");
-    row->addWidget(punchProfile_, 1);
-    row->addWidget(dieProfile_, 1);
-    layout->addWidget(profiles_, 1);
-    grooveRow_ = new QWidget(this);
+    punchAssembly_ = new ToolAssemblyDiagram({}, profiles_);
+    dieAssembly_ = new ToolAssemblyDiagram({}, profiles_);
+    punchAssembly_->setObjectName("punchAssemblyDiagram");
+    dieAssembly_->setObjectName("dieAssemblyDiagram");
+    ends_ = new ToolEndButtons(profiles_);
+    ends_->setObjectName("workspacePunchEnds");
+    grooveRow_ = new QWidget(profiles_);
     grooves_ = new QHBoxLayout(grooveRow_);
     grooves_->setContentsMargins(0, 0, 0, 0);
     grooves_->addStretch();
-    grooveRow_->hide();
-    layout->addWidget(grooveRow_);
+    auto *dieSlot = new QWidget(profiles_);
+    dieSlot->setMinimumHeight(44);
+    auto *dieSlotLayout = new QVBoxLayout(dieSlot);
+    dieSlotLayout->setContentsMargins(0, 0, 0, 0);
+    dieSlotLayout->addWidget(grooveRow_);
     punch_ = new QLabel(this);
     die_ = new QLabel(this);
     punch_->setObjectName("toolWorkspacePunchSegments");
@@ -64,25 +76,74 @@ ToolWorkspace::ToolWorkspace(QWidget *parent) : QWidget(parent) {
     editDie_->setObjectName("editDieAssembly");
     editPunch_->setAccessibleName(QStringLiteral("Расположение секций пуансона"));
     editDie_->setAccessibleName(QStringLiteral("Расположение секций матрицы"));
-    for (auto *button : {editPunch_, editDie_})
-        button->setToolTip(button->accessibleName());
-    for (auto *label : {punch_, die_}) {
+    std::array<ToolContourButton *, 2> buttons{punchProfile_, dieProfile_};
+    std::array<ToolAssemblyDiagram *, 2> diagrams{punchAssembly_, dieAssembly_};
+    for (std::size_t side = 0; side < 2; ++side) {
+        row->addWidget(buttons[side], 0, static_cast<int>(side));
+        row->addWidget(diagrams[side], 1, static_cast<int>(side));
+        row->addWidget(side ? dieSlot : static_cast<QWidget *>(ends_), 2, static_cast<int>(side));
+        auto *label = side ? die_ : punch_;
         label->setTextFormat(Qt::PlainText);
         label->setWordWrap(true);
         label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         auto *line = new QHBoxLayout;
         line->addWidget(label, 1);
-        line->addWidget(label == punch_ ? editPunch_ : editDie_);
-        layout->addLayout(line);
+        auto *edit = side ? editDie_ : editPunch_;
+        edit->setToolTip(edit->accessibleName());
+        line->addWidget(edit);
+        row->addLayout(line, 3, static_cast<int>(side));
+        const auto kind = side ? core::ToolKind::Die : core::ToolKind::Punch;
+        diagrams[side]->intervals = [this, kind] {
+            const auto tool = selection_ ? selection_->selectedTool(kind) : std::nullopt;
+            const auto assembly = selection_ ? selection_->selectedAssembly(kind) : std::nullopt;
+            return tool && tool->segments && assembly
+                       ? core::assemblyIntervals(*tool->segments, *assembly)
+                       : std::nullopt;
+        };
+        diagrams[side]->required = [this] {
+            return selection_ ? selection_->requiredAssemblyLength().value_or(0) : 0;
+        };
+        diagrams[side]->onSelected = [this, kind](int piece) {
+            if (selection_) {
+                selection_->editAssembly(kind, static_cast<std::size_t>(piece));
+                refresh();
+            }
+        };
+        connect(edit, &QPushButton::clicked, this, [this, kind] {
+            if (selection_) {
+                selection_->editAssembly(kind);
+                refresh();
+            }
+        });
     }
-    connect(editPunch_, &QPushButton::clicked, this, [this] {
-        if (selection_)
-            selection_->editAssembly(core::ToolKind::Punch);
+    layout->addWidget(profiles_, 1);
+    fit_ = new QPushButton(QStringLiteral("Подобрать секции"), this);
+    fit_->setObjectName("workspaceFitSections");
+    fit_->setToolTip(
+        QStringLiteral("Подобрать длину обоих инструментов, сохранив выбранные крайние сапожки."));
+    layout->addWidget(fit_);
+    notice_ = new QLabel(this);
+    notice_->setObjectName("workspaceAssemblyNotice");
+    notice_->setWordWrap(true);
+    notice_->hide();
+    layout->addWidget(notice_);
+    connect(fit_, &QPushButton::clicked, this, [this] {
+        if (!selection_)
+            return;
+        const auto issue = selection_->fitSelectedAssemblies();
+        refresh();
+        notice_->setText(issue);
+        notice_->setVisible(!issue.isEmpty());
     });
-    connect(editDie_, &QPushButton::clicked, this, [this] {
-        if (selection_)
-            selection_->editAssembly(core::ToolKind::Die);
-    });
+    ends_->onSelected = [this](const core::ToolPreset &snapshot, bool right,
+                               std::optional<std::size_t> piece) {
+        if (!selection_)
+            return;
+        const auto issue = selection_->setPunchEnd(snapshot, right, piece);
+        refresh();
+        notice_->setText(issue);
+        notice_->setVisible(!issue.isEmpty());
+    };
     connect(punchProfile_, &QToolButton::clicked, this, [this] {
         if (selection_)
             selection_->showPicker(core::ToolKind::Punch, punchProfile_);
@@ -94,6 +155,8 @@ ToolWorkspace::ToolWorkspace(QWidget *parent) : QWidget(parent) {
 }
 void ToolWorkspace::bindSelection(ToolSelectionWidget *selection) {
     selection_ = selection;
+    if (selection_)
+        selection_->useInlineAssemblyControls();
 }
 void ToolWorkspace::setContext(const QString &text) {
     context_->setText(text);
@@ -105,6 +168,17 @@ void ToolWorkspace::refresh() {
     const auto punch = selection_->selectedTool(core::ToolKind::Punch);
     const auto die = selection_->selectedTool(core::ToolKind::Die);
     const auto groove = selection_->selectedGroove();
+    notice_->hide();
+    punchAssembly_->setTool(punch);
+    dieAssembly_->setTool(die);
+    punchAssembly_->setVisible(punch && punch->segments.has_value());
+    dieAssembly_->setVisible(die && die->segments.has_value());
+    ends_->setVisible(punch && punch->segments.has_value());
+    if (punch)
+        ends_->setSource(*punch, selection_->selectedAssembly(core::ToolKind::Punch));
+    ends_->setEnabled(selection_->canEditAssemblies());
+    fit_->setEnabled(selection_->isEnabled() && selection_->canFitAssemblies());
+
     editPunch_->setEnabled(selection_->isEnabled() && punch && punch->segments.has_value());
     editDie_->setEnabled(selection_->isEnabled() && die && die->segments.has_value());
     punchProfile_->setTool(punch, 0, selection_->punchReversed());
@@ -115,6 +189,8 @@ void ToolWorkspace::refresh() {
                         ? QString::fromStdString(punch->code) + QStringLiteral(" · ") +
                               sections(*punch, selection_->selectedAssembly(core::ToolKind::Punch))
                         : QString{});
+    if (punch && selection_->punchReversed())
+        punch_->setText(punch_->text() + QStringLiteral(" · схема в обычной ориентации"));
     die_->setText(die ? QString::fromStdString(die->code) + QStringLiteral(" · ") +
                             sections(*die, selection_->selectedAssembly(core::ToolKind::Die))
                       : QString{});

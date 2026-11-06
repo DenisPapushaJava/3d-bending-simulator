@@ -3,6 +3,7 @@
 #include "ToolFixtures.h"
 #include "ToolLibraryDialog.h"
 #include "ToolSelectionWidget.h"
+#include "ToolWorkspace.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/project/ProjectFiles.h"
@@ -21,6 +22,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QSpinBox>
@@ -28,6 +30,8 @@
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
+#include <QToolButton>
+#include <QVBoxLayout>
 #include <QWindow>
 #include <STEPControl_Writer.hxx>
 #include <iostream>
@@ -54,6 +58,157 @@ void write(const QString &p, const QJsonObject &root) {
     require(f.open(QIODevice::WriteOnly), "Write file");
     const auto b = QJsonDocument(root).toJson();
     require(f.write(b) == b.size(), "Short write");
+}
+void endEditorChecks(core::ToolPreset tool) {
+    tool.segments->push_back({50, 2});
+    tool.segments->push_back({100, 2});
+    tool.segments->push_back(
+        {100, 1, core::SegmentShape::LeftHorn, core::HornRelief{20, 27, 9}, "other-left"});
+    const auto original = tool;
+    const core::ToolAssembly initial{{0, 3, 3}, 0, {2, 5}};
+    ui::ToolAssemblyDialog editor(tool, initial, nullptr, 500, 3);
+    auto *left = editor.findChild<QToolButton *>("assemblyLeftHorn");
+    auto *right = editor.findChild<QToolButton *>("assemblyRightHorn");
+    auto *fit = editor.findChild<QPushButton *>("assemblyFitMiddle");
+    auto *target = editor.findChild<QDoubleSpinBox *>("assemblyRequiredLength");
+    auto *rows = editor.findChild<QTableWidget *>("assemblyRows");
+    const auto draft = [&] {
+        core::ToolAssembly result;
+        for (int i = 0; i < rows->rowCount(); ++i) {
+            result.pieces.push_back(
+                static_cast<QComboBox *>(rows->cellWidget(i, 0))->currentData().toUInt());
+            if (i + 1 < rows->rowCount())
+                result.jointGapsMm.push_back(
+                    static_cast<QDoubleSpinBox *>(rows->cellWidget(i, 1))->value());
+        }
+        return result;
+    };
+    require(left && right && fit && target && !left->isChecked() && !right->isChecked(),
+            "No direct end controls or spontaneous horns");
+    left->click();
+    right->click();
+    require(draft().pieces == std::vector<std::size_t>{1, 0, 3, 3, 2} &&
+                draft().jointGapsMm == std::vector<double>{0, 2, 5, 0} &&
+                editor.findChild<QLabel *>("assemblyStatus")->text().contains("507"),
+            "Live ends changed inner joints, stock, or length");
+    left->click();
+    right->click();
+    require(draft() == initial, "Removing ends lost the original middle or its gaps");
+    left->click();
+    right->click();
+    editor.show();
+    QApplication::processEvents();
+    auto *diagram = editor.findChild<QWidget *>("assemblyDiagram");
+    const QPointF point(diagram->width() / 2., 30);
+    QMouseEvent click(QEvent::MouseButtonPress, point, diagram->mapToGlobal(point.toPoint()),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(diagram, &click);
+    require(rows->currentRow() == 1, "Diagram click did not select its real middle section");
+    fit->click();
+    require(core::assemblyLength(*tool.segments, draft()) == 500 &&
+                core::punchAssemblyEnds(*tool.segments, draft()) == core::PunchAssemblyEnds{1, 2},
+            "Middle fitting replaced pinned ends or ignored their full length");
+    require(left->menu(), "Multiple end variants have no choice menu");
+    for (auto *action : left->menu()->actions())
+        if (action->data().toUInt() == 5)
+            action->trigger();
+    fit->click();
+    require(draft().pieces.front() == 5 && draft().pieces.back() == 2,
+            "Same-length relief variants were silently substituted");
+    const auto beforeFailure = draft();
+    target->setValue(100000);
+    fit->click();
+    require(draft() == beforeFailure &&
+                editor.findChild<QLabel *>("assemblyStatus")->text().contains("сохранён"),
+            "Failed middle fitting destroyed the current assembly");
+    target->setValue(80);
+    fit->click();
+    require(draft().pieces == std::vector<std::size_t>{5, 2} &&
+                core::assemblyLength(*tool.segments, draft()) == 200,
+            "A horn-only long assembly required a fake straight middle");
+    target->setValue(500);
+    fit->click();
+    QApplication::processEvents();
+    if (const auto output = qEnvironmentVariable("BENDING_HORN_ENDS_SNAPSHOT"); !output.isEmpty())
+        require(editor.grab().save(output), "Live assembly snapshot");
+    const auto expected = draft();
+    editor.findChild<QPushButton *>("assemblyApply")->click();
+    require(editor.assembly() && editor.assembly()->pieces == expected.pieces &&
+                editor.assembly()->gapMm == 0 && editor.assembly()->jointGapsMm.empty() &&
+                core::assemblyLength(*tool.segments, *editor.assembly()) == 500 && tool == original,
+            "Atomic apply lost the assembly or changed workshop stock");
+    ui::ToolAssemblyDialog cancelled(tool, initial, nullptr, 500, 3);
+    cancelled.findChild<QToolButton *>("assemblyLeftHorn")->click();
+    cancelled.reject();
+    require(!cancelled.assembly(), "Cancel published a changed assembly");
+    auto pair = tool_fixture::pair();
+    pair.punch = tool;
+    pair.die.lengthMm = 500;
+    pair.die.segments = std::vector<core::ToolSegment>{{500, 1}};
+    pair.dieAssembly = core::ToolAssembly{{0}, 0, {}};
+    pair.punchAssembly = initial;
+    ui::ToolSelectionWidget owner({pair.punch, pair.die}, nullptr);
+    owner.setSelectionRequest(core::ToolSelectionRequest{2, std::numbers::pi / 2, 2, 500, 3}, true);
+    owner.setChoice(core::toolParameters(pair), pair);
+    QWidget window;
+    auto *layout = new QVBoxLayout(&window);
+    ui::ToolWorkspace workspace(&window);
+    workspace.bindSelection(&owner);
+    layout->addWidget(&workspace);
+    int changes = 0;
+    owner.onChanged = [&](auto) {
+        ++changes;
+        workspace.refresh();
+    };
+    workspace.refresh();
+    window.resize(1200, 760);
+    window.show();
+    QApplication::processEvents();
+    workspace.findChild<QToolButton *>("assemblyLeftHorn")->click();
+    workspace.findChild<QToolButton *>("assemblyRightHorn")->click();
+    require(owner.selectedAssembly(core::ToolKind::Punch)->jointGapsMm ==
+                    std::vector<double>{0, 2, 5, 0} &&
+                !window.findChild<QDialog *>(),
+            "Inline end choice opened an editor or lost the captured middle");
+    workspace.findChild<QPushButton *>("workspaceFitSections")->click();
+    const auto inlineAssembly = owner.selectedAssembly(core::ToolKind::Punch);
+    require(inlineAssembly && core::assemblyLength(*tool.segments, *inlineAssembly) == 500 &&
+                core::punchAssemblyEnds(*tool.segments, *inlineAssembly) ==
+                    core::PunchAssemblyEnds{1, 2},
+            "Inline fitting did not retain its selected ends");
+    const auto beforeNoop = changes;
+    require(owner.setPunchEnd(tool, false, 1).isEmpty() && changes == beforeNoop,
+            "Repeated inline end invalidated the assignment");
+    auto stale = tool;
+    stale.code = "stale";
+    require(!owner.setPunchEnd(stale, false, {}).isEmpty() &&
+                owner.selectedAssembly(core::ToolKind::Punch) == inlineAssembly &&
+                changes == beforeNoop,
+            "Stale inline source changed the current assignment");
+    owner.setCheckedSearchState(true);
+    workspace.refresh();
+    require(!workspace.findChild<QPushButton *>("workspaceFitSections")->isEnabled() &&
+                !workspace.findChild<QToolButton *>("assemblyLeftHorn")->isEnabled() &&
+                !owner.setPunchEnd(tool, false, {}).isEmpty(),
+            "Busy inline controls could change the search inputs");
+    (void)owner.fitSelectedAssemblies();
+    require(owner.selectedAssembly(core::ToolKind::Punch) == inlineAssembly &&
+                changes == beforeNoop,
+            "Busy fitting changed the captured assembly");
+    owner.setCheckedSearchState(false);
+    workspace.refresh();
+    QApplication::processEvents();
+    if (const auto output = qEnvironmentVariable("BENDING_HORN_INLINE_SNAPSHOT"); !output.isEmpty())
+        require(window.grab().save(output), "Inline tool workspace snapshot");
+    owner.onChanged = {};
+    tool.segments->at(1).quantity = 0;
+    tool.segments->at(2).horn.reset();
+    tool.segments->at(2).variantId.clear();
+    tool.segments->at(5).quantity = 0;
+    ui::ToolAssemblyDialog unavailable(tool, {}, nullptr, 500, 3);
+    require(!unavailable.findChild<QToolButton *>("assemblyLeftHorn")->isEnabled() &&
+                !unavailable.findChild<QToolButton *>("assemblyRightHorn")->isEnabled(),
+            "Zero stock or unknown relief became a selectable end");
 }
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
@@ -171,6 +326,7 @@ int main(int argc, char **argv) {
                 "Configured horns missing from manual assembly");
         assembly.findChild<QPushButton *>("assemblyApply")->click();
         require(assembly.assembly() == assigned.punchAssembly, "Manual assembly changed horn ends");
+        endEditorChecks(assigned.punch);
         ui::ToolSelectionWidget selection({assigned.punch, assigned.die}, nullptr);
         selection.setSelectionRequest(
             core::ToolSelectionRequest{2, std::numbers::pi / 2, 2, 250, 0}, true);
@@ -180,8 +336,18 @@ int main(int argc, char **argv) {
         require(fitted && fitted->punch.id == assigned.punch.id &&
                     fitted->die.id == assigned.die.id &&
                     core::usesHornSections(fitted->punch, fitted->punchAssembly) &&
-                    core::toolLength(fitted->punch, fitted->punchAssembly) == 300,
-                "Quick assembly fitting ignored usable horns or changed the profiles");
+                    core::toolLength(fitted->punch, fitted->punchAssembly) == 400 &&
+                    core::punchAssemblyEnds(*fitted->punch.segments, *fitted->punchAssembly) ==
+                        core::PunchAssemblyEnds{1, 2},
+                "Quick assembly fitting removed current horn ends or changed the profiles");
+        auto noAssembly = assigned;
+        noAssembly.punchAssembly.reset();
+        selection.setChoice(core::toolParameters(noAssembly), noAssembly);
+        selection.findChild<QPushButton *>("fitSelectedToolSections")->click();
+        require(selection.assignment() &&
+                    core::usesHornSections(selection.assignment()->punch,
+                                           selection.assignment()->punchAssembly),
+                "Unconstrained quick fitting stopped using available horn stock");
         if (app.arguments().contains("--graphics")) {
             const auto file = dir.path() + "/bend.step";
             STEPControl_Writer writer;

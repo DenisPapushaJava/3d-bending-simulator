@@ -79,10 +79,19 @@ struct PunchAssemblyPlans {
         return plans.empty() ? SegmentPlan{status, {}, 0} : plans.front();
     }
 };
+// Exact workshop rows at the two outer ends; an empty side requires no horn.
+// A missing constraint in planPunchAssemblies retains automatic family selection.
+struct PunchAssemblyEnds {
+    std::optional<std::size_t> left, right;
+    bool operator==(const PunchAssemblyEnds &) const = default;
+};
+[[nodiscard]] std::optional<PunchAssemblyEnds> punchAssemblyEnds(const std::vector<ToolSegment> &,
+                                                                 const ToolAssembly &);
 // Straight, left, right and paired ends; one shared middle table and work budget.
 // SearchLimit may retain valid plans. Unknown end geometry is never used.
 [[nodiscard]] PunchAssemblyPlans
 planPunchAssemblies(const std::vector<ToolSegment> &, double requiredMm,
                     std::size_t workBudget = 200000, double maximumGapMm = 0,
-                    std::stop_token stop = {}, std::size_t maximumPlans = 8);
+                    std::stop_token stop = {}, std::size_t maximumPlans = 8,
+                    std::optional<PunchAssemblyEnds> fixedEnds = {});
 } // namespace bending::core

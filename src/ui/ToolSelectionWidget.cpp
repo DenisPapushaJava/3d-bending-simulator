@@ -3,6 +3,7 @@
 #include "ToolLibraryDialog.h"
 #include "ToolPickerPopup.h"
 #include "bending/application/BendRoute.h"
+#include "bending/core/ToolAssemblyEdits.h"
 #include "bending/core/ToolGeometry.h"
 #include <QAction>
 #include <QCheckBox>
@@ -126,7 +127,8 @@ ToolSelectionWidget::ToolSelectionWidget(core::ToolCatalog catalog, QWidget *par
     fitSections_->setObjectName(QStringLiteral("fitSelectedToolSections"));
     fitSections_->setToolTip(QStringLiteral(
         "Рассчитать состав выбранных пуансона и матрицы по длине гиба, наличию и пределу зазора. "
-        "Артикулы, ручей и ориентация сохраняются. В общей установке — по самому длинному "
+        "Артикулы, ручей, ориентация и крайние сапожки сохраняются. В общей установке — по самому "
+        "длинному "
         "включённому гибу; в индивидуальной — по выбранному. Проверка столкновений выполняется "
         "при переходе к гибке."));
     layout->addWidget(fitSections_);
@@ -756,7 +758,8 @@ void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
     else if (result == QDialog::Accepted && dialog.choice())
         chooseTool(dialog.choice()->first, dialog.choice()->second);
 }
-void ToolSelectionWidget::editAssembly(core::ToolKind kind) {
+void ToolSelectionWidget::editAssembly(core::ToolKind kind,
+                                       std::optional<std::size_t> selectedPiece) {
     if (updating_ || checkedBusy_ || !isEnabled() || !usesCatalog())
         return;
     const auto *profile = preset(kind == core::ToolKind::Punch ? punch_ : die_);
@@ -764,7 +767,12 @@ void ToolSelectionWidget::editAssembly(core::ToolKind kind) {
         return;
     const auto captured = *profile;
     const auto before = selectedAssembly(kind);
-    ToolAssemblyDialog dialog(captured, before, window());
+    ToolAssemblyDialog dialog(captured, before, window(),
+                              selectionRequest_ ? std::optional{selectionRequest_->bendLengthMm}
+                                                : std::nullopt,
+                              segmentGap_->value());
+    if (selectedPiece)
+        dialog.selectPiece(*selectedPiece);
     if (dialog.exec() != QDialog::Accepted || !isEnabled() || checkedBusy_)
         return;
     const auto *current = preset(kind == core::ToolKind::Punch ? punch_ : die_);
@@ -1167,12 +1175,37 @@ void ToolSelectionWidget::recommend() {
     recommendation_->setMinimumHeight(recommendation_->heightForWidth(240));
     recommendation_->show();
 }
-void ToolSelectionWidget::fitSelectedAssemblies() {
-    if (updating_ || !isEnabled() || !usesCatalog() || !selectionRequest_ || !preset(punch_) ||
+void ToolSelectionWidget::useInlineAssemblyControls() {
+    fitSections_->hide();
+}
+bool ToolSelectionWidget::canFitAssemblies() const {
+    return canEditAssemblies() && fitSections_->isEnabled();
+}
+bool ToolSelectionWidget::canEditAssemblies() const {
+    return !updating_ && !checkedBusy_ && isEnabled();
+}
+QString ToolSelectionWidget::setPunchEnd(const core::ToolPreset &expected, bool right,
+                                         std::optional<std::size_t> row) {
+    const auto current = selectedTool(core::ToolKind::Punch);
+    if (updating_ || checkedBusy_ || !isEnabled() || !current || *current != expected ||
+        !current->segments)
+        return QStringLiteral("Выбор инструмента изменился. Повторите действие.");
+    const auto next = core::withPunchEnd(*current->segments,
+                                         punchAssembly_.value_or(core::ToolAssembly{}), right, row);
+    if (!next || next->pieces.empty())
+        return QStringLiteral("Проверьте наличие секций. Прежний состав сохранён.");
+    if (punchAssembly_ != next) {
+        punchAssembly_ = *next;
+        changed();
+    }
+    return {};
+}
+QString ToolSelectionWidget::fitSelectedAssemblies() {
+    if (!canEditAssemblies() || !usesCatalog() || !selectionRequest_ || !preset(punch_) ||
         !preset(die_))
-        return;
+        return {};
     const auto previousPunch = punchAssembly_, previousDie = dieAssembly_;
-    const auto plans = fitAssemblies();
+    const auto plans = fitAssemblies({}, true);
     QStringList issues;
     const std::array names{QStringLiteral("Пуансон"), QStringLiteral("Матрица")};
     for (std::size_t i = 0; i < plans.size(); ++i) {
@@ -1222,9 +1255,11 @@ void ToolSelectionWidget::fitSelectedAssemblies() {
     recommendation_->setToolTip(fitSections_->toolTip());
     recommendation_->setMinimumHeight(recommendation_->heightForWidth(240));
     recommendation_->show();
+    return issues.isEmpty() ? QString{} : message;
 }
 std::array<core::SegmentPlan, 2>
-ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only) {
+ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only, bool preservePunchEnds) {
+    const auto previousPunch = punchAssembly_;
     if (!only || *only == core::ToolKind::Punch)
         punchAssembly_.reset();
     if (!only || *only == core::ToolKind::Die)
@@ -1242,10 +1277,16 @@ ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only) {
                         : core::SegmentPlanStatus::InsufficientStock,
                     {},
                     tool->lengthMm};
+        std::optional<core::PunchAssemblyEnds> fixedEnds;
+        if (tool->kind == core::ToolKind::Punch && preservePunchEnds && previousPunch) {
+            fixedEnds = core::punchAssemblyEnds(*tool->segments, *previousPunch);
+            if (!fixedEnds)
+                return {};
+        }
         auto plan =
             tool->kind == core::ToolKind::Punch
                 ? core::planPunchAssemblies(*tool->segments, selectionRequest_->bendLengthMm,
-                                            200000, segmentGap_->value())
+                                            200000, segmentGap_->value(), {}, 8, fixedEnds)
                       .best()
                 : core::planToolSegments(*tool->segments, selectionRequest_->bendLengthMm, 200000,
                                          segmentGap_->value());

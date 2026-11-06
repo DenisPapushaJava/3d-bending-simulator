@@ -1,3 +1,4 @@
+#include "bending/core/ToolAssemblyEdits.h"
 #include "bending/core/ToolSegments.h"
 #include <algorithm>
 #include <cmath>
@@ -96,6 +97,34 @@ int main() {
                                               std::get<2>(want) == std::get<2>(got),
                                           "End planner differs from exhaustive stock optimum");
                                 }
+                                for (unsigned mask = 0; mask < 4; ++mask) {
+                                    if (((mask & 1) && !l) || ((mask & 2) && !r))
+                                        continue;
+                                    const PunchAssemblyEnds ends{
+                                        mask & 1 ? std::optional<std::size_t>{2} : std::nullopt,
+                                        mask & 2 ? std::optional<std::size_t>{3} : std::nullopt};
+                                    const auto fixed = planPunchAssemblies(stock, target, 200000,
+                                                                           maxGap, {}, 1, ends);
+                                    const auto want = expected.find(mask);
+                                    check(fixed.work <= 200000 &&
+                                              fixed.status ==
+                                                  (want == expected.end()
+                                                       ? SegmentPlanStatus::InsufficientStock
+                                                       : SegmentPlanStatus::Complete),
+                                          "Fixed ends changed the budget or feasibility");
+                                    if (want != expected.end()) {
+                                        const auto &p = fixed.best();
+                                        check(fixed.plans.size() == 1 &&
+                                                  punchAssemblyEnds(stock, p.assembly) == ends &&
+                                                  std::abs(p.lengthMm - std::get<0>(want->second)) <
+                                                      1e-6 &&
+                                                  std::abs(p.assembly.gapMm -
+                                                           std::get<1>(want->second)) < 1e-6 &&
+                                                  p.assembly.pieces.size() ==
+                                                      std::get<2>(want->second),
+                                              "Fixed end family differs from exhaustive optimum");
+                                    }
+                                }
                                 const auto old = planToolSegments(stock, target, 200000, maxGap);
                                 if (old.status == SegmentPlanStatus::Complete)
                                     check(family.best().assembly == old.assembly,
@@ -117,6 +146,23 @@ int main() {
                      {100, 1, SegmentShape::LeftHorn, HornRelief{25, 27, 9}, "L2"});
         const auto expanded = planPunchAssemblies(mixed, 80, 200000, 0, {}, 32);
         check(expanded.work == baseWork, "Equal end lengths rebuilt the middle table/query");
+        for (int i = 0; i < 12; ++i)
+            mixed.push_back({100, 1, SegmentShape::LeftHorn, HornRelief{26 + i * .001, 27, 9},
+                             "extra-" + std::to_string(i)});
+        const PunchAssemblyEnds pinned{mixed.size() - 1, 2};
+        const auto fixed = planPunchAssemblies(mixed, 80, 200000, 0, {}, 1, pinned);
+        check(fixed.status == SegmentPlanStatus::Complete && fixed.plans.size() == 1 &&
+                  fixed.best().lengthMm == 200 && fixed.best().assembly.pieces.size() == 2 &&
+                  punchAssemblyEnds(mixed, fixed.best().assembly) == pinned,
+              "Pinned late variant was lost to family truncation or needed a fake middle");
+        for (const PunchAssemblyEnds invalid :
+             {PunchAssemblyEnds{mixed.size(), {}}, PunchAssemblyEnds{2, {}},
+              PunchAssemblyEnds{4, {}}, PunchAssemblyEnds{{}, 0}})
+            check(planPunchAssemblies(mixed, 80, 200000, 0, {}, 1, invalid).status ==
+                      SegmentPlanStatus::InvalidInput,
+                  "Invalid/unknown/wrong-side pinned end was accepted");
+        check(!punchAssemblyEnds(mixed, {{2, 0}, 0, {}}),
+              "Invalid assembly produced valid end constraints");
         const auto fractional =
             planPunchAssemblies({{3.003, 1},
                                  {5.001, 1, SegmentShape::LeftHorn, HornRelief{2, 2, 1}, "fL"},
@@ -150,6 +196,32 @@ int main() {
                   planPunchAssemblies(mixed, 200, 0).status == SegmentPlanStatus::InvalidInput &&
                   planPunchAssemblies(mixed, 200, 1).status == SegmentPlanStatus::SearchLimit,
               "Cancellation/budget ignored");
+        const std::vector<ToolSegment> editable{
+            {100, 2},
+            {50, 1},
+            {100, 1, SegmentShape::LeftHorn, HornRelief{27, 27, 9}, "editL"},
+            {100, 1, SegmentShape::RightHorn, HornRelief{27, 27, 9}, "editR"}};
+        const ToolAssembly uniform{{0, 1}, 7, {}};
+        const auto leftEdit = withPunchEnd(editable, uniform, false, 2);
+        const auto bothEdit = leftEdit ? withPunchEnd(editable, *leftEdit, true, 3) : std::nullopt;
+        check(bothEdit && bothEdit->pieces == std::vector<std::size_t>{2, 0, 1, 3} &&
+                  bothEdit->jointGapsMm == std::vector<double>{0, 7, 0},
+              "End insertion changed an internal physical joint");
+        const auto noOp = withPunchEnd(editable, *bothEdit, false, 2);
+        check(noOp == bothEdit, "An identical end edit changed the assembly representation");
+        const auto withoutRight = withPunchEnd(editable, *bothEdit, true, {});
+        check(withoutRight.has_value(), "Right-end removal failed");
+        const auto middleOnly = withPunchEnd(editable, *withoutRight, false, {});
+        check(middleOnly && middleOnly->pieces == uniform.pieces &&
+                  assemblyGapAfter(*middleOnly, 0) == 7 &&
+                  assemblyLength(editable, *middleOnly) == assemblyLength(editable, uniform) &&
+                  !withPunchEnd(editable, uniform, true, 2) &&
+                  !withPunchEnd(editable, {{3, 0}, 0, {}}, false, 2),
+              "End removal, wrong-side validation or invalid source guard failed");
+        const auto only = withPunchEnd(editable, {}, false, 2);
+        const auto empty = only ? withPunchEnd(editable, *only, false, {}) : std::nullopt;
+        check(only && only->pieces == std::vector<std::size_t>{2} && empty && empty->pieces.empty(),
+              "Empty editor drafts require a fabricated middle");
         std::cout << "Punch end families match exhaustive stock/gap optima and preserve straight "
                      "answers\n";
     } catch (const std::exception &e) {
