@@ -60,6 +60,20 @@ int main() {
                 s.shape = SegmentShape::Straight;
             require(!validToolPreset(invalid.punch), "Invalid horn dimensions/identity accepted");
         }
+        auto onlyHorns = horn;
+        onlyHorns.punch.segments->erase(onlyHorns.punch.segments->begin() + 3);
+        onlyHorns.punch.segments->erase(onlyHorns.punch.segments->begin() + 1);
+        onlyHorns.punchAssembly = ToolAssembly{{0, 1}, 0, {}};
+        onlyHorns.die.lengthMm = 200;
+        const ToolSelectionRequest hornRequest{2, std::numbers::pi / 2, 2, 150, 0};
+        const auto selectedHorns = selectTools({onlyHorns.punch, onlyHorns.die}, hornRequest);
+        require(selectedHorns.validRequest && !selectedHorns.candidates.empty() &&
+                    selectedHorns.candidates.front().punchAssembly &&
+                    assemblyLength(*onlyHorns.punch.segments,
+                                   *selectedHorns.candidates.front().punchAssembly) == 200 &&
+                    screenTools(hornRequest, onlyHorns.punch, onlyHorns.die, 0) ==
+                        ToolRejection::None,
+                "Profile with sufficient horn stock rejected before route search");
         auto idealizedHorn = horn;
         idealizedHorn.useDrawingGeometry = false;
         require(!toolParameters(idealizedHorn), "Horn silently replaced by idealized punch");

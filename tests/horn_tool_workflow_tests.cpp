@@ -2,6 +2,7 @@
 #include "ToolAssemblyDialog.h"
 #include "ToolFixtures.h"
 #include "ToolLibraryDialog.h"
+#include "ToolSelectionWidget.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/project/ProjectFiles.h"
@@ -170,6 +171,17 @@ int main(int argc, char **argv) {
                 "Configured horns missing from manual assembly");
         assembly.findChild<QPushButton *>("assemblyApply")->click();
         require(assembly.assembly() == assigned.punchAssembly, "Manual assembly changed horn ends");
+        ui::ToolSelectionWidget selection({assigned.punch, assigned.die}, nullptr);
+        selection.setSelectionRequest(
+            core::ToolSelectionRequest{2, std::numbers::pi / 2, 2, 250, 0}, true);
+        selection.setChoice(core::toolParameters(assigned), assigned);
+        selection.findChild<QPushButton *>("fitSelectedToolSections")->click();
+        const auto fitted = selection.assignment();
+        require(fitted && fitted->punch.id == assigned.punch.id &&
+                    fitted->die.id == assigned.die.id &&
+                    core::usesHornSections(fitted->punch, fitted->punchAssembly) &&
+                    core::toolLength(fitted->punch, fitted->punchAssembly) == 300,
+                "Quick assembly fitting ignored usable horns or changed the profiles");
         if (app.arguments().contains("--graphics")) {
             const auto file = dir.path() + "/bend.step";
             STEPControl_Writer writer;

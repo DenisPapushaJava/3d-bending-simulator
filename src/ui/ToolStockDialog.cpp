@@ -95,12 +95,11 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
                        QString::fromStdString(t.code));
     layout->addWidget(tool_);
     tool_->setVisible(!embedded_);
-    auto *help = new QLabel(
-        QStringLiteral(
-            "Укажите доступное количество секций одного профиля. "
-            "Шаблон не подтверждает наличие: новые количества равны нулю. "
-            "Рожковые секции хранятся отдельно и пока не участвуют в автоматической сборке."),
-        this);
+    auto *help =
+        new QLabel(QStringLiteral("Укажите доступное количество секций одного профиля. "
+                                  "Шаблон не подтверждает наличие: новые количества равны нулю. "
+                                  "Сапожки участвуют в подборе после настройки размеров выемки."),
+                   this);
     help->setWordWrap(true);
     layout->addWidget(help);
     help->setVisible(!embedded_);
@@ -164,7 +163,7 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     connect(rows_, &QTableWidget::itemSelectionChanged, this, [this] { updateHornEditor(); });
     hornNotice_ =
         new QLabel(QStringLiteral("Выберите сапожок и нажмите «Настроить», чтобы задать выемку. "
-                                  "Настроенные секции доступны в ручной сборке."),
+                                  "Настроенные секции учитываются при подборе и проверке гибки."),
                    this);
     hornNotice_->setObjectName("stockHornNotice");
     hornNotice_->setWordWrap(true);

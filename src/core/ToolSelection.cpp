@@ -56,7 +56,11 @@ ToolRejection screenTools(const ToolSelectionRequest &r, const ToolPreset &p, co
     for (auto &t : pair)
         if (t.segments) {
             const auto plan =
-                planToolSegments(*t.segments, r.bendLengthMm, 200000, r.maximumSegmentGapMm);
+                t.kind == ToolKind::Punch
+                    ? planPunchAssemblies(*t.segments, r.bendLengthMm, 200000,
+                                          r.maximumSegmentGapMm)
+                          .best()
+                    : planToolSegments(*t.segments, r.bendLengthMm, 200000, r.maximumSegmentGapMm);
             if (plan.status != SegmentPlanStatus::Complete)
                 return ToolRejection::TooShort;
             t.lengthMm = plan.lengthMm;
@@ -73,14 +77,21 @@ ToolSelectionResult selectTools(const ToolCatalog &catalog, const ToolSelectionR
     std::vector<std::shared_ptr<const ToolAssembly>> assemblies(catalog.size());
     const auto stocked = std::count_if(catalog.begin(), catalog.end(), [](const auto &t) {
         return t.segments && std::any_of(t.segments->begin(), t.segments->end(), [](const auto &s) {
-                   return s.quantity && s.shape == SegmentShape::Straight;
+                   return s.quantity && usableToolSegment(s);
                });
     });
     const auto budget = 200000 / std::max<std::size_t>(1, static_cast<std::size_t>(stocked));
     for (std::size_t i = 0; i < catalog.size(); ++i)
         if (catalog[i].segments) {
-            const auto plan = planToolSegments(*catalog[i].segments, r.bendLengthMm, budget,
-                                               r.maximumSegmentGapMm);
+            SegmentPlan plan;
+            if (catalog[i].kind == ToolKind::Punch) {
+                const auto family = planPunchAssemblies(*catalog[i].segments, r.bendLengthMm,
+                                                        budget, r.maximumSegmentGapMm);
+                result.segmentSearchLimited |= family.status == SegmentPlanStatus::SearchLimit;
+                plan = family.best();
+            } else
+                plan = planToolSegments(*catalog[i].segments, r.bendLengthMm, budget,
+                                        r.maximumSegmentGapMm);
             result.segmentSearchLimited |= plan.status == SegmentPlanStatus::SearchLimit;
             assembled[i].lengthMm = plan.status == SegmentPlanStatus::Complete ? plan.lengthMm : 0;
             if (plan.status == SegmentPlanStatus::Complete)

@@ -1242,8 +1242,13 @@ ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only) {
                         : core::SegmentPlanStatus::InsufficientStock,
                     {},
                     tool->lengthMm};
-        auto plan = core::planToolSegments(*tool->segments, selectionRequest_->bendLengthMm, 200000,
-                                           segmentGap_->value());
+        auto plan =
+            tool->kind == core::ToolKind::Punch
+                ? core::planPunchAssemblies(*tool->segments, selectionRequest_->bendLengthMm,
+                                            200000, segmentGap_->value())
+                      .best()
+                : core::planToolSegments(*tool->segments, selectionRequest_->bendLengthMm, 200000,
+                                         segmentGap_->value());
         if (plan.status == core::SegmentPlanStatus::Complete)
             assembly = plan.assembly;
         return plan;

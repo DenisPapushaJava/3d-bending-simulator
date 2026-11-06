@@ -67,8 +67,22 @@ struct ToolWindow {
                                                    const ToolAssembly &);
 // Exact to 0.001 mm. Prefer gap-free stock: minimize excess length, then pieces.
 // Only when unavailable, try gaps up to maximumGapMm; minimize excess, gap, then pieces.
-// Horns need their own 3D geometry and are deliberately excluded from this first planner.
+// Straight-only reference; die/window planning retains this exact behaviour.
 [[nodiscard]] SegmentPlan planToolSegments(const std::vector<ToolSegment> &, double requiredMm,
                                            std::size_t stateBudget = 200000,
                                            double maximumGapMm = 0, std::stop_token stop = {});
+struct PunchAssemblyPlans {
+    SegmentPlanStatus status = SegmentPlanStatus::InvalidInput;
+    std::vector<SegmentPlan> plans; // Valid numeric assemblies, not collision certificates.
+    std::size_t work = 0;
+    [[nodiscard]] SegmentPlan best() const {
+        return plans.empty() ? SegmentPlan{status, {}, 0} : plans.front();
+    }
+};
+// Straight, left, right and paired ends; one shared middle table and work budget.
+// SearchLimit may retain valid plans. Unknown end geometry is never used.
+[[nodiscard]] PunchAssemblyPlans
+planPunchAssemblies(const std::vector<ToolSegment> &, double requiredMm,
+                    std::size_t workBudget = 200000, double maximumGapMm = 0,
+                    std::stop_token stop = {}, std::size_t maximumPlans = 8);
 } // namespace bending::core
