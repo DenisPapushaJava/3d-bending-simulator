@@ -1556,7 +1556,8 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                         placedPreview->realPunch
                             ? drawingPunchSweep(*realTools, *toolGeometry, tip, lift, placementStop)
                             : makePunch(*toolParameters, tip, lift);
-                    if (realTools)
+                    if (realTools &&
+                        !core::usesHornSections(realTools->punch, realTools->punchAssembly))
                         placedPreview->sweep = segmentToolBody(
                             placedPreview->sweep, realTools->punch, realTools->punchAssembly,
                             (toolParameters->lengthMm - core::punchLengthMm(*toolParameters)) / 2,

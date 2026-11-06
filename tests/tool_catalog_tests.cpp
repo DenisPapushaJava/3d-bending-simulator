@@ -17,6 +17,55 @@ int main() {
     using namespace bending::core;
     try {
         const auto drawn = tool_fixture::pair();
+        auto horn = drawn;
+        horn.punch.segments = std::vector<ToolSegment>{
+            {100, 1, SegmentShape::LeftHorn, HornRelief{27, 27, 9}, "left"},
+            {200, 1},
+            {100, 1, SegmentShape::RightHorn, HornRelief{27, 27, 9}, "right"},
+            {100, 1, SegmentShape::LeftHorn}};
+        horn.punchAssembly = ToolAssembly{{0, 1, 2}, 0, {}};
+        require(validToolPreset(horn.punch) && toolParameters(horn) &&
+                    toolLength(horn.punch, horn.punchAssembly) == 400 &&
+                    hornRootHeight({27, 27, 9}) == 36 && hornRootHeight({30, 20, 9}) == 29,
+                "Configured horn rejected or root height incorrect");
+        const auto &stock = *horn.punch.segments;
+        require(!assemblyLength(stock, {{3}, 0, {}}) && !assemblyLength(stock, {{1, 0}, 0, {}}) &&
+                    !assemblyLength(stock, {{2, 1}, 0, {}}) &&
+                    !assemblyLength(stock, {{0, 0, 2}, 0, {}}) &&
+                    assemblyLength(stock, {{0}, 0, {}}) == 100 &&
+                    planToolSegments(stock, 300).status == SegmentPlanStatus::InsufficientStock,
+                "Unknown horns, wrong ends or automatic horn assembly admitted");
+        auto distinct = stock;
+        distinct[3].horn = HornRelief{26, 27, 9};
+        distinct[3].variantId = "left-other";
+        require(validToolSegments(distinct), "Different horn shapes with equal length merged");
+        distinct[3].horn = distinct[0].horn;
+        require(!validToolSegments(distinct), "Duplicate horn shape counted twice");
+        for (int test = 0; test < 7; ++test) {
+            auto invalid = horn;
+            auto &s = invalid.punch.segments->front();
+            if (test == 0)
+                s.horn->projectionMm = 100;
+            if (test == 1)
+                s.horn->radiusMm = std::numeric_limits<double>::quiet_NaN();
+            if (test == 2)
+                s.horn->tipHeightMm = 0;
+            if (test == 3)
+                s.horn->radiusMm = 100000;
+            if (test == 4)
+                s.variantId.clear();
+            if (test == 5)
+                s.variantId = "bad/id";
+            if (test == 6)
+                s.shape = SegmentShape::Straight;
+            require(!validToolPreset(invalid.punch), "Invalid horn dimensions/identity accepted");
+        }
+        auto idealizedHorn = horn;
+        idealizedHorn.useDrawingGeometry = false;
+        require(!toolParameters(idealizedHorn), "Horn silently replaced by idealized punch");
+        auto dieHorn = horn.punch;
+        dieHorn.kind = ToolKind::Die;
+        require(!validToolPreset(dieHorn), "Punch horn template accepted for die");
         require(hasCompleteDrawingToolGeometry(drawn), "Explicit tool bodies were rejected");
         require(hasLibraryProfile(drawn.punch), "Captured DXF missing from workshop policy");
         auto missingProfile = drawn.punch;

@@ -532,6 +532,37 @@ void testCatalogProject() {
             "Unbounded catalogue accepted");
 }
 
+void testHornSnapshots() {
+    using namespace bending;
+    QTemporaryDir folder;
+    const auto destination = folder.filePath("horn.bend");
+    project::ProjectFiles files;
+    DocumentSession session;
+    session.complete(
+        session.beginImport("source.step"),
+        files.load(nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/trimmed-bend-2mm.step"),
+                   {}, {}));
+    auto a = tool_fixture::pair();
+    a.punch.segments = std::vector<core::ToolSegment>{
+        {100, 1, core::SegmentShape::LeftHorn, core::HornRelief{27, 27, 9}, "left"},
+        {200, 1},
+        {100, 1, core::SegmentShape::RightHorn, core::HornRelief{27, 27, 9}, "right"}};
+    a.punchAssembly = core::ToolAssembly{{0, 1, 2}, 0, {}};
+    require(session.setBendToolAssignment(0, a) &&
+                !files.save(nativePath(destination), *session.document(), {}, session.bends(), {}),
+            "Cannot save horn snapshot");
+    auto loaded = files.load(nativePath(destination), {}, {});
+    require(std::holds_alternative<OpenedProject>(loaded) &&
+                std::get<OpenedProject>(loaded).bends.front().catalogTools == a,
+            "Horn geometry/IDs/order lost from portable project snapshot");
+    auto root = QJsonDocument::fromJson(read(destination)).object();
+    require(root.value("version").toInt() == 19, "Horn snapshot not versioned");
+    root.insert("version", 18);
+    write(destination, QJsonDocument(root).toJson());
+    require(std::holds_alternative<ImportError>(files.load(nativePath(destination), {}, {})),
+            "Horn geometry silently read as old straight snapshot");
+}
+
 void testLocalAssemblies() {
     using namespace bending;
     QTemporaryDir folder;
@@ -724,6 +755,7 @@ int main(int argc, char **argv) {
         testPrivatePreparation();
         testMachineProfile();
         testLocalAssemblies();
+        testHornSnapshots();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

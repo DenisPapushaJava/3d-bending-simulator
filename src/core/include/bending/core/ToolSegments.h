@@ -2,16 +2,30 @@
 #include <cstddef>
 #include <optional>
 #include <stop_token>
+#include <string>
 #include <vector>
 
 namespace bending::core {
 enum class SegmentShape { Straight, LeftHorn, RightHorn };
+// A through relief in the longitudinal plane, measured from the working tip.
+struct HornRelief {
+    double projectionMm = 0;
+    double radiusMm = 0;
+    double tipHeightMm = 0;
+    bool operator==(const HornRelief &) const = default;
+};
+[[nodiscard]] bool validHornRelief(const HornRelief &, double sectionLengthMm);
+[[nodiscard]] double hornRootHeight(const HornRelief &);
 struct ToolSegment {
     double lengthMm = 0;
     unsigned quantity = 0;
     SegmentShape shape = SegmentShape::Straight;
+    std::optional<HornRelief> horn = {};
+    std::string variantId = {}; // Configured horn identity within this profile snapshot.
     bool operator==(const ToolSegment &) const = default;
 };
+[[nodiscard]] bool usableToolSegment(const ToolSegment &);
+[[nodiscard]] bool hasHornGeometry(const std::vector<ToolSegment> &);
 struct ToolAssembly {
     std::vector<std::size_t> pieces; // Stock row indices, in installation order.
     double gapMm = 0;                // Uniform spacing when jointGapsMm is empty.
@@ -19,6 +33,8 @@ struct ToolAssembly {
     std::vector<double> jointGapsMm = {};
     bool operator==(const ToolAssembly &) const = default;
 };
+[[nodiscard]] bool usesHornSections(const std::vector<ToolSegment> &,
+                                    const std::optional<ToolAssembly> &);
 struct ToolSectionInterval {
     std::size_t stockRow;
     double fromMm, toMm; // Assembly-local axial coordinates, beginning at zero.

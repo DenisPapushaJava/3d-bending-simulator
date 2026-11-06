@@ -7,6 +7,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <algorithm>
 
 #include <utility>
 
@@ -241,6 +242,8 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
                 if (catalog.value(QLatin1String(key)).toObject().contains("jointGapsMm"))
                     return false;
         }
+        if (version < 19 && bend.catalogTools && core::hasHornGeometry(*bend.catalogTools))
+            return false;
         if (version < 15 && ((bend.tools && bend.tools->backgauge) ||
                              (bend.catalogTools && bend.catalogTools->backgauge)))
             return false;
@@ -325,9 +328,10 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
          version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0 &&
          version.toDouble() != 10.0 && version.toDouble() != 11.0 && version.toDouble() != 12.0 &&
          version.toDouble() != 13.0 && version.toDouble() != 14.0 && version.toDouble() != 15.0 &&
-         version.toDouble() != 16.0 && version.toDouble() != 17.0 && version.toDouble() != 18.0)) {
+         version.toDouble() != 16.0 && version.toDouble() != 17.0 && version.toDouble() != 18.0 &&
+         version.toDouble() != 19.0)) {
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 18",
+                           "Supported project format versions are 1 through 19",
                            {}};
     }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
@@ -452,7 +456,13 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"), 18},
+        {QStringLiteral("version"),
+         std::any_of(bends.begin(), bends.end(),
+                     [](const auto &bend) {
+                         return bend.catalogTools && core::hasHornGeometry(*bend.catalogTools);
+                     })
+             ? 19
+             : 18},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},

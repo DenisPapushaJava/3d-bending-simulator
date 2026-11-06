@@ -1,5 +1,6 @@
 #include "bending/cad/occt/DrawingTools.h"
 #include "GeometryCacheInternal.h"
+#include "HornToolGeometry.h"
 #include "bending/cad/ToolProfileValidation.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include <BRepAlgoAPI_Common.hxx>
@@ -194,9 +195,12 @@ static TopoDS_Shape buildSegmentToolBody(const TopoDS_Shape &whole, const core::
         BRepGProp::VolumeProperties(cut.Shape(), properties);
         if (!std::isfinite(properties.Mass()) || std::abs(properties.Mass()) <= 1.e-10)
             throw std::runtime_error("Tool segment has no valid positive volume");
-        builder.Add(parts, cut.Shape());
+        auto section = cut.Shape();
+        if ((*tool.segments)[row].horn)
+            section = cutHornSection(section, (*tool.segments)[row], 0, startZ, stop);
+        builder.Add(parts, section);
         if (display)
-            display->push_back({cut.Shape(), length});
+            display->push_back({section, length});
     }
     return parts;
 }
@@ -213,10 +217,14 @@ TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &
     const auto location = whole.Location();
     const auto form = location.Transformation().Form();
     const bool translation = form == gp_Identity || form == gp_Translation;
+    const bool horns = core::usesHornSections(*tool.segments, assembly);
+    if (horns && (!translation || tool.kind != core::ToolKind::Punch || !tool.drawing))
+        throw std::runtime_error("Horn sections require the upright captured punch profile");
     const auto source = translation ? whole.Located(TopLoc_Location()) : whole;
     const double localStart =
         translation ? startZ - location.Transformation().TranslationPart().Z() : startZ;
-    auto key = geometryKey("segments/joint-gaps-v2/fuzzy=1e-7");
+    auto key = geometryKey(horns ? "segments/horns-v1/joint-gaps/fuzzy=1e-7"
+                                 : "segments/joint-gaps-v2/fuzzy=1e-7");
     const auto sourceKey = GeometryCacheScope::descriptor(source);
     key << sourceKey.size() << ':' << sourceKey << ' ' << localStart << ' ' << assembly->gapMm
         << ' ' << assembly->pieces.size();
@@ -225,6 +233,9 @@ TopoDS_Shape segmentToolBody(const TopoDS_Shape &whole, const core::ToolPreset &
         key << ' ' << core::assemblyGapAfter(*assembly, i);
         const auto &piece = tool.segments->at(row);
         key << ' ' << piece.lengthMm << ' ' << static_cast<int>(piece.shape);
+        if (piece.horn)
+            key << ' ' << piece.horn->projectionMm << ' ' << piece.horn->radiusMm << ' '
+                << piece.horn->tipHeightMm;
     }
     auto result = cachedToolShape(
         GeometryCacheScope::enabled() && sourceKey.empty() ? std::string{} : key.str(),
@@ -309,6 +320,22 @@ TopoDS_Shape drawingPunchSweep(const core::ToolAssignment &a, const core::ToolGe
                                double tip, double lift, std::stop_token stop) {
     if (!a.punch.drawing)
         throw std::runtime_error("No punch drawing");
+    if (core::usesHornSections(a.punch, a.punchAssembly)) {
+        const double start = (*core::toolLength(a.die, a.dieAssembly) -
+                              *core::toolLength(a.punch, a.punchAssembly)) /
+                             2;
+        const auto body =
+            segmentToolBody(makeDrawingTools(a, g, 0)[1], a.punch, a.punchAssembly, start, stop);
+        const auto descriptor = GeometryCacheScope::descriptor(body);
+        auto key = geometryKey("horn-vertical-sweep-v1/fuzzy=1e-7");
+        key << descriptor.size() << ':' << descriptor << ' ' << lift;
+        auto shape = cachedToolShape(
+            descriptor.empty() ? std::string{} : key.str(),
+            [&] { return hornTranslationSweep(body, lift, stop); }, 0);
+        gp_Trsf translation;
+        translation.SetTranslation(gp_Vec(0, tip, 0));
+        return shape.Moved(TopLoc_Location(translation));
+    }
     auto key = geometryKey("vertical-punch-sweep/fuzzy=1e-7");
     key << sectionDescriptor(a.punch.drawing->edges, g.punchTip,
                              *core::toolLength(a.punch, a.punchAssembly))

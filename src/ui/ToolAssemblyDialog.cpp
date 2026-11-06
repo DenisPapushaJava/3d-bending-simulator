@@ -122,7 +122,7 @@ ToolAssemblyDialog::ToolAssemblyDialog(core::ToolPreset tool,
             return;
         for (std::size_t i = 0; i < tool_.segments->size(); ++i) {
             const auto &s = (*tool_.segments)[i];
-            if (s.shape != core::SegmentShape::Straight ||
+            if (!core::usableToolSegment(s) ||
                 static_cast<unsigned>(std::count(draft_.pieces.begin(), draft_.pieces.end(), i)) >=
                     s.quantity)
                 continue;
@@ -184,10 +184,22 @@ void ToolAssemblyDialog::rebuild(int selected) {
         auto *section = new QComboBox(rows_);
         for (std::size_t row = 0; row < tool_.segments->size(); ++row) {
             const auto &s = (*tool_.segments)[row];
-            if (s.shape == core::SegmentShape::Straight && s.quantity)
-                section->addItem(
-                    QStringLiteral("%1 мм · в наличии %2 шт.").arg(s.lengthMm).arg(s.quantity),
-                    static_cast<int>(row));
+            if (core::usableToolSegment(s) && s.quantity) {
+                QString label =
+                    QStringLiteral("%1 мм · в наличии %2 шт.").arg(s.lengthMm).arg(s.quantity);
+                if (s.horn)
+                    label =
+                        QStringLiteral("%1 мм · %2 · %3/R%4/%5 · %6 шт.")
+                            .arg(s.lengthMm)
+                            .arg(s.shape == core::SegmentShape::LeftHorn ? QStringLiteral("Левый")
+                                                                         : QStringLiteral("Правый"))
+                            .arg(s.horn->projectionMm)
+                            .arg(s.horn->radiusMm)
+                            .arg(s.horn->tipHeightMm)
+                            .arg(s.quantity);
+                section->addItem(label, static_cast<int>(row));
+                section->setItemData(section->count() - 1, label, Qt::ToolTipRole);
+            }
         }
         section->setCurrentIndex(section->findData(static_cast<int>(draft_.pieces[i])));
         rows_->setCellWidget(static_cast<int>(i), 0, section);
@@ -222,13 +234,13 @@ void ToolAssemblyDialog::refresh() {
     status_->setText(
         length
             ? QStringLiteral("%1 секц. · общая длина %2 мм").arg(draft_.pieces.size()).arg(*length)
-            : QStringLiteral("Добавьте доступные секции. Количество не должно "
-                             "превышать указанное наличие."));
+            : QStringLiteral(
+                  "Проверьте наличие и порядок: левый сапожок — слева, правый — справа."));
     add_->setEnabled(
         tool_.segments && draft_.pieces.size() < 512 &&
         std::any_of(tool_.segments->begin(), tool_.segments->end(), [this](const auto &s) {
             const auto row = static_cast<std::size_t>(&s - tool_.segments->data());
-            return s.shape == core::SegmentShape::Straight &&
+            return core::usableToolSegment(s) &&
                    static_cast<unsigned>(
                        std::count(draft_.pieces.begin(), draft_.pieces.end(), row)) < s.quantity;
         }));

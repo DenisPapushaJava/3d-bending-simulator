@@ -60,6 +60,13 @@ bool validToolPreset(const ToolPreset &t) {
         (t.segments && !validToolSegments(*t.segments))) {
         return false;
     }
+    if (t.segments && hasHornGeometry(*t.segments)) {
+        if (t.kind != ToolKind::Punch || !t.parametersConfirmed || !t.drawing || !t.heightMm)
+            return false;
+        for (const auto &s : *t.segments)
+            if (s.horn && hornRootHeight(*s.horn) >= *t.heightMm - 1e-6)
+                return false;
+    }
     if (!t.grooveSettings.empty()) {
         if (t.kind != ToolKind::Die || t.grooveSettings.size() != t.openingsMm.size() ||
             t.grooveSettings.size() > 16 || !t.drawing || !t.drawing->millimeters ||
@@ -133,6 +140,8 @@ std::optional<PressTools> toolParameters(const ToolAssignment &a) {
         !text(a.machineName, 256, true)) {
         return {};
     }
+    if (usesHornSections(a.punch, a.punchAssembly) && !a.useDrawingGeometry)
+        return {};
     if (a.useDrawingGeometry && !drawingToolGeometry(a))
         return {};
     const auto punchLength = toolLength(a.punch, a.punchAssembly);
