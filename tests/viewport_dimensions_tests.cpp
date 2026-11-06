@@ -1,8 +1,10 @@
 #include "Dimensions.h"
+#include <PrsDim_LengthDimension.hxx>
 
 #include <QApplication>
 #include <QLocale>
 #include <QRegularExpression>
+#include <cmath>
 #include <iostream>
 #include <numbers>
 #include <stdexcept>
@@ -70,16 +72,41 @@ int main(int argc, char **argv) {
                                   3,
                                   .45,
                                   4});
+        auto stockMeasures = std::make_shared<application::ModelMeasurements>();
+        application::MeasuredEdge stockEdge;
+        stockEdge.id = 100;
+        stockEdge.straight = true;
+        stockEdge.first = {0, 0, 0};
+        stockEdge.second = {1000, 0, 0};
+        stockMeasures->edges.push_back(stockEdge);
+        stockMeasures->datumEdges = {100};
+        info.measurements = stockMeasures;
         const auto overview = viewer::flatPatternDimensions(info, 14, layout, {}, 1);
-        check(overview.labels.filter(QStringLiteral(" · Y ")).size() == 32 &&
+        check(overview.labels.filter(QRegularExpression(QStringLiteral("^B[0-9]+$"))).size() ==
+                      32 &&
+                  !overview.labels.join(' ').contains(" · Y ") &&
                   !overview.labels.join(' ').contains(" · L "),
               "Overview must have overall sizes and compact IDs, not full callouts");
-        const auto selected = viewer::flatPatternDimensions(info, 14, layout, 7, 1).labels;
+        const auto selectedAnnotations = viewer::flatPatternDimensions(info, 14, layout, 7, 1);
+        const auto selected = selectedAnnotations.labels;
+        const auto dimensions = [](const viewer::DimensionAnnotations &annotations) {
+            std::vector<Handle(PrsDim_LengthDimension)> result;
+            for (const auto &object : annotations.objects)
+                if (const auto dimension = Handle(PrsDim_LengthDimension)::DownCast(object);
+                    !dimension.IsNull())
+                    result.push_back(dimension);
+            return result;
+        };
+        const auto selectedDimensions = dimensions(selectedAnnotations);
+        check(selectedDimensions.size() == 3 &&
+                  std::abs(selectedDimensions.back()->FirstPoint().Y()) < 1.e-6 &&
+                  std::abs(selectedDimensions.back()->SecondPoint().Y() - 302) < 1.e-6,
+              "Selected bend lacks a dimension between the real edge and its centre line");
         check(
-            selected.filter(QStringLiteral(" · Y ")).size() == 32 &&
+            !selected.join(' ').contains(" · Y ") &&
                 selected.join(' ').contains(QStringLiteral("B08 · ВНИЗ · 125° · R 3 · L %1 мм")
                                                 .arg(QLocale::system().toString(1000.0, 'f', 0))) &&
-                selected.join(' ').contains("Y 302 мм"),
+                selected.contains(QStringLiteral("302 мм")),
             "Selected dimensions lost internal angle/radius/length/coordinate or used step ID");
         const auto reverse = viewer::flatPatternDimensions(info, 14, layout, 7, -1).labels;
         check(reverse.size() == selected.size() && reverse.join(' ').contains("B08 · ВВЕРХ · 125°"),
@@ -92,10 +119,49 @@ int main(int argc, char **argv) {
                   !viewer::flatBendAt(info, layout, {500, 319}, 8),
               "Flat picking lost the prepared source ID or extended a line beyond its endpoint");
         info.bends[7].end.y += 50;
-        check(!viewer::flatPatternDimensions(info, 14, layout, 7, 1)
-                   .labels.join(' ')
-                   .contains("Y 302 мм"),
-              "Oblique bend midpoint was mislabelled as an edge distance");
+        check(dimensions(viewer::flatPatternDimensions(info, 14, layout, 7, 1)).size() == 2,
+              "Oblique line without a parallel exterior datum acquired a fictitious dimension");
+        // A subtracted contour can have an empty bounding corner. Use a finite
+        // actual edge and reject a nearer edge outside the bend's axial interval.
+        auto relieved = info;
+        relieved.bounds.maximum = {100, 100, 1.5};
+        relieved.bends = {{0, {20, 40, 0}, {80, 40, 0}, {}, std::numbers::pi / 2, 1, 3, .45, 4}};
+        auto relievedMeasures = std::make_shared<application::ModelMeasurements>();
+        auto realEdge = stockEdge;
+        realEdge.first = {0, 10, 0};
+        realEdge.second = {100, 10, 0};
+        auto shortEdge = realEdge;
+        shortEdge.id = 101;
+        shortEdge.first = {110, 39, 0};
+        shortEdge.second = {130, 39, 0};
+        auto innerEdge = realEdge;
+        innerEdge.id = 102;
+        innerEdge.first.y = innerEdge.second.y = 39;
+        relievedMeasures->edges = {realEdge, shortEdge, innerEdge};
+        relievedMeasures->datumEdges = {100, 101};
+        relieved.measurements = relievedMeasures;
+        const auto actual = dimensions(viewer::flatPatternDimensions(relieved, 14, layout, 0, 1));
+        check(actual.size() == 3 && std::abs(actual.back()->FirstPoint().Y() - 10) < 1.e-6 &&
+                  std::abs(actual.back()->SecondPoint().Y() - 40) < 1.e-6,
+              "Bend dimension used a bounding corner, an inner contour or a prolonged edge");
+        // The same finite-edge rule works for a rotated profile, without X/Y guessing.
+        relieved.bends.front().start = {20, 20, 0};
+        relieved.bends.front().end = {80, 80, 0};
+        relievedMeasures->edges.front().first = {0, 10, 0};
+        relievedMeasures->edges.front().second = {50, 60, 0};
+        const auto oblique = dimensions(viewer::flatPatternDimensions(relieved, 14, layout, 0, -1));
+        check(oblique.size() == 3 &&
+                  std::abs(oblique.back()->FirstPoint().Distance(oblique.back()->SecondPoint()) -
+                           std::sqrt(50.)) < 1.e-6,
+              "Rotated bend lost its true perpendicular distance or changed with physical side");
+        // Collinear split zones share an ID marker, not a coordinate or merged operation.
+        auto split = relieved;
+        split.bends = {{0, {0, 40, 0}, {20, 40, 0}, {}, std::numbers::pi / 2, 1, 3, .45, 4},
+                       {1, {30, 40, 0}, {50, 40, 0}, {}, std::numbers::pi / 2, 1, 3, .45, 4}};
+        layout.project = {};
+        const auto splitLabels = viewer::flatPatternDimensions(split, 14, layout, {}, 1).labels;
+        check(splitLabels.contains(QStringLiteral("B01/B02")) && splitLabels.size() == 3,
+              "Split lines lost source IDs or kept a permanent Y coordinate");
         // Screen-space pruning preserves the selected callout and text height;
         // it must neither change geometry nor invent a typical repeated feature.
         layout.viewport = {0, 0, 900, 700};

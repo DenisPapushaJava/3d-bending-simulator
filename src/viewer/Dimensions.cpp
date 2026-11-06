@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <unordered_set>
 
 namespace bending::viewer {
 namespace {
@@ -293,6 +294,61 @@ void selectedMeasurements(DimensionAnnotations &result, const application::Model
                     height, layout.right, &layout);
     }
 }
+// Perpendicular to an actual finite external stock edge. Bounds are only
+// paper/viewport extents; their empty corners are not measurement datums.
+std::optional<std::array<gp_Pnt, 2>> flatBendEdgeSpan(const application::FlatPatternInfo &info,
+                                                      const application::FlatBend &bend) {
+    if (!info.measurements)
+        return {};
+    const auto line = bend.centreLine();
+    auto along = gp_Vec(point(line[0]), point(line[1]));
+    along.SetZ(0);
+    if (along.SquareMagnitude() <= 1.e-12)
+        return {};
+    along.Normalize();
+    if (along.X() < -1.e-8 || (std::abs(along.X()) <= 1.e-8 && along.Y() < 0))
+        along.Reverse();
+    const auto station = [&](application::PointMm p) { return p.x * along.X() + p.y * along.Y(); };
+    const double low = std::min(station(line[0]), station(line[1]));
+    const double high = std::max(station(line[0]), station(line[1]));
+    const std::unordered_set<std::size_t> datums(info.measurements->datumEdges.begin(),
+                                                 info.measurements->datumEdges.end());
+    std::optional<std::array<gp_Pnt, 2>> result;
+    double best = 0;
+    for (const auto &edge : info.measurements->edges) {
+        if (!edge.straight || !datums.contains(edge.id))
+            continue;
+        auto edgeDirection = gp_Vec(point(edge.first), point(edge.second));
+        edgeDirection.SetZ(0);
+        const double squaredLength = edgeDirection.SquareMagnitude();
+        if (squaredLength <= 1.e-12 ||
+            edgeDirection.Crossed(along).SquareMagnitude() > squaredLength * 1.e-14)
+            continue;
+        const double start = std::max(low, std::min(station(edge.first), station(edge.second)));
+        const double end = std::min(high, std::max(station(edge.first), station(edge.second)));
+        if (end - start <= 1.e-7)
+            continue; // Never prolong a short edge to meet the selected line.
+        auto atBend = point(line[0]).Translated(along * (start - station(line[0])));
+        const auto a = point(edge.first);
+        const double foot = gp_Vec(a, atBend).Dot(edgeDirection) / squaredLength;
+        if (foot < -1.e-8 || foot > 1. + 1.e-8)
+            continue;
+        auto atEdge = a.Translated(edgeDirection * std::clamp(foot, 0., 1.));
+        atEdge.SetZ(info.bounds.maximum.z);
+        atBend.SetZ(info.bounds.maximum.z);
+        const double distance = atEdge.Distance(atBend);
+        if (distance <= 1.e-7)
+            continue;
+        // Stable tie break: changing camera/physical sheet side cannot change the datum.
+        if (!result || distance < best - 1.e-7 ||
+            (std::abs(distance - best) <= 1.e-7 &&
+             std::pair{atEdge.X(), atEdge.Y()} < std::pair{(*result)[0].X(), (*result)[0].Y()})) {
+            result = std::array{atEdge, atBend};
+            best = distance;
+        }
+    }
+    return result;
+}
 } // namespace
 
 DimensionAnnotations documentDimensions(const application::DocumentMetadata &metadata,
@@ -475,57 +531,6 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
     const auto bendId = [](std::size_t index) {
         return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
     };
-    struct Coordinate {
-        bool x;
-        double value;
-        gp_Pnt anchor;
-        std::vector<std::size_t> ids;
-    };
-    std::vector<Coordinate> coordinates;
-    for (const auto &bend : info.bends) {
-        const auto line = bend.centreLine();
-        const bool horizontal = std::abs(line[0].y - line[1].y) < 1.e-5;
-        const bool vertical = std::abs(line[0].x - line[1].x) < 1.e-5;
-        if (!horizontal && !vertical)
-            continue; // No fictitious midpoint distance for an oblique line.
-        const double value = horizontal ? line[0].y : line[0].x;
-        const auto found =
-            std::find_if(coordinates.begin(), coordinates.end(), [&](const auto &row) {
-                return row.x == vertical && std::abs(row.value - value) < 1.e-5;
-            });
-        if (found != coordinates.end())
-            found->ids.push_back(bend.bendIndex);
-        else
-            coordinates.push_back(
-                {vertical,
-                 value,
-                 gp_Pnt(line[coordinates.size() % 2].x, line[coordinates.size() % 2].y, hi.z),
-                 {bend.bendIndex}});
-    }
-    std::sort(coordinates.begin(), coordinates.end(), [](const auto &a, const auto &b) {
-        return std::pair{a.x, a.value} < std::pair{b.x, b.value};
-    });
-    for (std::size_t i = 0; i < coordinates.size(); ++i) {
-        const auto &row = coordinates[i];
-        QStringList ids;
-        for (auto id : row.ids)
-            ids << bendId(id);
-        gp_Vec offset = row.x ? layout.up * .7 : layout.right * (i % 2 ? -.9 : .9);
-        if (layout.project && layout.unproject) {
-            const auto pixel = layout.project(row.anchor);
-            const auto center = layout.project(gp_Pnt(hi.x / 2, hi.y / 2, hi.z));
-            const auto delta = pixel - center;
-            const double norm = std::hypot(delta.x(), delta.y());
-            if (norm > 1)
-                offset =
-                    gp_Vec(row.anchor, layout.unproject(pixel + delta * (45 / norm), row.anchor));
-        }
-        callout(result, row.anchor, offset,
-                QStringLiteral("%1 · %2 %3 мм")
-                    .arg(ids.join('/'), row.x ? QStringLiteral("X") : QStringLiteral("Y"),
-                         number(row.value)),
-                height, layout.up, &layout);
-    }
     if (info.measurements)
         selectedMeasurements(result, *info.measurements, selection, height, layout, true);
     const auto active = std::find_if(info.bends.begin(), info.bends.end(), [&](const auto &bend) {
@@ -535,6 +540,15 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
         const auto line = active->centreLine();
         const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
         const auto direction = active->direction * (facing > 0 ? 1 : -1);
+        if (const auto span = flatBendEdgeSpan(info, *active)) {
+            gp_Vec along(point(line[0]), point(line[1]));
+            if (along.X() < -1.e-8 || (std::abs(along.X()) <= 1.e-8 && along.Y() < 0))
+                along.Reverse();
+            const auto offset = -along.Normalized() * layout.right.Magnitude() * .7;
+            length(result, (*span)[0], (*span)[1], offset,
+                   QStringLiteral("%1 мм").arg(number((*span)[0].Distance((*span)[1]))), height,
+                   bendColor, &layout);
+        }
         callout(result, anchor, layout.up * 1.0,
                 QStringLiteral("%1 · %2 · %3° · R %4 · L %5 мм")
                     .arg(bendId(active->bendIndex),
@@ -543,19 +557,44 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
                          number(active->radiusMm), number(active->lengthMm())),
                 height, layout.right, &layout);
     }
-    // Overview: compact IDs only. Dense/occluded markers remain accessible via
-    // line selection and the existing source-bend list, without shrinking text.
+    // The overview identifies lines; distances appear only for the selected bend.
+    struct Marker {
+        int axis; // 0: horizontal, 1: vertical, 2: oblique (not grouped).
+        double coordinate;
+        gp_Pnt anchor;
+        QStringList ids;
+    };
+    std::vector<Marker> markers;
+    for (const auto &bend : info.bends) {
+        const auto line = bend.centreLine();
+        const int axis = std::abs(line[0].y - line[1].y) < 1.e-5   ? 0
+                         : std::abs(line[0].x - line[1].x) < 1.e-5 ? 1
+                                                                   : 2;
+        const double coordinate = axis == 0 ? line[0].y : line[0].x;
+        const auto group = std::find_if(markers.begin(), markers.end(), [&](const auto &marker) {
+            return axis != 2 && marker.axis == axis &&
+                   std::abs(marker.coordinate - coordinate) < 1.e-5;
+        });
+        if (group != markers.end())
+            group->ids << bendId(bend.bendIndex);
+        else
+            markers.push_back(
+                {axis,
+                 coordinate,
+                 gp_Pnt((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z),
+                 {bendId(bend.bendIndex)}});
+    }
     QFont font(QStringLiteral("sans-serif"));
     font.setPixelSize(qRound(height));
     const QFontMetricsF metrics(font);
-    std::vector<QRectF> occupied = layout.excluded;
-    for (const auto &bend : info.bends) {
-        const auto line = bend.centreLine();
-        if (std::abs(line[0].y - line[1].y) < 1.e-5 || std::abs(line[0].x - line[1].x) < 1.e-5)
+    std::vector<QRectF> occupied = result.occupied;
+    occupied.insert(occupied.end(), layout.excluded.begin(), layout.excluded.end());
+    for (const auto &marker : markers) {
+        // The full selected callout already identifies this line.
+        if (selected && marker.ids.size() == 1 && marker.ids.front() == bendId(*selected))
             continue;
-        const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
-        const auto position = anchor.Translated(layout.up * .3);
-        const auto caption = bendId(bend.bendIndex);
+        const auto position = marker.anchor.Translated(layout.up * .3);
+        const auto caption = marker.ids.join('/');
         if (layout.project) {
             const auto screen = layout.project(position);
             const QRectF box(screen.x() - metrics.horizontalAdvance(caption) / 2 - 4,

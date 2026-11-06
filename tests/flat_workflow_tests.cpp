@@ -22,6 +22,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
@@ -177,20 +178,35 @@ int main(int argc, char **argv) {
             check(clicked && picked >= 0 && bends->currentIndex().row() == picked,
                   "Flat line click did not select its source bend in the list");
             check(dimensions->accessibleDescription().contains(QStringLiteral(" · L ")) &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral(" · Y ")) &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral(" · X ")) &&
                       !c.hasWork() && c.flatPattern() == first &&
                       c.session().editRevision() == revisionBeforeSelection,
                   "Flat selection recalculated CAD/edited project or omitted selected dimensions");
+            if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT"); !path.isEmpty())
+                viewer->captureImage().save(path + "-selected-bend.png");
             const auto topLabels = dimensions->accessibleDescription();
+            const auto measuredLabels = [](const QString &description) {
+                // Compact ID visibility depends on viewport fitting, while the
+                // selected measurements and their datum must remain identical.
+                const QRegularExpression marker(QStringLiteral("^B[0-9]+(?:/B[0-9]+)*$"));
+                QStringList result;
+                for (const auto &line : description.split('\n'))
+                    if (!marker.match(line).hasMatch())
+                        result << line;
+                return result;
+            };
             const bool up = topLabels.contains(QStringLiteral("ВВЕРХ"));
             viewer->setOrientation(viewer::ViewerWidget::Orientation::Bottom);
             check(dimensions->accessibleDescription().contains(up ? QStringLiteral("ВНИЗ")
                                                                   : QStringLiteral("ВВЕРХ")),
                   "Reverse flat side kept the old bend direction");
             viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
-            check(dimensions->accessibleDescription() == topLabels,
+            const auto returnedLabels = dimensions->accessibleDescription();
+            check(measuredLabels(returnedLabels) == measuredLabels(topLabels),
                   "Returning to the flat side changed the selected measurement");
             viewer->highlightFaces({}, c.session().revision() + 1);
-            check(dimensions->accessibleDescription() == topLabels,
+            check(dimensions->accessibleDescription() == returnedLabels,
                   "Stale selection changed flat labels");
             sendClick(QPoint(20, canvas->height() / 2));
             check(picked == -1 && !bends->currentIndex().isValid() &&
