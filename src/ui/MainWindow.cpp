@@ -2,7 +2,7 @@
 #include "BendMessagePanel.h"
 #include "DrawingDialog.h"
 #include "PartInputDialog.h"
-#include "ProcessStepButton.h"
+#include "ProcessNavigationBar.h"
 #include "ToolSearchDialog.h"
 #include "ToolSelectionWidget.h"
 #include "ToolWorkspace.h"
@@ -18,7 +18,6 @@
 #include "ToolSegmentColorPreferences.h"
 #include <QAction>
 #include <QApplication>
-#include <QButtonGroup>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -57,7 +56,6 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
-#include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -1163,17 +1161,19 @@ class MainWindow::Impl {
         partPrimary->setText(document ? QStringLiteral("К инструменту →")
                                       : QStringLiteral("Открыть деталь…"));
         const auto bendCount = document ? document->metadata().bendAnalysis.bends.size() : 0;
-        processSteps[0]->setStatus(document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
-                                            : QStringLiteral("Открыть STEP"));
+        processNavigation->setStageStatus(
+            0, document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
+                        : QStringLiteral("Открыть STEP"));
         if (document && bendCount > 1 && !toolContextId.empty()) {
             std::size_t assigned = 0;
             for (const auto index : session.orderedBends())
                 assigned += session.bend(index)->tools.has_value() ? 1 : 0;
-            processSteps[1]->setStatus(
-                QStringLiteral("По гибам: %1 из %2").arg(assigned).arg(bendCount));
+            processNavigation->setStageStatus(
+                1, QStringLiteral("По гибам: %1 из %2").arg(assigned).arg(bendCount));
         } else
-            processSteps[1]->setStatus(chosen && document ? toolSelection->shortSummary()
-                                                          : QStringLiteral("Выбрать пару"));
+            processNavigation->setStageStatus(1, chosen && document
+                                                     ? toolSelection->shortSummary()
+                                                     : QStringLiteral("Выбрать пару"));
         const auto bendingStatus =
             controller->isPreparingDraft() ? QStringLiteral("Проверяем столкновения…")
             : viewingDraft && controller->routeDraft() ? QStringLiteral("Ручной порядок")
@@ -1199,9 +1199,9 @@ class MainWindow::Impl {
         std::size_t activeBends = 0;
         for (auto i : session.orderedBends())
             activeBends += included(session.bend(i)->review);
-        processSteps[2]->setStatus(
-            document ? QStringLiteral("Гибов: %1 · %2").arg(activeBends).arg(bendingStatus)
-                     : bendingStatus);
+        processNavigation->setStageStatus(
+            2, document ? QStringLiteral("Гибов: %1 · %2").arg(activeBends).arg(bendingStatus)
+                        : bendingStatus);
         const bool checking = propertyTabs->currentIndex() == 2 && !viewingSource;
         const bool transport =
             checking && (preview || previewReplacement || controller->isPreparingPreview() ||
@@ -3053,7 +3053,7 @@ class MainWindow::Impl {
     QWidget *kinematicsPanel = nullptr;
     ToolSelectionWidget *toolSelection = nullptr;
     QPushButton *checkBend = nullptr;
-    std::array<ProcessStepButton *, 3> processSteps{};
+    ProcessNavigationBar *processNavigation = nullptr;
     QPushButton *partPrimary = nullptr;
     QCheckBox *sheetSides = nullptr;
     QPushButton *changePartTools = nullptr;
@@ -4249,64 +4249,24 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->routePanel->onPrepare = [this](bool automatic, bool withTools) {
         impl_->prepareRoute(automatic, withTools);
     };
-    auto *processBar = new QToolBar(QStringLiteral("Этапы работы"), this);
-    processBar->setObjectName(QStringLiteral("processNavigation"));
-    processBar->setMovable(false);
-    processBar->setFloatable(false);
-    processBar->setAllowedAreas(Qt::BottomToolBarArea);
-    processBar->setContextMenuPolicy(Qt::PreventContextMenu);
-    addToolBar(Qt::BottomToolBarArea, processBar);
-    auto *processPanel = new QWidget(processBar);
-    auto *processLayout = new QHBoxLayout(processPanel);
-    processLayout->setContentsMargins(16, 8, 16, 8);
-    processLayout->setSpacing(8);
-    processPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    processPanel->setStyleSheet(QStringLiteral(
-        "QToolButton{background:#FFFFFF;color:#526171;border:1px solid "
-        "#DCE3E9;border-radius:4px;padding:8px 16px;font-size:14px;}"
-        "QToolButton:checked{background:#E5F3F3;color:#087F83;border:2px solid #087F83;}"
-        "QToolButton:hover{background:#F0F3F6;}QToolButton:focus{border:2px solid #087F83;}"));
-    auto *processGroup = new QButtonGroup(processPanel);
-    processGroup->setExclusive(true);
-    const std::array<QString, 3> stageNames{QStringLiteral("Деталь"), QStringLiteral("Инструмент"),
-                                            QStringLiteral("Гибка")};
-    const std::array<int, 3> stageTabs{0, 3, 2};
-    for (int i = 0; i < 3; ++i) {
-        auto *button =
-            new ProcessStepButton(i, stageNames[static_cast<std::size_t>(i)], processPanel);
-        impl_->processSteps[static_cast<std::size_t>(i)] = button;
-        button->setObjectName(QStringLiteral("processStage%1").arg(i));
-        button->setShortcut(QKeySequence(QStringLiteral("Alt+%1").arg(i + 1)));
-        button->setToolTip(stageNames[static_cast<std::size_t>(i)] +
-                           QStringLiteral(" · Alt+%1").arg(i + 1));
-        processGroup->addButton(button, i);
-        processLayout->addWidget(button, 1);
-        connect(button, &QToolButton::clicked, this, [this, stageTabs, i] {
-            if (i == 0)
-                impl_->showSource();
-            else if (i == 2) {
-                impl_->enterBendingStage();
-                return;
-            }
-            impl_->propertyTabs->setCurrentIndex(stageTabs[static_cast<std::size_t>(i)]);
-            impl_->propertyTabs->parentWidget()->show();
-            impl_->refreshPreview();
-        });
-    }
-    processGroup->button(0)->setChecked(true);
-    auto *drawingButton = new ProcessStepButton(3, QStringLiteral("Чертёж / PDF"), processPanel);
-    drawingButton->setObjectName("drawingStageButton");
-    drawingButton->setStatus(QStringLiteral("Виды и развёртка"));
-    drawingButton->setEnabled(impl_->drawingAction->isEnabled());
-    processLayout->addWidget(drawingButton, 1);
-    connect(drawingButton, &QToolButton::clicked, impl_->drawingAction, &QAction::trigger);
-    connect(impl_->drawingAction, &QAction::changed, drawingButton,
-            [drawingButton, action = impl_->drawingAction] {
-                drawingButton->setEnabled(action->isEnabled());
+    impl_->processNavigation = new ProcessNavigationBar(*impl_->drawingAction, this);
+    addToolBar(Qt::BottomToolBarArea, impl_->processNavigation);
+    connect(impl_->processNavigation, &ProcessNavigationBar::stageRequested, this,
+            [this](int stage) {
+                if (stage == 0)
+                    impl_->showSource();
+                else if (stage == 2) {
+                    impl_->enterBendingStage();
+                    return;
+                }
+                constexpr std::array<int, 3> pages{0, 3, 2};
+                impl_->propertyTabs->setCurrentIndex(pages[static_cast<std::size_t>(stage)]);
+                impl_->propertyTabs->parentWidget()->show();
+                impl_->refreshPreview();
             });
-    connect(impl_->propertyTabs, &QTabWidget::currentChanged, this, [this, processGroup](int page) {
+    connect(impl_->propertyTabs, &QTabWidget::currentChanged, this, [this](int page) {
         const int stage = page == 3 ? 1 : page == 2 ? 2 : 0;
-        processGroup->button(stage)->setChecked(true);
+        impl_->processNavigation->setCurrentStage(stage);
         if (page != 2) {
             impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
@@ -4323,7 +4283,6 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->suggestInitialTools();
         }
     });
-    processBar->addWidget(processPanel);
 
     impl_->progress = new QProgressBar(this);
     impl_->progress->setObjectName(QStringLiteral("importProgress"));

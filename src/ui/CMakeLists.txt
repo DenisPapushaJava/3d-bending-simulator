@@ -3,6 +3,7 @@ add_library(bending_ui STATIC MainWindow.cpp ImportController.cpp RoutePanel.cpp
 add_library(Bending::Ui ALIAS bending_ui)
 target_sources(bending_ui PRIVATE DrawingComposition.cpp DrawingSheetInternal.h DrawingViewRecording.cpp)
 target_sources(bending_ui PRIVATE DrawingLayoutController.cpp DrawingLayoutController.h)
+target_sources(bending_ui PRIVATE ProcessNavigationBar.cpp ProcessNavigationBar.h)
 target_sources(bending_ui PRIVATE BendMessagePanel.cpp BendMessagePanel.h)
 target_sources(bending_ui PRIVATE ToolSearchDialog.cpp ToolSearchDialog.h)
 target_sources(bending_ui PRIVATE ToolLibraryDialog.cpp ToolLibraryDialog.h ToolAssemblyDialog.cpp ToolAssemblyDialog.h)
