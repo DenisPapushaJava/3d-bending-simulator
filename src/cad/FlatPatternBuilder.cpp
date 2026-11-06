@@ -1,5 +1,6 @@
 #include "bending/cad/FlatPatternBuilder.h"
 #include "FlatPatternDisplay.h"
+#include "ModelMeasurements.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
 #include "TrimmedBend.h"
@@ -642,6 +643,17 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             builder.Add(display, line);
         }
         result->display = display;
+        try {
+            if (const auto measures = OcctDocumentAccess::measurements(*native))
+                result->data.measurements = flatModelMeasurements(
+                    *measures, OcctDocumentAccess::shape(*native), source, flat,
+                    result->layout.walls, origin, cutoutsIgnored, tolerance, stop);
+        } catch (const Standard_Failure &) {
+            result->data.measurements
+                .reset(); // Do not block a valid unfolding/PDF for optional annotations.
+        } catch (const std::exception &) {
+            result->data.measurements.reset();
+        }
         cancelled(stop);
         return FlatPatternPtr(std::move(result));
     } catch (const TrimmedBendError &e) {

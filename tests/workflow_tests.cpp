@@ -2030,7 +2030,7 @@ void testGuidedWorkflow(bool graphics) {
                     dimensions->accessibleDescription().contains(QStringLiteral("R 8 мм")) &&
                     dimensions->accessibleDescription().contains(QStringLiteral("t 6 мм")) &&
                     dimensions->accessibleDescription().contains(QStringLiteral("Угол 90°")) &&
-                    !dimensions->accessibleDescription().contains(QStringLiteral("X ")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("X ")) &&
                     !controller.session().modified() && controller.session().editRevision() == edit,
                 "Dimensions lost selected CAD bend or modified project");
         dimensionSnapshot("cad");
@@ -2196,7 +2196,7 @@ void testGuidedWorkflow(bool graphics) {
         const auto preview = controller.bendPreview();
         const auto edit = controller.session().editRevision();
         viewer->setDimensionsVisible(true);
-        require(dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")) &&
+        require(dimensions->accessibleDescription().contains(QStringLiteral("Полки")) &&
                     !dimensions->accessibleDescription().contains(QStringLiteral("X ")),
                 "Preview retained source CAD bounds or omitted flange sizes");
         dimensionSnapshot("motion");
@@ -2218,8 +2218,8 @@ void testGuidedWorkflow(bool graphics) {
         dimensionSnapshot("formed");
         const auto formed = dimensions->accessibleDescription();
         viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
-        require(dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")) &&
-                    dimensions->accessibleDescription().contains(QStringLiteral("П2 прям.")),
+        require(dimensions->accessibleDescription().contains(QStringLiteral("Полки")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("2 шт.")),
                 "Front projection lost flange measurements");
         dimensionSnapshot("front");
         viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
@@ -2232,11 +2232,12 @@ void testGuidedWorkflow(bool graphics) {
                 "Dimension toggle invalidated calculation");
         play->click();
         require(dimensions->accessibleDescription().contains(QStringLiteral("Угол ")) &&
-                    !dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")),
-                "Playback retained detailed flange dimensions");
+                    dimensions->accessibleDescription().contains(QStringLiteral("Габарит")),
+                "Playback lost persistent blank dimensions");
         play->click();
-        require(dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")),
-                "Pause did not restore detailed operation dimensions");
+        require(dimensions->accessibleDescription().contains(QStringLiteral("плоско")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Габарит")),
+                "Pause did not restore detailed blank dimensions");
         viewer->setDimensionsVisible(false);
     }
     play->click();

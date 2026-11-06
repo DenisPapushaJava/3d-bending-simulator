@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/ModelMeasurements.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/SheetOrientation.h"
 
@@ -13,6 +14,7 @@ struct CadDocument::Impl {
     TopoDS_Shape routeSkin; // Prepared triangulated skin of an internal route state only.
     bool routeState = false;
     DocumentMetadata metadata;
+    std::shared_ptr<const application::ModelMeasurements> measurements;
     std::vector<application::FaceInfo> faces;
     std::string sourceStep;
     SheetOrientationData orientation;

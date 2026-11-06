@@ -609,6 +609,11 @@ PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBa
                                             extrusion,
                                             state.angleRadians,
                                             state.innerRadiusMm};
+    if (const auto outside = simulation::outsideFlangePoints(state))
+        frame.dimensions->outsideFlanges = {position((*outside)[0]), position((*outside)[1]),
+                                            position((*outside)[2])};
+    else if (std::abs(state.angleRadians) < 1.e-10)
+        frame.dimensions->blankEnds = {position(state.fixed[2]), position(state.moving[2])};
     if (withEnvelopes) {
         frame.regions[0] = flange(state.fixed);
         frame.regions[2] = flange(state.moving);

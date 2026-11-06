@@ -24,6 +24,10 @@ std::string_view CadDocument::sourceStep() const noexcept {
     return impl_->sourceStep;
 }
 
+std::shared_ptr<const application::ModelMeasurements>
+OcctDocumentAccess::measurements(const CadDocument &document) {
+    return document.impl_->measurements;
+}
 const TopoDS_Shape &OcctDocumentAccess::shape(const CadDocument &document) {
     return document.impl_->shape;
 }

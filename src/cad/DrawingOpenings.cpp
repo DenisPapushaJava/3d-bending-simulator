@@ -170,10 +170,11 @@ std::array<double, 4> bounds(const TopoDS_Shape &shape, const gp_Ax2 &frame) {
 } // namespace
 std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                                             const TopTools_IndexedMapOfShape &faces,
-                                            std::stop_token stop) {
+                                            std::stop_token stop, std::size_t maximumCandidates) {
     TopTools_IndexedDataMapOfShapeListOfShape neighbors;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, neighbors);
     std::vector<DrawingOpening> result;
+    std::size_t candidates = 0;
     for (int id = 1; id <= faces.Extent(); ++id) {
         if (stop.stop_requested())
             throw DrawingError{"Cancelled", true};
@@ -187,6 +188,8 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
             const auto wire = TopoDS::Wire(wi.Current());
             if (wire.IsSame(outer) || !BRep_Tool::IsClosed(wire))
                 continue;
+            if (maximumCandidates && ++candidates > maximumCandidates)
+                return result;
             std::vector<gp_Pnt> circleCenters;
             gp_Dir major = plane.XAxis().Direction();
             bool allowed = true, curved = false, circular = true;

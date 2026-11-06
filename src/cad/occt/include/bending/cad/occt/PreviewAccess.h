@@ -19,6 +19,8 @@ struct BendDimensionAnchors {
     gp_Vec widthVector;
     double angleRadians;
     std::optional<double> innerRadiusMm;
+    std::optional<std::array<gp_Pnt, 3>> outsideFlanges = {};
+    std::optional<std::array<gp_Pnt, 2>> blankEnds = {};
 };
 struct ToolDisplaySegment {
     TopoDS_Shape shape; // A subshape of the complete checked tool, at this frame's placement.

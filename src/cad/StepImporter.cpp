@@ -1,4 +1,5 @@
 #include "bending/cad/StepImporter.h"
+#include "ModelMeasurements.h"
 
 #include "BendRecognizer.h"
 #include "CadDocumentData.h"
@@ -553,6 +554,18 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
                             "A face has no display triangulation");
             }
         }
+        try {
+            data->measurements =
+                prepareModelMeasurements(data->shape, data->metadata, stop, data->faces);
+        } catch (const Standard_Failure &) {
+            data->measurements
+                .reset(); // Optional display data must not turn a valid import into failure.
+        } catch (const std::exception &) {
+            data->measurements.reset();
+        }
+        if (stop.stop_requested())
+            return fail(StepImportErrorCode::Cancelled,
+                        "Import cancelled during measurement preparation");
         return std::unique_ptr<const CadDocument>(new CadDocument(std::move(data)));
     } catch (const Standard_Failure &error) {
         return fail(StepImportErrorCode::KernelFailure,

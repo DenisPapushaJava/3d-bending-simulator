@@ -2,20 +2,18 @@
 
 #include <AIS_Shape.hxx>
 #include <AIS_TextLabel.hxx>
-#include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
-#include <BRepTools.hxx>
 #include <Font_NameOfFont.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <Prs3d_DimensionAspect.hxx>
 #include <PrsDim_LengthDimension.hxx>
-#include <TopoDS.hxx>
 #include <gp_Pln.hxx>
 
 #include <QFont>
 #include <QFontMetricsF>
 #include <QLocale>
+#include <QPolygonF>
 
 #include <algorithm>
 #include <cmath>
@@ -52,13 +50,66 @@ void append(DimensionAnnotations &result, const Handle(AIS_InteractiveObject) & 
     object->SetZLayer(Graphic3d_ZLayerId_Topmost);
     result.objects.push_back(object);
 }
+gp_Vec placedOffset(DimensionAnnotations &result, const DimensionLayout *layout,
+                    const gp_Pnt &anchor, gp_Vec offset, const QString &text, double height) {
+    if (!layout || !layout->project || !layout->unproject)
+        return offset;
+    QFont font(QStringLiteral("sans-serif"));
+    font.setPixelSize(qRound(height));
+    const QFontMetricsF metrics(font);
+    const double width = metrics.horizontalAdvance(text) + 12;
+    const double h = metrics.height() + 8;
+    const auto preferred = layout->project(anchor.Translated(offset));
+    // Stay local to the measured geometry. A free slot at a distant window
+    // border is not a reason to create a metre-long extension line.
+    for (int row = 0; row < 9; ++row)
+        for (int column = 0; column < 3; ++column) {
+            auto position = preferred;
+            position.rx() += column == 1 ? -24 : column == 2 ? 24 : 0;
+            position.ry() += ((row + 1) / 2) * h * (row % 2 ? 1 : -1);
+            const QRectF box(position.x() - width / 2, position.y() - h, width, h + 4);
+            const auto intersects = [&](const auto &boxes) {
+                return std::any_of(boxes.begin(), boxes.end(),
+                                   [&](const auto &b) { return box.intersects(b); });
+            };
+            if (!layout->viewport.contains(box) || intersects(layout->excluded) ||
+                intersects(result.occupied))
+                continue;
+            result.occupied.push_back(box);
+            return gp_Vec(anchor, layout->unproject(position, anchor));
+        }
+    result.crowded = true;
+    return offset; // Preserve the measurement, report insufficient space instead of deleting it.
+}
+void callout(DimensionAnnotations &, const gp_Pnt &, const gp_Vec &, const QString &, double,
+             const gp_Vec &, const DimensionLayout *);
 void length(DimensionAnnotations &result, const gp_Pnt &a, const gp_Pnt &b, const gp_Vec &offset,
-            const QString &caption, double height, const Quantity_Color &color = dimensionColor) {
-    if (a.Distance(b) <= 1.0e-7 || gp_Vec(a, b).Crossed(offset).SquareMagnitude() <= 1.0e-14) {
+            const QString &caption, double height, const Quantity_Color &color = dimensionColor,
+            const DimensionLayout *layout = nullptr) {
+    if (a.Distance(b) <= 1.0e-7)
         return;
+    if (layout && layout->project && layout->unproject && !layout->viewport.isEmpty()) {
+        const bool firstVisible = layout->viewport.contains(layout->project(a));
+        const bool secondVisible = layout->viewport.contains(layout->project(b));
+        if (firstVisible != secondVisible) {
+            callout(result, firstVisible ? a : b, layout->up * .7, caption, height, layout->right,
+                    layout);
+            return;
+        }
     }
+    auto initial = offset;
+    if (gp_Vec(a, b).Crossed(initial).SquareMagnitude() <= 1.0e-14) {
+        if (!layout)
+            return;
+        initial = gp_Vec(a, b).Crossed(layout->up).SquareMagnitude() > 1.e-14 ? layout->up
+                                                                              : layout->right;
+    }
+    const auto middle = gp_Pnt((a.XYZ() + b.XYZ()) * 0.5);
+    auto placed = placedOffset(result, layout, middle, initial, caption, height);
+    if (gp_Vec(a, b).Crossed(placed).SquareMagnitude() <= 1.e-14)
+        placed = initial;
     Handle(PrsDim_LengthDimension) dimension =
-        new PrsDim_LengthDimension(a, b, gp_Pln(a, gp_Dir(gp_Vec(a, b).Crossed(offset))));
+        new PrsDim_LengthDimension(a, b, gp_Pln(a, gp_Dir(gp_Vec(a, b).Crossed(placed))));
     Handle(Prs3d_DimensionAspect) aspect = new Prs3d_DimensionAspect;
     aspect->MakeText3d(false);
     aspect->MakeArrows3d(false);
@@ -69,20 +120,24 @@ void length(DimensionAnnotations &result, const gp_Pnt &a, const gp_Pnt &b, cons
     aspect->SetExtensionSize(offset.Magnitude() * 0.2);
     dimension->SetDimensionAspect(aspect);
     dimension->SetCustomValue(extended(caption));
-    dimension->SetTextPosition(gp_Pnt((a.XYZ() + b.XYZ()) * 0.5).Translated(offset));
+    dimension->SetTextPosition(middle.Translated(placed));
     append(result, dimension);
     result.labels.append(caption);
 }
 void callout(DimensionAnnotations &result, const gp_Pnt &anchor, const gp_Vec &offset,
-             const QString &caption, double height, const gp_Vec &arrowSide = {}) {
-    const auto end = anchor.Translated(offset);
+             const QString &caption, double height, const gp_Vec &arrowSide = {},
+             const DimensionLayout *layout = nullptr) {
+    auto actualOffset = placedOffset(result, layout, anchor, offset, caption, height);
+    if (actualOffset.SquareMagnitude() <= 1.e-14)
+        actualOffset = offset.SquareMagnitude() > 1.e-14 ? offset : gp_Vec(0, 1, 0);
+    const auto end = anchor.Translated(actualOffset);
     Handle(AIS_Shape) line = new AIS_Shape(BRepBuilderAPI_MakeEdge(anchor, end).Edge());
     line->SetColor(bendColor);
     line->SetWidth(1.5);
     append(result, line);
     if (arrowSide.SquareMagnitude() > 1.e-14) {
         // A small screen-sized arrow points to the actual prepared bend line.
-        const auto back = offset * .08;
+        const auto back = actualOffset.Normalized() * arrowSide.Magnitude() * .12;
         Handle(AIS_Shape) arrow = new AIS_Shape(
             BRepBuilderAPI_MakePolygon(anchor.Translated(back + arrowSide * .08), anchor,
                                        anchor.Translated(back - arrowSide * .08))
@@ -111,12 +166,141 @@ QString bendCaption(double angle, std::optional<double> radius, double thickness
              radius ? QStringLiteral("R %1 мм").arg(number(*radius)) : QStringLiteral("плоско"),
              number(thickness));
 }
+void selectedMeasurements(DimensionAnnotations &result, const application::ModelMeasurements &data,
+                          MeasurementSelection selection, double height,
+                          const DimensionLayout &layout, bool flat = false) {
+    using namespace application;
+    if (selection.kind == MeasurementKind::None)
+        return;
+    if (selection.kind == MeasurementKind::Opening) {
+        const auto opening = std::find_if(data.openings.begin(), data.openings.end(),
+                                          [&](const auto &v) { return v.id == selection.id; });
+        if (opening == data.openings.end())
+            return;
+        const auto center = point(opening->center);
+        const auto major = gp_Vec(opening->major.x, opening->major.y, opening->major.z);
+        const auto minor = gp_Vec(opening->minor.x, opening->minor.y, opening->minor.z);
+        const auto caption =
+            opening->circular ? QStringLiteral("Отверстие · ⌀%1 мм").arg(number(opening->lengthMm))
+                              : QStringLiteral("Вырез · %1 × %2 мм")
+                                    .arg(number(opening->lengthMm), number(opening->widthMm));
+        callout(result, center, layout.up * 1.0, caption, height, layout.right, &layout);
+        if (!opening->circular) {
+            length(result, center.Translated(-major), center.Translated(major), layout.up,
+                   QStringLiteral("Длина %1 мм").arg(number(opening->lengthMm)), height, bendColor,
+                   &layout);
+            length(result, center.Translated(-minor), center.Translated(minor), layout.right,
+                   QStringLiteral("Ширина %1 мм").arg(number(opening->widthMm)), height, bendColor,
+                   &layout);
+        }
+        std::vector<MeasuredSpan> locations = opening->locations;
+        if (!selection.bases.empty()) {
+            locations.clear();
+            for (auto id : selection.bases) {
+                const auto edge =
+                    std::find_if(data.edges.begin(), data.edges.end(),
+                                 [&](const auto &e) { return e.id == id && e.straight; });
+                if (edge == data.edges.end() || edge->bendBoundary ||
+                    (std::find(data.datumEdges.begin(), data.datumEdges.end(), id) ==
+                         data.datumEdges.end() &&
+                     std::none_of(data.faces.begin(), data.faces.end(), [&](const auto &face) {
+                         return std::find(opening->hostFaces.begin(), opening->hostFaces.end(),
+                                          face.id) != opening->hostFaces.end() &&
+                                std::find(face.outerEdges.begin(), face.outerEdges.end(), id) !=
+                                    face.outerEdges.end();
+                     })))
+                    continue;
+                const gp_Vec ab(point(edge->first), point(edge->second));
+                const gp_Vec normal(opening->normal.x, opening->normal.y, opening->normal.z);
+                if (ab.SquareMagnitude() <= 1.e-12 || normal.SquareMagnitude() <= 1.e-12)
+                    continue;
+                const auto projectedCenter =
+                    center.Translated(normal * (gp_Vec(center, point(edge->first)).Dot(normal) /
+                                                normal.SquareMagnitude()));
+                const double t =
+                    gp_Vec(point(edge->first), projectedCenter).Dot(ab) / ab.SquareMagnitude();
+                if (t < -1.e-8 || t > 1. + 1.e-8)
+                    continue;
+                const auto foot = point(edge->first).Translated(ab * t);
+                locations.push_back(
+                    {{foot.X(), foot.Y(), foot.Z()},
+                     {projectedCenter.X(), projectedCenter.Y(), projectedCenter.Z()},
+                     foot.Distance(projectedCenter),
+                     edge->faces});
+            }
+        }
+        for (std::size_t i = 0; i < locations.size(); ++i)
+            length(
+                result, point(locations[i].first), point(locations[i].second),
+                (i ? layout.right : -layout.up) * 1.2,
+                QStringLiteral("До базы %1 · %2 мм").arg(i + 1).arg(number(locations[i].valueMm)),
+                height, bendColor, &layout);
+        if (opening->outline.size() > 2) {
+            BRepBuilderAPI_MakePolygon polygon;
+            for (const auto &p : opening->outline)
+                polygon.Add(point(p));
+            polygon.Close();
+            if (polygon.IsDone()) {
+                Handle(AIS_Shape) outline = new AIS_Shape(polygon.Shape());
+                outline->SetColor(bendColor);
+                outline->SetWidth(2.5);
+                append(result, outline);
+            }
+        }
+    } else if (selection.kind == MeasurementKind::Face) {
+        const auto face = std::find_if(data.faces.begin(), data.faces.end(),
+                                       [&](const auto &v) { return v.id == selection.id; });
+        if (face == data.faces.end())
+            return;
+        callout(result, point(face->anchor), layout.up * 1.0,
+                QStringLiteral("%1 · S %2 мм²")
+                    .arg(face->planar ? (flat ? QStringLiteral("Плоский участок")
+                                              : QStringLiteral("Плоская грань"))
+                                      : QStringLiteral("Поверхность"),
+                         number(face->areaMm2)),
+                height, {}, &layout);
+        if (flat && face->outline.size() > 2) {
+            BRepBuilderAPI_MakePolygon boundary;
+            for (const auto &p : face->outline)
+                boundary.Add(point(p));
+            boundary.Close();
+            if (boundary.IsDone()) {
+                Handle(AIS_Shape) outline = new AIS_Shape(boundary.Shape());
+                outline->SetColor(bendColor);
+                outline->SetWidth(2.5);
+                append(result, outline);
+            }
+        }
+        for (std::size_t i = 0; i < face->sizes.size(); ++i)
+            length(result, point(face->sizes[i].first), point(face->sizes[i].second),
+                   (i ? layout.right : -layout.up) * 1.8,
+                   QStringLiteral("Грань %1 мм").arg(number(face->sizes[i].valueMm)), height,
+                   bendColor, &layout);
+    } else if (selection.kind == MeasurementKind::Edge) {
+        const auto edge = std::find_if(data.edges.begin(), data.edges.end(),
+                                       [&](const auto &v) { return v.id == selection.id; });
+        if (edge == data.edges.end())
+            return;
+        if (edge->straight)
+            length(result, point(edge->first), point(edge->second), layout.up * 1.0,
+                   QStringLiteral("Ребро %1 мм").arg(number(edge->lengthMm)), height, bendColor,
+                   &layout);
+        else
+            callout(result, point(edge->first), layout.up * 1.0,
+                    (edge->radiusMm ? QStringLiteral("R %1 мм · ").arg(number(*edge->radiusMm))
+                                    : QString{}) +
+                        QStringLiteral("Длина %1 мм").arg(number(edge->lengthMm)),
+                    height, layout.right, &layout);
+    }
+}
 } // namespace
 
 DimensionAnnotations documentDimensions(const application::DocumentMetadata &metadata,
                                         const TopTools_IndexedMapOfShape &faces,
                                         const std::optional<application::RecognizedBend> &bend,
-                                        double height, const DimensionLayout &layout) {
+                                        double height, const DimensionLayout &layout,
+                                        const application::ModelMeasurements *measurements,
+                                        MeasurementSelection selection) {
     DimensionAnnotations result;
     const auto &lo = metadata.bounds.minimum;
     const auto &hi = metadata.bounds.maximum;
@@ -124,45 +308,89 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
     if (!(gap > 0.0) || !std::isfinite(gap)) {
         return result;
     }
-    if (!bend) {
+    {
         length(result, point(lo), {hi.x, lo.y, lo.z}, {0, -gap, 0},
-               QStringLiteral("X %1 мм").arg(number(hi.x - lo.x)), height);
+               QStringLiteral("X %1 мм").arg(number(hi.x - lo.x)), height, dimensionColor, &layout);
         length(result, point(lo), {lo.x, hi.y, lo.z}, {-gap, 0, 0},
-               QStringLiteral("Y %1 мм").arg(number(hi.y - lo.y)), height);
+               QStringLiteral("Y %1 мм").arg(number(hi.y - lo.y)), height, dimensionColor, &layout);
         length(result, {hi.x, hi.y, lo.z}, point(hi), {gap, 0, 0},
-               QStringLiteral("Z %1 мм").arg(number(hi.z - lo.z)), height);
+               QStringLiteral("Z %1 мм").arg(number(hi.z - lo.z)), height, dimensionColor, &layout);
+    }
+    if (measurements) {
+        struct FlangeGroup {
+            const application::MeasuredSpan *span;
+            std::vector<std::vector<std::size_t>> walls;
+        };
+        std::vector<FlangeGroup> groups;
+        const double tolerance = std::max(1.e-5, metadata.bendAnalysis.lengthToleranceMm);
+        for (const auto &span : measurements->flanges) {
+            const std::array first{span.first.x, span.first.y, span.first.z};
+            const std::array second{span.second.x, span.second.y, span.second.z};
+            const std::array minimum{lo.x, lo.y, lo.z}, maximum{hi.x, hi.y, hi.z};
+            bool covered = false;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                bool parallel = true;
+                for (std::size_t other = 0; other < 3; ++other)
+                    if (other != axis && std::abs(first[other] - second[other]) > tolerance)
+                        parallel = false;
+                covered =
+                    covered ||
+                    (parallel &&
+                     std::abs(std::min(first[axis], second[axis]) - minimum[axis]) < tolerance &&
+                     std::abs(std::max(first[axis], second[axis]) - maximum[axis]) < tolerance &&
+                     std::abs(span.valueMm - (maximum[axis] - minimum[axis])) < tolerance);
+            }
+            if (covered)
+                continue;
+            const auto same = std::find_if(groups.begin(), groups.end(), [&](const auto &group) {
+                return std::abs(group.span->valueMm - span.valueMm) < tolerance;
+            });
+            if (same != groups.end()) {
+                if (std::find(same->walls.begin(), same->walls.end(), span.faces) ==
+                    same->walls.end())
+                    same->walls.push_back(span.faces);
+            } else
+                groups.push_back({&span, {span.faces}});
+        }
+        for (const auto &group : groups) {
+            const auto &span = *group.span;
+            const auto caption = group.walls.size() == 1
+                                     ? QStringLiteral("Полка %1 мм").arg(number(span.valueMm))
+                                     : QStringLiteral("Полки %1 мм · %2 шт.")
+                                           .arg(number(span.valueMm))
+                                           .arg(group.walls.size());
+            length(result, point(span.first), point(span.second), -layout.up * .7, caption, height,
+                   dimensionColor, &layout);
+        }
+        selectedMeasurements(result, *measurements, selection, height, layout);
     }
     if (!bend || bend->innerFace == 0 ||
         bend->innerFace > static_cast<std::size_t>(faces.Extent())) {
         return result;
     }
-    const auto face = TopoDS::Face(faces(static_cast<int>(bend->innerFace)));
-    double u1, u2, v1, v2;
-    BRepTools::UVBounds(face, u1, u2, v1, v2);
-    const auto anchor = BRepAdaptor_Surface(face).Value((u1 + u2) * 0.5, (v1 + v2) * 0.5);
-    const auto start = point(bend->axisStart);
-    const auto end = point(bend->axisEnd);
-    const auto middle = gp_Pnt((start.XYZ() + end.XYZ()) * 0.5);
-    const auto axis = gp_Vec(start, end);
-    if (axis.SquareMagnitude() <= 1.0e-14) {
-        return result;
+    const auto start = point(bend->axisStart), end = point(bend->axisEnd);
+    const auto middle = gp_Pnt((start.XYZ() + end.XYZ()) * .5);
+    auto anchor = middle;
+    if (measurements) {
+        const auto face = std::find_if(measurements->faces.begin(), measurements->faces.end(),
+                                       [&](const auto &f) { return f.id == bend->innerFace; });
+        if (face != measurements->faces.end())
+            anchor = point(face->anchor);
     }
-    auto radial = gp_Vec(middle, anchor);
-    radial -= axis * (radial.Dot(axis) / axis.SquareMagnitude());
-    if (radial.SquareMagnitude() <= 1.0e-14) {
+    const gp_Vec axis(start, end);
+    if (axis.SquareMagnitude() <= 1.e-14)
         return result;
-    }
     const auto caption = bend->trimmedEnds ? QStringLiteral("Осевой габарит %1 мм")
                                            : QStringLiteral("Длина гиба %1 мм");
     auto side = -layout.right;
     side -= axis * (side.Dot(axis) / axis.SquareMagnitude());
-    if (side.Magnitude() < layout.right.Magnitude() * 0.1) {
-        side = radial.Normalized() * layout.right.Magnitude();
-    }
-    length(result, start.Translated(radial), end.Translated(radial), side * 2.0,
-           caption.arg(number(bend->lengthMm)), height, bendColor);
-    callout(result, anchor, layout.up * 2.3,
-            bendCaption(bend->angleRadians, bend->innerRadiusMm, bend->thicknessMm), height);
+    if (side.SquareMagnitude() < 1.e-14)
+        side = layout.up;
+    length(result, start, end, side, caption.arg(number(bend->lengthMm)), height, bendColor,
+           &layout);
+    callout(result, anchor, layout.up * 1.0,
+            bendCaption(bend->angleRadians, bend->innerRadiusMm, bend->thicknessMm), height, {},
+            &layout);
     return result;
 }
 
@@ -191,16 +419,55 @@ std::optional<std::size_t> flatBendAt(const application::FlatPatternInfo &info,
     }
     return result;
 }
+MeasurementSelection flatMeasurementAt(const application::ModelMeasurements &data,
+                                       const DimensionLayout &layout, QPointF position) {
+    if (!layout.project)
+        return {};
+    const auto inside = [&](const auto &outline) {
+        QPolygonF polygon;
+        for (const auto &p : outline)
+            polygon << layout.project(point(p));
+        return polygon.containsPoint(position, Qt::OddEvenFill);
+    };
+    for (const auto &opening : data.openings)
+        if (inside(opening.outline))
+            return {MeasurementKind::Opening, opening.id, {}};
+    double best = 64;
+    MeasurementSelection result;
+    for (const auto &edge : data.edges)
+        for (std::size_t i = 1; i < edge.outline.size(); ++i) {
+            const auto a = layout.project(point(edge.outline[i - 1])),
+                       b = layout.project(point(edge.outline[i]));
+            const auto ab = b - a;
+            const double q = QPointF::dotProduct(ab, ab);
+            if (q <= 1.e-12)
+                continue;
+            const double t = std::clamp(QPointF::dotProduct(position - a, ab) / q, 0., 1.);
+            const auto delta = position - (a + ab * t);
+            const double distance = QPointF::dotProduct(delta, delta);
+            if (distance < best) {
+                best = distance;
+                result = {MeasurementKind::Edge, edge.id, {}};
+            }
+        }
+    if (result.kind != MeasurementKind::None)
+        return result;
+    for (const auto &face : data.faces)
+        if (inside(face.outline))
+            return {MeasurementKind::Face, face.id, {}};
+    return {};
+}
 DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &info, double height,
                                            const DimensionLayout &layout,
-                                           std::optional<std::size_t> selected, double facing) {
+                                           std::optional<std::size_t> selected, double facing,
+                                           MeasurementSelection selection) {
     DimensionAnnotations result;
     const auto &hi = info.bounds.maximum;
     const auto gap = std::max(hi.x, hi.y) * .12;
     length(result, {0, 0, hi.z}, {hi.x, 0, hi.z}, {0, -gap, 0},
-           QStringLiteral("Ширина %1 мм").arg(number(hi.x)), height);
+           QStringLiteral("Ширина %1 мм").arg(number(hi.x)), height, dimensionColor, &layout);
     length(result, {0, 0, hi.z}, {0, hi.y, hi.z}, {-gap, 0, 0},
-           QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), height);
+           QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), height, dimensionColor, &layout);
     // Directions are relative to the physical flat side facing the viewer. Do not
     // pretend that a nearly edge-on sheet has readable bend annotations.
     if (std::abs(facing) < .15)
@@ -208,6 +475,59 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
     const auto bendId = [](std::size_t index) {
         return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
     };
+    struct Coordinate {
+        bool x;
+        double value;
+        gp_Pnt anchor;
+        std::vector<std::size_t> ids;
+    };
+    std::vector<Coordinate> coordinates;
+    for (const auto &bend : info.bends) {
+        const auto line = bend.centreLine();
+        const bool horizontal = std::abs(line[0].y - line[1].y) < 1.e-5;
+        const bool vertical = std::abs(line[0].x - line[1].x) < 1.e-5;
+        if (!horizontal && !vertical)
+            continue; // No fictitious midpoint distance for an oblique line.
+        const double value = horizontal ? line[0].y : line[0].x;
+        const auto found =
+            std::find_if(coordinates.begin(), coordinates.end(), [&](const auto &row) {
+                return row.x == vertical && std::abs(row.value - value) < 1.e-5;
+            });
+        if (found != coordinates.end())
+            found->ids.push_back(bend.bendIndex);
+        else
+            coordinates.push_back(
+                {vertical,
+                 value,
+                 gp_Pnt(line[coordinates.size() % 2].x, line[coordinates.size() % 2].y, hi.z),
+                 {bend.bendIndex}});
+    }
+    std::sort(coordinates.begin(), coordinates.end(), [](const auto &a, const auto &b) {
+        return std::pair{a.x, a.value} < std::pair{b.x, b.value};
+    });
+    for (std::size_t i = 0; i < coordinates.size(); ++i) {
+        const auto &row = coordinates[i];
+        QStringList ids;
+        for (auto id : row.ids)
+            ids << bendId(id);
+        gp_Vec offset = row.x ? layout.up * .7 : layout.right * (i % 2 ? -.9 : .9);
+        if (layout.project && layout.unproject) {
+            const auto pixel = layout.project(row.anchor);
+            const auto center = layout.project(gp_Pnt(hi.x / 2, hi.y / 2, hi.z));
+            const auto delta = pixel - center;
+            const double norm = std::hypot(delta.x(), delta.y());
+            if (norm > 1)
+                offset =
+                    gp_Vec(row.anchor, layout.unproject(pixel + delta * (45 / norm), row.anchor));
+        }
+        callout(result, row.anchor, offset,
+                QStringLiteral("%1 · %2 %3 мм")
+                    .arg(ids.join('/'), row.x ? QStringLiteral("X") : QStringLiteral("Y"),
+                         number(row.value)),
+                height, layout.up, &layout);
+    }
+    if (info.measurements)
+        selectedMeasurements(result, *info.measurements, selection, height, layout, true);
     const auto active = std::find_if(info.bends.begin(), info.bends.end(), [&](const auto &bend) {
         return selected && bend.bendIndex == *selected;
     });
@@ -215,22 +535,13 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
         const auto line = active->centreLine();
         const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
         const auto direction = active->direction * (facing > 0 ? 1 : -1);
-        callout(result, anchor, layout.up * 1.8,
+        callout(result, anchor, layout.up * 1.0,
                 QStringLiteral("%1 · %2 · %3° · R %4 · L %5 мм")
                     .arg(bendId(active->bendIndex),
                          direction > 0 ? QStringLiteral("ВВЕРХ") : QStringLiteral("ВНИЗ"),
                          number(180 - active->turnRadians * 180 / std::numbers::pi),
                          number(active->radiusMm), number(active->lengthMm())),
-                height, layout.right);
-        // Only a confirmed axis-aligned coordinate is presented. A midpoint of
-        // an oblique bend is not a distance from the stock edge or a gauge X.
-        if (std::abs(line[0].y - line[1].y) < 1.e-5)
-            length(result, {hi.x, 0, hi.z}, {hi.x, line[0].y, hi.z}, {gap, 0, 0},
-                   QStringLiteral("Y %1 мм").arg(number(line[0].y)), height);
-        else if (std::abs(line[0].x - line[1].x) < 1.e-5)
-            length(result, {0, hi.y, hi.z}, {line[0].x, hi.y, hi.z}, {0, gap, 0},
-                   QStringLiteral("X %1 мм").arg(number(line[0].x)), height);
-        return result;
+                height, layout.right, &layout);
     }
     // Overview: compact IDs only. Dense/occluded markers remain accessible via
     // line selection and the existing source-bend list, without shrinking text.
@@ -240,6 +551,8 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
     std::vector<QRectF> occupied = layout.excluded;
     for (const auto &bend : info.bends) {
         const auto line = bend.centreLine();
+        if (std::abs(line[0].y - line[1].y) < 1.e-5 || std::abs(line[0].x - line[1].x) < 1.e-5)
+            continue;
         const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
         const auto position = anchor.Translated(layout.up * .3);
         const auto caption = bendId(bend.bendIndex);
@@ -276,20 +589,35 @@ DimensionAnnotations previewDimensions(const cad::PreviewFrame &frame,
         return result;
     }
     const auto &anchors = *frame.dimensions;
-    if (!compact) {
-        length(result, anchors.fixed[0], anchors.fixed[1], -layout.right * 2.2 - layout.up * 0.6,
-               QStringLiteral("П1 прям. %1 мм").arg(number(model.fixedFlangeMm)), height);
-        length(result, anchors.moving[0], anchors.moving[1], layout.right * 2.2 - layout.up * 0.6,
-               QStringLiteral("П2 прям. %1 мм").arg(number(model.movingFlangeMm)), height);
-        length(result, anchors.fixed[1], anchors.fixed[1].Translated(anchors.widthVector),
-               -layout.up * 1.8, QStringLiteral("Охват по оси %1 мм").arg(number(model.widthMm)),
-               height);
+    if (anchors.outsideFlanges) {
+        const auto &p = *anchors.outsideFlanges;
+        const auto first = p[0].Distance(p[1]), second = p[1].Distance(p[2]);
+        if (std::abs(first - second) < 1.e-6)
+            length(result, p[0], p[1], -layout.up * .9,
+                   QStringLiteral("Полки %1 мм · 2 шт.").arg(number(first)), height, dimensionColor,
+                   &layout);
+        else {
+            length(result, p[0], p[1], -layout.right * .9 - layout.up * .3,
+                   QStringLiteral("Полка 1 · %1 мм").arg(number(first)), height, dimensionColor,
+                   &layout);
+            length(result, p[1], p[2], layout.right * .9 - layout.up * .3,
+                   QStringLiteral("Полка 2 · %1 мм").arg(number(second)), height, dimensionColor,
+                   &layout);
+        }
+    } else if (anchors.blankEnds) {
+        const auto &p = *anchors.blankEnds;
+        length(result, p[0], p[1], -layout.up * 1.0,
+               QStringLiteral("Габарит %1 мм").arg(number(p[0].Distance(p[1]))), height,
+               dimensionColor, &layout);
     }
-    callout(result, anchors.bendMiddle, layout.up * 1.8,
+    length(result, anchors.fixed[1], anchors.fixed[1].Translated(anchors.widthVector),
+           -layout.up * 1.0, QStringLiteral("Охват по оси %1 мм").arg(number(model.widthMm)),
+           height, dimensionColor, &layout);
+    callout(result, anchors.bendMiddle, layout.up * 1.0,
             compact ? QStringLiteral("Угол %1°")
                           .arg(number(180 - anchors.angleRadians * 180 / std::numbers::pi))
                     : bendCaption(anchors.angleRadians, anchors.innerRadiusMm, model.thicknessMm),
-            height);
+            height, {}, &layout);
     return result;
 }
 } // namespace bending::viewer

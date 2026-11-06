@@ -5,6 +5,20 @@
 #include <numbers>
 
 namespace bending::simulation {
+std::optional<std::array<Point2Mm, 3>> outsideFlangePoints(const BendSection &s) noexcept {
+    const auto a = s.fixed[3], b = s.moving[1];
+    const Point2Mm u{a.x - s.fixed[2].x, a.y - s.fixed[2].y};
+    const Point2Mm v{s.moving[2].x - b.x, s.moving[2].y - b.y};
+    const double determinant = u.x * v.y - u.y * v.x;
+    const double scale = std::hypot(u.x, u.y) * std::hypot(v.x, v.y);
+    if (!(scale > 0) || std::abs(determinant) <= scale * 1.e-10)
+        return {};
+    const double t = ((b.x - a.x) * v.y - (b.y - a.y) * v.x) / determinant;
+    const Point2Mm corner{a.x + t * u.x, a.y + t * u.y};
+    if (!std::isfinite(corner.x) || !std::isfinite(corner.y))
+        return {};
+    return std::array{s.fixed[2], corner, s.moving[2]};
+}
 bool validSingleBend(const SingleBend &m) noexcept {
     const auto size = [](double value, double minimum) {
         // Range-boundary noise after STEP measurement, in millimetres.

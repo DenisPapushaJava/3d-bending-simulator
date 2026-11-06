@@ -1,5 +1,6 @@
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/cad/occt/DocumentAccess.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -15,6 +16,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListView>
 #include <QMouseEvent>
@@ -166,8 +168,8 @@ int main(int argc, char **argv) {
             for (int y = 30; y < overview.height() - 30 && !clicked; ++y)
                 for (int x = 30; x < overview.width() - 220 && !clicked; ++x) {
                     const auto color = overview.pixelColor(x, y);
-                    if (color.red() > 200 && color.green() > 70 && color.green() < 235 &&
-                        color.blue() < 160) {
+                    if (color.red() > 200 && color.green() > 70 && color.green() < 190 &&
+                        color.blue() < 110) {
                         sendClick(QPoint(x, y) / canvas->devicePixelRatioF());
                         clicked = picked >= 0;
                     }
@@ -199,6 +201,49 @@ int main(int argc, char **argv) {
             check(dimensions->accessibleDescription().contains(QStringLiteral("B01 ·")) &&
                       c.flatPattern() == first && !c.hasWork(),
                   "List selection did not refresh the flat bend or triggered a calculation");
+            if (const auto measures = first->info().measurements;
+                measures && !measures->openings.empty()) {
+                const auto image = viewer->captureImage();
+                int minX = image.width(), maxX = 0, minY = image.height(), maxY = 0;
+                for (int y = 0; y < image.height(); ++y)
+                    for (int x = 0; x < image.width(); ++x) {
+                        const auto color = image.pixelColor(x, y);
+                        if (color.red() > 50 && color.green() > 110 &&
+                            color.green() > color.red() * 1.35 && color.blue() > color.green()) {
+                            minX = std::min(minX, x);
+                            maxX = std::max(maxX, x);
+                            minY = std::min(minY, y);
+                            maxY = std::max(maxY, y);
+                        }
+                    }
+                check(maxX > minX && maxY > minY, "Cannot locate rendered flat stock");
+                const auto &opening = measures->openings.front();
+                const auto &bounds = first->info().bounds;
+                const QPoint position(
+                    qRound(minX + opening.center.x * (maxX - minX) / bounds.maximum.x),
+                    qRound(maxY - opening.center.y * (maxY - minY) / bounds.maximum.y));
+                const auto beforeClick = c.session().editRevision();
+                std::cout << "Opening center " << opening.center.x << ',' << opening.center.y
+                          << " pixel " << position.x() << ',' << position.y() << " body " << minX
+                          << ',' << minY << ':' << maxX << ',' << maxY << '\n';
+                sendClick(position / canvas->devicePixelRatioF());
+                check(dimensions->accessibleDescription().contains(
+                          opening.circular ? QStringLiteral("Отверстие") : QStringLiteral("Вырез")),
+                      "Flat opening click did not reveal measured dimensions");
+                check(dimensions->accessibleDescription().contains(QStringLiteral("Развёртка")) &&
+                          dimensions->accessibleDescription().contains(QStringLiteral("Ширина")) &&
+                          c.session().editRevision() == beforeClick && !c.hasWork(),
+                      "Opening selection removed permanent dimensions or changed CAD/project");
+                if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT");
+                    !path.isEmpty())
+                    viewer->captureImage(true).save(path + "-opening.png");
+                QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QApplication::sendEvent(canvas, &escape);
+                check(!dimensions->accessibleDescription().contains(QStringLiteral("Отверстие")) &&
+                          !dimensions->accessibleDescription().contains(QStringLiteral("Вырез")) &&
+                          dimensions->accessibleDescription().contains(QStringLiteral("Развёртка")),
+                      "Escape did not preserve the permanent dimension layer");
+            }
             wait([&] { return !viewer->captureImage().isNull(); });
             if (const auto output = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT");
                 !output.isEmpty()) {
@@ -224,6 +269,81 @@ int main(int argc, char **argv) {
                       .contains(QStringLiteral("Неактуальная")),
                   "Stale flat accepted by viewer");
             check(viewer->endBendPreview().isEmpty(), "Return to source failed");
+            viewer->highlightFaces({}, revision);
+            if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT"); !path.isEmpty()) {
+                viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+                viewer->captureImage(true).save(path + "-source.png");
+            }
+            if (const auto nativeDoc =
+                    std::dynamic_pointer_cast<const cad::CadDocument>(c.session().document())) {
+                const auto data = cad::OcctDocumentAccess::measurements(*nativeDoc);
+                if (data && !data->openings.empty()) {
+                    viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
+                    const auto image = viewer->captureImage();
+                    int minX = image.width(), maxX = 0, minY = image.height(), maxY = 0;
+                    for (int y = 0; y < image.height(); ++y)
+                        for (int x = 0; x < image.width(); ++x) {
+                            const auto color = image.pixelColor(x, y);
+                            if (color.red() > 50 && color.green() > 110 &&
+                                color.green() > color.red() * 1.35 &&
+                                color.blue() > color.green()) {
+                                minX = std::min(minX, x);
+                                maxX = std::max(maxX, x);
+                                minY = std::min(minY, y);
+                                maxY = std::max(maxY, y);
+                            }
+                        }
+                    const auto &bounds = nativeDoc->metadata().bounds;
+                    const auto project = [&](application::PointMm p) {
+                        return QPoint(qRound(minX + (p.x - bounds.minimum.x) * (maxX - minX) /
+                                                        (bounds.maximum.x - bounds.minimum.x)),
+                                      qRound(maxY - (p.y - bounds.minimum.y) * (maxY - minY) /
+                                                        (bounds.maximum.y - bounds.minimum.y))) /
+                               canvas->devicePixelRatioF();
+                    };
+                    const auto measurementEdit = c.session().editRevision();
+                    int drawingSelections = 0;
+                    const auto connection =
+                        QObject::connect(viewer, &viewer::ViewerWidget::selectionChanged, &window,
+                                         [&](quint64, int) { ++drawingSelections; });
+                    const auto &opening = data->openings.front();
+                    const auto rim =
+                        std::find_if(data->edges.begin(), data->edges.end(), [&](const auto &edge) {
+                            return std::find(opening.edges.begin(), opening.edges.end(), edge.id) !=
+                                   opening.edges.end();
+                        });
+                    check(rim != data->edges.end(), "Source hole has no prepared rim");
+                    sendClick(project(rim->first));
+                    check(
+                        dimensions->accessibleDescription().contains(QStringLiteral("Отверстие")) &&
+                            dimensions->accessibleDescription().contains(QStringLiteral("X ")),
+                        "Source hole selection lost permanent dimensions or did not use prepared "
+                        "hole data");
+                    const auto face = std::max_element(
+                        data->faces.begin(), data->faces.end(),
+                        [](const auto &a, const auto &b) { return a.areaMm2 < b.areaMm2; });
+                    if (face != data->faces.end()) {
+                        sendClick(project(face->anchor));
+                        check(dimensions->accessibleDescription().contains(
+                                  QStringLiteral("Плоская грань")),
+                              "Source plane selection did not reveal its measured area");
+                    }
+                    const auto edge = std::max_element(
+                        data->edges.begin(), data->edges.end(),
+                        [](const auto &a, const auto &b) { return a.lengthMm < b.lengthMm; });
+                    if (edge != data->edges.end() && edge->straight) {
+                        sendClick(project({(edge->first.x + edge->second.x) / 2,
+                                           (edge->first.y + edge->second.y) / 2,
+                                           (edge->first.z + edge->second.z) / 2}));
+                        check(dimensions->accessibleDescription().contains(QStringLiteral("Ребро")),
+                              "Source edge selection did not reveal its actual length");
+                    }
+                    check(drawingSelections == 0 && c.session().editRevision() == measurementEdit &&
+                              !c.hasWork(),
+                          "Measurement picking changed drawing/project inputs or started CAD work");
+                    QObject::disconnect(connection);
+                }
+            }
             check(viewer->presentFlatPattern(first, revision).isEmpty(), "Return to flat failed");
             viewer->setDimensionsVisible(false);
             viewer->setDimensionsVisible(true);
