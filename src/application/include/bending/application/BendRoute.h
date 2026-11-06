@@ -205,6 +205,8 @@ struct RouteDraft {
     std::size_t checkedToolPositions = 0;
     std::string toolNotice;
     std::optional<BendRouteToolLengthIssue> toolLengths;
+    // Actual reuse in this request, independent of whether the geometric basis was warm.
+    bool reusedVisual = false;
 };
 using RouteDraftPtr = std::shared_ptr<const RouteDraft>;
 using RouteDraftResult = std::variant<RouteDraftPtr, BendRouteError>;

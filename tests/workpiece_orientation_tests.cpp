@@ -233,6 +233,36 @@ int main() {
             op.workpieceReversed = step.fixedSecond;
             draft.operations.push_back(op);
         }
+        const auto blank = std::get<RouteDraftPtr>(builder.buildRouteDraft(channel, draft, {}));
+        require(blank->reusedVisual && blank->visual->frameCount() == 1 &&
+                    blank->visual->unverifiedDraft() && !blank->visual->pressMotion() &&
+                    !blank->visual->punchRetraction(),
+                "Checked route did not retain its initial blank for the first reversal");
+        cad::SingleBendPreviewBuilder referenceBlank;
+        const auto rebuiltBlank =
+            std::get<RouteDraftPtr>(referenceBlank.buildRouteDraft(channel, draft, {}));
+        const auto &savedFrame = cad::OcctPreviewAccess::frame(*blank->visual, 0);
+        const auto &rebuiltFrame = cad::OcctPreviewAccess::frame(*rebuiltBlank->visual, 0);
+        same(material(savedFrame), material(rebuiltFrame));
+        for (std::size_t tool = 0; tool < 2; ++tool)
+            same(savedFrame.tools[tool], rebuiltFrame.tools[tool]);
+        require(blank->visual->collisionAtFrame(0) == rebuiltBlank->visual->collisionAtFrame(0) &&
+                    blank->visual->machineCollisionAtFrame(0).has_value() ==
+                        rebuiltBlank->visual->machineCollisionAtFrame(0).has_value(),
+                "Retained blank disagrees with the independent collision check");
+        const auto original = draft;
+        for (auto &op : draft.operations) {
+            op.assignment->punchReversed = !op.assignment->punchReversed;
+            op.tools = core::toolParameters(*op.assignment);
+        }
+        const auto flipped = std::get<RouteDraftPtr>(builder.buildRouteDraft(channel, draft, {}));
+        const auto restored =
+            std::get<RouteDraftPtr>(builder.buildRouteDraft(channel, original, {}));
+        require(restored->reusedVisual && restored->visual == blank->visual &&
+                    std::get<RouteDraftPtr>(builder.buildRouteDraft(channel, draft, {}))->visual ==
+                        flipped->visual,
+                "A-B-A-B recomputed the first blank pose");
+        draft = original;
         for (std::size_t step = 1; step <= draft.operations.size(); ++step) {
             draft.step = step;
             auto result = builder.buildRouteDraft(channel, draft, {});
@@ -244,6 +274,77 @@ int main() {
                       << " reversed=" << draft.operations[step - 1].workpieceReversed << std::endl;
             same(material(cad::OcctPreviewAccess::frame(*manual, 20)),
                  material(cad::OcctPreviewAccess::frame(*route->steps[step - 1].preview, 60)));
+        }
+        // A standalone bend is equivalent only to a route cycle whose after-state
+        // contains the complete formed source, not an intermediate prefix.
+        const auto &lastInput = draft.operations.back();
+        const auto lastCycle = preview(builder.buildAssignedToolMotion(
+            channel, lastInput.bendIndex, lastInput.target, *lastInput.assignment, {}, 0,
+            lastInput.workpieceReversed));
+        require(lastCycle == route->steps.back().preview,
+                "Standalone lookup discarded an equivalent checked route cycle");
+        cad::SingleBendPreviewBuilder lastReference;
+        const auto independentLast = preview(lastReference.buildAssignedToolMotion(
+            channel, lastInput.bendIndex, lastInput.target, *lastInput.assignment, {}, 0,
+            lastInput.workpieceReversed));
+        for (const auto frame : {0u, 30u, 60u})
+            same(material(cad::OcctPreviewAccess::frame(*lastCycle, frame)),
+                 material(cad::OcctPreviewAccess::frame(*independentLast, frame)));
+        const auto &firstInput = draft.operations.front();
+        require(preview(builder.buildAssignedToolMotion(
+                    channel, firstInput.bendIndex, firstInput.target, *firstInput.assignment, {}, 0,
+                    firstInput.workpieceReversed)) != route->steps.front().preview,
+                "Standalone request reused a different intermediate material state");
+        gp_Trsf cacheRotation;
+        cacheRotation.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .47);
+        cacheRotation.SetTranslationPart(gp_Vec(17, -29, 43));
+        const auto rotated = load(BRepBuilderAPI_Transform(shape, cacheRotation, true).Shape(),
+                                  "rotated-cache.step");
+        for (const auto &source : {doc, rotated}) {
+            cad::SingleBendPreviewBuilder cache;
+            auto assignment = tool_fixture::pair(16);
+            const auto &zone = source->metadata().bendAnalysis.bends.front();
+            BendRouteRequest routeInput;
+            routeInput.withTools = true;
+            routeInput.allowWorkpieceRotation = false;
+            routeInput.allowPartialEndSupport = true;
+            routeInput.maximumEndSupportLossMm = 3;
+            routeInput.operations.push_back({"one",
+                                             0,
+                                             {zone.angleRadians, zone.innerRadiusMm},
+                                             core::toolParameters(assignment),
+                                             assignment});
+            const auto result = cache.buildRoute(source, routeInput, {});
+            if (const auto *error = std::get_if<BendRouteError>(&result))
+                throw std::runtime_error(error->detail);
+            const auto initial = std::get<BendRoutePtr>(result)->steps.front().preview;
+            require(preview(cache.buildAssignedToolMotion(source, 0,
+                                                          routeInput.operations.front().target,
+                                                          assignment, {}, 3)) == initial,
+                    "Initial checked orientation was not retained");
+            assignment.punchReversed = true;
+            const auto opposite = preview(cache.buildAssignedToolMotion(
+                source, 0, routeInput.operations.front().target, assignment, {}, 3));
+            assignment.punchReversed = false;
+            require(preview(cache.buildAssignedToolMotion(source, 0,
+                                                          routeInput.operations.front().target,
+                                                          assignment, {}, 3)) == initial,
+                    "First A-B-A rebuilt the original cycle");
+            cad::SingleBendPreviewBuilder reference;
+            const auto standalone = preview(reference.buildAssignedToolMotion(
+                source, 0, routeInput.operations.front().target, assignment, {}, 3));
+            for (const auto frame : {0u, 30u, 60u}) {
+                const auto &actual = cad::OcctPreviewAccess::frame(*initial, frame);
+                const auto &expected = cad::OcctPreviewAccess::frame(*standalone, frame);
+                same(material(actual), material(expected));
+                for (std::size_t tool = 0; tool < 2; ++tool)
+                    same(actual.tools[tool], expected.tools[tool]);
+            }
+            assignment.punchReversed = true;
+            require(preview(cache.buildAssignedToolMotion(source, 0,
+                                                          routeInput.operations.front().target,
+                                                          assignment, {}, 3)) == opposite,
+                    "Warm B rebuilt its cycle");
         }
         BendRouteRequest exact = request;
         exact.automatic = false;

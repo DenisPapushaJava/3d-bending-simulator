@@ -178,6 +178,22 @@ int main(int argc, char **argv) {
             throw std::runtime_error("Route: " + e->detail);
         require(std::get<application::BendRoutePtr>(planned)->steps.front().preview->backgauge(),
                 "Route omitted backgauge");
+        const auto &firstStep = std::get<application::BendRoutePtr>(planned)->steps.front();
+        application::RouteDraftRequest blankRequest{route.operations, 0, true, std::nullopt};
+        blankRequest.operations.front().workpieceReversed = firstStep.fixedSecond;
+        blankRequest.operations.front().workpieceOffsetMm = firstStep.preview->workpieceOffsetMm();
+        const auto blankResult = builder->buildRouteDraft(doc, blankRequest, {});
+        require(std::holds_alternative<application::RouteDraftPtr>(blankResult),
+                "Retained flat installation unavailable");
+        const auto blank = std::get<application::RouteDraftPtr>(blankResult);
+        require(blank->reusedVisual && blank->visual->unverifiedDraft() &&
+                    blank->visual->frameCount() == 1 && blank->checkedToolPositions == 1 &&
+                    blank->visual->floorChecked() && blank->visual->backgauge() &&
+                    blank->visual->backgauge()->status == application::BackgaugeStatus::Checked &&
+                    blank->visual->backgauge()->addedRetractionPositions == 0 &&
+                    !blank->visual->pressMotion() && !blank->visual->punchRetraction(),
+                "Flat reuse lost gauging/floor or acquired a cycle certificate");
+        raisedEdge(*blank->visual);
         application::RouteDraftRequest draft{route.operations, 1, true, std::nullopt};
         const auto manual = builder->buildRouteDraft(doc, draft, {});
         require(std::holds_alternative<application::RouteDraftPtr>(manual) &&

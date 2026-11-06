@@ -4,6 +4,7 @@
 #include "FlatPatternDisplay.h"
 #include "GeometryCacheInternal.h"
 #include "JointBends.h"
+#include "RouteDraftCache.h"
 #include "RouteDraftGeometry.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
@@ -175,6 +176,14 @@ template <class Value, std::size_t Capacity> class TransitionLru {
         entries.splice(entries.begin(), entries, found->second);
         return &found->second->second;
     }
+    template <class Predicate> const Value *findMatching(Predicate predicate) {
+        for (auto it = entries.begin(); it != entries.end(); ++it)
+            if (predicate(it->first, it->second)) {
+                entries.splice(entries.begin(), entries, it);
+                return &entries.front().second;
+            }
+        return nullptr;
+    }
     void put(TransitionKey key, Value value) {
         if (const auto found = index.find(key); found != index.end()) {
             found->second->second = std::move(value);
@@ -196,7 +205,7 @@ struct CacheData {
     std::optional<double> thickness;
     FlatPatternPtr flat;
     std::shared_ptr<const RouteDraftBasis> draftBasis;
-    std::list<RouteDraftPtr> drafts;
+    RouteDraftCache drafts;
     std::map<Mask, std::shared_ptr<const State>> states;
     std::list<Mask> stateOrder;
     // Exact inputs are compared once per operation/request and shared by all its state keys.
@@ -1413,6 +1422,7 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
     if (stop.stop_requested())
         return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
     std::shared_ptr<SingleCache> cache;
+    std::shared_ptr<RouteCache> checked;
     {
         std::lock_guard guard(routeCacheMutex_);
         if (!singleCache_ || singleCache_->source != document) {
@@ -1420,6 +1430,8 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
             singleCache_->source = document;
         }
         cache = singleCache_;
+        if (routeCache_ && routeCache_->source == document)
+            checked = routeCache_;
     }
     const SingleCache::Key key{index, target,     reversed, motion,
                                tools, assignment, limit,    workpieceOffsetMm};
@@ -1433,12 +1445,47 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
             }
     }
     const auto native = std::dynamic_pointer_cast<const CadDocument>(document);
+    BendPreviewPtr reused;
+    if (motion && checked && native) {
+        const auto &analysis = OcctDocumentAccess::simulationBends(*native);
+        const auto &bends = analysis.bends;
+        // A standalone operation keeps every other source bend formed. Only a
+        // complete-source state with one active zone is equivalent; intermediate
+        // route states and grouped strokes cannot satisfy this request.
+        if (analysis.status == BendRecognitionStatus::Completed &&
+            analysis.interiorContourDiagnostics.empty() && index < bends.size() &&
+            bends.size() <= maximumSheetBends &&
+            (!checked->thickness || *checked->thickness == bends[index].thicknessMm)) {
+            const auto full = (Mask{1} << bends.size()) - 1;
+            std::lock_guard guard(checked->mutex);
+            const auto found = checked->transitions.findMatching([&](const auto &entry,
+                                                                     const auto &preview) {
+                const auto &input = *entry.inputs;
+                const auto &op = input.operation;
+                return entry.mask == full && entry.jointInputs.empty() &&
+                       entry.fixedSecond == reversed && entry.axialOffset == workpieceOffsetMm &&
+                       input.withTools && input.partialEndSupport == (!limit || *limit > 0) &&
+                       (!input.partialEndSupport || input.maximumEndSupportLossMm == limit) &&
+                       op.bendIndex == index && op.target == target && op.tools == tools &&
+                       op.assignment == assignment && preview && !preview->unverifiedDraft() &&
+                       preview->activeBendCount() == 1 &&
+                       preview->otherFormedBends() == bends.size() - 1 && preview->pressMotion() &&
+                       preview->punchRetraction() && preview->endSupportLimitMm() == limit;
+            });
+            if (found)
+                reused = *found;
+        }
+    }
+    if (stop.stop_requested())
+        return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
     const auto reference = native && index < native->metadata().bendAnalysis.bends.size()
                                ? std::optional{normalBendAxis(*native, index)}
                                : std::nullopt;
-    auto result = buildBendOperation(document, index, target, reversed, stop, tools, motion,
-                                     std::move(assignment), !limit || *limit > 0, limit, reference,
-                                     true, nullptr, {}, workpieceOffsetMm);
+    auto result = reused
+                      ? BendPreviewResult(reused)
+                      : buildBendOperation(document, index, target, reversed, stop, tools, motion,
+                                           std::move(assignment), !limit || *limit > 0, limit,
+                                           reference, true, nullptr, {}, workpieceOffsetMm);
     const auto *error = std::get_if<BendPreviewError>(&result);
     if (!stop.stop_requested() && (!error || stableRejection(error->code))) {
         std::lock_guard guard(cache->mutex);
@@ -1509,14 +1556,10 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
         }
         std::lock_guard lock(work->mutex);
         cancelled(stop);
-        for (auto it = work->drafts.begin(); it != work->drafts.end(); ++it)
-            if ((*it)->request == request) {
-                auto result = std::make_shared<RouteDraft>(**it);
-                result->reusedBasis = true;
-                work->drafts.splice(work->drafts.begin(), work->drafts, it);
-                cancelled(stop);
-                return RouteDraftPtr(result);
-            }
+        if (const auto result = work->drafts.find(document, request)) {
+            cancelled(stop);
+            return result;
+        }
         if (!work->flat) {
             const auto result = FlatPatternBuilder().build(
                 document, {{core::SheetMaterial::Unknown, .5, 1}, request.manualThicknessMm}, stop);
@@ -1533,9 +1576,7 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
             work->draftBasis = std::make_shared<RouteDraftBasis>(document, work->flat, stop);
         const auto result = work->draftBasis->build(std::move(request), reused, stop);
         cancelled(stop);
-        work->drafts.push_front(result);
-        while (work->drafts.size() > 4)
-            work->drafts.pop_back();
+        work->drafts.remember(result);
         return result;
     } catch (const BendRouteError &e) {
         return e;
@@ -1969,6 +2010,22 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             for (std::size_t i = 0; i < result->steps.size(); ++i)
                 search.remember(search.reversedKeys[result->steps.size() - 1 - i],
                                 result->steps[i].preview);
+            const auto &first = result->steps.front();
+            if (first.additionalBends.empty()) {
+                const auto input =
+                    std::find_if(search.request.operations.begin(), search.request.operations.end(),
+                                 [&](const auto &op) { return op.bendIndex == first.bendIndex; });
+                check(input != search.request.operations.end(), "Missing first route input");
+                auto active = *input;
+                if (first.assemblyAssignment) {
+                    active.assignment = *first.assemblyAssignment;
+                    active.tools = core::toolParameters(*active.assignment);
+                }
+                active.workpieceReversed = first.fixedSecond;
+                active.workpieceOffsetMm = first.preview->workpieceOffsetMm();
+                cancelled(stop);
+                work->drafts.rememberBlank(document, std::move(active), first.preview);
+            }
         }
         result->partialEndSupport =
             std::any_of(result->steps.begin(), result->steps.end(),
