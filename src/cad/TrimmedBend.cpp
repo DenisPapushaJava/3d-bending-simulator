@@ -11,6 +11,7 @@
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeCircle.hxx>
 #include <Geom2dAPI_Interpolate.hxx>
@@ -134,6 +135,8 @@ TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pn
                 gp_Ax3(center, axis, gp_Dir(gp_Vec(center, first))), circle.Value()->Radius());
         }
         BRepBuilderAPI_MakeWire wire;
+        std::vector<std::array<TopoDS_Edge, 2>> boundaryEdges;
+        bool joined = true;
         for (BRepTools_WireExplorer e(BRepTools::OuterWire(face), face); e.More(); e.Next()) {
             const auto edge = e.Current();
             double firstParameter, lastParameter;
@@ -178,9 +181,32 @@ TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pn
             mapped[static_cast<std::size_t>(edges.FindIndex(edge))] = result;
             if (edge.Orientation() == TopAbs_REVERSED)
                 result.Reverse();
+            boundaryEdges.push_back({edge, result});
             wire.Add(result);
+            joined &= wire.IsDone();
         }
-        require(wire.IsDone(), "Cannot close a mapped trimmed bend boundary");
+        if (!joined) {
+            // Preserve the old successful wire. Independent pcurves of a
+            // tolerance-bearing BRep need not meet at 1e-7 mm; only retry a
+            // failed wire with the source uncertainty on NEW vertices.
+            const auto endpoint = [&](const TopoDS_Vertex &original, const TopoDS_Vertex &derived) {
+                const double uncertainty =
+                    std::max(BRep_Tool::Tolerance(original), BRep_Tool::Tolerance(derived));
+                require(std::isfinite(uncertainty) && uncertainty <= tolerance,
+                        "Mapped bend vertex uncertainty exceeds the comparison tolerance");
+                if (uncertainty > BRep_Tool::Tolerance(derived))
+                    BRep_Builder{}.UpdateVertex(derived, uncertainty);
+            };
+            wire = BRepBuilderAPI_MakeWire{};
+            joined = true;
+            for (const auto &[original, derived] : boundaryEdges) {
+                endpoint(TopExp::FirstVertex(original, true), TopExp::FirstVertex(derived, true));
+                endpoint(TopExp::LastVertex(original, true), TopExp::LastVertex(derived, true));
+                wire.Add(derived);
+                joined &= wire.IsDone();
+            }
+        }
+        require(joined && wire.IsDone(), "Cannot close a mapped trimmed bend boundary");
         auto result = BRepBuilderAPI_MakeFace(target, wire.Wire(), true).Face();
         result.Orientation(face.Orientation());
         if (inner && face.IsSame(source[0]))

@@ -1,4 +1,5 @@
 #include "bending/cad/FlatPatternBuilder.h"
+#include "BendSectorOwnership.h"
 #include "FlatPatternDisplay.h"
 #include "FlatWallRegions.h"
 #include "ModelMeasurements.h"
@@ -364,6 +365,7 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         std::vector<FlatDisplayRegion> regions;
         std::vector<std::size_t> wallRegions;
         bool nonRadialEnds = false;
+        bool partitionedSectors = false;
         for (std::size_t wi = 0; wi < pending.size(); ++wi) {
             cancelled(stop);
             const auto w = pending[wi];
@@ -456,10 +458,22 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                                               k,
                                               *ba});
                 const auto fullSector = bendSolid(b, faces, tolerance);
-                const auto sector =
-                    b.trimmedEnds ? boolean<BRepAlgoAPI_Common>(fullSector, source, tolerance, stop)
+                auto sector = b.trimmedEnds
+                                  ? boolean<BRepAlgoAPI_Common>(fullSector, source, tolerance, stop)
                                   : fullSector;
                 if (b.trimmedEnds) {
+                    TopTools_IndexedMapOfShape components;
+                    TopExp::MapShapes(sector, TopAbs_SOLID, components);
+                    if (components.Extent() > 1) {
+                        const auto owned = ownedBendSector(
+                            source, fullSector,
+                            {face(faces, b.innerFace), face(faces, b.outerFace)}, tolerance, stop);
+                        cancelled(stop);
+                        require(owned.has_value(),
+                                "Cannot assign both complete bend skins to one sector");
+                        sector = *owned;
+                        partitionedSectors = true;
+                    }
                     bool nonRadial = false;
                     const auto radial = mapTrimmedBend(
                         sector, [](gp_Pnt p) { return p; }, 1, tolerance, nullptr, stop,
@@ -558,6 +572,28 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         std::sort(result->data.bends.begin(), result->data.bends.end(),
                   [](const auto &a, const auto &b) { return a.bendIndex < b.bendIndex; });
         const double budget = std::max(1e-4, volume(source) * 1e-7);
+        if (partitionedSectors) {
+            // An envelope can also contain a neighbour's material. Every
+            // chosen sector owns full real skins; sectors may not own the
+            // same volume. Walls are proved separately below.
+            std::vector<Bnd_Box> sectorBoxes(result->layout.bends.size());
+            for (std::size_t i = 0; i < sectorBoxes.size(); ++i) {
+                BRepBndLib::AddOptimal(result->layout.bends[i].solid, sectorBoxes[i], false, false);
+                require(!sectorBoxes[i].IsVoid() && !sectorBoxes[i].IsOpen(),
+                        "Invalid bend sector bounds");
+                sectorBoxes[i].Enlarge(tolerance);
+            }
+            for (std::size_t i = 0; i < result->layout.bends.size(); ++i)
+                for (std::size_t j = 0; j < i; ++j) {
+                    cancelled(stop);
+                    if (sectorBoxes[i].IsOut(sectorBoxes[j]))
+                        continue;
+                    const auto overlap = boolean<BRepAlgoAPI_Common>(
+                        result->layout.bends[i].solid, result->layout.bends[j].solid, tolerance,
+                        stop, "Bend sector ownership intersection failed");
+                    require(volume(overlap) <= budget, "Bend sectors share material");
+                }
+        }
         TopoDS_Shape reconstruction = original;
         const auto reconstructs = [&](bool allowEmptyDifference = false) {
             const double actualVolume = volume(reconstruction), sourceVolume = volume(source);
@@ -584,7 +620,7 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             return empty(missing) && empty(excess);
         };
         bool complete = reconstructs();
-        if (!complete && nonRadialEnds) {
+        if ((!complete && nonRadialEnds) || partitionedSectors) {
             // An oblique cut may also bevel a rigid wall through its thickness.
             // Replace failed prism approximations by complete, owned source
             // components. Both original-solid differences still follow.
