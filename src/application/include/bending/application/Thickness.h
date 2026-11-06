@@ -16,6 +16,8 @@ struct ThicknessEvidence {
 struct ThicknessAnalysis {
     ThicknessStatus status = ThicknessStatus::Unsupported;
     std::optional<double> thicknessMm;
+    // Conservative bound of the published local measurements. CAD containment
+    // and full-body reconstruction keep their separate topology tolerance.
     double toleranceMm = 1.0e-6;
     std::vector<ThicknessEvidence> evidence;
 };

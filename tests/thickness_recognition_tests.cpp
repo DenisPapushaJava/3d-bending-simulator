@@ -1,12 +1,20 @@
 #include "BendFixtures.h"
+#include "BendRecognizer.h"
+#include "ThicknessRecognizer.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <STEPControl_Writer.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -67,6 +75,109 @@ TopoDS_Shape facetedPlate(unsigned sides) {
     wire.Close();
     return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, 2)).Shape();
 }
+TopoDS_Shape withEdgeTolerance(const TopoDS_Shape &source, double tolerance) {
+    auto copy = BRepBuilderAPI_Copy(source, true, false).Shape();
+    TopExp_Explorer edge(copy, TopAbs_EDGE);
+    check(edge.More(), "Missing tolerance fixture edge");
+    BRep_Builder{}.UpdateEdge(TopoDS::Edge(edge.Current()), tolerance);
+    check(BRepCheck_Analyzer(copy).IsValid(), "Invalid elevated-tolerance fixture");
+    return copy;
+}
+void localToleranceChecks() {
+    constexpr double edgeTolerance = .003;
+    const auto original = fixtures::bentStrip();
+    const auto raised = withEdgeTolerance(original, edgeTolerance);
+    const auto bends = cad::recognizeBends(raised, edgeTolerance, {});
+    check(bends.status == BendRecognitionStatus::Completed && bends.bends.size() == 1,
+          "Elevated edge tolerance lost the fixture bend");
+    const auto checkProposal = [&](const TopoDS_Shape &shape, const BendAnalysis *zones) {
+        const auto analysis = cad::recognizeThickness(shape, edgeTolerance, {}, zones);
+        const auto value = suggestThickness(analysis);
+        check(value && std::abs(*value - 2) < 1e-5 &&
+                  analysis.status == ThicknessStatus::Unsupported && !analysis.thicknessMm &&
+                  analysis.toleranceMm < 1e-5,
+              "A remote edge tolerance suppressed or certified a precise local thickness");
+        return analysis;
+    };
+    checkProposal(raised, nullptr);
+    const auto measured = checkProposal(raised, &bends);
+    check(
+        std::any_of(measured.evidence.begin(), measured.evidence.end(),
+                    [](const auto &pair) { return pair.kind == ThicknessEvidenceKind::BendRadii; }),
+        "Lost locally precise bend-radius evidence");
+    gp_Trsf rotate;
+    rotate.SetRotation(gp_Ax1(gp_Pnt(30, -20, 10), gp_Dir(1, 2, 3)), .73);
+    checkProposal(BRepBuilderAPI_Transform(raised, rotate, true).Shape(), nullptr);
+    checkProposal(withEdgeTolerance(BRepPrimAPI_MakeBox(100, 60, 2).Shape(), edgeTolerance),
+                  nullptr);
+    for (TopExp_Explorer edge(original, TopAbs_EDGE); edge.More(); edge.Next())
+        check(BRep_Tool::Tolerance(TopoDS::Edge(edge.Current())) < edgeTolerance,
+              "A tolerance probe mutated its source");
+
+    // The 0.01 mm pocket is below the global comparison tolerance (0.03 mm),
+    // but above the uncertainty of the actual analytic wall measurements.
+    const auto plate = BRepPrimAPI_MakeBox(100, 60, 2).Shape();
+    const auto pocket = BRepPrimAPI_MakeBox(gp_Pnt(10, 10, 1.99), 20, 20, 3).Shape();
+    const auto variable = withEdgeTolerance(BRepAlgoAPI_Cut(plate, pocket).Shape(), edgeTolerance);
+    const auto conflict = cad::recognizeThickness(variable, edgeTolerance, {});
+    check(conflict.status == ThicknessStatus::Ambiguous && !suggestThickness(conflict),
+          "Global topology tolerance hid a real wall-thickness difference");
+
+    auto mixed = BRepAlgoAPI_Cut(BRepBuilderAPI_Copy(original, true, false).Shape(),
+                                 BRepPrimAPI_MakeBox(gp_Pnt(5.9995, -25, 10), 2, 10, 20).Shape())
+                     .Shape();
+    for (TopExp_Explorer face(mixed, TopAbs_FACE); face.More(); face.Next()) {
+        const auto plane = TopoDS::Face(face.Current());
+        BRepAdaptor_Surface surface(plane);
+        if (surface.GetType() == GeomAbs_Plane &&
+            std::abs(surface.Plane().Axis().Direction().Y()) > .9)
+            BRep_Builder{}.UpdateFace(plane, .0001);
+    }
+    mixed = withEdgeTolerance(mixed, edgeTolerance);
+    const auto mixedConflict = cad::recognizeThickness(mixed, edgeTolerance, {});
+    check(mixedConflict.status == ThicknessStatus::Ambiguous && !suggestThickness(mixedConflict),
+          "An unrelated imprecise face hid a conflict between precise wall measurements");
+
+    // The global interior probe lies in a second wall behind a narrow air gap.
+    // A ray must still see the earlier exit from the original thin wall.
+    BRepBuilderAPI_MakePolygon profile;
+    for (const auto &p :
+         {gp_Pnt(0, 0, 0), gp_Pnt(100, 0, 0), gp_Pnt(100, 0, .1), gp_Pnt(5, 0, .1),
+          gp_Pnt(5, 0, .2), gp_Pnt(100, 0, .2), gp_Pnt(100, 0, .7), gp_Pnt(0, 0, .7)})
+        profile.Add(p);
+    profile.Close();
+    const auto folded = withEdgeTolerance(
+        BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(profile.Wire()), gp_Vec(0, 60, 0)).Shape(),
+        edgeTolerance);
+    const auto separated = cad::recognizeThickness(folded, edgeTolerance, {});
+    check(!separated.evidence.empty() && separated.status != ThicknessStatus::Detected &&
+              std::all_of(separated.evidence.begin(), separated.evidence.end(),
+                          [](const auto &e) { return e.distanceMm <= .5 + 1e-5; }),
+          "A high-tolerance interior probe measured across an earlier air gap");
+
+    // An imprecise surface cannot supply a precise thickness merely because
+    // the recorded analytic radii happen to differ by 2 mm.
+    auto uncertain = BRepBuilderAPI_Copy(original, true, false).Shape();
+    for (TopExp_Explorer face(uncertain, TopAbs_FACE); face.More(); face.Next())
+        BRep_Builder{}.UpdateFace(TopoDS::Face(face.Current()), edgeTolerance);
+    const auto unresolved = cad::recognizeThickness(uncertain, edgeTolerance, {}, &bends);
+    check(unresolved.status == ThicknessStatus::Unsupported && !suggestThickness(unresolved),
+          "Unresolved surfaces became a thickness or an inconsistent-evidence failure");
+    auto corrupt = bends;
+    corrupt.bends.front().thicknessMm += .2;
+    check(cad::recognizeThickness(raised, edgeTolerance, {}, &corrupt).status ==
+              ThicknessStatus::Failed,
+          "A genuinely inconsistent bend measurement was silently skipped");
+    corrupt.bends.front().innerFace = 0;
+    check(cad::recognizeThickness(raised, edgeTolerance, {}, &corrupt).status ==
+              ThicknessStatus::Failed,
+          "Invalid bend face references were silently skipped");
+    std::stop_source cancel;
+    cancel.request_stop();
+    check(!suggestThickness(
+              cad::recognizeThickness(raised, edgeTolerance, cancel.get_token(), &bends)),
+          "Cancelled thickness analysis supplied a proposal");
+}
 } // namespace
 int main(int argc, char **argv) {
     const auto folder =
@@ -79,6 +190,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         std::filesystem::create_directories(folder);
+        localToleranceChecks();
         const auto import = [&](const char *name, const TopoDS_Shape &shape) {
             check(BRepCheck_Analyzer(shape).IsValid(), "Invalid fixture");
             const auto path = folder / name;
