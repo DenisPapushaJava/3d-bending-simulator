@@ -1520,8 +1520,16 @@ void flatDrawing(const QString &folder) {
             profiled->flatPattern->view.paths.size() >= 4 &&
             ui::DrawingSheet::writePdf(folder + "/unfold-profiled.pdf", *profiled, {}).isEmpty(),
         "Countersink rims or hole are missing from the flat drawing/PDF");
-    const auto unsupported =
+    const auto trimmed =
         build(load(fixtures::cornerTrimmedBend(), folder + "/unfold-trimmed.step"), request);
+    require(trimmed->flatPattern && !trimmed->flatPatternError && !trimmed->views[0].paths.empty(),
+            "Supported oblique blank is missing from the drawing");
+    const auto unsupported =
+        build(load(BRepAlgoAPI_Fuse(fixtures::bentStrip(),
+                                    BRepPrimAPI_MakeBox(gp_Pnt(5.5, -20, 30), 2, 5, 5))
+                       .Shape(),
+                   folder + "/unfold-boss.step"),
+              request);
     require(!unsupported->flatPattern && unsupported->flatPatternError &&
                 !unsupported->views[0].paths.empty(),
             "Unsupported blank replaced the valid drawing");

@@ -973,6 +973,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
         auto finalFrame = makeFrame(model, basis, 1.0);
         std::vector<std::pair<double, double>> supportIntervals;
         std::vector<TopoDS_Shape> jointSectors;
+        bool nonRadialEnds = false;
         if (joint) {
             std::vector<TopoDS_Shape> sectors;
             for (const auto &zone : jointZones) {
@@ -990,11 +991,13 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                     extractFlange(source, envelope.regions[1], analysis.lengthToleranceMm);
                 if (!region)
                     return unsupported("Cannot isolate each joint bend sector");
+                bool nonRadial = false;
                 const auto radial = zone.trimmedEnds
                                         ? mapTrimmedBend(
                                               *region, [](gp_Pnt p) { return p; }, 1,
-                                              analysis.lengthToleranceMm, nullptr, stop)
+                                              analysis.lengthToleranceMm, nullptr, stop, &nonRadial)
                                         : envelope.regions[1];
+                nonRadialEnds |= nonRadial;
                 if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
                                 std::max(1e-4, volume(source) * 1e-7), stop))
                     return unsupported("A joint sector is not a supported radial surface");
@@ -1010,7 +1013,8 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                 return unsupported("Cannot isolate the trimmed bend region");
             finalFrame.regions[1] = *region;
             const auto radial = mapTrimmedBend(
-                *region, [](gp_Pnt p) { return p; }, 1, analysis.lengthToleranceMm, nullptr, stop);
+                *region, [](gp_Pnt p) { return p; }, 1, analysis.lengthToleranceMm, nullptr, stop,
+                &nonRadialEnds);
             if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
                             std::max(1e-4, volume(source) * 1e-7), stop))
                 return unsupported("The trimmed end is not a supported radial ruled surface");
@@ -1359,7 +1363,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
              centralBasis = basis, model, sourceBasis, sourceSection, flanges, bend, multi, joint,
              jointZones = std::move(jointZones), jointSectors = std::move(jointSectors),
              supportIntervals = std::move(supportIntervals), sourceSector, expectedVolume, budget,
-             collisionBudget, rigidVolume, toolParameters, withMotion, toolGeometry,
+             collisionBudget, rigidVolume, toolParameters, withMotion, toolGeometry, nonRadialEnds,
              realTools = std::move(realTools), machine = std::move(machine), initialTools,
              initialSegments = std::move(initialSegments), flangeSides, innerSide, referenceFlange,
              displaySource, displaySides, skin = std::move(skin), requestedReversed, tolerance](
@@ -1510,6 +1514,11 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                                   : volume(frame.shape);
                 if (!std::isfinite(materialVolume) ||
                     std::abs(materialVolume - expectedVolume) > budget) {
+                    if (nonRadialEnds && std::isfinite(materialVolume))
+                        return BendPreviewError{
+                            BendPreviewErrorCode::UnsupportedGeometry,
+                            "The current bend kinematics do not preserve the volume of a "
+                            "thickness-dependent end contour"};
                     return BendPreviewError{BendPreviewErrorCode::Failed,
                                             "Intermediate state changed material volume"};
                 }

@@ -2,6 +2,8 @@ add_library(bending_cad STATIC Kernel.cpp CadDocument.cpp StepImporter.cpp Thick
 add_library(Bending::Cad ALIAS bending_cad)
 target_sources(bending_cad PRIVATE Backgauge.cpp ModelMeasurements.cpp)
 target_sources(bending_cad PRIVATE RouteDraftCache.cpp)
+target_sources(bending_cad PRIVATE ObliqueBendEnd.cpp)
+target_sources(bending_cad PRIVATE FlatWallRegions.cpp)
 target_sources(bending_cad PRIVATE JointBends.cpp)
 target_sources(bending_cad PRIVATE ToolGeometryCache.cpp CollisionHighlight.cpp CollisionStrip.cpp TrimmedBend.cpp FloorGeometry.cpp DrawingRepeats.cpp SheetOrientation.cpp)
 file(SHA256 "${PROJECT_SOURCE_DIR}/vcpkg.json" bending_geometry_sdk_revision)

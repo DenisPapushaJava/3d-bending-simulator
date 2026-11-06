@@ -400,7 +400,15 @@ void test(const std::filesystem::path &path) {
     };
     const auto channel = load(fixtures::channel(), path);
     check(preview(channel, false), modelVolume(channel));
-    reject(load(fixtures::trimmedBend(), path));
+    const auto trimmed = load(fixtures::trimmedBend(), path);
+    for (bool side : {false, true}) {
+        const auto result =
+            cad::SingleBendPreviewBuilder{}.build(trimmed, 0, {std::numbers::pi / 2, 4}, side, {});
+        const auto *error = std::get_if<application::BendPreviewError>(&result);
+        require(error && error->code == application::BendPreviewErrorCode::UnsupportedGeometry &&
+                    error->detail.find("volume") != std::string::npos,
+                "Volume-changing oblique kinematics were published as a checked cycle");
+    }
     for (const auto &shape :
          {fixtures::bendWithZoneOpening(), fixtures::bendWithZoneOpening(false)}) {
         const auto interrupted = load(shape, path);

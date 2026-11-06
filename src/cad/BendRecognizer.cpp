@@ -316,8 +316,7 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     if (inner.outward || !outer.outward || thickness <= 20.0 * tolerance ||
         !parallel(inner.cylinder.Axis().Direction(), outer.cylinder.Axis().Direction()) ||
         gp_Lin(inner.cylinder.Axis()).Distance(outer.cylinder.Location()) > tolerance ||
-        std::abs(inner.angle - outer.angle) > angularTolerance ||
-        std::abs(inner.length - outer.length) > tolerance || inner.caps != outer.caps ||
+        std::abs(inner.angle - outer.angle) > angularTolerance || inner.caps != outer.caps ||
         !inner.middleRadial.IsEqual(outer.middleRadial, angularTolerance)) {
         return {};
     }
@@ -335,7 +334,10 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     const auto outerCore = coreInterval(outer);
     const double straightLength =
         std::min(innerCore[1], outerCore[1]) - std::max(innerCore[0], outerCore[0]);
-    if ((!sameEnds && !reversedEnds) || straightLength <= 20.0 * tolerance) {
+    const bool sameSpan =
+        (sameEnds || reversedEnds) && std::abs(inner.length - outer.length) <= tolerance;
+    if ((!sameSpan && !inner.trimmedEnds && !outer.trimmedEnds) ||
+        straightLength <= 20.0 * tolerance) {
         return {};
     }
     std::array<std::size_t, 4> flanges{};
@@ -356,6 +358,15 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     // Canonical axis direction independent of the surface parametrisation.
     auto start = inner.start;
     auto end = inner.end;
+    if (!sameSpan) {
+        // A shared oblique cap can reach different axial coordinates at the
+        // two radii. Keep the full occupied span, not just the inner skin.
+        const double outerA = gp_Vec(inner.start, outer.start).Dot(axis);
+        const double outerB = gp_Vec(inner.start, outer.end).Dot(axis);
+        start = inner.start.Translated(axis * std::min({0., outerA, outerB}));
+        end = inner.start.Translated(axis * std::max({inner.length, outerA, outerB}));
+    }
+    const double fullLength = sameSpan ? inner.length : start.Distance(end);
     const gp_Vec direction(start, end);
     const std::array<double, 3> components{direction.X(), direction.Y(), direction.Z()};
     for (const auto value : components) {
@@ -368,7 +379,7 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     }
     return RecognizedBend{point(start),  point(end),
                           inner.angle,   inner.cylinder.Radius(),
-                          thickness,     inner.length,
+                          thickness,     fullLength,
                           inner.face,    outer.face,
                           flanges,       inner.trimmedEnds || outer.trimmedEnds,
                           straightLength};

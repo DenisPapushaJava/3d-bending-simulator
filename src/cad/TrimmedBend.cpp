@@ -1,4 +1,5 @@
 #include "TrimmedBend.h"
+#include "ObliqueBendEnd.h"
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -98,7 +99,9 @@ std::array<TopoDS_Face, 2> cylinders(const TopoDS_Shape &solid) {
 } // namespace
 TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pnt(gp_Pnt)> &map,
                             double scale, double tolerance, TopoDS_Face *inner,
-                            std::stop_token stop) {
+                            std::stop_token stop, bool *nonRadialEnd) {
+    if (nonRadialEnd)
+        *nonRadialEnd = false;
     const auto source = cylinders(solid);
     TopTools_IndexedMapOfShape edges;
     TopExp::MapShapes(solid, TopAbs_EDGE, edges);
@@ -194,20 +197,31 @@ TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pn
             if (!mapped[static_cast<std::size_t>(i)].IsNull())
                 boundary.push_back(i);
         }
-        require(boundary.size() == 2, "A trimmed end is not bounded by one radial edge pair");
+        if (boundary.size() != 2) {
+            if (nonRadialEnd)
+                *nonRadialEnd = true;
+            sewing.Add(mapObliqueBendEnd(TopoDS::Face(f.Current()), edges, mapped, source, map,
+                                         tolerance, stop));
+            continue;
+        }
         const auto &firstCurve = angularEdges[static_cast<std::size_t>(boundary[0])];
         const auto &secondCurve = angularEdges[static_cast<std::size_t>(boundary[1])];
         if (!firstCurve.IsNull() && !secondCurve.IsNull()) {
-            require(std::abs(firstCurve->FirstParameter() - secondCurve->FirstParameter()) < 1e-5 &&
-                        std::abs(firstCurve->LastParameter() - secondCurve->LastParameter()) < 1e-5,
-                    "The radial bend-end boundaries do not share an angular interval");
-            for (int i = 0; i <= 32; ++i) {
+            if (std::abs(firstCurve->FirstParameter() - secondCurve->FirstParameter()) >= 1e-5 ||
+                std::abs(firstCurve->LastParameter() - secondCurve->LastParameter()) >= 1e-5) {
+                if (nonRadialEnd)
+                    *nonRadialEnd = true;
+                sewing.Add(mapObliqueBendEnd(TopoDS::Face(f.Current()), edges, mapped, source, map,
+                                             tolerance, stop));
+                continue;
+            }
+            for (int sample = 0; sample <= 32; ++sample) {
                 const double u =
                     firstCurve->FirstParameter() +
-                    (firstCurve->LastParameter() - firstCurve->FirstParameter()) * i / 32;
-                require(std::abs(firstCurve->Value(u).Y() - secondCurve->Value(u).Y()) <=
-                            tolerance / 10,
-                        "Thickness-dependent bend-end contours are not supported");
+                    (firstCurve->LastParameter() - firstCurve->FirstParameter()) * sample / 32;
+                if (nonRadialEnd &&
+                    std::abs(firstCurve->Value(u).Y() - secondCurve->Value(u).Y()) > tolerance / 10)
+                    *nonRadialEnd = true;
             }
         }
         auto a = mapped[static_cast<std::size_t>(boundary[0])];

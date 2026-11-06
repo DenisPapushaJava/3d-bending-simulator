@@ -1,5 +1,6 @@
 #include "bending/cad/FlatPatternBuilder.h"
 #include "FlatPatternDisplay.h"
+#include "FlatWallRegions.h"
 #include "ModelMeasurements.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
@@ -35,6 +36,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -169,12 +171,28 @@ TopoDS_Shape bendSolid(const RecognizedBend &b, const TopTools_IndexedMapOfShape
     require(s.GetType() == GeomAbs_Cylinder, "Only cylindrical bends are supported");
     double u0, u1, v0, v1;
     BRepTools::UVBounds(f, u0, u1, v0, v1);
+    const auto cylinder = s.Cylinder();
+    if (b.trimmedEnds) {
+        const gp_Vec axis(cylinder.Axis().Direction());
+        const auto at = [&](gp_Pnt p) { return gp_Vec(cylinder.Location(), p).Dot(axis); };
+        const double first = at(point(b.axisStart)), last = at(point(b.axisEnd));
+        const double minimum = std::min(first, last), maximum = std::max(first, last);
+        BRepAdaptor_Surface outer(face(faces, b.outerFace));
+        double a0, a1, z0, z1;
+        BRepTools::UVBounds(face(faces, b.outerFace), a0, a1, z0, z1);
+        const double outerFirst = at(outer.Value(a0, z0)), outerLast = at(outer.Value(a0, z1));
+        require(v0 >= minimum - tolerance * 20 && v1 <= maximum + tolerance * 20 &&
+                    std::min(outerFirst, outerLast) >= minimum - tolerance * 20 &&
+                    std::max(outerFirst, outerLast) <= maximum + tolerance * 20,
+                "A trimmed cylinder is outside its complete axial span");
+        v0 = minimum;
+        v1 = maximum;
+    }
     require(std::abs((u1 - u0) - b.angleRadians) < 1e-6 &&
                 std::abs((v1 - v0) - b.lengthMm) < tolerance * 20 &&
                 (b.trimmedEnds || std::abs(area(f) - b.innerRadiusMm * (u1 - u0) * (v1 - v0)) <
                                       std::max(1e-5, area(f) * 1e-7)),
             "A bend has openings, cut edges or an incomplete cylindrical surface");
-    const auto cylinder = s.Cylinder();
     const auto p = [&](double u, double offset) {
         auto inner = s.Value(u, v0);
         // Projection onto the axial line, not onto its normal plane.
@@ -344,6 +362,8 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         builder.MakeCompound(original);
         std::vector<TopoDS_Shape> patches;
         std::vector<FlatDisplayRegion> regions;
+        std::vector<std::size_t> wallRegions;
+        bool nonRadialEnds = false;
         for (std::size_t wi = 0; wi < pending.size(); ++wi) {
             cancelled(stop);
             const auto w = pending[wi];
@@ -362,6 +382,7 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
             const auto wallMap = [placement, zShift](gp_Pnt p) {
                 return p.Transformed(placement.map).Translated(gp_Vec(0, 0, zShift));
             };
+            wallRegions.push_back(regions.size());
             regions.push_back({wallSolid, wallMap});
             gp_Trsf wallToFlat = placement.map;
             gp_Trsf thicknessShift;
@@ -439,8 +460,11 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
                     b.trimmedEnds ? boolean<BRepAlgoAPI_Common>(fullSector, source, tolerance, stop)
                                   : fullSector;
                 if (b.trimmedEnds) {
+                    bool nonRadial = false;
                     const auto radial = mapTrimmedBend(
-                        sector, [](gp_Pnt p) { return p; }, 1, tolerance, nullptr, stop);
+                        sector, [](gp_Pnt p) { return p; }, 1, tolerance, nullptr, stop,
+                        &nonRadial);
+                    nonRadialEnds |= nonRadial;
                     const double budget = std::max(1e-4, volume(source) * 1e-7);
                     const double missing =
                         volume(boolean<BRepAlgoAPI_Cut>(sector, radial, tolerance, stop));
@@ -534,13 +558,64 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         std::sort(result->data.bends.begin(), result->data.bends.end(),
                   [](const auto &a, const auto &b) { return a.bendIndex < b.bendIndex; });
         const double budget = std::max(1e-4, volume(source) * 1e-7);
-        require(std::abs(volume(original) - volume(source)) <= budget,
-                "The recognized walls and bends do not reconstruct the complete original solid");
-        require(volume(boolean<BRepAlgoAPI_Cut>(source, original, tolerance, stop,
-                                                "Source coverage cut failed")) <= budget &&
-                    volume(boolean<BRepAlgoAPI_Cut>(original, source, tolerance, stop,
-                                                    "Reverse source coverage cut failed")) <=
-                        budget,
+        TopoDS_Shape reconstruction = original;
+        const auto reconstructs = [&](bool allowEmptyDifference = false) {
+            const double actualVolume = volume(reconstruction), sourceVolume = volume(source);
+            if (!std::isfinite(actualVolume) || !std::isfinite(sourceVolume) || actualVolume <= 0 ||
+                sourceVolume <= 0)
+                return false;
+            const bool equalVolume = std::abs(actualVolume - sourceVolume) <= budget;
+            if (!equalVolume && !allowEmptyDifference)
+                return false;
+            const auto missing = boolean<BRepAlgoAPI_Cut>(source, reconstruction, tolerance, stop,
+                                                          "Source coverage cut failed");
+            if (equalVolume && volume(missing) > budget)
+                return false;
+            const auto excess = boolean<BRepAlgoAPI_Cut>(reconstruction, source, tolerance, stop,
+                                                         "Reverse source coverage cut failed");
+            if (equalVolume)
+                return volume(excess) <= budget;
+            // A tolerance-bearing BRep can integrate differently after an
+            // exact partition. Only EMPTY topology in BOTH directions may
+            // resolve that numerical mismatch; no larger volume budget.
+            const auto empty = [](const TopoDS_Shape &shape) {
+                return shape.ShapeType() == TopAbs_COMPOUND && !TopoDS_Iterator(shape).More();
+            };
+            return empty(missing) && empty(excess);
+        };
+        bool complete = reconstructs();
+        if (!complete && nonRadialEnds) {
+            // An oblique cut may also bevel a rigid wall through its thickness.
+            // Replace failed prism approximations by complete, owned source
+            // components. Both original-solid differences still follow.
+            std::vector<TopoDS_Shape> sectors;
+            for (const auto &region : result->layout.bends)
+                sectors.push_back(region.solid);
+            std::vector<std::array<TopoDS_Face, 2>> anchors;
+            for (const auto &region : result->layout.walls)
+                anchors.push_back({face(faces, region.faces[0]), face(faces, region.faces[1])});
+            const auto actual = isolateFlatWalls(source, sectors, anchors, tolerance, stop);
+            cancelled(stop);
+            require(actual && actual->size() == result->layout.walls.size(),
+                    "Cannot isolate all complete planar walls after removing bend sectors");
+            TopoDS_Compound remainder;
+            builder.MakeCompound(remainder);
+            for (std::size_t i = 0; i < actual->size(); ++i) {
+                result->layout.walls[i].solid = (*actual)[i];
+                regions[wallRegions[i]].solid = (*actual)[i];
+                if (i > 0)
+                    builder.Add(remainder, (*actual)[i]);
+            }
+            for (const auto &sector : sectors)
+                builder.Add(remainder, sector);
+            // Source tolerances can leave coincident boundary fragments in
+            // independent pieces. Compare their real union with the source;
+            // never add the same material twice via compound volume sums.
+            reconstruction = boolean<BRepAlgoAPI_Fuse>((*actual)[0], remainder, tolerance, stop,
+                                                       "Wall/bend reconstruction union failed");
+            complete = reconstructs(true);
+        }
+        require(complete,
                 "The recognized walls and bends do not reconstruct the complete original solid");
         for (auto &p : patches) {
             auto f = TopoDS::Face(p);
