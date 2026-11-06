@@ -46,6 +46,8 @@ class ViewerWidget final : public QWidget {
     void fitAll();
     void setCutoutsVisible(bool visible);
     void setDimensionsVisible(bool visible);
+    // Presentation hint only: animation keeps the active angle and hides detailed dimensions.
+    void setAnimationRunning(bool running);
     [[nodiscard]] bool dimensionsVisible() const;
     void setOrientation(Orientation orientation);
     // Empty result means accepted. Geometry is prepared by the importer before publication.
@@ -70,6 +72,8 @@ class ViewerWidget final : public QWidget {
   signals:
     void renderingChanged(bool ready);
     void selectionChanged(quint64 documentRevision, int faceIndex);
+    // Source bend index on the flat pattern, -1 clears selection; never a route step.
+    void bendSelectionChanged(quint64 documentRevision, int bendIndex);
 
   private:
     class Impl;

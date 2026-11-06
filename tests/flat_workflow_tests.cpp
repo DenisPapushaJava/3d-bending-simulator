@@ -16,6 +16,8 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QLabel>
+#include <QListView>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QTabWidget>
@@ -134,27 +136,69 @@ int main(int argc, char **argv) {
             check(viewer->dimensionsVisible(), "Flat dimensions are not shown");
             const auto *dimensions = viewer->findChild<QToolButton *>("showDimensions");
             check(dimensions != nullptr, "Missing dimensions control");
-            const auto labels = dimensions->accessibleDescription().split(QLatin1Char('\n'));
-            int coordinates = 0, callouts = 0;
-            for (const auto &label : labels) {
-                if (!label.startsWith(QLatin1Char('B')))
-                    continue;
-                if (label.contains(QChar(0x2191)) || label.contains(QChar(0x2193)))
-                    ++callouts;
-                else
-                    ++coordinates;
-            }
-            check(callouts == static_cast<int>(first->info().bends.size()),
-                  "Flat annotations lost individual bend IDs");
-            if (app.arguments().contains(QStringLiteral("--expect-coordinate-rows"))) {
-                bool ok = false;
-                const auto expected =
-                    app.arguments()
-                        .at(app.arguments().indexOf(QStringLiteral("--expect-coordinate-rows")) + 1)
-                        .toInt(&ok);
-                check(ok && coordinates == expected,
-                      "Coincident bend coordinates were not grouped");
-            }
+            auto *bends = window.findChild<QListView *>("bendList");
+            check(bends != nullptr, "No bend list");
+            // Overview must not carry every bend's full dimensions.
+            viewer->highlightFaces({}, c.session().revision());
+            check(!dimensions->accessibleDescription().contains(QStringLiteral("ВВЕРХ")) &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral("ВНИЗ")),
+                  "Overview retained full bend callouts");
+            const auto revisionBeforeSelection = c.session().editRevision();
+            int picked = -1;
+            QObject::connect(viewer, &viewer::ViewerWidget::bendSelectionChanged, &window,
+                             [&](quint64, int index) { picked = index; });
+            auto *canvas = viewer->findChild<QWidget *>("cadCanvas");
+            const auto sendClick = [&](QPoint point) {
+                QMouseEvent event(QEvent::MouseButtonPress, QPointF(point),
+                                  QPointF(canvas->mapToGlobal(point)), Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(canvas, &event);
+                QMouseEvent release(QEvent::MouseButtonRelease, QPointF(point),
+                                    QPointF(canvas->mapToGlobal(point)), Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(canvas, &release);
+            };
+            // Pick an actual rendered orange bend line, not a hard-coded camera position.
+            const auto overview = viewer->captureImage();
+            if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT"); !path.isEmpty())
+                overview.save(path + "-overview.png");
+            bool clicked = false;
+            for (int y = 30; y < overview.height() - 30 && !clicked; ++y)
+                for (int x = 30; x < overview.width() - 220 && !clicked; ++x) {
+                    const auto color = overview.pixelColor(x, y);
+                    if (color.red() > 200 && color.green() > 70 && color.green() < 235 &&
+                        color.blue() < 160) {
+                        sendClick(QPoint(x, y) / canvas->devicePixelRatioF());
+                        clicked = picked >= 0;
+                    }
+                }
+            check(clicked && picked >= 0 && bends->currentIndex().row() == picked,
+                  "Flat line click did not select its source bend in the list");
+            check(dimensions->accessibleDescription().contains(QStringLiteral(" · L ")) &&
+                      !c.hasWork() && c.flatPattern() == first &&
+                      c.session().editRevision() == revisionBeforeSelection,
+                  "Flat selection recalculated CAD/edited project or omitted selected dimensions");
+            const auto topLabels = dimensions->accessibleDescription();
+            const bool up = topLabels.contains(QStringLiteral("ВВЕРХ"));
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Bottom);
+            check(dimensions->accessibleDescription().contains(up ? QStringLiteral("ВНИЗ")
+                                                                  : QStringLiteral("ВВЕРХ")),
+                  "Reverse flat side kept the old bend direction");
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
+            check(dimensions->accessibleDescription() == topLabels,
+                  "Returning to the flat side changed the selected measurement");
+            viewer->highlightFaces({}, c.session().revision() + 1);
+            check(dimensions->accessibleDescription() == topLabels,
+                  "Stale selection changed flat labels");
+            sendClick(QPoint(20, canvas->height() / 2));
+            check(picked == -1 && !bends->currentIndex().isValid() &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral(" · L ")),
+                  "Empty flat click retained selected dimensions");
+            // Source-list changes must update this same flat snapshot.
+            bends->setCurrentIndex(bends->model()->index(0, 0));
+            check(dimensions->accessibleDescription().contains(QStringLiteral("B01 ·")) &&
+                      c.flatPattern() == first && !c.hasWork(),
+                  "List selection did not refresh the flat bend or triggered a calculation");
             wait([&] { return !viewer->captureImage().isNull(); });
             if (const auto output = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT");
                 !output.isEmpty()) {

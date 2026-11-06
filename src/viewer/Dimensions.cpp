@@ -4,6 +4,7 @@
 #include <AIS_TextLabel.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepTools.hxx>
 #include <Font_NameOfFont.hxx>
 #include <Graphic3d_ZLayerId.hxx>
@@ -12,6 +13,8 @@
 #include <TopoDS.hxx>
 #include <gp_Pln.hxx>
 
+#include <QFont>
+#include <QFontMetricsF>
 #include <QLocale>
 
 #include <algorithm>
@@ -71,12 +74,23 @@ void length(DimensionAnnotations &result, const gp_Pnt &a, const gp_Pnt &b, cons
     result.labels.append(caption);
 }
 void callout(DimensionAnnotations &result, const gp_Pnt &anchor, const gp_Vec &offset,
-             const QString &caption, double height) {
+             const QString &caption, double height, const gp_Vec &arrowSide = {}) {
     const auto end = anchor.Translated(offset);
     Handle(AIS_Shape) line = new AIS_Shape(BRepBuilderAPI_MakeEdge(anchor, end).Edge());
     line->SetColor(bendColor);
     line->SetWidth(1.5);
     append(result, line);
+    if (arrowSide.SquareMagnitude() > 1.e-14) {
+        // A small screen-sized arrow points to the actual prepared bend line.
+        const auto back = offset * .08;
+        Handle(AIS_Shape) arrow = new AIS_Shape(
+            BRepBuilderAPI_MakePolygon(anchor.Translated(back + arrowSide * .08), anchor,
+                                       anchor.Translated(back - arrowSide * .08))
+                .Shape());
+        arrow->SetColor(bendColor);
+        arrow->SetWidth(1.5);
+        append(result, arrow);
+    }
     Handle(AIS_TextLabel) label = new AIS_TextLabel;
     label->SetPosition(end);
     label->SetText(extended(caption));
@@ -92,8 +106,8 @@ void callout(DimensionAnnotations &result, const gp_Pnt &anchor, const gp_Vec &o
     result.labels.append(caption);
 }
 QString bendCaption(double angle, std::optional<double> radius, double thickness) {
-    return QStringLiteral("Поворот %1° · %2 · t %3 мм")
-        .arg(number(angle * 180.0 / std::numbers::pi),
+    return QStringLiteral("Угол %1° · %2 · t %3 мм")
+        .arg(number(180.0 - angle * 180.0 / std::numbers::pi),
              radius ? QStringLiteral("R %1 мм").arg(number(*radius)) : QStringLiteral("плоско"),
              number(thickness));
 }
@@ -110,12 +124,14 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
     if (!(gap > 0.0) || !std::isfinite(gap)) {
         return result;
     }
-    length(result, point(lo), {hi.x, lo.y, lo.z}, {0, -gap, 0},
-           QStringLiteral("X %1 мм").arg(number(hi.x - lo.x)), height);
-    length(result, point(lo), {lo.x, hi.y, lo.z}, {-gap, 0, 0},
-           QStringLiteral("Y %1 мм").arg(number(hi.y - lo.y)), height);
-    length(result, {hi.x, hi.y, lo.z}, point(hi), {gap, 0, 0},
-           QStringLiteral("Z %1 мм").arg(number(hi.z - lo.z)), height);
+    if (!bend) {
+        length(result, point(lo), {hi.x, lo.y, lo.z}, {0, -gap, 0},
+               QStringLiteral("X %1 мм").arg(number(hi.x - lo.x)), height);
+        length(result, point(lo), {lo.x, hi.y, lo.z}, {-gap, 0, 0},
+               QStringLiteral("Y %1 мм").arg(number(hi.y - lo.y)), height);
+        length(result, {hi.x, hi.y, lo.z}, point(hi), {gap, 0, 0},
+               QStringLiteral("Z %1 мм").arg(number(hi.z - lo.z)), height);
+    }
     if (!bend || bend->innerFace == 0 ||
         bend->innerFace > static_cast<std::size_t>(faces.Extent())) {
         return result;
@@ -150,143 +166,130 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
     return result;
 }
 
+std::optional<std::size_t> flatBendAt(const application::FlatPatternInfo &info,
+                                      const DimensionLayout &layout, QPointF position,
+                                      double tolerancePixels) {
+    if (!layout.project)
+        return std::nullopt;
+    std::optional<std::size_t> result;
+    double best = tolerancePixels * tolerancePixels;
+    for (const auto &bend : info.bends) {
+        const auto line = bend.centreLine();
+        const auto a = layout.project({line[0].x, line[0].y, info.bounds.maximum.z});
+        const auto b = layout.project({line[1].x, line[1].y, info.bounds.maximum.z});
+        const auto ab = b - a;
+        const auto length2 = QPointF::dotProduct(ab, ab);
+        if (length2 < 1.)
+            continue;
+        const auto t = std::clamp(QPointF::dotProduct(position - a, ab) / length2, 0., 1.);
+        const auto delta = position - (a + ab * t);
+        const auto distance2 = QPointF::dotProduct(delta, delta);
+        if (distance2 < best) {
+            best = distance2;
+            result = bend.bendIndex;
+        }
+    }
+    return result;
+}
 DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &info, double height,
-                                           const DimensionLayout &layout) {
+                                           const DimensionLayout &layout,
+                                           std::optional<std::size_t> selected, double facing) {
     DimensionAnnotations result;
     const auto &hi = info.bounds.maximum;
-    const double gap = std::max(hi.x, hi.y) * .12;
-    struct LabelBox {
-        double x, y, halfWidth;
-    };
-    std::vector<LabelBox> labels;
-    const auto screen = [&](const gp_Pnt &p) {
-        const gp_Vec v(gp_Pnt(0, 0, 0), p);
-        return std::pair{v.Dot(layout.right) / layout.right.SquareMagnitude(),
-                         v.Dot(layout.up) / layout.up.SquareMagnitude()};
-    };
-    const auto halfWidth = [](const QString &caption) { return .075 * caption.size() + .1; };
-    const auto measure = [&](gp_Pnt a, gp_Pnt b, gp_Vec offset, const QString &caption,
-                             const Quantity_Color &color) {
-        length(result, a, b, offset, caption, height, color);
-        const auto [x, y] = screen(gp_Pnt((a.XYZ() + b.XYZ()) * .5).Translated(offset));
-        labels.push_back({x, y, halfWidth(caption)});
-    };
-    measure({0, 0, hi.z}, {hi.x, 0, hi.z}, {0, -gap, 0},
-            QStringLiteral("Ширина %1 мм").arg(number(hi.x)), dimensionColor);
-    measure({0, 0, hi.z}, {0, hi.y, hi.z}, {-gap, 0, 0},
-            QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), dimensionColor);
+    const auto gap = std::max(hi.x, hi.y) * .12;
+    length(result, {0, 0, hi.z}, {hi.x, 0, hi.z}, {0, -gap, 0},
+           QStringLiteral("Ширина %1 мм").arg(number(hi.x)), height);
+    length(result, {0, 0, hi.z}, {0, hi.y, hi.z}, {-gap, 0, 0},
+           QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), height);
+    // Directions are relative to the physical flat side facing the viewer. Do not
+    // pretend that a nearly edge-on sheet has readable bend annotations.
+    if (std::abs(facing) < .15)
+        return result;
     const auto bendId = [](std::size_t index) {
         return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
     };
-    struct CoordinateRow {
-        double value;
-        bool x;
-        std::vector<std::size_t> ids;
-    };
-    std::vector<CoordinateRow> rows;
-    const auto coordinate = [&](double value, bool x, std::size_t id) {
-        auto row = std::find_if(rows.begin(), rows.end(), [&](const auto &r) {
-            return r.x == x && std::abs(r.value - value) <= 1.e-5;
-        });
-        if (row == rows.end())
-            rows.push_back({value, x, {id}});
-        else
-            row->ids.push_back(id);
-    };
-    for (const auto &b : info.bends) {
-        const auto line = b.centreLine();
-        if (std::abs(line[0].y - line[1].y) < 1.e-5)
-            coordinate(line[0].y, false, b.bendIndex);
-        else if (std::abs(line[0].x - line[1].x) < 1.e-5)
-            coordinate(line[0].x, true, b.bendIndex);
-        else {
-            coordinate((line[0].x + line[1].x) / 2, true, b.bendIndex);
-            coordinate((line[0].y + line[1].y) / 2, false, b.bendIndex);
-        }
-    }
-    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) {
-        return std::pair{a.x, a.value} < std::pair{b.x, b.value};
+    const auto active = std::find_if(info.bends.begin(), info.bends.end(), [&](const auto &bend) {
+        return selected && bend.bendIndex == *selected;
     });
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-        auto &row = rows[i];
-        std::sort(row.ids.begin(), row.ids.end());
-        QString ids;
-        if (row.ids.size() > 1 && row.ids.back() - row.ids.front() + 1 == row.ids.size())
-            ids = bendId(row.ids.front()) + QChar(0x2013) + bendId(row.ids.back());
-        else {
-            QStringList names;
-            for (auto id : row.ids)
-                names << bendId(id);
-            ids = names.join(QLatin1Char('/'));
-        }
-        const double offset = gap * (1 + i * .65);
-        measure(row.x ? gp_Pnt(0, hi.y, hi.z) : gp_Pnt(hi.x, 0, hi.z),
-                row.x ? gp_Pnt(row.value, hi.y, hi.z) : gp_Pnt(hi.x, row.value, hi.z),
-                row.x ? gp_Vec(0, offset, 0) : gp_Vec(offset, 0, 0),
-                QStringLiteral("%1 · %2 %3 мм")
-                    .arg(ids, row.x ? QStringLiteral("X") : QStringLiteral("Y"), number(row.value)),
-                bendColor);
-    }
-    const auto [cx, cy] = screen({hi.x / 2, hi.y / 2, hi.z});
-    for (const auto &b : info.bends) {
-        const auto line = b.centreLine();
+    if (active != info.bends.end()) {
+        const auto line = active->centreLine();
         const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
-        const auto [ax, ay] = screen(anchor);
-        const gp_Vec axis(point(line[0]), point(line[1]));
-        double nx = -axis.Dot(layout.up), ny = axis.Dot(layout.right);
-        const double norm = std::hypot(nx, ny);
-        if (norm > 1.e-10) {
-            nx /= norm;
-            ny /= norm;
-        } else {
-            nx = 0;
-            ny = 1;
+        const auto direction = active->direction * (facing > 0 ? 1 : -1);
+        callout(result, anchor, layout.up * 1.8,
+                QStringLiteral("%1 · %2 · %3° · R %4 · L %5 мм")
+                    .arg(bendId(active->bendIndex),
+                         direction > 0 ? QStringLiteral("ВВЕРХ") : QStringLiteral("ВНИЗ"),
+                         number(180 - active->turnRadians * 180 / std::numbers::pi),
+                         number(active->radiusMm), number(active->lengthMm())),
+                height, layout.right);
+        // Only a confirmed axis-aligned coordinate is presented. A midpoint of
+        // an oblique bend is not a distance from the stock edge or a gauge X.
+        if (std::abs(line[0].y - line[1].y) < 1.e-5)
+            length(result, {hi.x, 0, hi.z}, {hi.x, line[0].y, hi.z}, {gap, 0, 0},
+                   QStringLiteral("Y %1 мм").arg(number(line[0].y)), height);
+        else if (std::abs(line[0].x - line[1].x) < 1.e-5)
+            length(result, {0, hi.y, hi.z}, {line[0].x, hi.y, hi.z}, {0, gap, 0},
+                   QStringLiteral("X %1 мм").arg(number(line[0].x)), height);
+        return result;
+    }
+    // Overview: compact IDs only. Dense/occluded markers remain accessible via
+    // line selection and the existing source-bend list, without shrinking text.
+    QFont font(QStringLiteral("sans-serif"));
+    font.setPixelSize(qRound(height));
+    const QFontMetricsF metrics(font);
+    std::vector<QRectF> occupied = layout.excluded;
+    for (const auto &bend : info.bends) {
+        const auto line = bend.centreLine();
+        const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
+        const auto position = anchor.Translated(layout.up * .3);
+        const auto caption = bendId(bend.bendIndex);
+        if (layout.project) {
+            const auto screen = layout.project(position);
+            const QRectF box(screen.x() - metrics.horizontalAdvance(caption) / 2 - 4,
+                             screen.y() - metrics.height() - 4,
+                             metrics.horizontalAdvance(caption) + 8, metrics.height() + 8);
+            if (!layout.viewport.contains(box) ||
+                std::any_of(occupied.begin(), occupied.end(),
+                            [&](const auto &other) { return box.intersects(other); }))
+                continue;
+            occupied.push_back(box);
         }
-        // Put the caption towards the blank interior, away from the outside dimensions.
-        if (nx * (cx - ax) + ny * (cy - ay) < 0) {
-            nx = -nx;
-            ny = -ny;
-        }
-        const auto caption =
-            QStringLiteral("%1 %2 · %3° · L %4 мм")
-                .arg(bendId(b.bendIndex),
-                     b.direction > 0 ? QStringLiteral("↑") : QStringLiteral("↓"),
-                     number(180 - b.turnRadians * 180 / std::numbers::pi), number(b.lengthMm()));
-        const double distance = 1 + .8 * std::abs(nx);
-        const double x = ax + nx * distance, initialY = ay + ny * distance;
-        // Screen units are 50 px. Reserve a conservative text box and separate nearby bends.
-        const double width = halfWidth(caption);
-        double y = initialY;
-        for (std::size_t row = 0; row < info.bends.size() * 2 + 1; ++row) {
-            const double shift = (row + 1) / 2 * .6 * (row % 2 ? 1 : -1);
-            y = initialY + shift;
-            if (std::none_of(labels.begin(), labels.end(), [&](const auto &placed) {
-                    return std::abs(x - placed.x) < width + placed.halfWidth &&
-                           std::abs(y - placed.y) < .5;
-                }))
-                break;
-        }
-        labels.push_back({x, y, width});
-        callout(result, anchor, layout.right * (x - ax) + layout.up * (y - ay), caption, height);
+        Handle(AIS_TextLabel) label = new AIS_TextLabel;
+        label->SetPosition(position);
+        label->SetText(extended(caption));
+        label->SetColor(dimensionColor);
+        label->SetHeight(height);
+        label->SetFont(Font_NOF_SANS_SERIF);
+        label->SetZoomable(false);
+        label->SetHJustification(Graphic3d_HTA_CENTER);
+        label->SetVJustification(Graphic3d_VTA_BOTTOM);
+        append(result, label);
+        result.labels.append(caption);
     }
     return result;
 }
 DimensionAnnotations previewDimensions(const cad::PreviewFrame &frame,
                                        const simulation::SingleBend &model, double height,
-                                       const DimensionLayout &layout) {
+                                       const DimensionLayout &layout, bool compact) {
     DimensionAnnotations result;
     if (!frame.dimensions) {
         return result;
     }
     const auto &anchors = *frame.dimensions;
-    length(result, anchors.fixed[0], anchors.fixed[1], -layout.right * 2.2 - layout.up * 0.6,
-           QStringLiteral("П1 прям. %1 мм").arg(number(model.fixedFlangeMm)), height);
-    length(result, anchors.moving[0], anchors.moving[1], layout.right * 2.2 - layout.up * 0.6,
-           QStringLiteral("П2 прям. %1 мм").arg(number(model.movingFlangeMm)), height);
-    length(result, anchors.fixed[1], anchors.fixed[1].Translated(anchors.widthVector),
-           -layout.up * 1.8, QStringLiteral("Ширина %1 мм").arg(number(model.widthMm)), height);
+    if (!compact) {
+        length(result, anchors.fixed[0], anchors.fixed[1], -layout.right * 2.2 - layout.up * 0.6,
+               QStringLiteral("П1 прям. %1 мм").arg(number(model.fixedFlangeMm)), height);
+        length(result, anchors.moving[0], anchors.moving[1], layout.right * 2.2 - layout.up * 0.6,
+               QStringLiteral("П2 прям. %1 мм").arg(number(model.movingFlangeMm)), height);
+        length(result, anchors.fixed[1], anchors.fixed[1].Translated(anchors.widthVector),
+               -layout.up * 1.8, QStringLiteral("Охват по оси %1 мм").arg(number(model.widthMm)),
+               height);
+    }
     callout(result, anchors.bendMiddle, layout.up * 1.8,
-            bendCaption(anchors.angleRadians, anchors.innerRadiusMm, model.thicknessMm), height);
+            compact ? QStringLiteral("Угол %1°")
+                          .arg(number(180 - anchors.angleRadians * 180 / std::numbers::pi))
+                    : bendCaption(anchors.angleRadians, anchors.innerRadiusMm, model.thicknessMm),
+            height);
     return result;
 }
 } // namespace bending::viewer

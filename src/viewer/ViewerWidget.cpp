@@ -379,6 +379,7 @@ class OcctCanvas final : public QWidget {
     std::function<void(const QString &)> onError;
     std::function<void()> onReady;
     std::function<void(quint64, int)> onSelection;
+    std::function<void(quint64, int)> onBendSelection;
     std::function<void()> onSurfaceChanged;
 
     QMenu *navigationMenu() const {
@@ -729,6 +730,7 @@ class OcctCanvas final : public QWidget {
         support_.Nullify();
         preview_.reset();
         flat_ = std::move(flat);
+        refreshFlatSelection();
         refreshDimensions();
         refreshOrientation();
         if (onSelection)
@@ -824,9 +826,13 @@ class OcctCanvas final : public QWidget {
         sanitize(state.cutouts);
         state.bend = state.bend && !state.primary.empty();
         highlights_ = std::move(state);
-        if (preview_ || flat_) {
+        if (flat_) {
+            guarded([&] { refreshFlatSelection(); });
+            refreshDimensions();
             return;
         }
+        if (preview_)
+            return;
         guarded([&] {
             for (const auto &overlay : {evidence_, support_}) {
                 if (!overlay.IsNull()) {
@@ -1064,7 +1070,21 @@ class OcctCanvas final : public QWidget {
                     fitAll();
                     return;
                 }
-                if (!preview_ && !flat_) {
+                if (flat_) {
+                    const auto hit = std::abs(view_->Camera()->Direction().Z()) < .15
+                                         ? std::nullopt
+                                         : flatBendAt(flat_->info(), dimensionLayout(),
+                                                      lastPosition_, 8 * devicePixelRatioF());
+                    const int source = hit && *hit < document_->metadata().bendAnalysis.bends.size()
+                                           ? static_cast<int>(*hit)
+                                           : -1;
+                    if (source >= 0)
+                        highlightBend(document_->metadata().bendAnalysis.bends[source], revision_);
+                    else
+                        highlightFaces({}, revision_);
+                    if (onBendSelection)
+                        onBendSelection(revision_, source);
+                } else if (!preview_) {
                     context_->SelectDetected(AIS_SelectionScheme_Replace);
                     context_->InitSelected();
                     int face = 0;
@@ -1236,15 +1256,70 @@ class OcctCanvas final : public QWidget {
         dimensionsAction_->setEnabled(ready_ && document_ != nullptr);
         const auto description = dimensions_.labels.join(QStringLiteral("\n"));
         const auto scope =
-            flat_ ? QStringLiteral(
-                        "Теоретическая развёртка: габариты и координаты линий гиба, не X упора.")
-            : preview_ ? QStringLiteral("Размеры текущего положения. П1/П2 — прямые участки "
-                                        "полок от касания зоны, по их габаритам.")
-                       : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
-                                        "измерения исходной модели.");
+            flat_ ? QStringLiteral("Развёртка: выберите линию гиба или гиб в списке. Координаты — "
+                                   "от края заготовки, не X упора.")
+            : preview_
+                ? QStringLiteral("Внутренний угол текущего положения. П1/П2 — прямые участки "
+                                 "полок от касания зоны, по их габаритам.")
+                : QStringLiteral("Без выбора — габариты CAD по X/Y/Z. Для выбранного гиба — "
+                                 "измерения исходной модели.");
         dimensionsButton_->setToolTip(
             QStringLiteral("Показать / скрыть размеры · Ctrl+D\n%1\n%2").arg(scope, description));
         dimensionsButton_->setAccessibleDescription(scope + QLatin1Char('\n') + description);
+    }
+    std::optional<std::size_t> selectedFlatBend() const {
+        if (!flat_ || !document_ || !highlights_.measuredBend)
+            return std::nullopt;
+        const auto &bends = document_->metadata().bendAnalysis.bends;
+        const auto &selected = *highlights_.measuredBend;
+        for (std::size_t i = 0; i < bends.size(); ++i)
+            if (bends[i].innerFace == selected.innerFace &&
+                bends[i].outerFace == selected.outerFace)
+                return i;
+        return std::nullopt;
+    }
+    void refreshFlatSelection() {
+        if (!ready_ || !flat_ || presentation_.IsNull())
+            return;
+        const auto selected = selectedFlatBend();
+        const auto &lines = cad::OcctFlatPatternAccess::bendLines(*flat_);
+        const auto &bends = flat_->info().bends;
+        for (std::size_t i = 0; i < std::min(lines.size(), bends.size()); ++i) {
+            const bool active = selected && bends[i].bendIndex == *selected;
+            presentation_->SetCustomColor(lines[i],
+                                          active ? Quantity_Color(1., .85, .4, Quantity_TOC_RGB)
+                                                 : Quantity_Color(1., .45, .08, Quantity_TOC_RGB));
+            presentation_->SetCustomWidth(lines[i], active ? 4. : 2.5);
+        }
+        context_->Redisplay(presentation_, false);
+        if (!dimensionsVisible_)
+            view_->Redraw();
+    }
+    DimensionLayout dimensionLayout() const {
+        const auto separation = view_->Convert(qRound(50.0 * devicePixelRatioF()));
+        double dx, dy, dz, ux, uy, uz;
+        view_->Proj(dx, dy, dz);
+        view_->Up(ux, uy, uz);
+        const auto up = gp_Vec(ux, uy, uz).Normalized() * separation;
+        const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
+        DimensionLayout layout{right, up, {}, {}, {}};
+        layout.project = [this](const gp_Pnt &point) {
+            int x, y;
+            view_->Convert(point.X(), point.Y(), point.Z(), x, y);
+            return QPointF(x, y);
+        };
+        const auto size = physicalSize();
+        const auto ratio = devicePixelRatioF();
+        layout.viewport =
+            QRectF(8 * ratio, 8 * ratio, size.width() - 16 * ratio, size.height() - 16 * ratio);
+        layout.excluded.emplace_back(size.width() - 210 * ratio, 0, 210 * ratio, 220 * ratio);
+        for (const auto *overlay :
+             std::array<QWidget *, 3>{bottomOverlay_.data(), topLeftOverlay_.data(), sideLegend_})
+            if (overlay && overlay->isVisible())
+                layout.excluded.emplace_back(overlay->x() * ratio, overlay->y() * ratio,
+                                             overlay->width() * ratio, overlay->height() * ratio);
+
+        return layout;
     }
     void refreshDimensions() {
         if (!dimensionsVisible_ && dimensions_.objects.empty()) {
@@ -1254,18 +1329,15 @@ class OcctCanvas final : public QWidget {
         guarded([&] {
             removeDimensions();
             if (dimensionsVisible_ && document_) {
-                const auto separation = view_->Convert(qRound(50.0 * devicePixelRatioF()));
-                double dx, dy, dz, ux, uy, uz;
-                view_->Proj(dx, dy, dz);
-                view_->Up(ux, uy, uz);
-                const auto up = gp_Vec(ux, uy, uz).Normalized() * separation;
-                const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
-                const DimensionLayout layout{right, up};
+                const auto layout = dimensionLayout();
                 dimensions_ =
-                    flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout)
+                    flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout,
+                                                  selectedFlatBend(),
+                                                  -view_->Camera()->Direction().Z())
                     : preview_
                         ? previewDimensions(cad::OcctPreviewAccess::frame(*preview_, previewFrame_),
-                                            preview_->model(), 14.0 * devicePixelRatioF(), layout)
+                                            preview_->model(), 14.0 * devicePixelRatioF(), layout,
+                                            animationRunning_)
                         : documentDimensions(document_->metadata(), faces_,
                                              highlights_.measuredBend, 14.0 * devicePixelRatioF(),
                                              layout);
@@ -1545,11 +1617,18 @@ class OcctCanvas final : public QWidget {
     DisplayStyle displayStyle_ = DisplayStyle::Edges;
     Handle(AIS_ViewCube) navigationCube_;
     double cubeRatio_ = 0;
+    bool animationRunning_ = false;
     DimensionAnnotations dimensions_;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
 
   public:
+    void setAnimationRunning(bool running) {
+        if (animationRunning_ == running)
+            return;
+        animationRunning_ = running;
+        refreshDimensions();
+    }
     void highlightPreviewBend(std::optional<std::size_t> i) {
         if (hoverPreviewBend_ == i)
             return;
@@ -1705,6 +1784,9 @@ ViewerWidget::ViewerWidget(QWidget *parent) : QWidget(parent), impl_(std::make_u
     };
     impl_->canvas->onSelection = [this](quint64 revision, int face) {
         emit selectionChanged(revision, face);
+    };
+    impl_->canvas->onBendSelection = [this](quint64 revision, int index) {
+        emit bendSelectionChanged(revision, index);
     };
     impl_->canvas->onSurfaceChanged = [this] { queueOverlayLayout(); };
     impl_->canvas->onError = [this, reportError](const QString &message) {
@@ -1927,6 +2009,10 @@ QString ViewerWidget::presentBendPreview(application::BendPreviewPtr preview,
     } catch (const std::exception &error) {
         return QString::fromUtf8(error.what());
     }
+}
+void ViewerWidget::setAnimationRunning(bool running) {
+    if (impl_->canvas)
+        impl_->canvas->setAnimationRunning(running);
 }
 void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i) {
     if (impl_->canvas)

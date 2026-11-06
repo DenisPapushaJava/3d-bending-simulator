@@ -1218,6 +1218,7 @@ class MainWindow::Impl {
     }
     void refreshPlaybackAction() {
         const bool playing = playback->isActive();
+        viewer->setAnimationRunning(playing);
         const auto action = playing ? QStringLiteral("Пауза") : QStringLiteral("Воспроизвести");
         const auto &icon = playbackIcons[playing ? 1 : 0];
         if (playBend->icon().cacheKey() != icon.cacheKey())
@@ -4297,6 +4298,23 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     });
     connect(impl_->viewer, &viewer::ViewerWidget::renderingChanged, this,
             [this](bool) { impl_->refresh(); });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendSelectionChanged, this,
+            [this](quint64 revision, int index) {
+                const auto &session = impl_->controller->session();
+                if (revision != session.revision() || !session.document() ||
+                    impl_->controller->hasWork())
+                    return;
+                if (index < -1 ||
+                    (index >= 0 && static_cast<std::size_t>(index) >=
+                                       session.document()->metadata().bendAnalysis.bends.size()))
+                    return;
+                const auto item = index >= 0 ? impl_->bendModel->index(index, 0) : QModelIndex{};
+                // Canvas has already applied the source selection. Reflect it without
+                // starting another scene update or invoking the route/tool workflow.
+                const QSignalBlocker block(impl_->bendList->selectionModel());
+                impl_->bendList->setCurrentIndex(item);
+                impl_->showSelectedBend(false);
+            });
     connect(impl_->viewer, &viewer::ViewerWidget::selectionChanged, this,
             [this](quint64 revision, int index) {
                 const auto &session = impl_->controller->session();

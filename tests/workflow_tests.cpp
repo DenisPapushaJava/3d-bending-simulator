@@ -2029,6 +2029,8 @@ void testGuidedWorkflow(bool graphics) {
                     dimensions->accessibleDescription().contains(QStringLiteral("Длина гиба")) &&
                     dimensions->accessibleDescription().contains(QStringLiteral("R 8 мм")) &&
                     dimensions->accessibleDescription().contains(QStringLiteral("t 6 мм")) &&
+                    dimensions->accessibleDescription().contains(QStringLiteral("Угол 90°")) &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("X ")) &&
                     !controller.session().modified() && controller.session().editRevision() == edit,
                 "Dimensions lost selected CAD bend or modified project");
         dimensionSnapshot("cad");
@@ -2211,7 +2213,7 @@ void testGuidedWorkflow(bool graphics) {
         require(formedFrame < guidedPreview->frameCount(), "Guided cycle lost punch return");
         slider->setValue(static_cast<int>(formedFrame));
         require(dimensions->accessibleDescription() != bending &&
-                    dimensions->accessibleDescription().contains(QStringLiteral("Поворот 90°")),
+                    dimensions->accessibleDescription().contains(QStringLiteral("Угол 90°")),
                 "Measurements did not follow forming state");
         dimensionSnapshot("formed");
         const auto formed = dimensions->accessibleDescription();
@@ -2228,6 +2230,13 @@ void testGuidedWorkflow(bool graphics) {
                 "Punch return changed formed-sheet dimensions");
         require(controller.bendPreview() == preview && controller.session().editRevision() == edit,
                 "Dimension toggle invalidated calculation");
+        play->click();
+        require(dimensions->accessibleDescription().contains(QStringLiteral("Угол ")) &&
+                    !dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")),
+                "Playback retained detailed flange dimensions");
+        play->click();
+        require(dimensions->accessibleDescription().contains(QStringLiteral("П1 прям.")),
+                "Pause did not restore detailed operation dimensions");
         viewer->setDimensionsVisible(false);
     }
     play->click();
