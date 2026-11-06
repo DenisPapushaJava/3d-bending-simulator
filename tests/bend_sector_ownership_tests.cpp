@@ -1,7 +1,10 @@
+#include "BendOperation.h"
 #include "BendSectorOwnership.h"
+#include "SheetGeometry.h"
 #include "TrayFixtures.h"
 #include "TrimmedBend.h"
 #include "bending/cad/FlatPatternBuilder.h"
+#include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -231,6 +234,26 @@ void trayChecks(const std::filesystem::path &path, gp_Trsf placement = {}) {
         require(difference.IsDone() && !difference.HasErrors() && volume(difference.Shape()) < 1e-4,
                 "Actual corner material was dropped or duplicated");
     }
+    const auto geometry = cad::prepareSheetGeometry(doc, {});
+    const auto *verified = std::get_if<cad::VerifiedSheetGeometry>(&geometry);
+    require(verified && verified->source == doc && verified->layout->walls.size() == 5 &&
+                verified->layout->bends.size() == 4,
+            "Simulation did not receive the complete unfolding partition");
+    const auto &bend = doc->metadata().bendAnalysis.bends.front();
+    for (bool reversed : {false, true}) {
+        const auto operation = cad::prepareBendOperation(
+            doc, 0, {bend.angleRadians, bend.innerRadiusMm}, reversed, {}, {});
+        const auto *prepared = std::get_if<cad::PreparedBendOperationPtr>(&operation);
+        require(prepared, "Simulation cannot prepare the fully owned corner partition");
+        const auto cycle = (*prepared)->at(0, {});
+        if (const auto *error = std::get_if<application::BendPreviewError>(&cycle))
+            require(error->code == application::BendPreviewErrorCode::UnsupportedGeometry &&
+                        error->detail.find("preserve the volume") != std::string::npos,
+                    "Owned corner failed before its independent kinematic volume check");
+        else
+            require(std::get<application::BendPreviewPtr>(cycle)->frameCount() == 21,
+                    "Incomplete intrinsic corner cycle");
+    }
     std::ostringstream after;
     BRepTools::Write(cad::OcctDocumentAccess::simulationShape(*native), after);
     require(before.str() == after.str(), "Ownership/unfolding mutated source BRep");
@@ -284,6 +307,9 @@ int main() {
             const auto *error = std::get_if<application::FlatPatternError>(&result);
             require(error && error->code == application::FlatPatternErrorCode::UnsupportedGeometry,
                     "An extra volume or variable thickness pocket was silently accepted");
+            require(std::holds_alternative<application::FlatPatternError>(
+                        cad::prepareSheetGeometry(doc, {})),
+                    "Geometry-only partition dropped an unknown wall or extra volume");
         }
         std::cout << "Owned corner sectors and full source reconstruction passed\n";
     } catch (const Standard_Failure &error) {

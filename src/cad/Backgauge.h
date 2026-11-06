@@ -14,6 +14,8 @@ backgaugeContactIssue(const PreviewFrame &, const core::BackgaugeSetup &, double
 // the contact frame fixed. No continuous movement/physical holding claim.
 void prepareBackgauge(CadPreview &, double toleranceMm, std::stop_token,
                       application::BackgaugeSearchStatistics * = nullptr);
+// Numerical working bounds only; also used after deferred search-frame meshing.
+void expandBackgaugeEnvelope(CadPreview &);
 // Error diagnostics contain a safe prefix and its first failed position only.
 void truncateCollisionPreview(CadPreview &, std::size_t failedFrame);
 } // namespace bending::cad

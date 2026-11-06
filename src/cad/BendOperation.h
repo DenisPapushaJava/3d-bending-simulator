@@ -7,9 +7,17 @@
 
 namespace bending::cad {
 class CadDocument;
+struct PreparedBendWorkpiece;
+// Bounded to four source/state/zone/side snapshots by prepareBendOperation.
+// Owned and serialized by the route worker; must outlive its prepared operations.
+struct BendWorkpieceReuse {
+    std::vector<std::shared_ptr<const PreparedBendWorkpiece>> entries;
+    std::size_t built = 0, reused = 0, checked = 0, reusedChecks = 0;
+};
 gp_Dir normalBendAxis(const CadDocument &, std::size_t);
 // Worker-local immutable preparation for one exact operation/side/tool setup.
-// Only the axial workpiece placement may vary. No checked frames/verdicts are shared.
+// Only axial placement may vary. Installation frames/contact verdicts are independent;
+// D209 may separately reuse successful intrinsic checks of the exact sheet geometry.
 class PreparedBendOperation {
   public:
     using Evaluate = std::function<application::BendPreviewResult(
@@ -27,13 +35,13 @@ class PreparedBendOperation {
 using PreparedBendOperationPtr = std::shared_ptr<const PreparedBendOperation>;
 using PreparedBendOperationResult =
     std::variant<PreparedBendOperationPtr, application::BendPreviewError>;
-PreparedBendOperationResult
-prepareBendOperation(application::DocumentPtr, std::size_t, core::BendTarget, bool fixedSecond,
-                     std::stop_token, std::optional<core::PressTools>, bool withMotion = false,
-                     std::optional<core::ToolAssignment> = {}, bool allowPartialEndSupport = false,
-                     std::optional<double> maximumEndSupportLossMm = {},
-                     std::optional<gp_Dir> referenceAxis = {},
-                     std::span<const std::size_t> jointBends = {});
+PreparedBendOperationResult prepareBendOperation(
+    application::DocumentPtr, std::size_t, core::BendTarget, bool fixedSecond, std::stop_token,
+    std::optional<core::PressTools>, bool withMotion = false,
+    std::optional<core::ToolAssignment> = {}, bool allowPartialEndSupport = false,
+    std::optional<double> maximumEndSupportLossMm = {}, std::optional<gp_Dir> referenceAxis = {},
+    std::span<const std::size_t> jointBends = {}, BendWorkpieceReuse *workpieceReuse = nullptr,
+    const application::FlatPatternPtr &verifiedFlat = {});
 // Shared CAD transition for an isolated operation and a route's intermediate state.
 application::BendPreviewResult
 buildBendOperation(application::DocumentPtr, std::size_t, core::BendTarget, bool fixedSecond,

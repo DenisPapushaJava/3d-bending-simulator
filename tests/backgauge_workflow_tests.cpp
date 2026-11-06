@@ -178,6 +178,36 @@ int main(int argc, char **argv) {
             throw std::runtime_error("Route: " + e->detail);
         require(std::get<application::BendRoutePtr>(planned)->steps.front().preview->backgauge(),
                 "Route omitted backgauge");
+        // Search-only checks still need the ACTUAL skin for contacts when holes
+        // were filled on the separate calculation solid.
+        const auto holeFile = temp.path() + "/gauge-hole.step";
+        const auto holeShape =
+            BRepAlgoAPI_Cut(
+                fixtures::bentStrip(4, 2, std::numbers::pi / 2, 300, true, 60),
+                BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(3, -40, 150), gp_Dir(1, 0, 0)), 3, 5)
+                    .Shape())
+                .Shape();
+        STEPControl_Writer holeWriter;
+        require(holeWriter.Transfer(holeShape, STEPControl_AsIs) == IFSelect_RetDone &&
+                    holeWriter.Write(holeFile.toUtf8().constData()) == IFSelect_RetDone,
+                "Gauge-hole fixture write");
+        const auto holeDoc =
+            application::resultDocument(cad::StepImporter{}.load(path(holeFile), {}, {}));
+        require(holeDoc && holeDoc->metadata().closedCutouts.status ==
+                               application::ClosedCutoutStatus::Filled,
+                "Gauge-hole fixture no longer uses the filled approximation");
+        auto holeRequest = route;
+        const auto &holeBend = holeDoc->metadata().bendAnalysis.bends.front();
+        holeRequest.operations.front().target = {holeBend.angleRadians, holeBend.innerRadiusMm};
+        const auto holeRoute = cad::SingleBendPreviewBuilder{}.buildRoute(holeDoc, holeRequest, {});
+        if (const auto *e = std::get_if<application::BendRouteError>(&holeRoute))
+            throw std::runtime_error("Search skin for gauges: " + e->detail);
+        const auto holePreview =
+            std::get<application::BendRoutePtr>(holeRoute)->steps.front().preview;
+        require(holePreview->backgauge() &&
+                    holePreview->backgauge()->status == application::BackgaugeStatus::Checked &&
+                    !cad::OcctPreviewAccess::frame(*holePreview, 0).displayRegions[0].IsNull(),
+                "Search gauges or visible hole skin were omitted");
         const auto &firstStep = std::get<application::BendRoutePtr>(planned)->steps.front();
         application::RouteDraftRequest blankRequest{route.operations, 0, true, std::nullopt};
         blankRequest.operations.front().workpieceReversed = firstStep.fixedSecond;

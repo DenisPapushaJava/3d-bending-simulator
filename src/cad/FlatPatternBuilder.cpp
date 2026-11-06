@@ -4,6 +4,7 @@
 #include "FlatWallRegions.h"
 #include "ModelMeasurements.h"
 #include "RouteGeometry.h"
+#include "SheetGeometry.h"
 #include "SheetOrientation.h"
 #include "TrimmedBend.h"
 #include "bending/cad/CadDocument.h"
@@ -279,8 +280,8 @@ const SheetLayout &OcctFlatPatternAccess::layout(const FlatPattern &p) {
 const SheetOrientationVisual &OcctFlatPatternAccess::orientation(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).orientation;
 }
-FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternRequest request,
-                                            std::stop_token stop) const {
+static FlatPatternResult buildSheet(DocumentPtr document, FlatPatternRequest request,
+                                    std::stop_token stop, bool geometryOnly) {
     try {
         cancelled(stop);
         if (!core::validUnfoldSettings(request.settings) ||
@@ -653,6 +654,10 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
         }
         require(complete,
                 "The recognized walls and bends do not reconstruct the complete original solid");
+        if (geometryOnly) {
+            cancelled(stop);
+            return FlatPatternPtr(std::move(result));
+        }
         for (auto &p : patches) {
             auto f = TopoDS::Face(p);
             const double normal = BRepAdaptor_Surface(f).Plane().Axis().Direction().Z() *
@@ -779,5 +784,19 @@ FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternReq
     } catch (const std::exception &e) {
         return FlatPatternError{FlatPatternErrorCode::Failed, e.what()};
     }
+}
+FlatPatternResult FlatPatternBuilder::build(DocumentPtr document, FlatPatternRequest request,
+                                            std::stop_token stop) const {
+    return buildSheet(std::move(document), request, stop, false);
+}
+SheetGeometryResult prepareSheetGeometry(DocumentPtr document, std::stop_token stop) {
+    const auto result =
+        buildSheet(document, {{core::SheetMaterial::Unknown, .5, 1}, {}}, stop, true);
+    if (const auto *error = std::get_if<FlatPatternError>(&result))
+        return *error;
+    const auto &owner = std::get<FlatPatternPtr>(result);
+    const auto &layout = dynamic_cast<const CadFlatPattern &>(*owner).layout;
+    return VerifiedSheetGeometry{std::move(document),
+                                 std::shared_ptr<const SheetLayout>(owner, &layout)};
 }
 } // namespace bending::cad

@@ -216,6 +216,7 @@ struct CacheData {
     TransitionLru<BendPreviewPtr, maximumSheetBends> transitions;
     // Null rejection is a success hint. A positive verdict alone cannot publish a cycle.
     TransitionLru<std::optional<BendPreviewError>, 512> verdicts;
+    BendWorkpieceReuse workpieces;
     std::mutex mutex;
 
     std::shared_ptr<const TransitionInputs> intern(TransitionInputs wanted) {
@@ -968,11 +969,19 @@ class RouteSearch {
             BendPreviewError{BendPreviewErrorCode::Failed, "Operation preparation unavailable"};
         if (!prepared) {
             const auto start = std::chrono::steady_clock::now();
+            const auto built = cache->workpieces.built, reused = cache->workpieces.reused;
             auto result = prepareBendOperation(
                 after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
                 request.withTools ? op.tools : std::nullopt, request.withTools,
                 request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
-                request.maximumEndSupportLossMm, reference, joint);
+                request.maximumEndSupportLossMm, reference, joint,
+                request.reuseCalculations && request.reusePlacementPreparation &&
+                        request.reuseWorkpiecePreparation
+                    ? &cache->workpieces
+                    : nullptr,
+                cache->flat);
+            statistics.preparedWorkpieces += cache->workpieces.built - built;
+            statistics.reusedWorkpieces += cache->workpieces.reused - reused;
             ++statistics.preparedOperations;
             statistics.operationPreparationUs += elapsedUs(start);
             if (const auto *failure = std::get_if<BendPreviewError>(&result))
@@ -983,7 +992,10 @@ class RouteSearch {
             ++statistics.reusedOperationPreparations;
         if (prepared) {
             const auto start = std::chrono::steady_clock::now();
+            const auto checked = cache->workpieces.checked, reused = cache->workpieces.reusedChecks;
             preview = prepared->at(wanted.axialOffset, stop, false, &statistics.backgauge);
+            statistics.checkedWorkpieceSections += cache->workpieces.checked - checked;
+            statistics.reusedWorkpieceSections += cache->workpieces.reusedChecks - reused;
             statistics.placementEvaluationUs += elapsedUs(start);
         }
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
@@ -1877,6 +1889,10 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.reusedOperationPreparations += s.reusedOperationPreparations;
                 totals.operationPreparationUs += s.operationPreparationUs;
                 totals.placementEvaluationUs += s.placementEvaluationUs;
+                totals.preparedWorkpieces += s.preparedWorkpieces;
+                totals.reusedWorkpieces += s.reusedWorkpieces;
+                totals.checkedWorkpieceSections += s.checkedWorkpieceSections;
+                totals.reusedWorkpieceSections += s.reusedWorkpieceSections;
                 totals.toolAccessRankedStates += s.toolAccessRankedStates;
                 totals.commonAssemblyPasses += s.commonAssemblyPasses;
                 totals.commonAssemblyChecks += s.commonAssemblyChecks;

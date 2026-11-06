@@ -413,6 +413,14 @@ void prepareBackgauge(CadPreview &preview, double tolerance, std::stop_token sto
         preview.frames.push_back(std::move(frame));
     }
     // Prepared working bounds include the gauges, without fitting the whole press.
+    expandBackgaugeEnvelope(preview);
+}
+void expandBackgaugeEnvelope(CadPreview &preview) {
+    if (!preview.gauging || !preview.gauging->placement)
+        return;
+    const auto &placement = preview.gauging->placement;
+    const auto &setup = preview.gauging->setup;
+    const bool movement = preview.gauging->addedRetractionPositions > 0;
     preview.envelope.minimum.x = std::min(preview.envelope.minimum.x, placement->xMm);
     preview.envelope.maximum.x = std::max(preview.envelope.maximum.x,
                                           placement->xMm + (movement ? setup.retractMm : 0) + 150);
