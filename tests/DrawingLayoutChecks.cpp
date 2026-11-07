@@ -426,6 +426,34 @@ void references() {
                 source.detailLocators.size() == 2 && source.viewArrows.size() == 1,
             "Reference filtering mutated the immutable CAD snapshot");
 
+    auto pair = choices;
+    pair[1].visible = false;
+    pair[4].visible = true;
+    DrawingTitle pairedTitle;
+    pairedTitle.plan = DrawingSheet::compose(d, pair);
+    const auto parentView =
+        std::find_if(pairedTitle.plan->views.begin(), pairedTitle.plan->views.end(),
+                     [&](const auto &at) { return at.key == key; });
+    require(parentView != pairedTitle.plan->views.end(), "Missing detail parent projection");
+    Device pairedDevice(96);
+    {
+        QPainter painter(&pairedDevice);
+        DrawingSheet::paint(painter, *d, pairedTitle, parentView->page);
+    }
+    const auto centre = parentView->centre + QPointF(-40 * parentView->scale, 0);
+    for (const auto &locator : source.detailLocators) {
+        const double radius = std::max(2.5, locator.radius * parentView->scale);
+        require(pairedDevice.engine.texts[QString::fromStdString(locator.designation)] == 1 &&
+                    std::any_of(pairedDevice.engine.lines.begin(), pairedDevice.engine.lines.end(),
+                                [&](const auto &line) {
+                                    return std::abs(QLineF(centre, line.p1()).length() - radius) <
+                                               1e-4 &&
+                                           QLineF(centre, line.p2()).length() > radius + 1 &&
+                                           std::abs(line.dx()) > 1e-3 && std::abs(line.dy()) > 1e-3;
+                                }),
+                "Concentric detail leader did not connect its own circle to a slanted line");
+    }
+
     // The same policy must reach fit probes, recordings, preview and PDF. Keep
     // one true section marker; all local detail locators are disabled here.
     choices[3].visible = false;

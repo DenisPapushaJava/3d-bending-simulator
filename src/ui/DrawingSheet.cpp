@@ -442,6 +442,83 @@ void leaderNote(QPainter &p, QPointF anchor, QRectF bounds, const QString &value
             }
     throw std::runtime_error("Bend callouts do not fit; choose another orientation");
 }
+void detailLeader(QPainter &p, QPointF centre, double radius, const QString &name, QRectF bounds,
+                  QRectF area, std::vector<QRectF> &occupied,
+                  const std::vector<QLineF> &dimensionLines, std::vector<QLineF> &leaders,
+                  drawing::LayoutContext *context) {
+    struct Placement {
+        QLineF leader;
+        QLineF shelf;
+        QRectF label;
+        double cost;
+    };
+    std::optional<Placement> best;
+    const auto outward = centre - bounds.center();
+    const double heading = std::atan2(outward.y(), outward.x());
+    const double width = std::max(8., textWidthMm(name));
+    const std::vector<QRectF> body{bounds};
+    for (int lane = 0; lane < 16; ++lane) {
+        const double length = 3 + lane * 3;
+        if (best && length >= best->cost)
+            break;
+        if (context)
+            context->checkpoint();
+        for (int step = -11; step <= 12; ++step) {
+            const double angle = heading + step * std::numbers::pi / 12;
+            const QPointF direction(std::cos(angle), std::sin(angle));
+            const auto start = centre + direction * radius;
+            const auto end = start + direction * length;
+            if (crossesText(start, end, occupied))
+                continue;
+            const QLineF leader(start, end);
+            const double preferredSide = direction.x() < 0 ? -1 : 1;
+            for (double side : {preferredSide, -preferredSide}) {
+                const auto shelfEnd = end + QPointF(side * width, 0);
+                const QRectF label(std::min(end.x(), shelfEnd.x()), end.y() - 5, width, 5);
+                const QPointF nearest(std::clamp(centre.x(), label.left(), label.right()),
+                                      std::clamp(centre.y(), label.top(), label.bottom()));
+                if (!area.contains(label) || label.intersects(bounds) ||
+                    QLineF(centre, nearest).length() < radius || overlaps(label, occupied) ||
+                    crossesText(end, shelfEnd, occupied))
+                    continue;
+                const QLineF shelf(end, shelfEnd);
+                const std::vector<QRectF> labelBox{label};
+                const auto along = [&](const QLineF &old) {
+                    return overlappingRow(leader, old) || overlappingRow(shelf, old);
+                };
+                if (std::any_of(leaders.begin(), leaders.end(), [&](const auto &old) {
+                        return along(old) || crossesText(old.p1(), old.p2(), labelBox);
+                    }))
+                    continue;
+                const auto crossings = [&](const auto &lines) {
+                    return std::count_if(lines.begin(), lines.end(), [&](const auto &old) {
+                        return leader.intersects(old, nullptr) == QLineF::BoundedIntersection ||
+                               shelf.intersects(old, nullptr) == QLineF::BoundedIntersection;
+                    });
+                };
+                const bool alongDimension =
+                    std::any_of(dimensionLines.begin(), dimensionLines.end(), along);
+                // Prefer short diagonals clear of the outline and existing dimension lines.
+                const double cost =
+                    length + (crossesText(start, end, body) ? 60 : 0) +
+                    (std::min(std::abs(direction.x()), std::abs(direction.y())) < .22 ? 140 : 0) +
+                    (alongDimension ? 60 : 0) + (side != preferredSide ? 2 : 0) +
+                    5. * crossings(dimensionLines) + 35. * crossings(leaders);
+                if (!best || cost < best->cost)
+                    best = Placement{leader, shelf, label, cost};
+            }
+        }
+    }
+    if (!best)
+        throw std::runtime_error("Detail callout does not fit the available area");
+    occupied.push_back(best->label);
+    leaders.push_back(best->leader);
+    leaders.push_back(best->shelf);
+    dimensionPen(p);
+    p.drawLine(best->leader);
+    p.drawLine(best->shelf);
+    text(p, best->label, name, 3.5);
+}
 void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPointF center,
           double scale, const QString &caption, bool isometric = false, bool circular = false,
           bool compact = false, std::vector<QRectF> *sheetOccupied = nullptr,
@@ -577,9 +654,12 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     dimensionPen(p);
     if (circular)
         p.drawEllipse(bounds);
+    const auto locatorRadius = [scale](const DrawingDetailLocator &locator) {
+        return std::max(2.5, locator.radius * scale);
+    };
     for (const auto &locator : v.detailLocators) {
         const auto at = map(locator.anchor);
-        const double r = std::max(2.5, locator.radius * scale);
+        const double r = locatorRadius(locator);
         p.drawEllipse(at, r, r);
     }
     const bool paired = drawing.details.size() >= 2 && drawing.details[0].fullProfile &&
@@ -941,7 +1021,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                        .arg(bendId(drawing, note.first), bendId(drawing, note.second),
                             number(note.radians * 180 / std::numbers::pi)),
                    annotationArea.adjusted(0, -10, 0, 7), occupied);
-    const auto paintLocator = [&](DrawingPoint anchor, const std::string &value, bool detail) {
+    for (const auto &[anchor, value] : v.labels) {
         const auto a = map(anchor);
         auto delta = a - bounds.center();
         const double distance = std::hypot(delta.x(), delta.y());
@@ -967,19 +1047,19 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             // A locator inside a long narrow view may be far from its radial edge.
             // Try the same bounded external leader placement used by bend notes.
             leaderNote(p, a, bounds, QString::fromStdString(value), annotationArea, occupied, true);
-            return;
+            continue;
         }
         dimensionPen(p);
         p.drawLine(a, end);
         arrow(p, a, end, dimensionColor);
-        if (detail)
-            p.drawLine(end - QPointF(6, 0), end + QPointF(6, 0));
         text(p, QRectF(end.x() - 6, end.y() - 5, 12, 5), QString::fromStdString(value), 3.5);
-    };
-    for (const auto &[anchor, value] : v.labels)
-        paintLocator(anchor, value, false);
+    }
+    std::vector<QLineF> detailLeaders;
     for (const auto &locator : v.detailLocators)
-        paintLocator(locator.anchor, locator.designation, true);
+        detailLeader(p, map(locator.anchor), locatorRadius(locator),
+                     QString::fromStdString(locator.designation), bounds,
+                     cellArea ? annotationArea : QRectF(25, 20, 385, 193), occupied,
+                     placement.lines, detailLeaders, context);
     if (isometric && !classical) {
         const auto a = map(v.sideAnchor);
         auto b = map(v.sideTip);
