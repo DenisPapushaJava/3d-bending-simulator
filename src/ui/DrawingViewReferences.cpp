@@ -1,6 +1,5 @@
 #include "DrawingSheetInternal.h"
 #include <algorithm>
-#include <cmath>
 
 namespace bending::ui::drawing {
 application::DrawingView selectedView(const application::BendingDrawing &drawing,
@@ -35,27 +34,11 @@ application::DrawingView selectedView(const application::BendingDrawing &drawing
         return availability(drawing.auxiliaryViews, DrawingViewKind::Auxiliary,
                             arrow.designation) == false;
     });
-    std::vector<application::DrawingPoint> removed;
-    std::erase_if(view.labels, [&](const auto &label) {
-        const auto detail = availability(drawing.details, DrawingViewKind::Detail, label.second);
-        const auto profile = availability(drawing.profiles, DrawingViewKind::Profile, label.second);
-        if ((!detail && !profile) || detail.value_or(false) || profile.value_or(false))
-            return false;
-        removed.push_back(label.first);
-        return true;
+    std::erase_if(view.detailLocators, [&](const auto &locator) {
+        return availability(drawing.details, DrawingViewKind::Detail, locator.designation) == false;
     });
-    const auto sameAnchor = [](auto a, auto b) {
-        // The same association is used when classicalSource restores locators.
-        return std::hypot(a.x - b.x, a.y - b.y) < 1.e-5;
-    };
-    std::erase_if(view.detailCircles, [&](const auto &circle) {
-        const bool disabled = std::any_of(removed.begin(), removed.end(), [&](auto anchor) {
-            return sameAnchor(anchor, circle.first);
-        });
-        return disabled &&
-               std::none_of(view.labels.begin(), view.labels.end(), [&](const auto &label) {
-                   return sameAnchor(label.first, circle.first);
-               });
+    std::erase_if(view.labels, [&](const auto &label) {
+        return availability(drawing.profiles, DrawingViewKind::Profile, label.second) == false;
     });
     return view;
 }

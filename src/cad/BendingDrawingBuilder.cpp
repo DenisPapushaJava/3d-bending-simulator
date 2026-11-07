@@ -1390,13 +1390,11 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     const std::string designation =
                         "А" + std::to_string(drawing->details.size() + 1);
                     const double radius = (detail->maximum.x - detail->minimum.x) / 2;
-                    drawing->views[best].labels.push_back({project(at, frames[best]), designation});
-                    drawing->views[best].detailCircles.push_back(
-                        {project(at, frames[best]), radius});
-                    if (best != 0) {
-                        drawing->views[0].labels.push_back({project(at, frames[0]), designation});
-                        drawing->views[0].detailCircles.push_back({project(at, frames[0]), radius});
-                    }
+                    drawing->views[best].detailLocators.push_back(
+                        {project(at, frames[best]), radius, designation});
+                    if (best != 0)
+                        drawing->views[0].detailLocators.push_back(
+                            {project(at, frames[0]), radius, designation});
                     drawing->details.push_back(
                         {std::move(*detail), drawing->bends.size(), designation});
                 }
@@ -1456,7 +1454,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             drawing->details = std::move(details);
             for (auto &projection : drawing->views) {
                 projection.labels.clear();
-                projection.detailCircles.clear();
+                projection.detailLocators.clear();
             }
             profileGroup->marker.designation = "А1";
             drawing->views[0].sectionMarkers.push_back(profileGroup->marker);
@@ -1471,9 +1469,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                    gp_Pnt(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z)) *
                             .5);
                 const auto at = bendSurfacePoint(bend, faces, station);
-                drawing->views[0].labels.push_back({project(at, frames[0]), detail.designation});
-                drawing->views[0].detailCircles.push_back(
-                    {project(at, frames[0]), (detail.view.maximum.x - detail.view.minimum.x) / 2});
+                drawing->views[0].detailLocators.push_back(
+                    {project(at, frames[0]), (detail.view.maximum.x - detail.view.minimum.x) / 2,
+                     detail.designation});
             }
         }
         for (std::size_t i = 0; i < bendAnalysis.bends.size(); ++i)
@@ -1495,7 +1493,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     drawing->details = std::move(variable->details);
                     for (auto &projection : drawing->views) {
                         projection.labels.clear();
-                        projection.detailCircles.clear();
+                        projection.detailLocators.clear();
                         projection.sectionMarkers.clear();
                     }
                     drawing->views[0].sectionMarkers = std::move(variable->markers);

@@ -365,9 +365,8 @@ void references() {
     source.sectionMarkers = {{{40, 0}, {40, 80}, {-1, 0}, "А"},
                              {{80, 0}, {80, 80}, {-1, 0}, "Б"},
                              {{90, 0}, {90, 80}, {-1, 0}, "Б"}};
-    source.labels = {
-        {{20, 40}, "А1"}, {{100, 40}, "А2"}, {{60, 10}, "П1"}, {{60, 70}, "Примечание"}};
-    source.detailCircles = {{{20, 40}, 8}, {{100, 40}, 8}};
+    source.labels = {{{60, 10}, "П1"}, {{60, 70}, "Примечание"}};
+    source.detailLocators = {{{20, 40}, 8, "А1"}, {{20, 40}, 16, "А2"}};
     source.circleCenters = {{{30, 30}, 3}};
     source.viewArrows = {{{120, 40}, {-1, 0}, "Ц"}};
     std::vector<DrawingViewChoice> choices{
@@ -378,45 +377,53 @@ void references() {
     const auto key = DrawingViewKey{DrawingViewKind::Projection, 0};
     const auto selected = drawing::selectedView(*d, key, &choices);
     require(selected.sectionMarkers.size() == 1 && selected.sectionMarkers[0].designation == "А" &&
-                selected.labels.size() == 2 && selected.labels[0].second == "А1" &&
-                selected.labels[1].second == "Примечание" && selected.detailCircles.size() == 1 &&
-                selected.detailCircles[0].first.x == 20 && selected.viewArrows.empty() &&
+                selected.labels.size() == 1 && selected.labels[0].second == "Примечание" &&
+                selected.detailLocators.size() == 1 &&
+                selected.detailLocators[0].designation == "А1" &&
+                selected.detailLocators[0].radius == 8 && selected.viewArrows.empty() &&
                 selected.circleCenters.size() == 1 && selected.paths.size() == source.paths.size(),
             "Disabled destination retained a marker or erased geometry/unrelated text");
     auto reversed = choices;
     for (auto &choice : reversed)
         choice.visible = !choice.visible;
     const auto alternate = drawing::selectedView(*d, key, &reversed);
-    require(alternate.sectionMarkers.size() == 2 && alternate.labels.size() == 3 &&
-                alternate.labels[0].second == "А2" && alternate.detailCircles.size() == 1 &&
-                alternate.detailCircles[0].first.x == 100 && alternate.viewArrows.size() == 1,
+    require(alternate.sectionMarkers.size() == 2 && alternate.labels.size() == 2 &&
+                alternate.labels[0].second == "П1" && alternate.detailLocators.size() == 1 &&
+                alternate.detailLocators[0].designation == "А2" &&
+                alternate.detailLocators[0].radius == 16 && alternate.viewArrows.size() == 1,
             "Related markers did not follow their individual destinations");
     const std::vector<DrawingViewChoice> onlySource{{key}};
     const auto none = drawing::selectedView(*d, key, &onlySource);
-    require(none.sectionMarkers.empty() && none.detailCircles.empty() && none.viewArrows.empty() &&
+    require(none.sectionMarkers.empty() && none.detailLocators.empty() && none.viewArrows.empty() &&
                 none.labels.size() == 1 && none.labels[0].second == "Примечание",
             "Omitted destinations differ from unchecked destinations");
     // Classical preparation can restore locators from the original projection.
     // Selection is applied afterwards, so restoration cannot resurrect a hidden one.
     d->classicalViews = std::array{d->views[0], d->views[1], d->views[2]};
     (*d->classicalViews)[0].labels.clear();
-    (*d->classicalViews)[0].detailCircles.clear();
+    (*d->classicalViews)[0].detailLocators.clear();
     const auto classical = drawing::selectedView(*d, key, &choices);
-    require(classical.labels.size() == 1 && classical.labels[0].second == "А1" &&
-                classical.detailCircles.size() == 1 && classical.sectionMarkers.size() == 1,
-            "Classical locator restoration ignored destination visibility");
+    require(classical.labels.empty() && classical.detailLocators.size() == 1 &&
+                classical.detailLocators[0].designation == "А1" &&
+                classical.detailLocators[0].radius == 8 && classical.sectionMarkers.size() == 1,
+            "Classical locator restoration borrowed a circle from the coincident detail");
+    const auto classicalAlternate = drawing::selectedView(*d, key, &reversed);
+    require(classicalAlternate.detailLocators.size() == 1 &&
+                classicalAlternate.detailLocators[0].designation == "А2" &&
+                classicalAlternate.detailLocators[0].radius == 16,
+            "Classical locator restoration lost the second coincident detail");
     auto all = DrawingSheet::defaultViews(*d);
     for (auto &choice : all)
         choice.visible = true;
     const auto complete = drawing::selectedView(*d, key, &all);
     const auto original = drawing::preparedView(*d, key);
     require(complete.sectionMarkers.size() == original.sectionMarkers.size() &&
-                complete.detailCircles.size() == original.detailCircles.size() &&
+                complete.detailLocators.size() == 2 && original.detailLocators.size() == 2 &&
                 complete.labels.size() == original.labels.size() &&
                 complete.viewArrows.size() == original.viewArrows.size(),
             "Visible references changed the original annotation set");
-    require(source.sectionMarkers.size() == 3 && source.labels.size() == 4 &&
-                source.detailCircles.size() == 2 && source.viewArrows.size() == 1,
+    require(source.sectionMarkers.size() == 3 && source.labels.size() == 2 &&
+                source.detailLocators.size() == 2 && source.viewArrows.size() == 1,
             "Reference filtering mutated the immutable CAD snapshot");
 
     // The same policy must reach fit probes, recordings, preview and PDF. Keep

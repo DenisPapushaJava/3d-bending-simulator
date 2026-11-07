@@ -574,12 +574,12 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         }
     }
     p.restore();
-    pen(p);
+    dimensionPen(p);
     if (circular)
         p.drawEllipse(bounds);
-    for (const auto &[anchor, radius] : v.detailCircles) {
-        const auto at = map(anchor);
-        const double r = std::max(2.5, radius * scale);
+    for (const auto &locator : v.detailLocators) {
+        const auto at = map(locator.anchor);
+        const double r = std::max(2.5, locator.radius * scale);
         p.drawEllipse(at, r, r);
     }
     const bool paired = drawing.details.size() >= 2 && drawing.details[0].fullProfile &&
@@ -827,11 +827,11 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             if (offset > 24)
                 throw std::runtime_error("Section marker does not fit");
             const auto tip = end + outward * (offset + 2.5);
-            pen(p, .75);
+            p.setPen(QPen(dimensionColor, .75));
             p.drawLine(end + outward * offset, end + outward * (offset + 5));
-            pen(p);
+            dimensionPen(p);
             p.drawLine(tip - look * 6, tip);
-            arrow(p, tip, tip - look * 6);
+            arrow(p, tip, tip - look * 6, dimensionColor);
             bool placed = false;
             for (double along : {3., 0., -3., 6., -6., 9., -9.}) {
                 for (int lane = 0; lane < 8 && !placed; ++lane)
@@ -925,9 +925,9 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                 crossesText(tip, from, occupied))
                 continue;
             occupied.push_back(box);
-            pen(p);
+            dimensionPen(p);
             p.drawLine(from, tip);
-            arrow(p, tip, from);
+            arrow(p, tip, from, dimensionColor);
             text(p, box, QString::fromStdString(marker.designation));
             placed = true;
             break;
@@ -941,7 +941,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                        .arg(bendId(drawing, note.first), bendId(drawing, note.second),
                             number(note.radians * 180 / std::numbers::pi)),
                    annotationArea.adjusted(0, -10, 0, 7), occupied);
-    for (const auto &[anchor, value] : v.labels) {
+    const auto paintLocator = [&](DrawingPoint anchor, const std::string &value, bool detail) {
         const auto a = map(anchor);
         auto delta = a - bounds.center();
         const double distance = std::hypot(delta.x(), delta.y());
@@ -967,15 +967,19 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             // A locator inside a long narrow view may be far from its radial edge.
             // Try the same bounded external leader placement used by bend notes.
             leaderNote(p, a, bounds, QString::fromStdString(value), annotationArea, occupied, true);
-            continue;
+            return;
         }
         dimensionPen(p);
         p.drawLine(a, end);
         arrow(p, a, end, dimensionColor);
-        if (!v.detailCircles.empty())
+        if (detail)
             p.drawLine(end - QPointF(6, 0), end + QPointF(6, 0));
         text(p, QRectF(end.x() - 6, end.y() - 5, 12, 5), QString::fromStdString(value), 3.5);
-    }
+    };
+    for (const auto &[anchor, value] : v.labels)
+        paintLocator(anchor, value, false);
+    for (const auto &locator : v.detailLocators)
+        paintLocator(locator.anchor, locator.designation, true);
     if (isometric && !classical) {
         const auto a = map(v.sideAnchor);
         auto b = map(v.sideTip);
@@ -1156,7 +1160,7 @@ DrawingView referenceView(const DrawingView &source) {
     auto result = source;
     result.bendNotes.clear();
     result.labels.clear();
-    result.detailCircles.clear();
+    result.detailLocators.clear();
     result.sectionMarkers.clear();
     result.angles.clear();
     return result;
@@ -1275,7 +1279,7 @@ void operatorSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &tit
             const QRectF cell(25 + (i / 2) * 195, 37 + (i % 2) * 87, 190, 85);
             auto v = d.views[i];
             v.labels.clear();
-            v.detailCircles.clear();
+            v.detailLocators.clear();
             v.sectionMarkers.clear();
             const auto scale = fittedScale(v, 125, 40);
             view(p, d, v, cell.center() + QPointF(0, 5), scale,
@@ -1525,17 +1529,12 @@ DrawingView classicalSource(const BendingDrawing &d, const DrawingView &source,
         return view;
     for (auto index : classicalDetails(d)) {
         const auto &name = d.details[index].designation;
-        for (const auto &label : original.labels) {
-            if (label.second != name ||
-                std::any_of(view.labels.begin(), view.labels.end(),
-                            [&](const auto &old) { return old.second == name; }))
-                continue;
-            view.labels.push_back(label);
-            for (const auto &circle : original.detailCircles)
-                if (std::hypot(circle.first.x - label.first.x, circle.first.y - label.first.y) <
-                    1e-5)
-                    view.detailCircles.push_back(circle);
-        }
+        if (std::any_of(view.detailLocators.begin(), view.detailLocators.end(),
+                        [&](const auto &locator) { return locator.designation == name; }))
+            continue;
+        for (const auto &locator : original.detailLocators)
+            if (locator.designation == name)
+                view.detailLocators.push_back(locator);
     }
     return view;
 }

@@ -56,6 +56,11 @@ struct DrawingViewArrow {
     DrawingPoint direction;
     std::string designation;
 };
+struct DrawingDetailLocator {
+    DrawingPoint anchor;
+    double radius;
+    std::string designation;
+};
 struct DrawingBendCallout {
     DrawingPoint anchor;
     std::vector<std::size_t> bends;
@@ -81,7 +86,7 @@ struct DrawingView {
     std::vector<std::pair<DrawingPoint, std::string>> labels;
     std::vector<DrawingAngle> angles;
     std::vector<std::vector<DrawingPoint>> sectionLoops;
-    std::vector<std::pair<DrawingPoint, double>> detailCircles;
+    std::vector<DrawingDetailLocator> detailLocators;
     std::vector<std::pair<DrawingPoint, std::size_t>> bendNotes;
     std::vector<DrawingSectionMarker> sectionMarkers;
     // Zones for which both adjacent dimensions and the true angle are represented.
