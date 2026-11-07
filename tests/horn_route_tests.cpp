@@ -138,6 +138,12 @@ int main() {
             check(error &&
                       error->operationError == application::BendPreviewErrorCode::ToolIntersection,
                   "Overlong straight section unexpectedly cleared the corners");
+            plain.manualExtraction = true;
+            const auto formingBlocked = builder.buildRoute(doc, plain, {});
+            const auto *formingError = std::get_if<application::BendRouteError>(&formingBlocked);
+            check(formingError && formingError->operationError ==
+                                      application::BendPreviewErrorCode::ToolIntersection,
+                  "Manual extraction waived a real forming collision");
             auto longer = resolved;
             longer.assemblySearch.reset();
             for (auto &op : longer.operations) {

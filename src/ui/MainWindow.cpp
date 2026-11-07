@@ -628,6 +628,7 @@ class MainWindow::Impl {
         request.allowWorkpieceRotation = automatic;
         request.allowAxialPlacement = automatic && withTools;
         request.withTools = withTools;
+        request.manualExtraction = withTools && routePanel->manualExtraction();
         request.toolVariants = std::move(variants);
         const bool checkedTooling = !request.toolVariants.empty();
         request.allowPartialEndSupport = withTools;
@@ -1180,6 +1181,9 @@ class MainWindow::Impl {
             : controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
             : controller->bendRoute() && controller->bendRoute()->partialEndSupport
                 ? QStringLiteral("Торцевые подрезы")
+            : controller->bendRoute() && controller->bendRoute()->manualExtraction
+                ? QStringLiteral("Извлечение вручную · %1 шагов")
+                      .arg(controller->bendRoute()->steps.size())
             : scenePreview() && scenePreview()->hasPartialEndSupport()
                 ? QStringLiteral("Торцевые подрезы")
             : controller->bendRoute()
@@ -1494,12 +1498,14 @@ class MainWindow::Impl {
                         result += QStringLiteral(" Допуск %1 мм на каждый.").arg(*limit, 0, 'f', 2);
                 }
         } else if (preview && preview->pressMotion())
-            result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.")
-                                   : QStringLiteral("Геометрическая проверка пройдена.")) +
-                     (preview->machineModel() == core::MachineModel::None
-                          ? QStringLiteral("\nГибка — по кадрам, отвод пуансона — непрерывно.\n"
-                                           "Станок, держатели и перенос не проверены.")
-                          : QString{});
+            result =
+                (preview->manualExtraction() ? QStringLiteral("Гибка проверена в модели.")
+                 : viewingRoute ? QStringLiteral("Порядок проверен в модели.")
+                                : QStringLiteral("Геометрическая проверка пройдена.")) +
+                (!preview->manualExtraction() && preview->machineModel() == core::MachineModel::None
+                     ? QStringLiteral("\nГибка — по кадрам, отвод пуансона — непрерывно.\n"
+                                      "Станок, держатели и перенос не проверены.")
+                     : QString{});
         else if (preview && preview->toolSetup())
             result = QStringLiteral("Начальная установка проверена.\n"
                                     "Одно положение; движение не проверено.");
@@ -1513,6 +1519,9 @@ class MainWindow::Impl {
                          ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                          : QStringLiteral("Деталь и инструмент выбраны. Можно проверить.");
         if (preview && !preparing) {
+            if (preview->manualExtraction())
+                result += QStringLiteral("\nИзвлечение вручную: подъём пуансона и путь детали "
+                                         "не проверены.");
             if (preview->floorChecked())
                 result += QStringLiteral(
                     "\nДемонстрационный станок и пол · стол 900 мм. Проверка по кадрам; "
@@ -1908,6 +1917,11 @@ class MainWindow::Impl {
             setFrameText(QStringLiteral("Обнаружено столкновение · диагностическое положение"));
             return;
         }
+        if (preview->manualExtraction() && index + 1 == preview->frameCount()) {
+            setFrameText(approximation + segmented +
+                         QStringLiteral("Гибка завершена · извлечение вручную не проверено"));
+            return;
+        }
         if (const auto *state = preview->pressState(index)) {
             setFrameText(
                 approximation + segmented +
@@ -2128,7 +2142,8 @@ class MainWindow::Impl {
                 checkedToolVariants.clear();
                 toolSelection->rememberChoice();
                 status =
-                    route->partialEndSupport
+                    route->manualExtraction ? QStringLiteral("Гибка проверена · извлечение вручную")
+                    : route->partialEndSupport
                         ? QStringLiteral("Маршрут найден · торцевые подрезы")
                         : QStringLiteral("Проверенный порядок · %1 гибов").arg(route->steps.size());
             } else {

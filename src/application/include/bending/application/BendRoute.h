@@ -81,6 +81,8 @@ struct BendRouteRequest {
         true;                         // Exact intrinsic geometry/checks, no tool verdict reuse.
     bool rankToolAccess = true;       // Soft axial obstruction ranking; never a collision verdict.
     bool preferCommonAssembly = true; // Bounded original-assembly pass, then normal planning.
+    // Explicit forming-only scope: operator extraction is not computed or certified.
+    bool manualExtraction = false;
 };
 // Apply one input snapshot without changing IDs, targets, order or workpiece orientations.
 [[nodiscard]] bool applyRouteToolVariant(BendRouteRequest &, std::size_t variant);
@@ -129,7 +131,9 @@ struct BendRoute {
     BendRouteStatistics statistics = {};
     std::optional<std::size_t> selectedToolVariant;
     // The first route is geometric K=0.5; material BA remains a separate flat pattern.
-    // Tool mode checks each cycle; extraction/repositioning/machine are NOT certified.
+    // Tool mode checks each cycle unless manualExtraction explicitly excludes punch return.
+    // Operator extraction/repositioning and the actual machine are NOT certified.
+    bool manualExtraction = false;
 };
 [[nodiscard]] bool validRouteAssemblySearch(const BendRouteRequest &);
 [[nodiscard]] bool sameToolSetupExceptAssemblies(const core::ToolAssignment &,

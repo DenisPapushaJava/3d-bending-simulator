@@ -31,7 +31,8 @@ bool prepareBendRouteRequest(const DocumentSession &session, BendRouteRequest &r
     if (!matchesSession(session, request))
         return false;
     request.manualThicknessMm = session.manualThicknessMm();
-    if ((request.allowAxialPlacement && (!request.automatic || !request.withTools)) ||
+    if ((request.manualExtraction && !request.withTools) ||
+        (request.allowAxialPlacement && (!request.automatic || !request.withTools)) ||
         !validRouteAssemblySearch(request))
         return false;
     if (!request.toolVariants.empty()) {
@@ -58,7 +59,9 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                             applyRouteToolVariant(request, *route->selectedToolVariant));
     selectedInput = selectedInput && route && applyRouteAssemblyResult(request, *route);
     bool valid = selectedInput && route && route->source == document &&
-                 route->withTools == request.withTools && !route->steps.empty() &&
+                 route->withTools == request.withTools &&
+                 route->manualExtraction == request.manualExtraction &&
+                 (!request.manualExtraction || request.withTools) && !route->steps.empty() &&
                  route->steps.size() <= request.operations.size();
     std::set<std::string> ids;
     std::vector<std::string> order;
@@ -106,7 +109,8 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                 (request.allowWorkpieceRotation ||
                  (found != request.operations.end() &&
                   found->workpieceReversed == step.fixedSecond)) &&
-                (request.withTools ? p->pressMotion() && p->punchRetraction() : !p->toolSetup());
+                p->manualExtraction() == request.manualExtraction &&
+                (request.withTools ? p->pressMotion() != nullptr : !p->toolSetup());
             if (p && found != request.operations.end()) {
                 partialEndSupport |= p->hasPartialEndSupport();
                 if (request.withTools && found->tools)
@@ -134,8 +138,12 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                                                                  : core::MachineModel::None);
                 valid &=
                     p->floorChecked() == (p->machineModel() == core::MachineModel::DemoPressV3);
-                for (std::size_t f = 0; f < p->frameCount(); ++f)
+                for (std::size_t f = 0; f < p->frameCount(); ++f) {
                     valid &= !p->machineCollisionAtFrame(f);
+                    if (request.manualExtraction)
+                        valid &= p->pressState(f) &&
+                                 p->pressState(f)->phase != simulation::PressPhase::Retracting;
+                }
                 if (request.withTools) {
                     valid &= !found->tools->backgauge ||
                              (p->backgauge() && p->backgauge()->setup == *found->tools->backgauge &&
@@ -150,12 +158,18 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                                      document->metadata().bendAnalysis.lengthToleranceMm >=
                                  p->model().widthMm &&
                              p->pressState(0) &&
-                             p->pressState(0)->phase == simulation::PressPhase::Approach &&
-                             p->pressState(p->frameCount() - 1) &&
-                             p->pressState(p->frameCount() - 1)->phase ==
-                                 simulation::PressPhase::Retracting &&
-                             ret && std::isfinite(ret->liftMm) && ret->liftMm > 0 &&
-                             std::isfinite(ret->finalClearanceMm) && ret->finalClearanceMm > 0;
+                             p->pressState(0)->phase == simulation::PressPhase::Approach;
+                    const auto *last = p->pressState(p->frameCount() - 1);
+                    if (request.manualExtraction)
+                        valid &=
+                            !ret && last && last->phase == simulation::PressPhase::Bending &&
+                            std::isfinite(last->section.angleRadians) &&
+                            std::abs(last->section.angleRadians - found->target.angleRadians) <=
+                                document->metadata().bendAnalysis.angleToleranceRadians;
+                    else
+                        valid &= last && last->phase == simulation::PressPhase::Retracting && ret &&
+                                 std::isfinite(ret->liftMm) && ret->liftMm > 0 &&
+                                 std::isfinite(ret->finalClearanceMm) && ret->finalClearanceMm > 0;
                 }
             }
             order.push_back(step.id);

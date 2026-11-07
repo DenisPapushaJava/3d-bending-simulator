@@ -41,7 +41,7 @@ PreparedBendOperationResult prepareBendOperation(
     std::optional<core::ToolAssignment> = {}, bool allowPartialEndSupport = false,
     std::optional<double> maximumEndSupportLossMm = {}, std::optional<gp_Dir> referenceAxis = {},
     std::span<const std::size_t> jointBends = {}, BendWorkpieceReuse *workpieceReuse = nullptr,
-    const application::FlatPatternPtr &verifiedFlat = {});
+    const application::FlatPatternPtr &verifiedFlat = {}, bool manualExtraction = false);
 // Shared CAD transition for an isolated operation and a route's intermediate state.
 application::BendPreviewResult
 buildBendOperation(application::DocumentPtr, std::size_t, core::BendTarget, bool fixedSecond,

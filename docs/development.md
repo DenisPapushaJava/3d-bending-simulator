@@ -1,5 +1,14 @@
 # Разработка и проверки
 
+## D213 — ручное извлечение
+
+2026-11-07. [Контракт и частный прогон](manual-extraction.md). Строгий Release приложения/затронутых targets собран с warnings-as-errors; dev-app собран для F5. Целевой Release: **6/6**, 69,16 с (`application.route-acceptance`, `cad.bend-route-tools`, `cad.horn-route`, `cad.bend-preview`, `cad.route-draft`, `app.manual-route`). После расширения реального UI-сценария forming-only отдельно **1/1** `app.manual-route`, 21,44 с. SDK-free core acceptance **1/1**. Это проверки корректности с фоновыми сборками, не benchmark скорости.
+
+**Native Linux/X11/GPU, только100%:** обновлённый manual_route_workflow_tests прошёл, включая передачу флага MainWindow → worker → acceptance, показ настоящего конечного положения/отчёта, отмену старого результата и сброс при новом источнике. Снимок `out/manual-control-box/native.png-forming-checked.png` осмотрен: в панели явно указано, что подъём пуансона и путь извлечения не проверены; нет обещания полного цикла. Первую native-пробу с заданным путём снимка без расширения остановила проверка сохранения изображения; повтор с `.png` успешен. Это ошибка диагностического имени файла, а не расчёта или UI. Логи native-final/ui-final-tests/dev-build/manual-extraction-tests и артефакты только ignored `out/manual-control-box`.
+
+Частный проект: первый обратный B02 без sweep-отказа; затем SearchLimit после 173,118 с на одной тяжёлой CAD-операции, **не полный маршрут**. Прежний строгий отказ D212 сохранён; реальное извлечение не рассчитывается. SHA-256 проекта совпал до/после, встроенный STEP неизменён. Windows/полный удалённый CI/HiDPI не запускались. Форматы/пользовательская библиотека/допуски и строгий sweep не менялись. D051: локально, без push/PR/релиза.
+
+
 ## D212 — проверка сохранённого ручного порядка
 
 2026-11-07. [Входы/методика/вывод](manual-control-box-route-audit.md). Production-код не менялся. Сохранённый `.bend` v19 восстановлен штатными ProjectFiles/DocumentSession; точный ручной запрос проверен `prepareBendRouteRequest` и полным builder без перестановок/поворотных/осевых/секционных альтернатив. **Unsupported на B02**, одна проверка/68,264 с, `Cannot sweep a forward horn face`. Затем **8/8** ручных шагов, **200** положений без tool/machine collision и с Checked упорами; все сохраняют `unverifiedDraft=true`. Полный маршрут не сертифицирован.

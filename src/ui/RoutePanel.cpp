@@ -2,6 +2,7 @@
 #include "bending/application/SingleBendPreview.h"
 #include "bending/core/BendSequence.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDrag>
 #include <QDragEnterEvent>
@@ -263,7 +264,17 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
                                              "до 120 секунд и 512 попыток на запуск. "
                                              "Это не обещание найти маршрут."));
     expandSearch_->hide();
+    manualExtraction_ = new QCheckBox(QStringLiteral("Извлечение вручную"), this);
+    manualExtraction_->setObjectName("routeManualExtraction");
+    manualExtraction_->setToolTip(
+        QStringLiteral("Проверять гибку без расчёта подъёма пуансона. Извлечение и перенос детали "
+                       "оператором не проверяются. Только для текущей открытой детали."));
+    connect(manualExtraction_, &QCheckBox::toggled, this, [this] {
+        if (onModeChanged)
+            onModeChanged();
+    });
     layout->addWidget(automatic_);
+    layout->addWidget(manualExtraction_);
     layout->addWidget(expandSearch_);
     advancedLayout->addLayout(actions);
     stepStrip_ = new QWidget(this);
@@ -474,6 +485,13 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                          bool preparing, bool toolsAvailable, application::RouteDraftPtr draft,
                          std::optional<application::BendRouteError> draftError,
                          bool preparingDraft) {
+    if (extractionDocument_ != session.document()) {
+        extractionDocument_ = session.document();
+        const QSignalBlocker blocker(manualExtraction_);
+        manualExtraction_->setChecked(false);
+    }
+    manualExtraction_->setVisible(withTools());
+    manualExtraction_->setEnabled(session.document() && !busy && !preparing && !preparingDraft);
     if (documentRevision_ != session.revision()) {
         documentRevision_ = session.revision();
         selected_ = 0;
@@ -635,8 +653,11 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         }
         message += route_->partialEndSupport
                        ? QStringLiteral("Маршрут найден. Торцевые подрезы: возможна деформация. ")
+                   : route_->manualExtraction ? QString{}
                    : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
                                        : QStringLiteral("Движение без инструмента. ");
+        if (route_->manualExtraction)
+            message += QStringLiteral("Гибка проверена. Извлечение вручную — не рассчитано. ");
         if (selected_ > 0)
             for (const auto &interval : route_->steps[operation()].preview->endSupportIntervals()) {
                 const auto &support = interval.material;
@@ -707,5 +728,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         error ? QString::fromStdString(error->detail)
               : QStringLiteral("Геометрическая заготовка сохраняет среднюю поверхность. "
                                "Материальная развёртка для раскроя рассчитывается отдельно."));
+}
+bool RoutePanel::manualExtraction() const {
+    return withTools() && manualExtraction_->isChecked();
 }
 } // namespace bending::ui

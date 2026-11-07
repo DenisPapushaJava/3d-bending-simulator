@@ -844,14 +844,16 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
         }
     return gp_Dir(axis);
 }
-PreparedBendOperationResult
-prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
-                     bool fixedSecond, std::stop_token stop,
-                     std::optional<core::PressTools> toolParameters, bool withMotion,
-                     std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-                     std::optional<double> maximumEndSupportLossMm,
-                     std::optional<gp_Dir> referenceAxis, std::span<const std::size_t> jointBends,
-                     BendWorkpieceReuse *workpieceReuse, const FlatPatternPtr &verifiedFlat) {
+PreparedBendOperationResult prepareBendOperation(
+    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
+    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
+    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis,
+    std::span<const std::size_t> jointBends, BendWorkpieceReuse *workpieceReuse,
+    const FlatPatternPtr &verifiedFlat, bool manualExtraction) {
+    if (manualExtraction && (!withMotion || !toolParameters))
+        return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                "Manual extraction requires a forming cycle with tools"};
     const bool requestedReversed = fixedSecond;
     const auto unsupported = [](const char *detail) -> BendPreviewError {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
@@ -1240,6 +1242,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
         const auto &rigidVolume = workpiece->rigidVolume;
         const auto &displaySource = workpiece->displaySource;
         auto preview = std::make_shared<CadPreview>();
+        preview->manualExit = manualExtraction;
         preview->supportLimit =
             allowPartialEndSupport ? maximumEndSupportLossMm : std::optional<double>(0);
         preview->reversed = requestedReversed;
@@ -1515,8 +1518,9 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
              centralBasis = basis, model, sourceBasis, sourceSection, flanges, bend, multi, joint,
              jointZones = std::move(jointZones), jointSectors = std::move(jointSectors),
              supportIntervals = std::move(supportIntervals), sourceSector, expectedVolume, budget,
-             collisionBudget, rigidVolume, toolParameters, withMotion, toolGeometry, nonRadialEnds,
-             realTools = std::move(realTools), machine = std::move(machine), initialTools,
+             collisionBudget, rigidVolume, toolParameters, withMotion, manualExtraction,
+             toolGeometry, nonRadialEnds, realTools = std::move(realTools),
+             machine = std::move(machine), initialTools,
              initialSegments = std::move(initialSegments), flangeSides, innerSide, referenceFlange,
              displaySource, displaySides, workpiece, workpieceReuse, requestedReversed, tolerance](
                 double workpieceOffsetMm, std::stop_token placementStop, bool prepareDiagnostic,
@@ -1596,15 +1600,20 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
             RigidClearanceCache rigidClearances;
             bool returnSweepClear = true;
             constexpr std::size_t formingIntervals = 40;
-            const std::size_t intervals = withMotion       ? formingIntervals + 20
-                                          : toolParameters ? 0
-                                                           : 20;
+            const std::size_t fullIntervals = withMotion       ? formingIntervals + 20
+                                              : toolParameters ? 0
+                                                               : 20;
+            // Preserve the exact approach/forming samples. Do not rescale this prefix
+            // to progress=1, which would animate the unverified vertical return.
+            const std::size_t intervals =
+                withMotion && manualExtraction ? formingIntervals : fullIntervals;
             for (std::size_t i = 0; i <= intervals; ++i) {
                 if (placementStop.stop_requested()) {
                     return placementCancelled();
                 }
                 const double progress =
-                    intervals ? static_cast<double>(i) / static_cast<double>(intervals) : 0.0;
+                    fullIntervals ? static_cast<double>(i) / static_cast<double>(fullIntervals)
+                                  : 0.0;
                 if (withMotion) {
                     const auto state =
                         simulation::pressMotionState(model, *placedPreview->motion, progress);
@@ -1734,7 +1743,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                             "Contact endpoint differs from the verified STEP reconstruction", i};
                     }
                 }
-                if (withMotion && i == formingIntervals) {
+                if (withMotion && !manualExtraction && i == formingIntervals) {
                     const double tip = placedPreview->states.back().punchTipYmm;
                     const double lift = model.thicknessMm + toolParameters->clearanceMm - tip;
                     if (!std::isfinite(lift) || lift <= tolerance) {
@@ -2007,7 +2016,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                                     "Punch contact/clearance mismatch", i};
                         }
                     }
-                    if (withMotion && i == intervals) {
+                    if (withMotion && !manualExtraction && i == intervals) {
                         BRepExtrema_DistShapeShape distance(frame.shape, frame.tools[1]);
                         if (!distance.IsDone() || !std::isfinite(distance.Value()) ||
                             distance.Value() <= tolerance) {

@@ -91,7 +91,10 @@ class TestPreview final : public SingleBendPreview {
         return tools ? (frame == 0 ? &approach : &returned) : nullptr;
     }
     const PunchRetractionCheck *punchRetraction() const noexcept override {
-        return tools ? &retraction : nullptr;
+        return tools && !manualExit ? &retraction : nullptr;
+    }
+    bool manualExtraction() const noexcept override {
+        return manualExit;
     }
     const BackgaugeReport *backgauge() const noexcept override {
         return &gauge;
@@ -103,7 +106,7 @@ class TestPreview final : public SingleBendPreview {
     std::optional<double> endSupportLimitMm() const noexcept override {
         return supportLimit;
     }
-    bool tools = false, drawing = false, draft = false, reversed = false;
+    bool tools = false, drawing = false, draft = false, reversed = false, manualExit = false;
     bool machineConflict = false, floor = false;
     std::size_t active = 1;
     std::optional<ToolCollisionPair> conflict;
@@ -297,6 +300,64 @@ void rejectedRoutes() {
         f.reject("Unknown selected variant accepted");
     }
 }
+// The relaxed scope must be explicit at request, route and every operation.
+void manualExtractionScope() {
+    const auto enable = [](Fixture &f) {
+        f.request.manualExtraction = f.route->manualExtraction = true;
+        for (auto &p : f.previews) {
+            p->manualExit = true;
+            p->returned.phase = simulation::PressPhase::Bending;
+            p->returned.section.angleRadians = std::numbers::pi / 2;
+        }
+    };
+    {
+        Fixture f(true);
+        enable(f);
+        require(prepareBendRouteRequest(f.session, f.request) &&
+                    applyBendRouteResult(f.session, f.request, f.route),
+                "Explicit complete forming route rejected");
+    }
+    {
+        Fixture f;
+        enable(f);
+        require(!prepareBendRouteRequest(f.session, f.request), "Manual extraction without tools");
+        f.reject("Forming-only scope without tools accepted");
+    }
+    for (int failure = 0; failure < 7; ++failure) {
+        Fixture f(true);
+        enable(f);
+        switch (failure) {
+        case 0:
+            f.request.manualExtraction = false;
+            break;
+        case 1:
+            f.route->manualExtraction = false;
+            break;
+        case 2:
+            f.previews[1]->manualExit = false;
+            break;
+        case 3:
+            f.previews[1]->returned.section.angleRadians -= .1;
+            break;
+        case 4:
+            f.previews[1]->returned.phase = simulation::PressPhase::Retracting;
+            break;
+        case 5:
+            f.previews[1]->conflict = ToolCollisionPair::SheetPunch;
+            break;
+        case 6:
+            f.previews[1]->machineConflict = true;
+            break;
+        }
+        f.reject("Incomplete, mismatched or colliding forming-only route accepted");
+    }
+    {
+        Fixture f(true);
+        enable(f);
+        f.previews[1]->setup.tools.lengthMm = 1;
+        f.reject("Manual extraction waived tool coverage");
+    }
+}
 void requestBoundary() {
     Fixture f;
     const auto before = f.session.editRevision();
@@ -315,6 +376,7 @@ int main() {
         successfulRoutes();
         rejectedRoutes();
         requestBoundary();
+        manualExtractionScope();
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         return 1;

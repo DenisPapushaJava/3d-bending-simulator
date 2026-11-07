@@ -6,6 +6,7 @@
 class QLabel;
 class QPushButton;
 class QComboBox;
+class QCheckBox;
 class QHBoxLayout;
 class QScrollArea;
 namespace bending::ui {
@@ -22,6 +23,7 @@ class RoutePanel final : public QWidget {
     void select(int step, bool notify = true);
     void setWithTools(bool);
     [[nodiscard]] bool withTools() const;
+    [[nodiscard]] bool manualExtraction() const;
     void setExpandedSearch(bool expanded) {
         expandedSearch_ = expanded;
     }
@@ -68,6 +70,8 @@ class RoutePanel final : public QWidget {
     std::vector<QPushButton *> steps_;
     int selected_ = 0;
     QComboBox *mode_;
+    QCheckBox *manualExtraction_;
+    application::DocumentPtr extractionDocument_;
     QPushButton *automatic_, *manual_, *earlier_, *later_, *editTool_, *expandSearch_;
     bool expandedSearch_ = false;
     QLabel *status_;

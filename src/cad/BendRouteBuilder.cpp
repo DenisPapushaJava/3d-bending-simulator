@@ -120,6 +120,7 @@ struct TransitionInputs {
     RouteOperation operation;
     bool withTools, partialEndSupport;
     std::optional<double> maximumEndSupportLossMm;
+    bool manualExtraction = false;
     bool operator==(const TransitionInputs &) const = default;
 };
 struct TransitionKey {
@@ -800,7 +801,7 @@ class RouteSearch {
         normalized.workpieceOffsetMm = 0;
         auto entry =
             cache->intern({std::move(normalized), request.withTools, request.allowPartialEndSupport,
-                           request.maximumEndSupportLossMm});
+                           request.maximumEndSupportLossMm, request.manualExtraction});
         assemblyInputs.push_back(entry);
         return entry;
     }
@@ -979,7 +980,7 @@ class RouteSearch {
                         request.reuseWorkpiecePreparation
                     ? &cache->workpieces
                     : nullptr,
-                cache->flat);
+                cache->flat, request.manualExtraction);
             statistics.preparedWorkpieces += cache->workpieces.built - built;
             statistics.reusedWorkpieces += cache->workpieces.reused - reused;
             ++statistics.preparedOperations;
@@ -1653,7 +1654,8 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
                 const auto &op = input.operation;
                 return entry.mask == full && entry.jointInputs.empty() &&
                        entry.fixedSecond == reversed && entry.axialOffset == workpieceOffsetMm &&
-                       input.withTools && input.partialEndSupport == (!limit || *limit > 0) &&
+                       input.withTools && !input.manualExtraction &&
+                       input.partialEndSupport == (!limit || *limit > 0) &&
                        (!input.partialEndSupport || input.maximumEndSupportLossMm == limit) &&
                        op.bendIndex == index && op.target == target && op.tools == tools &&
                        op.assignment == assignment && preview && !preview->unverifiedDraft() &&
@@ -1789,6 +1791,9 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         const auto n = analysis.bends.size();
         if (request.onProgress)
             request.onProgress({BendRoutePhase::Preparing, 0, 0, 0, std::nullopt});
+        if (request.manualExtraction && !request.withTools)
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "Manual extraction requires tools"};
         if ((request.allowPartialEndSupport && !request.withTools) ||
             (request.maximumEndSupportLossMm &&
              (!request.allowPartialEndSupport ||
@@ -2083,7 +2088,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             const auto bend = operation.bendIndex;
             search.inputs[bend] = work->intern({std::move(operation), search.request.withTools,
                                                 search.request.allowPartialEndSupport,
-                                                search.request.maximumEndSupportLossMm});
+                                                search.request.maximumEndSupportLossMm,
+                                                search.request.manualExtraction});
         }
         search.layout = &OcctFlatPatternAccess::layout(*search.flat);
         search.tolerance = analysis.lengthToleranceMm;
@@ -2195,6 +2201,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         auto result = std::make_shared<BendRoute>();
         result->source = document;
         result->withTools = search.request.withTools;
+        result->manualExtraction = search.request.manualExtraction;
         result->evaluatedOperations = search.attempts;
         result->statistics = search.statistics;
         result->steps.assign(search.reversed.rbegin(), search.reversed.rend());

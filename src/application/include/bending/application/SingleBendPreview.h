@@ -115,6 +115,10 @@ class SingleBendPreview {
     [[nodiscard]] virtual const simulation::PressState *pressState(std::size_t) const noexcept {
         return nullptr;
     }
+    // Forming was checked, but no punch-return or operator-extraction path was verified.
+    [[nodiscard]] virtual bool manualExtraction() const noexcept {
+        return false;
+    }
     [[nodiscard]] virtual const PunchRetractionCheck *punchRetraction() const noexcept {
         return nullptr;
     }
