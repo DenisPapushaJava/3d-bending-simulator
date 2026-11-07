@@ -1,4 +1,5 @@
 #include "PartInputDialog.h"
+#include "ProjectFormatFixtures.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
@@ -248,7 +249,7 @@ void workflowTests(const QString &snapshot) {
     // Legacy projects must request their missing material.
     QFile file(dir.path() + "/part.bend");
     check(file.open(QIODevice::ReadOnly), "Cannot read project");
-    auto root = QJsonDocument::fromJson(file.readAll()).object();
+    auto root = project_fixture::legacyRoot(file.readAll());
     file.close();
     root.insert("version", 5);
     root.remove("unfold");

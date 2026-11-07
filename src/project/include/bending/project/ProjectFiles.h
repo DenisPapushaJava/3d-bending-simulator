@@ -15,7 +15,8 @@ class ProjectFiles final : public application::DocumentImporter, public applicat
     save(const std::filesystem::path &path, const application::Document &document,
          std::optional<double> manualThicknessMm,
          const std::vector<application::BendPreparation> &bends, std::stop_token stop,
-         core::UnfoldSettings unfold = {}) const override;
+         core::UnfoldSettings unfold = {},
+         const std::optional<application::ProjectDrawingSettings> &drawing = {}) const override;
 
   private:
     cad::StepImporter importer_;

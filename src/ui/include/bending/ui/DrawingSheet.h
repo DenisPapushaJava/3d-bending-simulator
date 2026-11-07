@@ -1,5 +1,5 @@
 #pragma once
-#include "bending/application/BendingDrawing.h"
+#include "bending/application/ProjectDrawingSettings.h"
 #include <QImage>
 #include <QLineF>
 #include <QRectF>
@@ -11,7 +11,7 @@
 class QPainter;
 namespace bending::ui {
 enum class DrawingLayout { Classical, Profiles };
-enum class DrawingViewKind { Projection, Section, Profile, Detail, Auxiliary, Flat, Isometric };
+using application::DrawingViewKind;
 struct DrawingViewKey {
     DrawingViewKind kind;
     std::size_t index = 0;
@@ -22,7 +22,7 @@ struct DrawingViewChoice {
     bool visible = true;
     std::optional<double> scale = {}; // Standard paper scale; projections share it.
 };
-enum class DrawingFlatSide { Automatic, First, Opposite };
+using application::DrawingFlatSide;
 struct DrawingFlatOrientation {
     bool reversed = false;
     std::optional<bool> sideA = {};

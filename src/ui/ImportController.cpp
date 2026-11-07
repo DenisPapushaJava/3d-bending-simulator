@@ -648,6 +648,13 @@ bool ImportController::isSaving() const {
 QString ImportController::saveError() const {
     return impl_->writeError;
 }
+bool ImportController::setDrawingSettings(std::uint64_t revision, ProjectDrawingSettings settings) {
+    if (impl_->stopping || !impl_->session.setDrawingSettings(revision, std::move(settings)))
+        return false;
+    QMetaObject::invokeMethod(this, [this] { emit stateChanged(); }, Qt::QueuedConnection);
+    return true;
+}
+
 void ImportController::saveProject(std::filesystem::path path,
                                    std::shared_ptr<const ProjectWriter> writer) {
     if (impl_->stopping || hasWork() || !impl_->session.document() || !writer) {
@@ -658,6 +665,8 @@ void ImportController::saveProject(std::filesystem::path path,
     const auto manual = state->session.manualThicknessMm();
     const auto unfold = state->session.unfoldSettings();
     const auto bends = state->session.bends();
+    const auto drawing = state->session.drawingSettings();
+    const auto drawingRevision = state->session.drawingRevision();
     const auto revision = state->session.editRevision();
     const auto id = ++state->saveId;
     state->beginForeground();
@@ -667,11 +676,11 @@ void ImportController::saveProject(std::filesystem::path path,
     state->writeError.clear();
     QMetaObject::invokeMethod(
         state->worker,
-        [state, document, manual, unfold, bends, revision, id, stop, path = std::move(path),
-         writer = std::move(writer)] {
+        [state, document, manual, unfold, bends, drawing, drawingRevision, revision, id, stop,
+         path = std::move(path), writer = std::move(writer)] {
             std::optional<std::string> error;
             try {
-                error = writer->save(path, *document, manual, bends, stop, unfold);
+                error = writer->save(path, *document, manual, bends, stop, unfold, drawing);
             } catch (const std::exception &failure) {
                 error = failure.what();
             } catch (...) {
@@ -679,7 +688,7 @@ void ImportController::saveProject(std::filesystem::path path,
             }
             QMetaObject::invokeMethod(
                 state->owner,
-                [state, revision, id, path, error] {
+                [state, revision, drawingRevision, id, path, error] {
                     state->running = false;
                     state->saving = false;
                     if (state->stopping) {
@@ -688,7 +697,7 @@ void ImportController::saveProject(std::filesystem::path path,
                     if (id == state->saveId) {
                         if (error) {
                             state->writeError = QString::fromStdString(*error);
-                        } else {
+                        } else if (state->session.drawingRevision() == drawingRevision) {
                             state->session.markSaved(revision, path);
                         }
                     }

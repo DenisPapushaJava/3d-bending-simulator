@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "ProjectFormatFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
@@ -369,13 +370,13 @@ int main(int argc, char **argv) {
                 "Backgauge snapshot lost on reload");
         QFile file(project);
         require(file.open(QIODevice::ReadOnly), "Open JSON failed");
-        auto json = QJsonDocument::fromJson(file.readAll()).object();
+        auto json = project_fixture::legacyRoot(file.readAll());
         file.close();
         // Explicit v15 centre-contact policy remains strict when opened by v16.
         require(session.setBendToolAssignment(0, strictPair), "Legacy assignment rejected");
         require(!files->save(path(project), *doc, {}, session.bends(), {}), "Legacy save failed");
         require(file.open(QIODevice::ReadOnly), "Legacy JSON open failed");
-        auto legacyJson = QJsonDocument::fromJson(file.readAll()).object();
+        auto legacyJson = project_fixture::legacyRoot(file.readAll());
         file.close();
         legacyJson.insert("version", 15);
         auto legacyBends = legacyJson.value("bends").toArray();

@@ -39,6 +39,7 @@ class ImportController final : public QObject {
                                      std::optional<core::PressTools> sharedTools = {},
                                      std::optional<core::ToolAssignment> sharedAssignment = {});
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
+    bool setDrawingSettings(std::uint64_t revision, application::ProjectDrawingSettings);
     void saveProject(std::filesystem::path path,
                      std::shared_ptr<const application::ProjectWriter> writer);
     [[nodiscard]] bool isSaving() const;

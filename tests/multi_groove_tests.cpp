@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "ProjectFormatFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/core/ToolSelection.h"
@@ -193,7 +194,7 @@ int main(int argc, char **argv) {
                 "Portable groove selection lost");
         QFile json(temp.path() + "/four.bend");
         require(json.open(QIODevice::ReadOnly), "Read project");
-        auto root = QJsonDocument::fromJson(json.readAll()).object();
+        auto root = project_fixture::legacyRoot(json.readAll());
         json.close();
         root.insert("version", 8);
         require(json.open(QIODevice::WriteOnly | QIODevice::Truncate), "Retag old project");

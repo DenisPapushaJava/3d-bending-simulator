@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "ProjectFormatFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/project/ProjectFiles.h"
@@ -146,9 +147,8 @@ int main(int argc, char **argv) {
                 "Portable mode lost");
         QFile json(dir.path() + "/tool.bend");
         require(json.open(QIODevice::ReadOnly), "Read saved");
-        auto root = QJsonDocument::fromJson(json.readAll()).object();
+        auto root = project_fixture::legacyRoot(json.readAll());
         json.close();
-        require(root.value("version").toInt() == 18, "Wrong current project version");
         {
             auto legacyBends = root["bends"].toArray();
             for (qsizetype i = 0; i < legacyBends.size(); ++i) {
@@ -278,7 +278,7 @@ int main(int argc, char **argv) {
                     window.findChild<QLabel *>("bendCheckSummary")->text().contains("DXF"),
                 "Legacy partial assignment launched a generated tool check");
         require(json.open(QIODevice::ReadOnly), "Read mixed project");
-        root = QJsonDocument::fromJson(json.readAll()).object();
+        root = project_fixture::legacyRoot(json.readAll());
         json.close();
         {
             auto legacyBends = root["bends"].toArray();

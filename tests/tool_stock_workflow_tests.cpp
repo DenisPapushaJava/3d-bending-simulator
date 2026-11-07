@@ -1,4 +1,5 @@
 #include "BendFixtures.h"
+#include "ProjectFormatFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/DrawingTools.h"
@@ -329,9 +330,8 @@ int main(int argc, char **argv) {
                 "Stock or assembly not portable");
         QFile saved(folder.path() + "/assembly.bend");
         require(saved.open(QIODevice::ReadOnly), "Cannot read saved assembly");
-        auto older = QJsonDocument::fromJson(saved.readAll()).object();
+        auto older = project_fixture::legacyRoot(saved.readAll());
         saved.close();
-        require(older.value("version").toInt() == 18, "Wrong project schema for assembly");
         older.insert("version", 9);
         QFile forged(folder.path() + "/forged-v9.bend");
         require(forged.open(QIODevice::WriteOnly), "Cannot create version test");

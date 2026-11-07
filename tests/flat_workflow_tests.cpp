@@ -1,3 +1,4 @@
+#include "ProjectFormatFixtures.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -389,7 +390,7 @@ int main(int argc, char **argv) {
         // Malformed rule data is rejected before it can modify the session.
         QFile saved(qtPath(path));
         check(saved.open(QIODevice::ReadOnly), "Cannot read saved project");
-        auto root = QJsonDocument::fromJson(saved.readAll()).object();
+        auto root = project_fixture::legacyRoot(saved.readAll());
         saved.close();
         // An explicitly saved material-table mode must not become the new default constant.
         auto tableRoot = root;

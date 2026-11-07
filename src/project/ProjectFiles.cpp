@@ -1,5 +1,9 @@
 #include "bending/project/ProjectFiles.h"
+#include "ProjectDrawingJson.h"
 #include "ToolJson.h"
+
+#include <QCborMap>
+#include <QCborValue>
 
 #include <QCryptographicHash>
 #include <QFile>
@@ -15,6 +19,8 @@ namespace bending::project {
 namespace {
 using namespace application;
 constexpr qint64 maximumProjectBytes = 92 * 1024 * 1024;
+constexpr int compactProjectVersion = 20;
+const QByteArray projectSignature("BENDSIM\0", 8);
 QString qtPath(const std::filesystem::path &path) {
 #ifdef _WIN32
     return QString::fromStdWString(path.native());
@@ -127,8 +133,9 @@ bool readTools(const QJsonValue &value, std::optional<core::PressTools> &tools,
     tools = candidate;
     return true;
 }
-QJsonArray bendsJson(const std::vector<BendPreparation> &bends) {
+QJsonArray bendsJson(const std::vector<BendPreparation> &bends, QJsonArray &assignments) {
     QJsonArray values;
+    std::vector<const core::ToolAssignment *> snapshots;
     for (const auto &bend : bends) {
         const auto &a = bend.anchor;
         const QJsonObject geometry{
@@ -145,19 +152,30 @@ QJsonArray bendsJson(const std::vector<BendPreparation> &bends) {
                               {QStringLiteral("angleRadians"), bend.target->angleRadians},
                               {QStringLiteral("innerRadiusMm"), bend.target->innerRadiusMm}})
                         : QJsonValue(QJsonValue::Null);
-        values.append(
-            QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
-                        {QStringLiteral("review"), reviewName(bend.review)},
-                        {QStringLiteral("workpieceReversed"), bend.workpieceReversed},
-                        {QStringLiteral("workpieceOffsetMm"), bend.workpieceOffsetMm},
-                        {QStringLiteral("geometry"), geometry},
-                        {QStringLiteral("target"), target},
-                        {QStringLiteral("tools"), toolsJson(bend.tools)},
-                        {QStringLiteral("catalogTools"), assignmentJson(bend.catalogTools)}});
+        QJsonValue assignment = QJsonValue::Null;
+        if (bend.catalogTools) {
+            const auto existing =
+                std::find_if(snapshots.begin(), snapshots.end(),
+                             [&](const auto *saved) { return *saved == *bend.catalogTools; });
+            assignment = static_cast<int>(existing - snapshots.begin());
+            if (existing == snapshots.end()) {
+                snapshots.push_back(&*bend.catalogTools);
+                assignments.append(assignmentJson(bend.catalogTools));
+            }
+        }
+        values.append(QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
+                                  {QStringLiteral("review"), reviewName(bend.review)},
+                                  {QStringLiteral("workpieceReversed"), bend.workpieceReversed},
+                                  {QStringLiteral("workpieceOffsetMm"), bend.workpieceOffsetMm},
+                                  {QStringLiteral("geometry"), geometry},
+                                  {QStringLiteral("target"), target},
+                                  {QStringLiteral("tools"), toolsJson(bend.tools)},
+                                  {QStringLiteral("catalogTools"), assignment}});
     }
     return values;
 }
-bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int version) {
+bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int version,
+               const std::vector<core::ToolAssignment> &assignments) {
     if (!value.isArray() || value.toArray().size() > 512) {
         return false;
     }
@@ -231,9 +249,16 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
                 : object.contains(QStringLiteral("tools"))) {
             return false;
         }
-        if (version >= 4
-                ? !readAssignment(object.value(QStringLiteral("catalogTools")), bend.catalogTools)
-                : object.contains(QStringLiteral("catalogTools"))) {
+        const auto assignment = object.value(QStringLiteral("catalogTools"));
+        if (version == compactProjectVersion) {
+            if (!assignment.isNull()) {
+                const int index = assignment.toInt(-1);
+                if (index < 0 || static_cast<std::size_t>(index) >= assignments.size())
+                    return false;
+                bend.catalogTools = assignments[static_cast<std::size_t>(index)];
+            }
+        } else if (version >= 4 ? !readAssignment(assignment, bend.catalogTools)
+                                : !assignment.isUndefined()) {
             return false;
         }
         if (version < 18) {
@@ -312,28 +337,40 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (bytes.size() > maximumProjectBytes || file.error() != QFileDevice::NoError) {
         return invalid("Cannot read project");
     }
-    QJsonParseError parseError;
-    const auto json = QJsonDocument::fromJson(bytes, &parseError);
-    if (parseError.error != QJsonParseError::NoError || !json.isObject()) {
-        return invalid("Invalid project JSON");
+    const bool compact = bytes.startsWith(projectSignature);
+    QJsonObject root;
+    QByteArray sourceBytes;
+    if (compact) {
+        QCborParserError error;
+        const auto payload = QByteArray::fromRawData(bytes.constData() + projectSignature.size(),
+                                                     bytes.size() - projectSignature.size());
+        const auto decoded = QCborValue::fromCbor(payload, &error);
+        if (error.error != QCborError::NoError || error.offset != payload.size() ||
+            !decoded.isMap())
+            return invalid("Invalid compact project");
+        auto manifest = decoded.toMap();
+        auto source = manifest.value(QStringLiteral("source")).toMap();
+        const auto data = source.take(QStringLiteral("data"));
+        if (!data.isByteArray())
+            return invalid("Missing binary STEP snapshot");
+        sourceBytes = data.toByteArray();
+        manifest.insert(QStringLiteral("source"), source);
+        root = manifest.toJsonObject();
+    } else {
+        QJsonParseError error;
+        const auto json = QJsonDocument::fromJson(bytes, &error);
+        if (error.error != QJsonParseError::NoError || !json.isObject())
+            return invalid("Invalid project JSON");
+        root = json.object();
     }
-    const auto root = json.object();
-    if (root.value(QStringLiteral("format")).toString() != QStringLiteral("3d-bending-simulator")) {
+    if (root.value(QStringLiteral("format")).toString() != QStringLiteral("3d-bending-simulator"))
         return invalid("Unknown project format");
-    }
-    const auto version = root.value(QStringLiteral("version"));
-    if (!version.isDouble() ||
-        (version.toDouble() != 1.0 && version.toDouble() != 2.0 && version.toDouble() != 3.0 &&
-         version.toDouble() != 4.0 && version.toDouble() != 5.0 && version.toDouble() != 6.0 &&
-         version.toDouble() != 7.0 && version.toDouble() != 8.0 && version.toDouble() != 9.0 &&
-         version.toDouble() != 10.0 && version.toDouble() != 11.0 && version.toDouble() != 12.0 &&
-         version.toDouble() != 13.0 && version.toDouble() != 14.0 && version.toDouble() != 15.0 &&
-         version.toDouble() != 16.0 && version.toDouble() != 17.0 && version.toDouble() != 18.0 &&
-         version.toDouble() != 19.0)) {
+    const int version = root.value(QStringLiteral("version")).toInt();
+    if (version < 1 || version > compactProjectVersion ||
+        compact != (version == compactProjectVersion))
         return ImportError{ImportErrorCode::UnsupportedProjectVersion,
-                           "Supported project format versions are 1 through 19",
+                           "Supported project versions are 1 through 20",
                            {}};
-    }
     if (root.value(QStringLiteral("units")).toString() != QStringLiteral("mm") ||
         !root.value(QStringLiteral("source")).isObject() ||
         !root.value(QStringLiteral("parameters")).isObject()) {
@@ -345,19 +382,23 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (name.isEmpty() || name.contains(QLatin1Char('/')) || name.contains(QLatin1Char('\\')) ||
         name.contains(QChar(0)) ||
         (suffix != QStringLiteral(".step") && suffix != QStringLiteral(".stp")) ||
-        !source.value(QStringLiteral("data")).isString() ||
+        (!compact && !source.value(QStringLiteral("data")).isString()) ||
         !source.value(QStringLiteral("sha256")).isString()) {
         return invalid("Invalid embedded STEP description");
     }
-    const auto decoded =
-        QByteArray::fromBase64Encoding(source.value(QStringLiteral("data")).toString().toLatin1(),
-                                       QByteArray::AbortOnBase64DecodingErrors);
-    if (!decoded || decoded.decoded.isEmpty() ||
-        static_cast<std::size_t>(decoded.decoded.size()) > cad::StepImporter::maximumSourceBytes ||
-        QCryptographicHash::hash(decoded.decoded, QCryptographicHash::Sha256).toHex() !=
-            source.value(QStringLiteral("sha256")).toString().toLatin1()) {
-        return invalid("Embedded STEP data is invalid or its SHA-256 does not match");
+    if (!compact) {
+        const auto decoded = QByteArray::fromBase64Encoding(
+            source.value(QStringLiteral("data")).toString().toLatin1(),
+            QByteArray::AbortOnBase64DecodingErrors);
+        if (!decoded)
+            return invalid("Invalid embedded STEP encoding");
+        sourceBytes = decoded.decoded;
     }
+    if (sourceBytes.isEmpty() ||
+        static_cast<std::size_t>(sourceBytes.size()) > cad::StepImporter::maximumSourceBytes ||
+        QCryptographicHash::hash(sourceBytes, QCryptographicHash::Sha256).toHex() !=
+            source.value(QStringLiteral("sha256")).toString().toLatin1())
+        return invalid("Embedded STEP data is invalid or its SHA-256 does not match");
     const auto thicknessValue = root.value(QStringLiteral("parameters"))
                                     .toObject()
                                     .value(QStringLiteral("manualThicknessMm"));
@@ -373,7 +414,7 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     }
     std::vector<BendPreparation> bends;
     core::UnfoldSettings unfold;
-    if (version.toDouble() >= 6) {
+    if (version >= 6) {
         const auto parameters = root.value(QStringLiteral("parameters")).toObject();
         const auto value = parameters.value(QStringLiteral("unfold"));
         if (!value.isObject())
@@ -401,16 +442,29 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
         if (!core::validUnfoldSettings(unfold))
             return invalid("Invalid unfold settings");
     }
-    if (version.toDouble() >= 2.0) {
-        if (!readBends(root.value(QStringLiteral("bends")), bends,
-                       static_cast<int>(version.toDouble()))) {
+    std::optional<ProjectDrawingSettings> drawing;
+    std::vector<core::ToolAssignment> assignments;
+    if (compact) {
+        const auto table = root.value(QStringLiteral("toolAssignments"));
+        if (!table.isArray() || table.toArray().size() > 512 ||
+            !readDrawingSettings(root.value(QStringLiteral("drawing")), drawing))
+            return invalid("Invalid tool table or drawing settings");
+        for (const auto &value : table.toArray()) {
+            std::optional<core::ToolAssignment> assignment;
+            if (!readAssignment(value, assignment) || !assignment)
+                return invalid("Invalid saved tool assignment");
+            assignments.push_back(std::move(*assignment));
+        }
+    }
+    if (version >= 2) {
+        if (!readBends(root.value(QStringLiteral("bends")), bends, version, assignments)) {
             return invalid("Invalid saved bend preparations");
         }
     } else if (root.contains(QStringLiteral("bends"))) {
         return invalid("Version 1 cannot contain bend preparations");
     }
     const auto absolute = std::filesystem::absolute(path).lexically_normal();
-    auto loaded = importer_.readBytes(decoded.decoded.toStdString(),
+    auto loaded = importer_.readBytes(sourceBytes.toStdString(),
                                       absolute.parent_path() / nativePath(name), stop, progress);
     if (auto *error = std::get_if<cad::StepImportError>(&loaded)) {
         return std::move(*error);
@@ -419,23 +473,25 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (manual && rejected(*manual, document->metadata().thickness)) {
         return invalid("Saved thickness conflicts with embedded geometry");
     }
-    return OpenedProject{std::move(document), manual, absolute, std::move(bends), unfold};
+    return OpenedProject{std::move(document), manual, absolute,
+                         std::move(bends),    unfold, std::move(drawing)};
 }
 
-std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
-                                              const Document &document,
-                                              std::optional<double> manualThicknessMm,
-                                              const std::vector<BendPreparation> &bends,
-                                              std::stop_token stop,
-                                              core::UnfoldSettings unfold) const {
+std::optional<std::string>
+ProjectFiles::save(const std::filesystem::path &path, const Document &document,
+                   std::optional<double> manualThicknessMm,
+                   const std::vector<BendPreparation> &bends, std::stop_token stop,
+                   core::UnfoldSettings unfold,
+                   const std::optional<ProjectDrawingSettings> &drawing) const {
     if (qtPath(path.extension()).compare(QStringLiteral(".bend"), Qt::CaseInsensitive) != 0) {
         return "Project filename must end with .bend";
     }
     if (manualThicknessMm && rejected(*manualThicknessMm, document.metadata().thickness)) {
         return "Thickness conflicts with geometry";
     }
-    if (!validBendPreparations(bends) || !core::validUnfoldSettings(unfold)) {
-        return "Invalid bend preparations";
+    if (!validBendPreparations(bends) || !core::validUnfoldSettings(unfold) ||
+        (drawing && !validProjectDrawingSettings(*drawing))) {
+        return "Invalid project settings";
     }
     const auto source = document.sourceStep();
     if (source.empty() || source.size() > cad::StepImporter::maximumSourceBytes) {
@@ -444,7 +500,8 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
     if (stop.stop_requested()) {
         return "Save cancelled";
     }
-    const QByteArray bytes(source.data(), static_cast<qsizetype>(source.size()));
+    const auto bytes =
+        QByteArray::fromRawData(source.data(), static_cast<qsizetype>(source.size()));
     const auto material = unfold.material == core::SheetMaterial::MildSteel        ? "mild-steel"
                           : unfold.material == core::SheetMaterial::StainlessSteel ? "stainless"
                           : unfold.material == core::SheetMaterial::Aluminium      ? "aluminium"
@@ -454,19 +511,14 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                                                                  ? QJsonValue(*unfold.manualK)
                                                                  : QJsonValue(QJsonValue::Null)},
                                  {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
+    QJsonArray assignments;
+    const auto prepared = bendsJson(bends, assignments);
     const QJsonObject root{
         {QStringLiteral("format"), QStringLiteral("3d-bending-simulator")},
-        {QStringLiteral("version"),
-         std::any_of(bends.begin(), bends.end(),
-                     [](const auto &bend) {
-                         return bend.catalogTools && core::hasHornGeometry(*bend.catalogTools);
-                     })
-             ? 19
-             : 18},
+        {QStringLiteral("version"), compactProjectVersion},
         {QStringLiteral("units"), QStringLiteral("mm")},
         {QStringLiteral("source"),
          QJsonObject{{QStringLiteral("name"), qtPath(document.metadata().sourcePath.filename())},
-                     {QStringLiteral("data"), QString::fromLatin1(bytes.toBase64())},
                      {QStringLiteral("sha256"),
                       QString::fromLatin1(
                           QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}}},
@@ -475,14 +527,24 @@ std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
                      {QStringLiteral("manualThicknessMm"), manualThicknessMm
                                                                ? QJsonValue(*manualThicknessMm)
                                                                : QJsonValue(QJsonValue::Null)}}},
-        {QStringLiteral("bends"), bendsJson(bends)}};
-    const auto encoded = QJsonDocument(root).toJson(QJsonDocument::Compact);
+        {QStringLiteral("bends"), prepared},
+        {QStringLiteral("toolAssignments"), assignments},
+        {QStringLiteral("drawing"), drawingSettingsJson(drawing)}};
+    auto manifest = QCborMap::fromJsonObject(root);
+    auto model = manifest.value(QStringLiteral("source")).toMap();
+    model.insert(QStringLiteral("data"), bytes);
+    manifest.insert(QStringLiteral("source"), model);
+    const auto encoded = QCborValue(manifest).toCbor();
+    if (encoded.size() > maximumProjectBytes - projectSignature.size())
+        return "Project exceeds size limit";
     if (stop.stop_requested()) {
         return "Save cancelled";
     }
     QSaveFile file(qtPath(path));
     file.setDirectWriteFallback(false);
-    if (!file.open(QIODevice::WriteOnly) || file.write(encoded) != encoded.size()) {
+    if (!file.open(QIODevice::WriteOnly) ||
+        file.write(projectSignature) != projectSignature.size() ||
+        file.write(encoded) != encoded.size()) {
         return file.errorString().toStdString();
     }
     if (stop.stop_requested()) {

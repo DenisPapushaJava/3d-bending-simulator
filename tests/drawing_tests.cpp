@@ -10,6 +10,7 @@
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
+#include "bending/project/ProjectFiles.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -2143,7 +2144,8 @@ void sectionControlsWorkflow(const QString &folder) {
     auto builder = std::make_shared<ControlledDrawingBuilder>();
     builder->hold = false;
     builder->fail = false;
-    ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
+    const auto files = std::make_shared<project::ProjectFiles>();
+    ui::MainWindow window({"test", "test"}, files);
     window.setAutomaticPartInputPrompt(false);
     window.setDrawingBuilder(builder);
     window.show();
@@ -2316,8 +2318,28 @@ void sectionControlsWorkflow(const QString &folder) {
         }
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".reversed.png"), "Cannot save reversed section");
-    builder->hold = true;
+    dialog->findChild<QSpinBox *>("drawingQuantity")->setValue(18);
+    dialog->findChild<QLineEdit *>("drawingName")->setText(QStringLiteral("Ручное сечение"));
+    const auto sectionChoices = ui::DrawingSheet::defaultViews(*controller.drawing());
+    const auto iso = std::find_if(sectionChoices.begin(), sectionChoices.end(), [](const auto &v) {
+        return v.key.kind == ui::DrawingViewKind::Isometric;
+    });
+    require(iso != sectionChoices.end(), "Isometric view missing");
+    const auto isoRow = static_cast<int>(iso - sectionChoices.begin());
+    list->item(isoRow)->setCheckState(Qt::Unchecked);
+    const auto savedSettings = controller.session().drawingSettings();
+    require(savedSettings && savedSettings->sectionEdits.size() == 1 &&
+                savedSettings->sectionEdits[0].reversed &&
+                savedSettings->sectionEdits[0].fraction == .35 && controller.session().modified(),
+            "Applied settings did not update the project");
     percent->setValue(42);
+    const auto savedPath = native(folder + "/section-controls.bend");
+    controller.saveProject(savedPath, files);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.saveError().isEmpty() &&
+                controller.session().drawingSettings() == savedSettings,
+            "Saving captured an unapplied section change");
+    builder->hold = true;
     rebuild->click();
     wait([&] { return controller.isPreparingDrawing(); });
     percent->setValue(61);
@@ -2350,6 +2372,42 @@ void sectionControlsWorkflow(const QString &folder) {
     QApplication::processEvents();
     require(builder->calls == calls && !controller.hasWork(),
             "Closing the dialog submitted unapplied section settings");
+    controller.closeDocument();
+    controller.open(savedPath);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.session().drawingSettings() == savedSettings &&
+                !controller.session().modified(),
+            "Project reload lost applied drawing settings");
+    window.findChild<QAction *>("bendingDrawingAction")->trigger();
+    auto *reopened = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(reopened, "Restored drawing window is missing");
+    auto *exportPdf = reopened->findChild<QPushButton *>("exportDrawingPdf");
+    wait([&] { return !controller.hasWork() && exportPdf->isEnabled(); });
+    const auto restored = controller.drawing();
+    auto *restoredViews = reopened->findChild<QListWidget *>("drawingViews");
+    const auto restoredChoices = ui::DrawingSheet::defaultViews(*restored);
+    bool sectionRestored = false, isometricHidden = false;
+    for (std::size_t i = 0; i < restoredChoices.size(); ++i) {
+        const auto key = restoredChoices[i].key;
+        if (key.kind == ui::DrawingViewKind::Isometric)
+            isometricHidden =
+                restoredViews->item(static_cast<int>(i))->checkState() == Qt::Unchecked;
+        if (key.kind != ui::DrawingViewKind::Section)
+            continue;
+        for (const auto &cut : restored->sections[key.index].locations)
+            if (cut.reversed && std::abs(cut.fraction - .35) < 1e-9) {
+                restoredViews->setCurrentRow(static_cast<int>(i));
+                sectionRestored = reopened->findChild<QComboBox *>("drawingViewScale")
+                                      ->currentData()
+                                      .toDouble() == .5;
+            }
+    }
+    require(sectionRestored && isometricHidden &&
+                reopened->findChild<QSpinBox *>("drawingQuantity")->value() == 18 &&
+                reopened->findChild<QLineEdit *>("drawingName")->text() ==
+                    QStringLiteral("Ручное сечение") &&
+                !controller.session().modified(),
+            "Rebuilt drawing lost section, scale, visibility or title");
     window.close();
 }
 void workflow(const QString &folder) {
