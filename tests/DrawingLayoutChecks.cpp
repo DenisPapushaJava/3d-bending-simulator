@@ -1,6 +1,7 @@
 #include "DrawingLayoutChecks.h"
 #include "DrawingLayoutController.h"
 #include "DrawingPaginationChecks.h"
+#include "DrawingSheetInternal.h"
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QPaintEngine>
@@ -338,6 +339,152 @@ void fitCache() {
     require(!error.empty() && error == failure(disabled),
             "Fit reuse hid an impossible explicit scale or changed its diagnostic");
 }
+void references() {
+    using namespace application;
+    using namespace ui;
+    auto d = std::make_shared<BendingDrawing>();
+    for (auto &v : d->views) {
+        v.minimum = {0, 0};
+        v.maximum = {120, 80};
+        v.paths = {{{{0, 0}, {120, 0}, {120, 80}, {0, 80}, {0, 0}}, false}};
+    }
+    d->bends.resize(2);
+    for (std::size_t i = 0; i < 2; ++i) {
+        DrawingSection section;
+        section.designation = i ? "Б" : "А";
+        section.view = d->views[0];
+        d->sections.push_back(section);
+        d->details.push_back({d->views[0], i, i ? "А2" : "А1"});
+    }
+    DrawingProfile profile;
+    profile.designation = "П1";
+    profile.view = d->views[0];
+    d->profiles.push_back(profile);
+    d->auxiliaryViews.push_back({d->views[0], "Ц", 1});
+    auto &source = d->views[0];
+    source.sectionMarkers = {{{40, 0}, {40, 80}, {-1, 0}, "А"},
+                             {{80, 0}, {80, 80}, {-1, 0}, "Б"},
+                             {{90, 0}, {90, 80}, {-1, 0}, "Б"}};
+    source.labels = {
+        {{20, 40}, "А1"}, {{100, 40}, "А2"}, {{60, 10}, "П1"}, {{60, 70}, "Примечание"}};
+    source.detailCircles = {{{20, 40}, 8}, {{100, 40}, 8}};
+    source.circleCenters = {{{30, 30}, 3}};
+    source.viewArrows = {{{120, 40}, {-1, 0}, "Ц"}};
+    std::vector<DrawingViewChoice> choices{
+        {{DrawingViewKind::Projection, 0}},      {{DrawingViewKind::Section, 0}},
+        {{DrawingViewKind::Section, 1}, false},  {{DrawingViewKind::Detail, 0}},
+        {{DrawingViewKind::Detail, 1}, false},   {{DrawingViewKind::Profile, 0}, false},
+        {{DrawingViewKind::Auxiliary, 0}, false}};
+    const auto key = DrawingViewKey{DrawingViewKind::Projection, 0};
+    const auto selected = drawing::selectedView(*d, key, &choices);
+    require(selected.sectionMarkers.size() == 1 && selected.sectionMarkers[0].designation == "А" &&
+                selected.labels.size() == 2 && selected.labels[0].second == "А1" &&
+                selected.labels[1].second == "Примечание" && selected.detailCircles.size() == 1 &&
+                selected.detailCircles[0].first.x == 20 && selected.viewArrows.empty() &&
+                selected.circleCenters.size() == 1 && selected.paths.size() == source.paths.size(),
+            "Disabled destination retained a marker or erased geometry/unrelated text");
+    auto reversed = choices;
+    for (auto &choice : reversed)
+        choice.visible = !choice.visible;
+    const auto alternate = drawing::selectedView(*d, key, &reversed);
+    require(alternate.sectionMarkers.size() == 2 && alternate.labels.size() == 3 &&
+                alternate.labels[0].second == "А2" && alternate.detailCircles.size() == 1 &&
+                alternate.detailCircles[0].first.x == 100 && alternate.viewArrows.size() == 1,
+            "Related markers did not follow their individual destinations");
+    const std::vector<DrawingViewChoice> onlySource{{key}};
+    const auto none = drawing::selectedView(*d, key, &onlySource);
+    require(none.sectionMarkers.empty() && none.detailCircles.empty() && none.viewArrows.empty() &&
+                none.labels.size() == 1 && none.labels[0].second == "Примечание",
+            "Omitted destinations differ from unchecked destinations");
+    // Classical preparation can restore locators from the original projection.
+    // Selection is applied afterwards, so restoration cannot resurrect a hidden one.
+    d->classicalViews = std::array{d->views[0], d->views[1], d->views[2]};
+    (*d->classicalViews)[0].labels.clear();
+    (*d->classicalViews)[0].detailCircles.clear();
+    const auto classical = drawing::selectedView(*d, key, &choices);
+    require(classical.labels.size() == 1 && classical.labels[0].second == "А1" &&
+                classical.detailCircles.size() == 1 && classical.sectionMarkers.size() == 1,
+            "Classical locator restoration ignored destination visibility");
+    auto all = DrawingSheet::defaultViews(*d);
+    for (auto &choice : all)
+        choice.visible = true;
+    const auto complete = drawing::selectedView(*d, key, &all);
+    const auto original = drawing::preparedView(*d, key);
+    require(complete.sectionMarkers.size() == original.sectionMarkers.size() &&
+                complete.detailCircles.size() == original.detailCircles.size() &&
+                complete.labels.size() == original.labels.size() &&
+                complete.viewArrows.size() == original.viewArrows.size(),
+            "Visible references changed the original annotation set");
+    require(source.sectionMarkers.size() == 3 && source.labels.size() == 4 &&
+                source.detailCircles.size() == 2 && source.viewArrows.size() == 1,
+            "Reference filtering mutated the immutable CAD snapshot");
+
+    // The same policy must reach fit probes, recordings, preview and PDF. Keep
+    // one true section marker; all local detail locators are disabled here.
+    choices[3].visible = false;
+    const auto enabled = DrawingSheet::compose(d, choices);
+    DrawingTitle title;
+    title.plan = enabled;
+    Device with(96);
+    {
+        QPainter painter(&with);
+        for (int page = 0; page < enabled->pages; ++page)
+            DrawingSheet::paint(painter, *d, title, page);
+    }
+    require(with.engine.texts[QStringLiteral("А")] == 2 &&
+                with.engine.texts[QStringLiteral("Б")] == 0 &&
+                with.engine.texts[QStringLiteral("А1")] == 0 &&
+                with.engine.texts[QStringLiteral("А2")] == 0,
+            "Vector recording retained disabled callouts");
+    choices[1].visible = false;
+    const auto disabled = DrawingSheet::compose(d, choices);
+    title.plan = disabled;
+    Device without(96);
+    {
+        QPainter painter(&without);
+        for (int page = 0; page < disabled->pages; ++page)
+            DrawingSheet::paint(painter, *d, title, page);
+    }
+    require(without.engine.texts[QStringLiteral("А")] == 0 &&
+                without.engine.texts[QStringLiteral("Б")] == 0,
+            "Hidden section left arrows/letters in the recorded parent");
+    DrawingLayoutLimits reference;
+    reference.maximumCachedFits = 0;
+    sameLayout(*disabled, *DrawingSheet::compose(d, choices, {}, {}, reference));
+    choices[1].visible = true;
+    sameLayout(*enabled, *DrawingSheet::compose(d, choices));
+    auto paginated = std::make_shared<BendingDrawing>(*d);
+    auto &large = paginated->sections[0].view;
+    large.maximum = {300, 150};
+    large.paths = {{{{0, 0}, {300, 0}, {300, 150}, {0, 150}, {0, 0}}, false}};
+    auto fixed = choices;
+    for (auto &choice : fixed)
+        choice.scale = 1;
+    const auto multiPage = DrawingSheet::compose(paginated, fixed);
+    require(multiPage->pages >= 2, "Reference fixture did not separate source and target sheets");
+    const auto parent = std::find_if(multiPage->views.begin(), multiPage->views.end(),
+                                     [&](const auto &at) { return at.key == key; });
+    require(parent != multiPage->views.end(), "Cross-sheet source missing");
+    title.plan = multiPage;
+    Device crossSheet(96);
+    {
+        QPainter painter(&crossSheet);
+        DrawingSheet::paint(painter, *paginated, title, parent->page);
+    }
+    require(crossSheet.engine.texts[QStringLiteral("А")] == 2,
+            "A section on another sheet lost its parent marker");
+    if (const auto prefix = qEnvironmentVariable("BENDING_DRAWING_REFERENCES_OUTPUT");
+        !prefix.isEmpty()) {
+        title.plan = enabled;
+        require(DrawingSheet::writePdf(prefix + "-enabled.pdf", *d, title).isEmpty(),
+                "Cannot write selected-reference PDF");
+        title.plan = disabled;
+        require(DrawingSheet::writePdf(prefix + "-disabled.pdf", *d, title).isEmpty(),
+                "Cannot write hidden-reference PDF");
+        require(DrawingSheet::preview(*d, title, 0).save(prefix + "-preview.png"),
+                "Cannot write hidden-reference preview");
+    }
+}
 void worker() {
     struct Gate {
         std::mutex mutex;
@@ -503,7 +650,11 @@ void verifySameDrawingLayout(const bending::ui::DrawingSheetPlan &a,
                              const bending::ui::DrawingSheetPlan &b) {
     sameLayout(a, b);
 }
+void drawingReferenceChecks() {
+    references();
+}
 void drawingLayoutChecks() {
+    references();
     limits();
     unevenProjectionDimensions();
     drawingPaginationChecks();

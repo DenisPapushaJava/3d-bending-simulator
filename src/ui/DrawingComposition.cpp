@@ -214,7 +214,7 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
         std::array<std::optional<DrawingView>, 3> views;
         std::optional<double> fixed;
         for (const auto &choice : item.choices) {
-            views.at(choice.key.index) = drawing::preparedView(d, choice.key);
+            views.at(choice.key.index) = drawing::selectedView(d, choice.key, context.choices);
             if (choice.scale) {
                 if (fixed && *fixed != *choice.scale)
                     throw std::runtime_error("Масштабы связанных видов должны совпадать");
@@ -316,7 +316,7 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
         }
     } else {
         const auto &choice = item.choices.front();
-        const auto v = drawing::preparedView(d, choice.key);
+        const auto v = drawing::selectedView(d, choice.key, context.choices);
         const double fit =
             std::min((area.width() - 70) / width(v), (area.height() - 48) / height(v));
         auto scale = choice.scale ? choice.scale
@@ -499,11 +499,12 @@ std::size_t internItem(std::vector<Item> &items, Item item) {
     items.push_back(std::move(item));
     return items.size() - 1;
 }
-std::vector<double> familyScales(const BendingDrawing &drawing, const Item &family) {
+std::vector<double> familyScales(const BendingDrawing &drawing, const Item &family,
+                                 const std::vector<DrawingViewChoice> *choices) {
     std::array<std::optional<DrawingView>, 3> views;
     std::optional<double> fixed;
     for (const auto &choice : family.choices) {
-        views.at(choice.key.index) = drawing::preparedView(drawing, choice.key);
+        views.at(choice.key.index) = drawing::selectedView(drawing, choice.key, choices);
         if (choice.scale) {
             if (fixed && fixed != choice.scale)
                 throw std::runtime_error("Масштабы связанных видов должны совпадать");
@@ -602,6 +603,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     auto plan = std::make_shared<DrawingSheetPlan>();
     plan->source = source;
     plan->choices = choices;
+    context.choices = &plan->choices;
     plan->flatSide = side;
     std::vector<Item> items;
     Item family;
@@ -630,7 +632,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     if (items.empty())
         throw std::runtime_error("Выберите хотя бы один размерный вид");
     if (iso && iso->scale) {
-        const auto v = drawing::preparedView(*source, iso->key);
+        const auto v = drawing::selectedView(*source, iso->key, context.choices);
         const double compactFit = std::min(175. / width(v), 24. / height(v));
         if (*iso->scale > compactFit + 1.e-9) {
             // An explicit larger isometric view participates in normal sheet packing.
@@ -647,7 +649,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
         if (family.choices.empty() || failure->item != 0 || plan->pages != 0)
             throw std::runtime_error(failure->reason);
         // Validate the common explicit scale before considering any new policy.
-        const auto scales = familyScales(*source, family);
+        const auto scales = familyScales(*source, family, context.choices);
         const auto reset = [&] {
             plan->views.clear();
             plan->pages = 0;
@@ -710,7 +712,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     }
     if (iso)
         for (int page = 0; page < plan->pages; ++page) {
-            const auto v = drawing::preparedView(*source, iso->key);
+            const auto v = drawing::selectedView(*source, iso->key, context.choices);
             const QRectF area(25, 251, 195, 38);
             const double fit = std::min(175. / width(v), 24. / height(v));
             const auto scale = iso->scale ? iso->scale : standardDrawingScale(fit);
@@ -726,7 +728,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     std::set<std::size_t> covered;
     for (const auto &at : plan->views)
         if (at.key.kind != DrawingViewKind::Flat && at.key.kind != DrawingViewKind::Isometric) {
-            const auto v = drawing::preparedView(*source, at.key);
+            const auto v = drawing::selectedView(*source, at.key, context.choices);
             covered.insert(v.dimensionedBends.begin(), v.dimensionedBends.end());
         }
     for (std::size_t i = 0; i < source->bends.size(); ++i)

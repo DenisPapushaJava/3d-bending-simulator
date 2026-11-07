@@ -1,7 +1,7 @@
 add_library(bending_ui STATIC MainWindow.cpp ImportController.cpp RoutePanel.cpp RoutePanel.h PartInputDialog.cpp ToolSelectionWidget.cpp ToolContourButton.cpp ToolPickerPopup.cpp ToolWorkspace.cpp ToolImportDialog.cpp ToolImportDialog.h ToolStockDialog.cpp ToolStockDialog.h DrawingSheet.cpp DrawingDialog.cpp UpdateDialog.cpp Preferences.cpp
     include/bending/ui/MainWindow.h include/bending/ui/ImportController.h)
 add_library(Bending::Ui ALIAS bending_ui)
-target_sources(bending_ui PRIVATE DrawingComposition.cpp DrawingSheetInternal.h DrawingViewRecording.cpp)
+target_sources(bending_ui PRIVATE DrawingComposition.cpp DrawingSheetInternal.h DrawingViewRecording.cpp DrawingViewReferences.cpp)
 target_sources(bending_ui PRIVATE DrawingLayoutController.cpp DrawingLayoutController.h)
 target_sources(bending_ui PRIVATE ProcessNavigationBar.cpp ProcessNavigationBar.h)
 target_sources(bending_ui PRIVATE HornSectionEditor.cpp HornSectionEditor.h)

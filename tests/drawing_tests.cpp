@@ -2393,6 +2393,41 @@ void workflow(const QString &folder) {
     if (!initialSnapshot.isEmpty())
         require(dialog->grab().save(initialSnapshot + ".default.png"),
                 "Cannot save default drawing workspace");
+    if (QApplication::arguments().contains(QStringLiteral("--reference-controls-only"))) {
+        auto *views = dialog->findChild<QListWidget *>("drawingViews");
+        auto *image = dialog->findChild<QLabel *>("drawingPreviewImage");
+        auto *page = dialog->findChild<QSpinBox *>("drawingPage");
+        const auto source = c.drawing();
+        const auto choices = ui::DrawingSheet::defaultViews(*source);
+        require(views && image && page && views->count() == static_cast<int>(choices.size()),
+                "Reference controls do not match drawing destinations");
+        const auto before = image->pixmap().toImage();
+        const auto initialPage = page->value();
+        bool changed = false;
+        for (std::size_t i = 0; i < choices.size(); ++i)
+            if (choices[i].key.kind == ui::DrawingViewKind::Section ||
+                choices[i].key.kind == ui::DrawingViewKind::Detail ||
+                choices[i].key.kind == ui::DrawingViewKind::Profile ||
+                choices[i].key.kind == ui::DrawingViewKind::Auxiliary) {
+                changed |= choices[i].visible;
+                views->item(static_cast<int>(i))->setCheckState(Qt::Unchecked);
+            }
+        wait([&] { return exportButton->isEnabled(); });
+        require(changed && image->pixmap().toImage() != before && c.drawing() == source &&
+                    !c.hasWork() && c.session().editRevision() == revision,
+                "Disabling drawing destinations failed to refresh preview or recomputed CAD");
+        if (!initialSnapshot.isEmpty())
+            require(dialog->grab().save(initialSnapshot + ".disabled.png"),
+                    "Cannot capture disabled reference controls");
+        for (std::size_t i = 0; i < choices.size(); ++i)
+            views->item(static_cast<int>(i))
+                ->setCheckState(choices[i].visible ? Qt::Checked : Qt::Unchecked);
+        wait([&] { return exportButton->isEnabled(); });
+        page->setValue(initialPage);
+        require(image->pixmap().toImage() == before && c.drawing() == source && !c.hasWork(),
+                "Restored drawing destinations differ from the original preview");
+        return;
+    }
     if (QApplication::arguments().contains(QStringLiteral("--workspace-sample-only"))) {
         const auto source = c.drawing();
         const auto plan =
@@ -2917,6 +2952,10 @@ int main(int argc, char **argv) {
     QTemporaryDir temp;
     ui::setPreferencesFile(temp.path() + "/settings.ini");
     try {
+        if (app.arguments().contains(QStringLiteral("--references-only"))) {
+            drawingReferenceChecks();
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--window-placement-only"))) {
             drawingWindowPlacement();
             return 0;
@@ -2924,6 +2963,10 @@ int main(int argc, char **argv) {
         if (app.arguments().contains(QStringLiteral("--workflow-only"))) {
             pdfDestinations(temp.path());
             previewStates();
+            workflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--reference-controls-only"))) {
             workflow(temp.path());
             return 0;
         }

@@ -6,3 +6,5 @@ void drawingLayoutChecks();
 
 void verifySameDrawingLayout(const bending::ui::DrawingSheetPlan &,
                              const bending::ui::DrawingSheetPlan &);
+
+void drawingReferenceChecks();

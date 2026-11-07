@@ -2126,7 +2126,7 @@ void paintPlaced(QPainter &p, const BendingDrawing &d, const DrawingPlacedView &
         flatView(p, d, at.area, 0, side, at.scale, selectionBounds, context);
         return;
     }
-    const auto v = preparedView(d, at.key);
+    const auto v = selectedView(d, at.key, context ? context->choices : nullptr);
     double width = v.maximum.x - v.minimum.x;
     if (v.omittedX)
         width -= (*v.omittedX)[1] - (*v.omittedX)[0];
