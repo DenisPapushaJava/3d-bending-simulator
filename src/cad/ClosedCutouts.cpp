@@ -1,5 +1,6 @@
 #include "ClosedCutouts.h"
 
+#include <BOPAlgo_PaveFiller.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -182,10 +183,25 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
         if (originalBox.CornerMin().Distance(filledBox.CornerMin()) > tolerance ||
             originalBox.CornerMax().Distance(filledBox.CornerMax()) > tolerance)
             return result;
-        BRepAlgoAPI_Cut missing;
         TopTools_ListOfShape arguments, tools;
         arguments.Append(source);
         tools.Append(solid);
+
+        // Both differences use the same intersections. Build each result separately
+        // so its geometry and volume are still checked in its own direction.
+        auto operands = arguments;
+        operands.Append(solid);
+        BOPAlgo_PaveFiller filler;
+        filler.SetArguments(operands);
+        filler.SetNonDestructive(true);
+        filler.SetFuzzyValue(tolerance);
+        filler.Perform();
+        if (stop.stop_requested())
+            return {};
+        if (filler.HasErrors())
+            return result;
+
+        BRepAlgoAPI_Cut missing(filler);
         missing.SetArguments(arguments);
         missing.SetTools(tools);
         missing.SetNonDestructive(true);
@@ -194,10 +210,12 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
         if (stop.stop_requested())
             return {};
         if (!missing.IsDone() || missing.HasErrors() ||
-            !BRepCheck_Analyzer(missing.Shape()).IsValid() ||
-            !std::isfinite(volume(missing.Shape())) || volume(missing.Shape()) > budget)
+            !BRepCheck_Analyzer(missing.Shape()).IsValid())
             return result;
-        BRepAlgoAPI_Cut added;
+        const double lostVolume = volume(missing.Shape());
+        if (!std::isfinite(lostVolume) || lostVolume > budget)
+            return result;
+        BRepAlgoAPI_Cut added(filler);
         added.SetArguments(tools);
         added.SetTools(arguments);
         added.SetNonDestructive(true);
@@ -205,10 +223,11 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
         added.Build();
         if (stop.stop_requested())
             return {};
-        if (!added.IsDone() || added.HasErrors() || !BRepCheck_Analyzer(added.Shape()).IsValid() ||
-            !std::isfinite(volume(added.Shape())) || volume(added.Shape()) <= positiveBudget ||
-            std::abs(filledVolume - originalVolume - volume(added.Shape()) +
-                     volume(missing.Shape())) > budget)
+        if (!added.IsDone() || added.HasErrors() || !BRepCheck_Analyzer(added.Shape()).IsValid())
+            return result;
+        const double addedVolume = volume(added.Shape());
+        if (!std::isfinite(addedVolume) || addedVolume <= positiveBudget ||
+            std::abs(filledVolume - originalVolume - addedVolume + lostVolume) > budget)
             return result;
         result.shape = solid;
         result.report.status = Status::Filled;

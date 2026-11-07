@@ -4,13 +4,16 @@
 #include "bending/cad/occt/PreviewAccess.h"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <numbers>
@@ -80,9 +83,31 @@ int main() {
             const double modelVolume = volume(filled);
             require(std::abs(modelVolume - metadata.volumeMm3 - cutouts.addedVolumeMm3) < 1e-4,
                     "Incorrect added volume");
-            BRepAlgoAPI_Cut lost(source, filled);
-            require(lost.IsDone() && volume(lost.Shape()) < 1e-4,
-                    "Simplification lost source material");
+            const auto differenceVolume = [&](const TopoDS_Shape &left, const TopoDS_Shape &right) {
+                BRepAlgoAPI_Cut cut;
+                TopTools_ListOfShape arguments, tools;
+                arguments.Append(left);
+                tools.Append(right);
+                cut.SetArguments(arguments);
+                cut.SetTools(tools);
+                cut.SetFuzzyValue(metadata.bendAnalysis.lengthToleranceMm);
+                cut.SetNonDestructive(true);
+                cut.Build();
+                require(cut.IsDone() && !cut.HasErrors() &&
+                            BRepCheck_Analyzer(cut.Shape()).IsValid(),
+                        "Independent cutout difference failed");
+                return volume(cut.Shape());
+            };
+            const double lost = differenceVolume(source, filled);
+            require(lost < 1e-4, "Simplification lost source material");
+            const double added = differenceVolume(filled, source);
+            GProp_GProps sourceArea;
+            BRepGProp::SurfaceProperties(source, sourceArea);
+            const double budget =
+                std::max(metadata.volumeMm3 * 1e-8,
+                         sourceArea.Mass() * metadata.bendAnalysis.lengthToleranceMm * 2);
+            require(added > 0 && std::abs(added - lost - cutouts.addedVolumeMm3) <= budget,
+                    "Reverse difference does not account for the filled cutouts");
             const auto &bend = metadata.bendAnalysis.bends.front();
             const core::BendTarget target{bend.angleRadians, bend.innerRadiusMm};
             const cad::SingleBendPreviewBuilder builder;
