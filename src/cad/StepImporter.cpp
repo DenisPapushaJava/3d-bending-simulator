@@ -474,8 +474,12 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
                      "исходная геометрия не исправлялась. Развёртка и движение проверяются "
                      "отдельно."});
         }
+        const auto &sourceBends = data->metadata.bendAnalysis;
+        const bool hasBendCandidates =
+            sourceBends.status == application::BendRecognitionStatus::Completed &&
+            (!sourceBends.bends.empty() || !sourceBends.interiorContourDiagnostics.empty());
         auto filled =
-            fillClosedCutouts(data->shape, data->metadata.bendAnalysis.lengthToleranceMm, stop);
+            fillClosedCutouts(data->shape, sourceBends.lengthToleranceMm, stop, hasBendCandidates);
         data->metadata.closedCutouts = filled.report;
         if (filled.report.status == application::ClosedCutoutStatus::Filled) {
             auto analysis = recognizeBends(filled.shape, tolerance, stop);

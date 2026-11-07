@@ -42,24 +42,28 @@ double area(const TopoDS_Shape &shape) {
     return props.Mass();
 }
 } // namespace
-FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
-                                std::stop_token stop) {
+FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance, std::stop_token stop,
+                                bool hasBendCandidates) {
     FilledCutouts result;
     using Status = application::ClosedCutoutStatus;
     try {
         TopTools_IndexedMapOfShape faces, edges;
         TopExp::MapShapes(source, TopAbs_FACE, faces);
         TopExp::MapShapes(source, TopAbs_EDGE, edges);
-        if (faces.Extent() > 512 || edges.Extent() > 2048 || tolerance > .01) {
+        const bool large = faces.Extent() > 512 || edges.Extent() > 2048;
+        if ((large && !hasBendCandidates) || faces.Extent() > 4096 || edges.Extent() > 16384 ||
+            tolerance > .01) {
             result.report.status = Status::Unsupported;
             return result;
         }
         TopTools_IndexedDataMapOfShapeListOfShape adjacent;
         TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, adjacent);
         std::set<int> hosts;
+        std::vector<TopoDS_Wire> outerWires(static_cast<std::size_t>(faces.Extent() + 1));
         std::vector<TopTools_IndexedMapOfShape> outerEdges(
             static_cast<std::size_t>(faces.Extent() + 1));
         std::vector<int> seeds;
+        int innerWires = 0;
         for (int i = 1; i <= faces.Extent(); ++i) {
             if (stop.stop_requested())
                 return {};
@@ -68,12 +72,18 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
             TopExp::MapShapes(face, TopAbs_WIRE, wires);
             if (wires.Extent() <= 1)
                 continue;
+            innerWires += wires.Extent() - 1;
+            if (large && innerWires > 1024) {
+                result.report.status = Status::Unsupported;
+                return result;
+            }
             const auto outer = BRepTools::OuterWire(face);
             if (outer.IsNull() || !wires.Contains(outer)) {
                 result.report.status = Status::Unsupported;
                 return result;
             }
             hosts.insert(i);
+            outerWires[static_cast<std::size_t>(i)] = outer;
             TopExp::MapShapes(outer, TopAbs_EDGE, outerEdges[static_cast<std::size_t>(i)]);
         }
         if (hosts.empty())
@@ -83,7 +93,7 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
             TopTools_IndexedMapOfShape wires;
             const auto face = TopoDS::Face(faces(i));
             TopExp::MapShapes(face, TopAbs_WIRE, wires);
-            const auto outer = BRepTools::OuterWire(face);
+            const auto &outer = outerWires[static_cast<std::size_t>(i)];
             for (int j = 1; j <= wires.Extent(); ++j) {
                 if (wires(j).IsSame(outer))
                     continue;

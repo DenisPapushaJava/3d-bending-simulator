@@ -93,6 +93,64 @@ application::ThicknessAnalysis recognizeThickness(const TopoDS_Shape &shape, dou
             gp_Pnt centre;
             double tolerance;
         };
+        std::map<std::pair<std::size_t, std::size_t>, double> measured;
+        const auto remember = [&](int a, int b, double gap, ThicknessEvidenceKind kind,
+                                  double uncertainty) {
+            auto pair = std::pair{static_cast<std::size_t>(a), static_cast<std::size_t>(b)};
+            if (pair.first > pair.second)
+                std::swap(pair.first, pair.second);
+            if (measured.emplace(pair, uncertainty).second) {
+                result.evidence.push_back({pair.first, pair.second, gap, kind});
+                result.toleranceMm = std::max(result.toleranceMm, uncertainty);
+            }
+        };
+        const auto recordBendThickness = [&]() {
+            if (bends && bends->status == BendRecognitionStatus::Completed) {
+                for (const auto &bend : bends->bends) {
+                    if (stop.stop_requested())
+                        return false;
+                    if (!bend.innerFace || !bend.outerFace || bend.innerFace == bend.outerFace ||
+                        bend.innerFace > static_cast<std::size_t>(faces.Extent()) ||
+                        bend.outerFace > static_cast<std::size_t>(faces.Extent()))
+                        throw Standard_Failure("Invalid bend thickness evidence");
+                    BRepAdaptor_Surface inner(
+                        TopoDS::Face(faces(static_cast<int>(bend.innerFace))));
+                    BRepAdaptor_Surface outer(
+                        TopoDS::Face(faces(static_cast<int>(bend.outerFace))));
+                    if (inner.GetType() != GeomAbs_Cylinder ||
+                        outer.GetType() != GeomAbs_Cylinder || !std::isfinite(bend.thicknessMm) ||
+                        bend.thicknessMm <= 0)
+                        throw Standard_Failure("Inconsistent bend thickness evidence");
+                    const double uncertainty = std::max(
+                        measurementTolerance(TopoDS::Face(faces(static_cast<int>(bend.innerFace)))),
+                        measurementTolerance(
+                            TopoDS::Face(faces(static_cast<int>(bend.outerFace)))));
+                    if (std::abs(outer.Cylinder().Radius() - inner.Cylinder().Radius() -
+                                 bend.thicknessMm) > uncertainty)
+                        throw Standard_Failure("Inconsistent bend thickness evidence");
+                    // Insufficient local resolution is not contradictory geometry.
+                    if (bend.thicknessMm <= uncertainty * 100)
+                        continue;
+                    remember(static_cast<int>(bend.innerFace), static_cast<int>(bend.outerFace),
+                             bend.thicknessMm, ThicknessEvidenceKind::BendRadii, uncertainty);
+                }
+            }
+            return true;
+        };
+        const auto uncertaintyOf = [&](const ThicknessEvidence &pair) {
+            return measured.at({pair.firstFace, pair.secondFace});
+        };
+        const auto agrees = [&](const std::vector<ThicknessEvidence> &evidence) {
+            return std::all_of(evidence.begin(), evidence.end(), [&](const auto &pair) {
+                return std::abs(pair.distanceMm - evidence.front().distanceMm) <=
+                       std::max(uncertaintyOf(pair), uncertaintyOf(evidence.front()));
+            });
+        };
+        const auto sortEvidence = [&] {
+            std::stable_sort(
+                result.evidence.begin(), result.evidence.end(),
+                [&](const auto &a, const auto &b) { return uncertaintyOf(a) < uncertaintyOf(b); });
+        };
         std::map<int, PlaneFace> planes;
         for (int i = 1; i <= faces.Extent(); ++i) {
             if (stop.stop_requested())
@@ -111,21 +169,20 @@ application::ThicknessAnalysis recognizeThickness(const TopoDS_Shape &shape, dou
             planes.emplace(i, PlaneFace{plane, normal, props.Mass(), props.CentreOfMass(),
                                         measurementTolerance(TopoDS::Face(faces(i)))});
             if (planes.size() > maximumPlanes) {
-                result.status = ThicknessStatus::LimitReached;
+                // Dense perforation can exhaust the planar-wall budget. The
+                // recognized bend surfaces can still give local evidence.
+                if (!recordBendThickness())
+                    return {};
+                if (result.evidence.empty())
+                    result.status = ThicknessStatus::LimitReached;
+                else {
+                    sortEvidence();
+                    if (!agrees(result.evidence))
+                        result.status = ThicknessStatus::Ambiguous;
+                }
                 return result;
             }
         }
-        std::map<std::pair<std::size_t, std::size_t>, double> measured;
-        const auto remember = [&](int a, int b, double gap, ThicknessEvidenceKind kind,
-                                  double uncertainty) {
-            auto pair = std::pair{static_cast<std::size_t>(a), static_cast<std::size_t>(b)};
-            if (pair.first > pair.second)
-                std::swap(pair.first, pair.second);
-            if (measured.emplace(pair, uncertainty).second) {
-                result.evidence.push_back({pair.first, pair.second, gap, kind});
-                result.toleranceMm = std::max(result.toleranceMm, uncertainty);
-            }
-        };
         IntCurvesFace_ShapeIntersector ray;
         ray.Load(shape, topologyTolerance);
         BRepClass3d_SolidClassifier material(shape);
@@ -201,46 +258,9 @@ application::ThicknessAnalysis recognizeThickness(const TopoDS_Shape &shape, dou
                 remember(index, other, gap, ThicknessEvidenceKind::PlanarWalls, uncertainty);
             }
         }
-        if (bends && bends->status == BendRecognitionStatus::Completed) {
-            for (const auto &bend : bends->bends) {
-                if (stop.stop_requested())
-                    return {};
-                if (!bend.innerFace || !bend.outerFace || bend.innerFace == bend.outerFace ||
-                    bend.innerFace > static_cast<std::size_t>(faces.Extent()) ||
-                    bend.outerFace > static_cast<std::size_t>(faces.Extent()))
-                    throw Standard_Failure("Invalid bend thickness evidence");
-                BRepAdaptor_Surface inner(TopoDS::Face(faces(static_cast<int>(bend.innerFace))));
-                BRepAdaptor_Surface outer(TopoDS::Face(faces(static_cast<int>(bend.outerFace))));
-                if (inner.GetType() != GeomAbs_Cylinder || outer.GetType() != GeomAbs_Cylinder ||
-                    !std::isfinite(bend.thicknessMm) || bend.thicknessMm <= 0)
-                    throw Standard_Failure("Inconsistent bend thickness evidence");
-                const double uncertainty = std::max(
-                    measurementTolerance(TopoDS::Face(faces(static_cast<int>(bend.innerFace)))),
-                    measurementTolerance(TopoDS::Face(faces(static_cast<int>(bend.outerFace)))));
-                if (std::abs(outer.Cylinder().Radius() - inner.Cylinder().Radius() -
-                             bend.thicknessMm) > uncertainty)
-                    throw Standard_Failure("Inconsistent bend thickness evidence");
-                // Insufficient local resolution is not contradictory geometry.
-                if (bend.thicknessMm <= uncertainty * 100)
-                    continue;
-                remember(static_cast<int>(bend.innerFace), static_cast<int>(bend.outerFace),
-                         bend.thicknessMm, ThicknessEvidenceKind::BendRadii, uncertainty);
-            }
-        }
-        const auto uncertaintyOf = [&](const ThicknessEvidence &pair) {
-            return measured.at({pair.firstFace, pair.secondFace});
-        };
-        // Use a real, most precise observation as the reference. A coarse
-        // unrelated surface must not mask disagreement between precise walls.
-        std::stable_sort(
-            result.evidence.begin(), result.evidence.end(),
-            [&](const auto &a, const auto &b) { return uncertaintyOf(a) < uncertaintyOf(b); });
-        const auto agrees = [&](const std::vector<ThicknessEvidence> &evidence) {
-            return std::all_of(evidence.begin(), evidence.end(), [&](const auto &pair) {
-                return std::abs(pair.distanceMm - evidence.front().distanceMm) <=
-                       std::max(uncertaintyOf(pair), uncertaintyOf(evidence.front()));
-            });
-        };
+        if (!recordBendThickness())
+            return {};
+        sortEvidence();
         // A loose topology budget must not hide a measured change of thickness
         // even if one prism would fit within that larger occupied-volume budget.
         if (!result.evidence.empty() && !agrees(result.evidence)) {
