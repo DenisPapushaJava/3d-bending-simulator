@@ -7,6 +7,7 @@
 
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -20,6 +21,7 @@
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
 #include <STEPControl_Writer.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -400,7 +402,15 @@ void test(const std::filesystem::path &path) {
     };
     const auto channel = load(fixtures::channel(), path);
     check(preview(channel, false), modelVolume(channel));
-    reject(load(fixtures::trimmedBend(), path));
+    const auto trimmed = load(fixtures::trimmedBend(), path);
+    for (bool side : {false, true}) {
+        const auto result =
+            cad::SingleBendPreviewBuilder{}.build(trimmed, 0, {std::numbers::pi / 2, 4}, side, {});
+        const auto *error = std::get_if<application::BendPreviewError>(&result);
+        require(error && error->code == application::BendPreviewErrorCode::UnsupportedGeometry &&
+                    error->detail.find("volume") != std::string::npos,
+                "Volume-changing oblique kinematics were published as a checked cycle");
+    }
     for (const auto &shape :
          {fixtures::bendWithZoneOpening(), fixtures::bendWithZoneOpening(false)}) {
         const auto interrupted = load(shape, path);
@@ -623,6 +633,53 @@ void testRoundedShoulderReturn(const std::filesystem::path &path) {
     }
     require(document->sourceStep() == sourceBytes, "Return flange check altered the source STEP");
 }
+void testWideFlange(const std::filesystem::path &path) {
+    constexpr double bendWidth = 60, overhang = 23, thickness = 2, radius = 4;
+    const auto strip = fixtures::bentStrip(radius, thickness, std::numbers::pi / 2, bendWidth);
+    const auto web =
+        BRepPrimAPI_MakeBox(gp_Pnt(radius, -30, -overhang), thickness, 30, bendWidth + 2 * overhang)
+            .Shape();
+    ShapeUpgrade_UnifySameDomain unify(BRepAlgoAPI_Fuse(strip, web).Shape());
+    unify.Build();
+    const auto document = load(unify.Shape(), path);
+    const auto &bends = document->metadata().bendAnalysis.bends;
+    require(bends.size() == 1 && std::abs(bends.front().lengthMm - bendWidth) < 1e-5 &&
+                !bends.front().trimmedEnds,
+            "Wide flange fixture changed the bend zone");
+    const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(document);
+    const auto &source = cad::OcctDocumentAccess::simulationShape(*native);
+    for (bool fixedSecond : {false, true}) {
+        const auto result = preview(document, fixedSecond);
+        check(result, modelVolume(document));
+        const auto &last = cad::OcctPreviewAccess::frame(*result, 20);
+        for (bool reverse : {false, true}) {
+            BRepAlgoAPI_Cut cut(reverse ? last.shape : source, reverse ? source : last.shape);
+            require(cut.IsDone() && !cut.HasErrors() && volume(cut.Shape()) < 1e-4,
+                    "Wide flange preview did not reconstruct the full source");
+        }
+    }
+    const auto &bend = bends.front();
+    const core::BendTarget target{bend.angleRadians, bend.innerRadiusMm};
+    auto tools =
+        core::PressTools{16, std::numbers::pi / 3, std::numbers::pi / 6, .8, bendWidth, 15};
+    checkMotion(document, tools);
+    tools.lengthMm -= 1;
+    const auto shortTools =
+        cad::SingleBendPreviewBuilder{}.buildToolMotion(document, 0, target, tools, {});
+    const auto *shortError = std::get_if<application::BendPreviewError>(&shortTools);
+    require(shortError && shortError->code == application::BendPreviewErrorCode::ToolTooShort,
+            "Wide flange recovery bypassed tool length validation");
+
+    const auto boss =
+        BRepPrimAPI_MakeBox(gp_Pnt(radius + 1.5, -20, -overhang + 5), 2, 5, 5).Shape();
+    const auto withBoss = load(BRepAlgoAPI_Fuse(unify.Shape(), boss).Shape(), path);
+    require(withBoss->metadata().bendAnalysis.bends.size() == 1,
+            "Wide flange with boss lost its bend");
+    const auto rejected = cad::SingleBendPreviewBuilder{}.build(withBoss, 0, target, false, {});
+    const auto *error = std::get_if<application::BendPreviewError>(&rejected);
+    require(error && error->code == application::BendPreviewErrorCode::UnsupportedGeometry,
+            "Wide flange recovery accepted a boss outside the sheet");
+}
 } // namespace
 int main() {
     try {
@@ -631,6 +688,7 @@ int main() {
         test(temporary.path / "part.step");
         testProfiled(temporary.path / "profiled.step");
         testRoundedShoulderReturn(temporary.path / "rounded-return.step");
+        testWideFlange(temporary.path / "wide-flange.step");
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -1,5 +1,6 @@
 add_library(bending_core STATIC BendSequence.cpp BendTarget.cpp PressTools.cpp ToolCatalog.cpp ToolGeometry.cpp ToolSelection.cpp ToolSegments.cpp UnfoldRule.cpp)
 add_library(Bending::Core ALIAS bending_core)
 target_sources(bending_core PRIVATE Backgauge.cpp ToolShapeRanking.cpp ToolWindow.cpp)
+target_sources(bending_core PRIVATE PunchAssemblies.cpp)
 target_include_directories(bending_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(bending_core PRIVATE bending_options)

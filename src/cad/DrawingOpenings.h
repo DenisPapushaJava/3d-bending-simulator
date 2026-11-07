@@ -17,7 +17,8 @@ struct DrawingOpening {
 };
 std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                                             const TopTools_IndexedMapOfShape &faces,
-                                            std::stop_token stop);
+                                            std::stop_token stop,
+                                            std::size_t maximumCandidates = 0);
 void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax2 &projection,
                         const TopoDS_Shape &visible, application::DrawingView &view,
                         std::stop_token stop);

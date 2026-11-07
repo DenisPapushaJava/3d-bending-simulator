@@ -4,6 +4,7 @@
 #include "FlatPatternDisplay.h"
 #include "GeometryCacheInternal.h"
 #include "JointBends.h"
+#include "RouteDraftCache.h"
 #include "RouteDraftGeometry.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
@@ -119,6 +120,7 @@ struct TransitionInputs {
     RouteOperation operation;
     bool withTools, partialEndSupport;
     std::optional<double> maximumEndSupportLossMm;
+    bool manualExtraction = false;
     bool operator==(const TransitionInputs &) const = default;
 };
 struct TransitionKey {
@@ -164,6 +166,9 @@ template <class Value, std::size_t Capacity> class TransitionLru {
         limit = std::clamp(value, std::size_t{1}, Capacity);
         trim();
     }
+    template <class Predicate> bool any(Predicate matches) const {
+        return std::any_of(entries.begin(), entries.end(), matches);
+    }
     const Value *peek(const TransitionKey &key) const {
         const auto found = index.find(key);
         return found == index.end() ? nullptr : &found->second->second;
@@ -174,6 +179,14 @@ template <class Value, std::size_t Capacity> class TransitionLru {
             return nullptr;
         entries.splice(entries.begin(), entries, found->second);
         return &found->second->second;
+    }
+    template <class Predicate> const Value *findMatching(Predicate predicate) {
+        for (auto it = entries.begin(); it != entries.end(); ++it)
+            if (predicate(it->first, it->second)) {
+                entries.splice(entries.begin(), entries, it);
+                return &entries.front().second;
+            }
+        return nullptr;
     }
     void put(TransitionKey key, Value value) {
         if (const auto found = index.find(key); found != index.end()) {
@@ -196,7 +209,7 @@ struct CacheData {
     std::optional<double> thickness;
     FlatPatternPtr flat;
     std::shared_ptr<const RouteDraftBasis> draftBasis;
-    std::list<RouteDraftPtr> drafts;
+    RouteDraftCache drafts;
     std::map<Mask, std::shared_ptr<const State>> states;
     std::list<Mask> stateOrder;
     // Exact inputs are compared once per operation/request and shared by all its state keys.
@@ -204,6 +217,7 @@ struct CacheData {
     TransitionLru<BendPreviewPtr, maximumSheetBends> transitions;
     // Null rejection is a success hint. A positive verdict alone cannot publish a cycle.
     TransitionLru<std::optional<BendPreviewError>, 512> verdicts;
+    BendWorkpieceReuse workpieces;
     std::mutex mutex;
 
     std::shared_ptr<const TransitionInputs> intern(TransitionInputs wanted) {
@@ -245,6 +259,14 @@ bool stableRejection(BendPreviewErrorCode code) {
 }
 class RouteSearch {
   public:
+    using AssemblyPair =
+        std::pair<std::optional<core::ToolAssembly>, std::optional<core::ToolAssembly>>;
+    struct AssemblyPlans {
+        std::shared_ptr<const TransitionInputs> snapshot;
+        double required;
+        core::PunchAssemblyPlans punch;
+        core::SegmentPlan die;
+    };
     DocumentPtr source;
     std::shared_ptr<const CadDocument> native;
     FlatPatternPtr flat;
@@ -255,8 +277,11 @@ class RouteSearch {
     CacheData *cache = nullptr;
     std::vector<std::shared_ptr<const TransitionInputs>> inputs;
     std::vector<std::shared_ptr<const TransitionInputs>> assemblyInputs;
-    std::map<std::pair<std::size_t, double>, std::array<core::SegmentPlan, 2>> assemblyPlans;
+    std::vector<AssemblyPlans> assemblyPlans; // Bounded numeric plans shared by equal stock/length.
+    std::optional<AssemblyPair> commonAssemblyOverride;
+    std::vector<std::shared_ptr<const TransitionInputs>> commonInputs;
     bool assemblyLimitReached = false;
+    bool observedPunchCollision = false;
     std::string windowHint; // Qualified explanation only after a real collision-driven attempt.
     BendRouteStatistics statistics;
     std::vector<Mask> neighbours;
@@ -430,6 +455,35 @@ class RouteSearch {
         }
         return best; // Bounding intervals rank candidates only; overlap proves no collision.
     }
+    double commonRequiredLength() const {
+        double required = 0;
+        const auto &flatBends = flat->info().bends;
+        for (const auto &a : flatBends) {
+            const auto line = a.centreLine();
+            const auto origin = point(line[0]);
+            const gp_Vec axis(gp_Dir(gp_Vec(origin, point(line[1]))));
+            double low = 0, high = a.lengthMm();
+            for (const auto &b : flatBends)
+                if (jointNeighbours[a.bendIndex] & (Mask{1} << b.bendIndex))
+                    for (const auto p : b.centreLine()) {
+                        const double z = gp_Vec(origin, point(p)).Dot(axis);
+                        low = std::min(low, z);
+                        high = std::max(high, z);
+                    }
+            required = std::max(required, high - low);
+        }
+        return required;
+    }
+    void resetRestrictedPath() {
+        dead.clear();
+        reversed.clear();
+        reversedKeys.clear();
+        frontPreferences.clear();
+        incomplete = false;
+        lastFailure.clear();
+        lastOperationError.reset();
+        failedBend.reset();
+    }
     bool tryCommonAssembly(Mask full) {
         if (!request.preferCommonAssembly || !request.automatic || !request.withTools ||
             !request.assemblySearch || accessObstacles.empty() || request.operations.size() < 2)
@@ -450,25 +504,10 @@ class RouteSearch {
             std::none_of(request.operations.begin(), request.operations.end(),
                          [&](const auto &op) { return toolAccessRisk(full, op) > 0; }))
             return false;
-        // Do not replace a potentially shared stroke with several short strokes
-        // merely because the original pair cannot cover its complete flat envelope.
-        const auto &flatBends = flat->info().bends;
-        for (const auto &a : flatBends) {
-            const auto line = a.centreLine();
-            const auto origin = point(line[0]);
-            const gp_Vec axis(gp_Dir(gp_Vec(origin, point(line[1]))));
-            double low = 0, high = a.lengthMm();
-            for (const auto &b : flatBends)
-                if (jointNeighbours[a.bendIndex] & (Mask{1} << b.bendIndex))
-                    for (const auto p : b.centreLine()) {
-                        const double z = gp_Vec(origin, point(p)).Dot(axis);
-                        low = std::min(low, z);
-                        high = std::max(high, z);
-                    }
-            if (high - low >
-                std::min(core::punchLengthMm(*first.tools), first.tools->lengthMm) + tolerance)
-                return false;
-        }
+        // Include the whole potential joint stroke, never only its longest member.
+        if (commonRequiredLength() >
+            std::min(core::punchLengthMm(*first.tools), first.tools->lengthMm) + tolerance)
+            return false;
         const auto quota = std::min(request.maximumChecks / 3, request.operations.size() * 2);
         if (quota < request.operations.size())
             return false;
@@ -493,13 +532,130 @@ class RouteSearch {
         }
         statistics.commonAssemblyChecks += attempts - before;
         commonAssemblyPhase = false;
-        dead.clear();
-        reversed.clear();
-        reversedKeys.clear();
-        incomplete = false;
-        lastFailure.clear();
-        lastOperationError.reset();
-        failedBend.reset();
+        resetRestrictedPath();
+        return false;
+    }
+    bool tryCommonHornAssemblies(Mask full) {
+        if (!request.preferCommonAssembly || !request.automatic || !request.withTools ||
+            !request.assemblySearch || request.operations.size() < 2)
+            return false;
+        const auto &first = request.operations.front();
+        if (!first.assignment || !first.assignment->punch.segments ||
+            std::none_of(
+                first.assignment->punch.segments->begin(), first.assignment->punch.segments->end(),
+                [](const auto &s) { return s.quantity && s.horn && core::usableToolSegment(s); }) ||
+            std::any_of(request.operations.begin(), request.operations.end(), [&](const auto &op) {
+                return !mayPlan(op.bendIndex) || op.assignment != first.assignment;
+            }))
+            return false;
+        // This extra preference pass is useful after a real punch obstruction.
+        // Other failures still reach the complete bounded per-operation family below.
+        // A warm preference pass can hit its quota before revisiting the old
+        // collision. Read only exact-input compact reports as a scheduling hint.
+        observedPunchCollision |= cache->verdicts.any([&](const auto &entry) {
+            const auto current = [&](const auto &input) {
+                return std::find(inputs.begin(), inputs.end(), input) != inputs.end();
+            };
+            return entry.second && entry.second->toolCollision == ToolCollisionPair::SheetPunch &&
+                   current(entry.first.inputs) &&
+                   std::all_of(entry.first.jointInputs.begin(), entry.first.jointInputs.end(),
+                               current);
+        });
+        const auto required = commonRequiredLength();
+        const bool needsLength = core::punchLengthMm(*first.tools) + tolerance < required;
+        const bool retainedHorn =
+            core::usesHornSections(first.assignment->punch, first.assignment->punchAssembly);
+        if (!retainedHorn && !needsLength && statistics.commonAssemblyPasses &&
+            !observedPunchCollision)
+            return false;
+        if (!retainedHorn && !needsLength && !observedPunchCollision &&
+            !statistics.commonAssemblyPasses &&
+            (accessObstacles.empty() ||
+             std::none_of(request.operations.begin(), request.operations.end(),
+                          [&](const auto &op) { return toolAccessRisk(full, op) > 0; })))
+            return false;
+        auto candidates = assemblyAlternatives(first, required);
+        std::stable_sort(candidates.begin(), candidates.end(), [&](const auto &a, const auto &b) {
+            return (a.second != first.assignment->dieAssembly) <
+                   (b.second != first.assignment->dieAssembly);
+        });
+        const bool originalTried = statistics.commonAssemblyPasses != 0;
+        std::vector<AssemblyPair> commonCandidates;
+        for (const auto &candidate : candidates) {
+            if (!core::usesHornSections(first.assignment->punch, candidate.first) ||
+                (originalTried && candidate == AssemblyPair{first.assignment->punchAssembly,
+                                                            first.assignment->dieAssembly}) ||
+                std::any_of(commonCandidates.begin(), commonCandidates.end(),
+                            [&](const auto &p) { return p.first == candidate.first; }))
+                continue;
+            const auto punch = core::toolLength(first.assignment->punch, candidate.first);
+            const auto die = core::toolLength(first.assignment->die, candidate.second);
+            if (!punch || !die || std::min(*punch, *die) + tolerance < required ||
+                (candidate.first && !candidate.first->jointGapsMm.empty() &&
+                 candidate.first != first.assignment->punchAssembly) ||
+                (candidate.second && !candidate.second->jointGapsMm.empty() &&
+                 candidate.second != first.assignment->dieAssembly))
+                continue;
+            commonCandidates.push_back(candidate);
+            if (commonCandidates.size() == 4)
+                break;
+        }
+        if (request.rankToolAccess)
+            std::stable_sort(commonCandidates.begin(), commonCandidates.end(),
+                             [&](const auto &a, const auto &b) {
+                                 // Excess axial body is a soft risk for corner access, never a
+                                 // rejection.
+                                 return *core::toolLength(first.assignment->punch, a.first) <
+                                        *core::toolLength(first.assignment->punch, b.first);
+                             });
+        // Share the reserved half across families, so an early one cannot starve paired ends.
+        const auto commonLimit = request.maximumChecks / 2;
+        for (std::size_t i = 0; i < commonCandidates.size(); ++i) {
+            const auto &candidate = commonCandidates[i];
+            if (attempts >= commonLimit || std::chrono::steady_clock::now() - started >
+                                               std::chrono::milliseconds(request.maximumTimeMs / 2))
+                break;
+            const auto quota = std::min(request.operations.size() * 4,
+                                        (commonLimit - attempts) / (commonCandidates.size() - i));
+            if (quota < request.operations.size())
+                break;
+            resetRestrictedPath();
+            commonAssemblyOverride = candidate;
+            commonInputs.resize(inputs.size());
+            for (auto operation : request.operations) {
+                operation.assignment->punchAssembly = candidate.first;
+                operation.assignment->dieAssembly = candidate.second;
+                operation.tools = core::toolParameters(*operation.assignment);
+                commonInputs[operation.bendIndex] = assemblyInput(operation);
+            }
+            commonAssemblyPhase = true;
+            phaseCheckLimit = attempts + quota;
+            ++statistics.commonAssemblyPasses;
+            const auto before = attempts;
+            try {
+                if (search(full)) {
+                    statistics.commonAssemblyChecks += attempts - before;
+                    statistics.usedCommonAssembly = true;
+                    commonAssemblyPhase = false;
+                    commonAssemblyOverride.reset();
+                    commonInputs.clear();
+                    return true;
+                }
+            } catch (const CommonAssemblyBudget &) {
+                // This family is bounded; exact transitions remain reusable below.
+            } catch (...) {
+                statistics.commonAssemblyChecks += attempts - before;
+                commonAssemblyPhase = false;
+                commonAssemblyOverride.reset();
+                commonInputs.clear();
+                throw;
+            }
+            statistics.commonAssemblyChecks += attempts - before;
+            commonAssemblyPhase = false;
+            commonAssemblyOverride.reset();
+            commonInputs.clear();
+        }
+        resetRestrictedPath();
         return false;
     }
     void touchState(Mask mask) {
@@ -610,13 +766,14 @@ class RouteSearch {
 
     TransitionKey key(Mask mask, const RouteOperation &op, bool side,
                       const std::vector<RouteOperation> &additional = {}) const {
+        const auto &active = commonAssemblyOverride ? commonInputs : inputs;
         if (additional.empty())
             return {
-                mask, inputs[op.bendIndex], side, {}, request.withTools ? op.workpieceOffsetMm : 0};
+                mask, active[op.bendIndex], side, {}, request.withTools ? op.workpieceOffsetMm : 0};
         std::vector<std::shared_ptr<const TransitionInputs>> members;
         for (const auto &member : additional)
-            members.push_back(inputs[member.bendIndex]);
-        return {mask, inputs[op.bendIndex], side, std::move(members),
+            members.push_back(active[member.bendIndex]);
+        return {mask, active[op.bendIndex], side, std::move(members),
                 request.withTools ? op.workpieceOffsetMm : 0};
     }
     bool mayPlan(std::size_t index) const {
@@ -644,7 +801,7 @@ class RouteSearch {
         normalized.workpieceOffsetMm = 0;
         auto entry =
             cache->intern({std::move(normalized), request.withTools, request.allowPartialEndSupport,
-                           request.maximumEndSupportLossMm});
+                           request.maximumEndSupportLossMm, request.manualExtraction});
         assemblyInputs.push_back(entry);
         return entry;
     }
@@ -655,54 +812,69 @@ class RouteSearch {
             result.jointInputs.push_back(assemblyInput(member));
         return result;
     }
-    using AssemblyPair =
-        std::pair<std::optional<core::ToolAssembly>, std::optional<core::ToolAssembly>>;
+    const AssemblyPlans *plansFor(const RouteOperation &op, double required) {
+        const auto &original = *op.assignment;
+        const auto found =
+            std::find_if(assemblyPlans.begin(), assemblyPlans.end(), [&](const auto &p) {
+                const auto &saved = *p.snapshot->operation.assignment;
+                return p.required == required && saved.punch == original.punch &&
+                       saved.die == original.die;
+            });
+        if (found != assemblyPlans.end()) {
+            ++statistics.reusedAssemblyPlans;
+            return &*found;
+        }
+        if (assemblyPlans.size() >= 128) {
+            assemblyLimitReached = true;
+            return nullptr;
+        }
+        AssemblyPlans plans{assemblyInput(op), required, {}, {}};
+        if (original.punch.segments) {
+            checkBudget();
+            plans.punch = core::planPunchAssemblies(*original.punch.segments, required, 200000,
+                                                    request.assemblySearch->maximumGapMm, stop);
+            ++statistics.plannedAssemblies;
+            cancelled(stop);
+            assemblyLimitReached |= plans.punch.status == core::SegmentPlanStatus::SearchLimit;
+        }
+        if (original.die.segments) {
+            checkBudget();
+            plans.die = core::planToolSegments(*original.die.segments, required, 200000,
+                                               request.assemblySearch->maximumGapMm, stop);
+            ++statistics.plannedAssemblies;
+            cancelled(stop);
+            assemblyLimitReached |= plans.die.status == core::SegmentPlanStatus::SearchLimit;
+        }
+        assemblyPlans.push_back(std::move(plans));
+        return &assemblyPlans.back();
+    }
     std::vector<AssemblyPair> assemblyAlternatives(const RouteOperation &op, double required) {
         const auto &original = *op.assignment;
-        const auto wanted = std::pair{op.bendIndex, required};
-        auto found = assemblyPlans.find(wanted);
-        if (found == assemblyPlans.end()) {
-            // Bound planning independently of the CAD search. Hitting this quota
-            // leaves a partial answer, never a proof that another assembly cannot fit.
-            if (assemblyPlans.size() >= 128) {
-                assemblyLimitReached = true;
-                return {{original.punchAssembly, original.dieAssembly}};
-            }
-            std::array<core::SegmentPlan, 2> plans;
-            const std::array<const core::ToolPreset *, 2> profiles{&original.punch, &original.die};
-            for (std::size_t i = 0; i < profiles.size(); ++i) {
-                cancelled(stop);
-                if (profiles[i]->segments) {
-                    checkBudget();
-                    plans[i] = core::planToolSegments(*profiles[i]->segments, required, 200000,
-                                                      request.assemblySearch->maximumGapMm, stop);
-                    ++statistics.plannedAssemblies;
-                    cancelled(stop);
-                    assemblyLimitReached |= plans[i].status == core::SegmentPlanStatus::SearchLimit;
-                }
-            }
-            found = assemblyPlans.emplace(wanted, std::move(plans)).first;
-        } else
-            ++statistics.reusedAssemblyPlans;
+        const auto *plans = plansFor(op, required);
         const AssemblyPair originalPair{original.punchAssembly, original.dieAssembly};
+        if (!plans)
+            return {originalPair};
         auto fitted = originalPair;
-        if (found->second[0].status == core::SegmentPlanStatus::Complete)
-            fitted.first = found->second[0].assembly;
-        if (found->second[1].status == core::SegmentPlanStatus::Complete)
-            fitted.second = found->second[1].assembly;
+        if (!plans->punch.plans.empty())
+            fitted.first = plans->punch.plans.front().assembly;
+        if (plans->die.status == core::SegmentPlanStatus::Complete)
+            fitted.second = plans->die.assembly;
         std::vector<AssemblyPair> result;
         const auto add = [&](AssemblyPair candidate) {
             if (std::find(result.begin(), result.end(), candidate) == result.end())
                 result.push_back(std::move(candidate));
         };
-        // Four small assembly pairs; the immutable DXF profiles are not copied
-        // into this family or each candidate's unchanged member assignments.
+        // Preserve the four original pairs and their order before trying ends.
         if (request.allowAxialPlacement)
-            add(originalPair); // Try retaining the installed long pair at its end first.
+            add(originalPair);
         add(fitted);
         add(originalPair);
         add({fitted.first, originalPair.second});
         add({originalPair.first, fitted.second});
+        for (const auto &punch : plans->punch.plans) {
+            add({punch.assembly, fitted.second});
+            add({punch.assembly, originalPair.second});
+        }
         return result;
     }
     // 0 = verified success, 1 = unknown, 2 = stable rejection of this exact transition.
@@ -798,11 +970,19 @@ class RouteSearch {
             BendPreviewError{BendPreviewErrorCode::Failed, "Operation preparation unavailable"};
         if (!prepared) {
             const auto start = std::chrono::steady_clock::now();
+            const auto built = cache->workpieces.built, reused = cache->workpieces.reused;
             auto result = prepareBendOperation(
                 after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
                 request.withTools ? op.tools : std::nullopt, request.withTools,
                 request.withTools ? op.assignment : std::nullopt, request.allowPartialEndSupport,
-                request.maximumEndSupportLossMm, reference, joint);
+                request.maximumEndSupportLossMm, reference, joint,
+                request.reuseCalculations && request.reusePlacementPreparation &&
+                        request.reuseWorkpiecePreparation
+                    ? &cache->workpieces
+                    : nullptr,
+                cache->flat, request.manualExtraction);
+            statistics.preparedWorkpieces += cache->workpieces.built - built;
+            statistics.reusedWorkpieces += cache->workpieces.reused - reused;
             ++statistics.preparedOperations;
             statistics.operationPreparationUs += elapsedUs(start);
             if (const auto *failure = std::get_if<BendPreviewError>(&result))
@@ -813,7 +993,10 @@ class RouteSearch {
             ++statistics.reusedOperationPreparations;
         if (prepared) {
             const auto start = std::chrono::steady_clock::now();
+            const auto checked = cache->workpieces.checked, reused = cache->workpieces.reusedChecks;
             preview = prepared->at(wanted.axialOffset, stop, false, &statistics.backgauge);
+            statistics.checkedWorkpieceSections += cache->workpieces.checked - checked;
+            statistics.reusedWorkpieceSections += cache->workpieces.reusedChecks - reused;
             statistics.placementEvaluationUs += elapsedUs(start);
         }
         if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
@@ -1036,6 +1219,20 @@ class RouteSearch {
                 reverseReference.push_back(axis.Dot(primary) < 0);
             }
         }
+        if (commonAssemblyOverride) {
+            auto candidate = op;
+            candidate.assignment->punchAssembly = commonAssemblyOverride->first;
+            candidate.assignment->dieAssembly = commonAssemblyOverride->second;
+            candidate.tools = core::toolParameters(*candidate.assignment);
+            auto members = additional;
+            for (auto &member : members) {
+                member.assignment->punchAssembly = commonAssemblyOverride->first;
+                member.assignment->dieAssembly = commonAssemblyOverride->second;
+                member.tools = candidate.tools;
+            }
+            return tryInstallation(mask, candidate, members, reverseReference,
+                                   assemblyKey(mask, candidate, members), required);
+        }
         const bool planning =
             !commonAssemblyPhase && mayPlan(op.bendIndex) && op.assignment &&
             std::all_of(additional.begin(), additional.end(), [&](const auto &m) {
@@ -1223,6 +1420,8 @@ class RouteSearch {
                     if (const auto *failure = std::get_if<BendPreviewError>(&preview)) {
                         if (failure->code == BendPreviewErrorCode::Cancelled)
                             cancelled(stop);
+                        observedPunchCollision |=
+                            failure->toolCollision == ToolCollisionPair::SheetPunch;
                         lastFailure = failure->detail;
                         lastOperationError = failure->code;
                         failedBend = op.bendIndex;
@@ -1413,6 +1612,7 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
     if (stop.stop_requested())
         return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
     std::shared_ptr<SingleCache> cache;
+    std::shared_ptr<RouteCache> checked;
     {
         std::lock_guard guard(routeCacheMutex_);
         if (!singleCache_ || singleCache_->source != document) {
@@ -1420,6 +1620,8 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
             singleCache_->source = document;
         }
         cache = singleCache_;
+        if (routeCache_ && routeCache_->source == document)
+            checked = routeCache_;
     }
     const SingleCache::Key key{index, target,     reversed, motion,
                                tools, assignment, limit,    workpieceOffsetMm};
@@ -1433,12 +1635,48 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
             }
     }
     const auto native = std::dynamic_pointer_cast<const CadDocument>(document);
+    BendPreviewPtr reused;
+    if (motion && checked && native) {
+        const auto &analysis = OcctDocumentAccess::simulationBends(*native);
+        const auto &bends = analysis.bends;
+        // A standalone operation keeps every other source bend formed. Only a
+        // complete-source state with one active zone is equivalent; intermediate
+        // route states and grouped strokes cannot satisfy this request.
+        if (analysis.status == BendRecognitionStatus::Completed &&
+            analysis.interiorContourDiagnostics.empty() && index < bends.size() &&
+            bends.size() <= maximumSheetBends &&
+            (!checked->thickness || *checked->thickness == bends[index].thicknessMm)) {
+            const auto full = (Mask{1} << bends.size()) - 1;
+            std::lock_guard guard(checked->mutex);
+            const auto found = checked->transitions.findMatching([&](const auto &entry,
+                                                                     const auto &preview) {
+                const auto &input = *entry.inputs;
+                const auto &op = input.operation;
+                return entry.mask == full && entry.jointInputs.empty() &&
+                       entry.fixedSecond == reversed && entry.axialOffset == workpieceOffsetMm &&
+                       input.withTools && !input.manualExtraction &&
+                       input.partialEndSupport == (!limit || *limit > 0) &&
+                       (!input.partialEndSupport || input.maximumEndSupportLossMm == limit) &&
+                       op.bendIndex == index && op.target == target && op.tools == tools &&
+                       op.assignment == assignment && preview && !preview->unverifiedDraft() &&
+                       preview->activeBendCount() == 1 &&
+                       preview->otherFormedBends() == bends.size() - 1 && preview->pressMotion() &&
+                       preview->punchRetraction() && preview->endSupportLimitMm() == limit;
+            });
+            if (found)
+                reused = *found;
+        }
+    }
+    if (stop.stop_requested())
+        return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
     const auto reference = native && index < native->metadata().bendAnalysis.bends.size()
                                ? std::optional{normalBendAxis(*native, index)}
                                : std::nullopt;
-    auto result = buildBendOperation(document, index, target, reversed, stop, tools, motion,
-                                     std::move(assignment), !limit || *limit > 0, limit, reference,
-                                     true, nullptr, {}, workpieceOffsetMm);
+    auto result = reused
+                      ? BendPreviewResult(reused)
+                      : buildBendOperation(document, index, target, reversed, stop, tools, motion,
+                                           std::move(assignment), !limit || *limit > 0, limit,
+                                           reference, true, nullptr, {}, workpieceOffsetMm);
     const auto *error = std::get_if<BendPreviewError>(&result);
     if (!stop.stop_requested() && (!error || stableRejection(error->code))) {
         std::lock_guard guard(cache->mutex);
@@ -1509,14 +1747,10 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
         }
         std::lock_guard lock(work->mutex);
         cancelled(stop);
-        for (auto it = work->drafts.begin(); it != work->drafts.end(); ++it)
-            if ((*it)->request == request) {
-                auto result = std::make_shared<RouteDraft>(**it);
-                result->reusedBasis = true;
-                work->drafts.splice(work->drafts.begin(), work->drafts, it);
-                cancelled(stop);
-                return RouteDraftPtr(result);
-            }
+        if (const auto result = work->drafts.find(document, request)) {
+            cancelled(stop);
+            return result;
+        }
         if (!work->flat) {
             const auto result = FlatPatternBuilder().build(
                 document, {{core::SheetMaterial::Unknown, .5, 1}, request.manualThicknessMm}, stop);
@@ -1533,9 +1767,7 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
             work->draftBasis = std::make_shared<RouteDraftBasis>(document, work->flat, stop);
         const auto result = work->draftBasis->build(std::move(request), reused, stop);
         cancelled(stop);
-        work->drafts.push_front(result);
-        while (work->drafts.size() > 4)
-            work->drafts.pop_back();
+        work->drafts.remember(result);
         return result;
     } catch (const BendRouteError &e) {
         return e;
@@ -1559,6 +1791,9 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         const auto n = analysis.bends.size();
         if (request.onProgress)
             request.onProgress({BendRoutePhase::Preparing, 0, 0, 0, std::nullopt});
+        if (request.manualExtraction && !request.withTools)
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "Manual extraction requires tools"};
         if ((request.allowPartialEndSupport && !request.withTools) ||
             (request.maximumEndSupportLossMm &&
              (!request.allowPartialEndSupport ||
@@ -1659,6 +1894,10 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.reusedOperationPreparations += s.reusedOperationPreparations;
                 totals.operationPreparationUs += s.operationPreparationUs;
                 totals.placementEvaluationUs += s.placementEvaluationUs;
+                totals.preparedWorkpieces += s.preparedWorkpieces;
+                totals.reusedWorkpieces += s.reusedWorkpieces;
+                totals.checkedWorkpieceSections += s.checkedWorkpieceSections;
+                totals.reusedWorkpieceSections += s.reusedWorkpieceSections;
                 totals.toolAccessRankedStates += s.toolAccessRankedStates;
                 totals.commonAssemblyPasses += s.commonAssemblyPasses;
                 totals.commonAssemblyChecks += s.commonAssemblyChecks;
@@ -1849,7 +2088,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             const auto bend = operation.bendIndex;
             search.inputs[bend] = work->intern({std::move(operation), search.request.withTools,
                                                 search.request.allowPartialEndSupport,
-                                                search.request.maximumEndSupportLossMm});
+                                                search.request.maximumEndSupportLossMm,
+                                                search.request.manualExtraction});
         }
         search.layout = &OcctFlatPatternAccess::layout(*search.flat);
         search.tolerance = analysis.lengthToleranceMm;
@@ -1941,7 +2181,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         if (search.request.onProgress)
             search.request.onProgress({BendRoutePhase::ToolCandidate, 0, 0, 0, std::nullopt});
         try {
-            found = search.tryCommonAssembly(full) || search.search(full);
+            found = search.tryCommonAssembly(full) || search.tryCommonHornAssemblies(full) ||
+                    search.search(full);
         } catch (BendRouteError &e) {
             e.statistics = search.statistics;
             throw;
@@ -1960,6 +2201,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         auto result = std::make_shared<BendRoute>();
         result->source = document;
         result->withTools = search.request.withTools;
+        result->manualExtraction = search.request.manualExtraction;
         result->evaluatedOperations = search.attempts;
         result->statistics = search.statistics;
         result->steps.assign(search.reversed.rbegin(), search.reversed.rend());
@@ -1969,6 +2211,22 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
             for (std::size_t i = 0; i < result->steps.size(); ++i)
                 search.remember(search.reversedKeys[result->steps.size() - 1 - i],
                                 result->steps[i].preview);
+            const auto &first = result->steps.front();
+            if (first.additionalBends.empty()) {
+                const auto input =
+                    std::find_if(search.request.operations.begin(), search.request.operations.end(),
+                                 [&](const auto &op) { return op.bendIndex == first.bendIndex; });
+                check(input != search.request.operations.end(), "Missing first route input");
+                auto active = *input;
+                if (first.assemblyAssignment) {
+                    active.assignment = *first.assemblyAssignment;
+                    active.tools = core::toolParameters(*active.assignment);
+                }
+                active.workpieceReversed = first.fixedSecond;
+                active.workpieceOffsetMm = first.preview->workpieceOffsetMm();
+                cancelled(stop);
+                work->drafts.rememberBlank(document, std::move(active), first.preview);
+            }
         }
         result->partialEndSupport =
             std::any_of(result->steps.begin(), result->steps.end(),

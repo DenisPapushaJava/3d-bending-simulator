@@ -42,6 +42,9 @@ class OcctFlatPatternAccess final {
     [[nodiscard]] static const std::vector<TopoDS_Shape> &
     bendLines(const application::FlatPattern &);
     [[nodiscard]] static const SheetLayout &layout(const application::FlatPattern &);
+    // Proven owner of the original STEP face, in the same frame as layout().
+    [[nodiscard]] static const gp_Trsf *sourceWallToFlat(const application::FlatPattern &,
+                                                         std::size_t faceId);
     [[nodiscard]] static const SheetOrientationVisual &
     orientation(const application::FlatPattern &);
 };

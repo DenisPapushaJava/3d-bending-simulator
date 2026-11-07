@@ -477,10 +477,15 @@ class DrawingDialog::Impl {
     QString layoutError;
     std::optional<std::size_t> selected;
     bool settingsChanged = false;
+    bool geometryEdited = false;
+    std::optional<application::DrawingRequest> pendingGeometry;
     bool started = false;
     Impl(ImportController &c, std::shared_ptr<const application::BendingDrawingBuilder> b,
          std::optional<std::size_t> face)
-        : controller(c), builder(std::move(b)), revision(c.session().revision()), selected(face) {}
+        : controller(c), builder(std::move(b)), revision(c.session().revision()), selected(face) {
+        if (const auto &saved = c.session().drawingSettings(); saved && saved->baseFace)
+            selected = saved->baseFace;
+    }
     DrawingTitle title() const {
         return {name->text(),
                 designation->text(),
@@ -508,6 +513,71 @@ class DrawingDialog::Impl {
                     !parent.locations.empty())
                     return &parent;
         return nullptr;
+    }
+    static application::DrawingViewIdentity identity(const application::BendingDrawing &drawing,
+                                                     DrawingViewKey key) {
+        application::DrawingViewIdentity result{key.kind, key.index};
+        switch (key.kind) {
+        case DrawingViewKind::Section:
+            result.variant = drawing.sections[key.index].repeatCount != 0;
+            if (const auto *section = cutSection(drawing, key)) {
+                for (const auto &location : section->locations)
+                    result.groups.push_back(cutKey(location));
+            } else if (const auto &bends = drawing.sections[key.index].view.dimensionedBends;
+                       !bends.empty()) {
+                result.groups.push_back(bends);
+                std::sort(result.groups[0].begin(), result.groups[0].end());
+                auto &group = result.groups[0];
+                group.erase(std::unique(group.begin(), group.end()), group.end());
+            }
+            if (!result.groups.empty()) {
+                result.index = 0;
+                std::sort(result.groups.begin(), result.groups.end());
+            }
+            break;
+        case DrawingViewKind::Detail:
+            result.index = drawing.details[key.index].bendIndex;
+            result.variant = drawing.details[key.index].fullProfile;
+            break;
+        case DrawingViewKind::Profile:
+            if (const auto &bends = drawing.profiles[key.index].bends; !bends.empty()) {
+                result.groups.push_back(bends);
+                std::sort(result.groups[0].begin(), result.groups[0].end());
+                result.index = 0;
+            }
+            break;
+        case DrawingViewKind::Auxiliary:
+            result.index = drawing.auxiliaryViews[key.index].projection;
+            result.variant = drawing.auxiliaryViews[key.index].view.reverseProjection;
+            break;
+        default:
+            break;
+        }
+        return result;
+    }
+    void persistSettings(const application::DrawingRequest *geometry = nullptr) {
+        auto saved =
+            controller.session().drawingSettings().value_or(application::ProjectDrawingSettings{});
+        saved.name = name->text().toStdString();
+        saved.designation = designation->text().toStdString();
+        saved.material = material->text().toStdString();
+        saved.execution = execution->text().toStdString();
+        saved.quantity = quantity->value();
+        if (geometry) {
+            saved.baseFace = geometry->baseFace;
+            saved.quarterTurns = geometry->quarterTurns;
+            saved.reverseView = geometry->reverseView;
+            saved.allowBreaks = geometry->allowBreaks;
+            saved.sectionEdits = geometry->sectionEdits;
+        }
+        if (compositionSource) {
+            saved.flatSide = static_cast<DrawingFlatSide>(flatSide->currentIndex());
+            saved.views.clear();
+            for (const auto &choice : choices)
+                saved.views.push_back(
+                    {identity(*compositionSource, choice.key), choice.visible, choice.scale});
+        }
+        controller.setDrawingSettings(revision, std::move(saved));
     }
     static bool sameView(const application::BendingDrawing &before, DrawingViewKey old,
                          const application::BendingDrawing &after, DrawingViewKey now) {
@@ -562,6 +632,8 @@ class DrawingDialog::Impl {
         sectionOptions->setEnabled(!settingsChanged && controller.session().revision() == revision);
     }
     void invalidateSection() {
+        geometryEdited = true;
+        pendingGeometry.reset();
         sectionDirty = true;
         sectionRefresh = true;
         const auto row = views->currentRow();
@@ -603,6 +675,8 @@ class DrawingDialog::Impl {
             const auto previousSource = compositionSource;
             const auto previousChoices = choices;
             const bool preserve = sectionRefresh && previousSource;
+            const auto &saved = controller.session().drawingSettings();
+            const bool restore = !preserve && !pendingGeometry && saved.has_value();
             cancelLayout();
             compositionSource = drawing;
             choices = DrawingSheet::defaultViews(*drawing);
@@ -636,6 +710,17 @@ class DrawingDialog::Impl {
                             (drawing->sections[choice.key.index].repeatCount != 0) == activeUnit;
                     }
                 }
+            if (restore)
+                for (auto &choice : choices) {
+                    const auto id = identity(*drawing, choice.key);
+                    const auto found =
+                        std::find_if(saved->views.begin(), saved->views.end(),
+                                     [&](const auto &entry) { return entry.identity == id; });
+                    if (found != saved->views.end()) {
+                        choice.visible = found->visible;
+                        choice.scale = found->scale;
+                    }
+                }
             sectionRefresh = false;
             plan.reset();
             layoutError.clear();
@@ -648,7 +733,7 @@ class DrawingDialog::Impl {
                 item->setCheckState(choice.visible ? Qt::Checked : Qt::Unchecked);
             }
             if (!preserve)
-                flatSide->setCurrentIndex(0);
+                flatSide->setCurrentIndex(restore ? static_cast<int>(saved->flatSide) : 0);
             const bool known =
                 drawing->flatPattern && drawing->flatPattern->info.positiveZIsSideA.has_value();
             flatSide->setItemText(1,
@@ -656,6 +741,11 @@ class DrawingDialog::Impl {
             flatSide->setItemText(2,
                                   known ? QStringLiteral("Сторона B") : QStringLiteral("Обратная"));
             views->setCurrentRow(selectedRow);
+        }
+        if (pendingGeometry) {
+            persistSettings(&*pendingGeometry);
+            pendingGeometry.reset();
+            geometryEdited = false;
         }
         selectionControls();
         if (!plan) {
@@ -772,6 +862,7 @@ class DrawingDialog::Impl {
                 ->setCheckState(choices[i].visible ? Qt::Checked : Qt::Unchecked);
         }
         flatSide->setCurrentIndex(0);
+        persistSettings();
         scheduleLayout();
     }
     void showLayoutError(const QString &detail) {
@@ -797,6 +888,8 @@ class DrawingDialog::Impl {
             });
     }
     void invalidate() {
+        geometryEdited = true;
+        pendingGeometry.reset();
         sectionDirty = false;
         sectionRefresh = false;
         sectionEdits.clear();
@@ -865,7 +958,7 @@ class DrawingDialog::Impl {
         for (auto *w : {static_cast<QWidget *>(base), static_cast<QWidget *>(turn),
                         static_cast<QWidget *>(reverse), static_cast<QWidget *>(breaks)})
             w->setEnabled(same && !busy);
-        prepare->setEnabled(same && !busy);
+        prepare->setEnabled(same && controller.canPrepareDrawing());
         const auto drawing = controller.drawing();
         views->setEnabled(same && !busy && drawing && !settingsChanged);
         flatSide->setEnabled(same && !busy && drawing && !settingsChanged);
@@ -991,8 +1084,7 @@ class DrawingDialog::Impl {
         }
     }
     void build() {
-        if (!controller.session().document() || controller.session().revision() != revision ||
-            controller.hasWork())
+        if (controller.session().revision() != revision || !controller.canPrepareDrawing())
             return;
         application::DrawingRequest request;
         if (base->currentIndex() == 1)
@@ -1010,7 +1102,11 @@ class DrawingDialog::Impl {
         image->clear();
         preview->showState(QStringLiteral("Подготовка чертежа"),
                            QStringLiteral("Строим виды и размеры…"), true);
+        if (geometryEdited)
+            pendingGeometry = request;
         started = controller.prepareDrawing(builder, request);
+        if (!started)
+            pendingGeometry.reset();
         refresh();
     }
 };
@@ -1153,7 +1249,6 @@ DrawingDialog::DrawingDialog(ImportController &c,
         line->setMaxLength(length);
         line->setAccessibleName(label);
         form->addRow(label, line);
-        connect(line, &QLineEdit::textChanged, this, [this] { impl_->render(); });
         return line;
     };
     impl_->name = field(QStringLiteral("Наименование"), "drawingName", 60);
@@ -1168,8 +1263,8 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->base = new QComboBox(panel);
     impl_->base->setObjectName(QStringLiteral("drawingBaseFace"));
     impl_->base->addItem(QStringLiteral("Авто: основная плоская грань"));
-    if (selected)
-        impl_->base->addItem(QStringLiteral("Выбранная грань №%1").arg(*selected));
+    if (impl_->selected)
+        impl_->base->addItem(QStringLiteral("Выбранная грань №%1").arg(*impl_->selected));
     form->addRow(QStringLiteral("База главного вида"), impl_->base);
     impl_->turn = new QComboBox(panel);
     impl_->turn->setObjectName(QStringLiteral("drawingOrientation"));
@@ -1272,8 +1367,28 @@ DrawingDialog::DrawingDialog(ImportController &c,
     const auto stemUtf8 = c.session().document()->metadata().sourcePath.stem().u8string();
     impl_->name->setText(QString::fromUtf8(reinterpret_cast<const char *>(stemUtf8.data()),
                                            static_cast<qsizetype>(stemUtf8.size())));
+    if (const auto &saved = c.session().drawingSettings()) {
+        if (saved->name)
+            impl_->name->setText(QString::fromStdString(*saved->name));
+        impl_->designation->setText(QString::fromStdString(saved->designation));
+        impl_->material->setText(QString::fromStdString(saved->material));
+        impl_->execution->setText(QString::fromStdString(saved->execution));
+        impl_->quantity->setValue(saved->quantity);
+        impl_->base->setCurrentIndex(saved->baseFace ? 1 : 0);
+        impl_->turn->setCurrentIndex(saved->quarterTurns + 1);
+        impl_->reverse->setChecked(saved->reverseView);
+        impl_->breaks->setChecked(saved->allowBreaks);
+        impl_->flatSide->setCurrentIndex(static_cast<int>(saved->flatSide));
+        impl_->sectionEdits = saved->sectionEdits;
+    }
     setWindowTitle(QStringLiteral("Чертёж — %1").arg(impl_->name->text()));
-    connect(impl_->quantity, &QSpinBox::valueChanged, this, [this] { impl_->render(); });
+    const auto titleEdited = [this] {
+        impl_->persistSettings();
+        impl_->render();
+    };
+    for (auto *editor : {impl_->name, impl_->designation, impl_->material, impl_->execution})
+        connect(editor, &QLineEdit::textChanged, this, titleEdited);
+    connect(impl_->quantity, &QSpinBox::valueChanged, this, titleEdited);
     connect(impl_->views, &QListWidget::currentRowChanged, this,
             [this](int row) { impl_->selectView(row); });
     connect(impl_->views, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
@@ -1284,6 +1399,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
         if (impl_->choices[row].visible == visible)
             return;
         impl_->choices[row].visible = visible;
+        impl_->persistSettings();
         impl_->scheduleLayout();
     });
     connect(impl_->viewScale, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -1298,6 +1414,7 @@ DrawingDialog::DrawingDialog(ImportController &c,
             if (choice.key == key ||
                 (key.kind == DrawingViewKind::Projection && choice.key.kind == key.kind))
                 choice.scale = scale;
+        impl_->persistSettings();
         impl_->scheduleLayout();
     });
     connect(impl_->sectionPlace, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -1327,8 +1444,10 @@ DrawingDialog::DrawingDialog(ImportController &c,
                       [&](const auto &e) { return e.bends == impl_->activeCut; });
         impl_->invalidateSection();
     });
-    connect(impl_->flatSide, &QComboBox::currentIndexChanged, this,
-            [this] { impl_->scheduleLayout(); });
+    connect(impl_->flatSide, &QComboBox::currentIndexChanged, this, [this] {
+        impl_->persistSettings();
+        impl_->scheduleLayout();
+    });
     connect(resetViews, &QPushButton::clicked, this, [this] { impl_->resetComposition(); });
     connect(impl_->page, &QSpinBox::valueChanged, this, [this] {
         impl_->render();

@@ -47,11 +47,13 @@ class Builder final : public application::SingleBendPreviewBuilder {
   public:
     mutable cad::SingleBendPreviewBuilder implementation;
     mutable std::atomic<unsigned> searches = 0, drafts = 0;
+    mutable std::atomic<bool> lastManualExtraction = false;
     mutable std::atomic<bool> delay = false, entered = false, fail = false;
     application::BendRouteResult buildRoute(application::DocumentPtr d,
                                             application::BendRouteRequest r,
                                             std::stop_token s) const override {
         ++searches;
+        lastManualExtraction = r.manualExtraction;
         return implementation.buildRoute(std::move(d), std::move(r), s);
     }
     application::RouteDraftResult buildRouteDraft(application::DocumentPtr d,
@@ -82,6 +84,58 @@ std::vector<std::string> order(const ui::ImportController &c) {
     for (auto i : c.session().orderedBends())
         ids.push_back(c.session().bend(i)->id);
     return ids;
+}
+void verifyManualExtraction(const QString &folder) {
+    const auto path = folder + "/single.step";
+    STEPControl_Writer writer;
+    require(writer.Transfer(fixtures::bentStrip(), STEPControl_AsIs) == IFSelect_RetDone &&
+                writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
+            "Cannot write manual extraction fixture");
+    auto files = std::make_shared<project::ProjectFiles>();
+    auto builder = std::make_shared<Builder>();
+    const auto tools = tool_fixture::pair(16);
+    ui::MainWindow window({"test", "test"}, files, files, builder, {tools.punch, tools.die});
+    window.setAutomaticPartInputPrompt(false);
+    window.resize(1280, 850);
+    window.show();
+    auto &controller = window.importController();
+    window.openStep(path);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.setBendToolAssignment(0, tools), "Cannot set manual extraction tools");
+    window.findChild<QToolButton *>("processStage2")->click();
+    wait([&] { return !controller.hasWork(); });
+    auto *scope = window.findChild<QCheckBox *>("routeManualExtraction");
+    require(scope && !scope->isChecked() && scope->isEnabled(), "Incorrect default return scope");
+    scope->click();
+    wait([&] { return !controller.hasWork(); });
+    window.findChild<QPushButton *>("checkBendRoute")->click();
+    wait([&] { return !controller.hasWork(); });
+    const auto route = controller.bendRoute();
+    if (!route && controller.bendRouteError())
+        throw std::runtime_error("UI manual extraction: " + controller.bendRouteError()->detail);
+    require(route && route->manualExtraction && builder->lastManualExtraction &&
+                route->steps.size() == 1 && route->steps.front().preview->manualExtraction() &&
+                !route->steps.front().preview->punchRetraction(),
+            "UI dropped the explicit forming-only request");
+    window.findChild<QPushButton *>("routeStep1")->click();
+    if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
+        auto *viewer = window.findChild<viewer::ViewerWidget *>();
+        wait([&] { return window.windowHandle() && window.windowHandle()->isExposed(); });
+        auto image = window.grab().toImage();
+        if (viewer && viewer->isReady()) {
+            QPainter painter(&image);
+            painter.drawImage(viewer->mapTo(&window, QPoint()), viewer->captureImage(true));
+        }
+        require(image.save(output + "-forming-checked.png"),
+                "Cannot capture checked forming scope");
+    }
+    const auto searches = builder->searches.load();
+    scope->click();
+    wait([&] { return !controller.hasWork(); });
+    require(!controller.bendRoute() && builder->searches == searches,
+            "Changing return scope retained an old certificate or searched implicitly");
+    controller.closeDocument();
+    window.close();
 }
 void verifyToolStageTransitions(const QString &folder) {
     auto files = std::make_shared<project::ProjectFiles>();
@@ -945,6 +999,20 @@ x.XCloseDisplay(d)
                           << '\n';
             }
         }
+        auto *manualExtraction = window.findChild<QCheckBox *>("routeManualExtraction");
+        require(manualExtraction && manualExtraction->isVisible() &&
+                    manualExtraction->isEnabled() && !manualExtraction->isChecked(),
+                "Manual extraction was implicit or hidden");
+        const auto searches = builder->searches.load();
+        const auto editRevision = controller.session().editRevision();
+        manualExtraction->click();
+        wait([&] { return !controller.hasWork(); });
+        require(manualExtraction->isChecked() && builder->searches == searches &&
+                    controller.session().editRevision() == editRevision,
+                "Changing extraction scope started a search or edited the project");
+        if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty())
+            require(window.grab().save(output + "-manual-extraction.png"),
+                    "Cannot capture manual extraction control");
         require(controller.session().document()->sourceStep() == bytes, "Source was modified");
         const auto oldSource = controller.session().document();
         const auto oldRequest = controller.routeDraft()->request;
@@ -961,6 +1029,7 @@ x.XCloseDisplay(d)
         require(controller.session().document() && controller.session().document() != oldSource &&
                     !controller.routeDraft(),
                 "An old draft survived a new import or stranded the worker queue");
+        require(!manualExtraction->isChecked(), "Manual extraction leaked into another document");
         builder->delay = true;
         builder->entered = false;
         step(1)->click();
@@ -971,6 +1040,7 @@ x.XCloseDisplay(d)
                 "Closed document accepted a late draft");
         window.close();
         verifyToolStageTransitions(folder.path());
+        verifyManualExtraction(folder.path());
         std::cout << "Manual prefixes, collision scope, stable reorder, undo/redo, explicit check "
                      "and stale selection passed\n";
     } catch (const std::exception &e) {

@@ -196,24 +196,28 @@ void testShutdown() {
 }
 class GatedWriter final : public ProjectWriter {
   public:
-    std::optional<std::string> save(const std::filesystem::path &path, const Document &,
-                                    std::optional<double>,
-                                    const std::vector<BendPreparation> &bends, std::stop_token stop,
-                                    bending::core::UnfoldSettings = {}) const override {
+    std::optional<std::string>
+    save(const std::filesystem::path &path, const Document &, std::optional<double>,
+         const std::vector<BendPreparation> &bends, std::stop_token stop,
+         bending::core::UnfoldSettings,
+         const std::optional<ProjectDrawingSettings> &drawing) const override {
         require(QThread::currentThread() != QCoreApplication::instance()->thread(),
                 "Save ran in GUI thread");
         if (path == "failed.bend") {
             return "disk error";
         }
         captured = bends;
+        capturedDrawing = drawing;
         entered = true;
-        while (!stop.stop_requested()) {
+        while (!released && !stop.stop_requested()) {
             QThread::msleep(1);
         }
         return {}; // Emulate a completed atomic rename racing with cancellation.
     }
     mutable std::atomic<bool> entered{false};
+    std::atomic<bool> released{false};
     mutable std::vector<BendPreparation> captured;
+    mutable std::optional<ProjectDrawingSettings> capturedDrawing;
 };
 void testSaveRace() {
     const auto importer = std::make_shared<GatedImporter>();
@@ -233,6 +237,24 @@ void testSaveRace() {
     waitUntil(finished);
     require(!controller.saveError().isEmpty() && controller.session().modified(),
             "Failed write cleared unsaved edits");
+    const auto documentRevision = controller.session().revision();
+    const auto editRevision = controller.session().editRevision();
+    ProjectDrawingSettings drawing;
+    drawing.quantity = 10;
+    require(controller.setDrawingSettings(documentRevision, drawing), "Drawing edit rejected");
+    controller.saveProject("drawing.bend", writer);
+    waitUntil([&] { return writer->entered.load(); });
+    require(writer->capturedDrawing == drawing, "Save did not capture applied drawing settings");
+    drawing.quantity = 11;
+    require(controller.setDrawingSettings(documentRevision, drawing) &&
+                controller.session().editRevision() == editRevision,
+            "Drawing edits during save must keep the CAD revision");
+    writer->released = true;
+    waitUntil(finished);
+    require(controller.session().modified() && controller.session().drawingSettings() == drawing,
+            "A completed save cleared later drawing edits");
+    writer->entered = false;
+    writer->released = false;
     controller.saveProject("old.bend", writer);
     waitUntil([&] { return writer->entered.load(); });
     require(writer->captured.size() == 1 && writer->captured[0].review == BendReview::Confirmed &&
@@ -249,6 +271,7 @@ void testSaveRace() {
     require(controller.session().document()->metadata().sourcePath == "new.step" &&
                 controller.session().projectPath().empty() &&
                 !controller.session().manualThicknessMm() &&
+                !controller.session().drawingSettings() &&
                 controller.session().bend(0)->review == BendReview::Automatic &&
                 !controller.session().bend(0)->target,
             "Late save rebound a new document to an old project");

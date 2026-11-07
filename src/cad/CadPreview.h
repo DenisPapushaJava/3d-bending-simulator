@@ -89,6 +89,10 @@ class CadPreview : public SingleBendPreview {
     std::optional<simulation::FlatToolSetup> setup;
     std::optional<simulation::PressMotion> motion;
     std::vector<simulation::PressState> states;
+    bool manualExit = false;
+    bool manualExtraction() const noexcept override {
+        return manualExit;
+    }
     std::optional<PunchRetractionCheck> retraction;
     TopoDS_Shape sweep;
     const PunchRetractionCheck *punchRetraction() const noexcept override {

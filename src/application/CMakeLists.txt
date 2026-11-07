@@ -1,5 +1,6 @@
 add_library(bending_application STATIC DocumentSession.cpp Thickness.cpp BendPreparation.cpp BendingDrawing.cpp BendRoute.cpp ReleaseVersion.cpp)
 add_library(Bending::Application ALIAS bending_application)
-target_sources(bending_application PRIVATE ToolLibrary.cpp)
+target_sources(bending_application PRIVATE ToolLibrary.cpp ProjectDrawingSettings.cpp)
+target_sources(bending_application PRIVATE BendRouteAcceptance.cpp)
 target_include_directories(bending_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(bending_application PUBLIC Bending::Core Bending::Simulation PRIVATE bending_options)

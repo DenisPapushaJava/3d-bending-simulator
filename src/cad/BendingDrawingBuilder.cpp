@@ -285,11 +285,14 @@ DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budge
     if (stop.stop_requested())
         throw DrawingError{"Cancelled", true};
     algo->Hide();
+    if (stop.stop_requested())
+        throw DrawingError{"Cancelled", true};
     HLRBRep_HLRToShape result(algo);
     DrawingView view;
     std::vector<CircleArcs> circles;
-    contours(result.VCompound(), false, view, budget, stop, &circles);
-    contours(result.OutLineVCompound(), false, view, budget, stop, &circles);
+    const std::array visibleEdges{result.VCompound(), result.OutLineVCompound()};
+    for (const auto &edges : visibleEdges)
+        contours(edges, false, view, budget, stop, &circles);
     contours(result.HCompound(), true, view, budget, stop);
     contours(result.OutLineHCompound(), true, view, budget, stop);
     for (auto &circle : circles) {
@@ -312,7 +315,7 @@ DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budge
         BRep_Builder builder;
         TopoDS_Compound visible;
         builder.MakeCompound(visible);
-        for (const auto &edges : {result.VCompound(), result.OutLineVCompound()})
+        for (const auto &edges : visibleEdges)
             if (!edges.IsNull())
                 builder.Add(visible, edges);
         addDrawingOpenings(*openings, gp_Ax2(gp_Pnt(0, 0, 0), f.normal, f.u), visible, view, stop);
@@ -895,9 +898,14 @@ std::optional<VariableSections> variableSections(const TopoDS_Shape &shape,
     return result;
 }
 void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
-                        const DrawingRequest &request, std::size_t &budget, std::stop_token stop) {
+                        const DrawingRequest &request, gp_Dir frontUp, std::size_t &budget,
+                        std::stop_token stop) {
     if (!request.unfoldSettings)
         return;
+    if (request.preparedFlatError) {
+        drawing.flatPatternError = request.preparedFlatError;
+        return;
+    }
     const auto &metadata = document->metadata();
     const auto &settings = *request.unfoldSettings;
     auto flat = request.preparedFlatPattern;
@@ -917,9 +925,10 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
             flat = std::get<FlatPatternPtr>(std::move(flatResult));
     }
     if (flat) {
+        drawing.preparedFlatPattern = flat;
         DrawingFlatPattern unfolded;
         unfolded.info = flat->info();
-        const auto &info = unfolded.info;
+        auto &info = unfolded.info;
         bool topFound = false;
         for (TopExp_Explorer e(OcctFlatPatternAccess::geometry(*flat), TopAbs_FACE); e.More();
              e.Next()) {
@@ -938,6 +947,28 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
             throw DrawingError{"Missing verified flat contour"};
         auto &v = unfolded.view;
         const auto &hi = info.bounds.maximum;
+        const auto *wall = OcctFlatPatternAccess::sourceWallToFlat(*flat, drawing.baseFace);
+        // A half-turn aligns the physical up direction without changing the shown material side.
+        const bool halfTurn = wall && gp_Vec(frontUp).Transformed(*wall).Y() < -1 + 1e-7;
+        const auto orient = [&](DrawingPoint p) {
+            return halfTurn ? DrawingPoint{hi.x - p.x, hi.y - p.y} : p;
+        };
+        if (halfTurn) {
+            info.measurements.reset(); // The 3D viewer's measurement snapshot uses the stock frame.
+            for (auto &path : v.paths)
+                for (auto &point : path.points)
+                    point = orient(point);
+            for (auto &bend : info.bends) {
+                const auto start = orient({bend.start.x, bend.start.y});
+                const auto end = orient({bend.end.x, bend.end.y});
+                bend.start.x = start.x;
+                bend.start.y = start.y;
+                bend.end.x = end.x;
+                bend.end.y = end.y;
+                bend.offset.x = -bend.offset.x;
+                bend.offset.y = -bend.offset.y;
+            }
+        }
         v.minimum = {0, 0};
         v.maximum = {hi.x, hi.y};
         v.dimensions.push_back({{0, 0}, {hi.x, 0}, hi.x, ""});
@@ -1019,7 +1050,7 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
                 throw DrawingError{"Drawing projection exceeds 200000 points"};
             DrawingPath path;
             for (const auto &p : contour)
-                path.points.push_back({p.x, p.y});
+                path.points.push_back(orient({p.x, p.y}));
             v.paths.push_back(std::move(path));
         }
         drawing.flatPattern = std::move(unfolded);
@@ -1039,8 +1070,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         TopTools_IndexedMapOfShape faces, edges;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
         TopExp::MapShapes(shape, TopAbs_EDGE, edges);
-        if (faces.Extent() > 500 || edges.Extent() > 2000)
-            return DrawingError{"First drawing version supports up to 500 faces / 2000 edges"};
+        if (faces.Extent() > 4096 || edges.Extent() > 16384)
+            return DrawingError{"Drawing supports up to 4096 faces / 16384 edges"};
         if (request.quarterTurns < -1 || request.quarterTurns > 3 ||
             (request.manualThicknessMm &&
              (!std::isfinite(*request.manualThicknessMm) || *request.manualThicknessMm <= 0)))
@@ -1390,13 +1421,11 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     const std::string designation =
                         "А" + std::to_string(drawing->details.size() + 1);
                     const double radius = (detail->maximum.x - detail->minimum.x) / 2;
-                    drawing->views[best].labels.push_back({project(at, frames[best]), designation});
-                    drawing->views[best].detailCircles.push_back(
-                        {project(at, frames[best]), radius});
-                    if (best != 0) {
-                        drawing->views[0].labels.push_back({project(at, frames[0]), designation});
-                        drawing->views[0].detailCircles.push_back({project(at, frames[0]), radius});
-                    }
+                    drawing->views[best].detailLocators.push_back(
+                        {project(at, frames[best]), radius, designation});
+                    if (best != 0)
+                        drawing->views[0].detailLocators.push_back(
+                            {project(at, frames[0]), radius, designation});
                     drawing->details.push_back(
                         {std::move(*detail), drawing->bends.size(), designation});
                 }
@@ -1456,7 +1485,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             drawing->details = std::move(details);
             for (auto &projection : drawing->views) {
                 projection.labels.clear();
-                projection.detailCircles.clear();
+                projection.detailLocators.clear();
             }
             profileGroup->marker.designation = "А1";
             drawing->views[0].sectionMarkers.push_back(profileGroup->marker);
@@ -1471,9 +1500,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                    gp_Pnt(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z)) *
                             .5);
                 const auto at = bendSurfacePoint(bend, faces, station);
-                drawing->views[0].labels.push_back({project(at, frames[0]), detail.designation});
-                drawing->views[0].detailCircles.push_back(
-                    {project(at, frames[0]), (detail.view.maximum.x - detail.view.minimum.x) / 2});
+                drawing->views[0].detailLocators.push_back(
+                    {project(at, frames[0]), (detail.view.maximum.x - detail.view.minimum.x) / 2,
+                     detail.designation});
             }
         }
         for (std::size_t i = 0; i < bendAnalysis.bends.size(); ++i)
@@ -1495,7 +1524,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                     drawing->details = std::move(variable->details);
                     for (auto &projection : drawing->views) {
                         projection.labels.clear();
-                        projection.detailCircles.clear();
+                        projection.detailLocators.clear();
                         projection.sectionMarkers.clear();
                     }
                     drawing->views[0].sectionMarkers = std::move(variable->markers);
@@ -1613,7 +1642,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         else if (!request.sectionEdits.empty())
             throw DrawingError{"Для этого типа сечения ручная настройка пока недоступна"};
         try {
-            prepareFlatDrawing(*drawing, document, request, budget, stop);
+            prepareFlatDrawing(*drawing, document, request, frames[0].v, budget, stop);
         } catch (const DrawingError &error) {
             if (error.cancelled)
                 throw;

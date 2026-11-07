@@ -56,6 +56,11 @@ struct DrawingViewArrow {
     DrawingPoint direction;
     std::string designation;
 };
+struct DrawingDetailLocator {
+    DrawingPoint anchor;
+    double radius;
+    std::string designation;
+};
 struct DrawingBendCallout {
     DrawingPoint anchor;
     std::vector<std::size_t> bends;
@@ -81,7 +86,7 @@ struct DrawingView {
     std::vector<std::pair<DrawingPoint, std::string>> labels;
     std::vector<DrawingAngle> angles;
     std::vector<std::vector<DrawingPoint>> sectionLoops;
-    std::vector<std::pair<DrawingPoint, double>> detailCircles;
+    std::vector<DrawingDetailLocator> detailLocators;
     std::vector<std::pair<DrawingPoint, std::size_t>> bendNotes;
     std::vector<DrawingSectionMarker> sectionMarkers;
     // Zones for which both adjacent dimensions and the true angle are represented.
@@ -174,6 +179,7 @@ struct DrawingRequest {
     std::optional<core::UnfoldSettings> unfoldSettings = {};
     FlatPatternPtr preparedFlatPattern = {}; // Optional cache; not an input affecting equality.
     std::vector<DrawingSectionEdit> sectionEdits;
+    std::optional<FlatPatternError> preparedFlatError = {}; // Matching in-flight preparation only.
     bool operator==(const DrawingRequest &other) const {
         return baseFace == other.baseFace && reverseView == other.reverseView &&
                quarterTurns == other.quarterTurns && allowBreaks == other.allowBreaks &&
@@ -209,6 +215,7 @@ struct BendingDrawing {
     std::vector<DrawingAuxiliaryView> auxiliaryViews;
     std::optional<DrawingFlatPattern> flatPattern = {};
     std::optional<FlatPatternError> flatPatternError = {};
+    FlatPatternPtr preparedFlatPattern = {}; // Original stock snapshot, before paper orientation.
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
 struct DrawingError {

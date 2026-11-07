@@ -361,6 +361,14 @@ class OcctCanvas final : public QWidget {
             }
         orbitLockAction_->setIcon(anchor);
         orbitLockButton_->hide();
+        dimensionsNotice_ = new QLabel(
+            QStringLiteral("Размеры не помещаются. Увеличьте окно или впишите деталь (F)."), this);
+        dimensionsNotice_->setObjectName(QStringLiteral("dimensionsNotice"));
+        dimensionsNotice_->setWordWrap(true);
+        dimensionsNotice_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        dimensionsNotice_->setStyleSheet(QStringLiteral(
+            "QLabel { background: #fff3d6; color: #6b4b15; padding: 8px; border-radius: 5px; }"));
+        dimensionsNotice_->hide();
         orbitLockAction_->setEnabled(false);
         connect(orbitLockAction_, &QAction::toggled, this, [this](bool locked) {
             if (locked && pressOrbitLocked())
@@ -379,6 +387,7 @@ class OcctCanvas final : public QWidget {
     std::function<void(const QString &)> onError;
     std::function<void()> onReady;
     std::function<void(quint64, int)> onSelection;
+    std::function<void(quint64, int)> onBendSelection;
     std::function<void()> onSurfaceChanged;
 
     QMenu *navigationMenu() const {
@@ -430,12 +439,14 @@ class OcctCanvas final : public QWidget {
     QString present(const TopoDS_Shape &shape, application::DocumentPtr document, quint64 revision,
                     bool diagnostic = false) {
         const bool sameSource = document && document == document_ && revision == revision_;
+        const bool wasDerived = preview_ || flat_;
         if (sameSource)
             rememberSceneCamera();
         else
             sceneCameras_ = {};
-        TopTools_IndexedMapOfShape faces;
+        TopTools_IndexedMapOfShape faces, edges;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        TopExp::MapShapes(shape, TopAbs_EDGE, edges);
         cad::SheetOrientationVisual orientation;
         if (const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(document)) {
             const auto &tags = cad::OcctDocumentAccess::sheetOrientation(*native);
@@ -462,6 +473,8 @@ class OcctCanvas final : public QWidget {
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
                                                                            : AIS_Shaded,
                                   AIS_Shape::SelectionMode(TopAbs_FACE), false);
+                if (dimensionsVisible_)
+                    context_->Activate(candidate, AIS_Shape::SelectionMode(TopAbs_EDGE), false);
                 if (!presentation_.IsNull()) {
                     context_->Remove(presentation_, false);
                 }
@@ -490,6 +503,12 @@ class OcctCanvas final : public QWidget {
         flat_.reset();
         shape_ = shape;
         faces_ = std::move(faces);
+        edges_ = std::move(edges);
+        if (!sameSource || wasDerived)
+            measureSelection_ = {};
+        measurements_.reset();
+        if (const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(document))
+            measurements_ = cad::OcctDocumentAccess::measurements(*native);
         document_ = std::move(document);
         revision_ = revision;
         diagnostic_ = diagnostic;
@@ -687,6 +706,8 @@ class OcctCanvas final : public QWidget {
             return QStringLiteral("Неактуальная развёртка");
         const bool entering = flat_ != flat;
         if (entering)
+            measureSelection_ = {};
+        if (entering)
             rememberSceneCamera();
         Handle(AIS_ColoredShape) candidate;
         if (ready_) {
@@ -729,6 +750,7 @@ class OcctCanvas final : public QWidget {
         support_.Nullify();
         preview_.reset();
         flat_ = std::move(flat);
+        refreshFlatSelection();
         refreshDimensions();
         refreshOrientation();
         if (onSelection)
@@ -753,6 +775,9 @@ class OcctCanvas final : public QWidget {
         highlights_ = {};
         shape_.Nullify();
         faces_.Clear();
+        edges_.Clear();
+        measurements_.reset();
+        measureSelection_ = {};
         document_.reset();
         preview_.reset();
         flat_.reset();
@@ -778,6 +803,14 @@ class OcctCanvas final : public QWidget {
             return;
         }
         dimensionsVisible_ = visible;
+        guarded([&] {
+            if (!preview_ && !flat_ && !presentation_.IsNull()) {
+                if (visible)
+                    context_->Activate(presentation_, AIS_Shape::SelectionMode(TopAbs_EDGE), false);
+                else
+                    context_->Deactivate(presentation_, AIS_Shape::SelectionMode(TopAbs_EDGE));
+            }
+        });
         dimensionsAction_->setChecked(visible);
         refreshDimensions();
         if (visible) {
@@ -785,10 +818,14 @@ class OcctCanvas final : public QWidget {
         }
     }
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision) {
+        if (revision == revision_)
+            measureSelection_ = {};
         setHighlights({indices, {}, false}, revision);
     }
 
     void highlightBend(const application::RecognizedBend &bend, quint64 revision) {
+        if (revision == revision_)
+            measureSelection_ = {};
         setHighlights({{bend.innerFace, bend.outerFace},
                        std::vector<std::size_t>(bend.flangeFaces.begin(), bend.flangeFaces.end()),
                        true,
@@ -824,9 +861,13 @@ class OcctCanvas final : public QWidget {
         sanitize(state.cutouts);
         state.bend = state.bend && !state.primary.empty();
         highlights_ = std::move(state);
-        if (preview_ || flat_) {
+        if (flat_) {
+            guarded([&] { refreshFlatSelection(); });
+            refreshDimensions();
             return;
         }
+        if (preview_)
+            return;
         guarded([&] {
             for (const auto &overlay : {evidence_, support_}) {
                 if (!overlay.IsNull()) {
@@ -1064,12 +1105,87 @@ class OcctCanvas final : public QWidget {
                     fitAll();
                     return;
                 }
-                if (!preview_ && !flat_) {
+                if (flat_) {
+                    const auto *measures = flat_->info().measurements.get();
+                    auto feature =
+                        dimensionsVisible_ && measures &&
+                                std::abs(view_->Camera()->Direction().Z()) >= .15
+                            ? flatMeasurementAt(*measures, dimensionLayout(), lastPosition_)
+                            : MeasurementSelection{};
+                    if (feature.kind == MeasurementKind::Opening) {
+                        selectMeasurement(feature);
+                        return;
+                    }
+                    if (feature.kind == MeasurementKind::Edge &&
+                        selectBase(feature, event->modifiers()))
+                        return;
+                    const auto hit = std::abs(view_->Camera()->Direction().Z()) < .15
+                                         ? std::nullopt
+                                         : flatBendAt(flat_->info(), dimensionLayout(),
+                                                      lastPosition_, 8 * devicePixelRatioF());
+                    const int source = hit && *hit < document_->metadata().bendAnalysis.bends.size()
+                                           ? static_cast<int>(*hit)
+                                           : -1;
+                    if (source < 0 && feature.kind != MeasurementKind::None) {
+                        if (!selectBase(feature, event->modifiers()))
+                            selectMeasurement(feature);
+                        return;
+                    }
+                    if (source >= 0)
+                        highlightBend(document_->metadata().bendAnalysis.bends[source], revision_);
+                    else
+                        highlightFaces({}, revision_);
+                    if (onBendSelection)
+                        onBendSelection(revision_, source);
+                } else if (!preview_) {
                     context_->SelectDetected(AIS_SelectionScheme_Replace);
                     context_->InitSelected();
                     int face = 0;
-                    if (context_->MoreSelected() && context_->HasSelectedShape())
-                        face = faces_.FindIndex(context_->SelectedShape());
+                    if (context_->MoreSelected() && context_->HasSelectedShape()) {
+                        const auto shape = context_->SelectedShape();
+                        if (shape.ShapeType() == TopAbs_FACE)
+                            face = faces_.FindIndex(shape);
+                        if (dimensionsVisible_ && measurements_) {
+                            const auto edge = edges_.FindIndex(shape);
+                            MeasurementSelection selected{
+                                face > 0 ? MeasurementKind::Face : MeasurementKind::Edge,
+                                static_cast<std::size_t>(face > 0 ? face : edge),
+                                {}};
+                            if (edge > 0 && selectBase(selected, event->modifiers()))
+                                return;
+                            for (const auto &opening : measurements_->openings)
+                                if ((edge > 0 &&
+                                     std::find(opening.edges.begin(), opening.edges.end(),
+                                               static_cast<std::size_t>(edge)) !=
+                                         opening.edges.end()) ||
+                                    (face > 0 &&
+                                     std::find(opening.faces.begin(), opening.faces.end(),
+                                               static_cast<std::size_t>(face)) !=
+                                         opening.faces.end())) {
+                                    selected = {MeasurementKind::Opening, opening.id, {}};
+                                    break;
+                                }
+                            if (face > 0 && selected.kind != MeasurementKind::Opening) {
+                                const auto &bends = document_->metadata().bendAnalysis.bends;
+                                for (std::size_t i = 0; i < bends.size(); ++i)
+                                    if (bends[i].innerFace == static_cast<std::size_t>(face) ||
+                                        bends[i].outerFace == static_cast<std::size_t>(face)) {
+                                        highlightBend(bends[i], revision_);
+                                        if (onBendSelection)
+                                            onBendSelection(revision_, static_cast<int>(i));
+                                        return;
+                                    }
+                            }
+                            if (face > 0 || edge > 0) {
+                                selectMeasurement(selected);
+                                return;
+                            }
+                        }
+                    }
+                    if (dimensionsVisible_) {
+                        selectMeasurement({});
+                        return;
+                    }
                     if (onSelection)
                         onSelection(revision_, face);
                     view_->Redraw();
@@ -1124,7 +1240,10 @@ class OcctCanvas final : public QWidget {
     }
 
     void keyPressEvent(QKeyEvent *event) override {
-        if (event->key() == Qt::Key_F) {
+        if (event->key() == Qt::Key_Escape && dimensionsVisible_ && !preview_) {
+            selectMeasurement({});
+            event->accept();
+        } else if (event->key() == Qt::Key_F) {
             fitAll();
             event->accept();
         } else {
@@ -1234,17 +1353,151 @@ class OcctCanvas final : public QWidget {
         }
         updateNavigationCube();
         dimensionsAction_->setEnabled(ready_ && document_ != nullptr);
-        const auto description = dimensions_.labels.join(QStringLiteral("\n"));
+        const auto description =
+            dimensions_.labels.join(QStringLiteral("\n")) +
+            (dimensions_.crowded
+                 ? QStringLiteral("\nРазмеры не помещаются: увеличьте окно или приблизьте деталь.")
+                 : QString{});
         const auto scope =
-            flat_ ? QStringLiteral(
-                        "Теоретическая развёртка: габариты и координаты линий гиба, не X упора.")
-            : preview_ ? QStringLiteral("Размеры текущего положения. П1/П2 — прямые участки "
-                                        "полок от касания зоны, по их габаритам.")
-                       : QStringLiteral("Габариты CAD по X/Y/Z. Для выбранного гиба — "
+            flat_ ? QStringLiteral("Развёртка: выберите линию гиба или гиб в списке. Размер — "
+                                   "от внешней кромки до оси гиба, не X упора.")
+            : preview_ ? QStringLiteral("Размеры текущего положения. "
+                                        "Наружные полки — до пересечения стенок.")
+                       : QStringLiteral("Габариты CAD по X/Y/Z и подтверждённые наружные размеры "
+                                        "полок. Для выбранного гиба — "
                                         "измерения исходной модели.");
         dimensionsButton_->setToolTip(
-            QStringLiteral("Показать / скрыть размеры · Ctrl+D\n%1\n%2").arg(scope, description));
+            QStringLiteral("Показать / скрыть размеры · Ctrl+D\nКлик — измерение; Esc — снять "
+                           "выбор. Для отверстия Shift+клик по кромке — выбрать базу.\n%1\n%2")
+                .arg(scope, description));
         dimensionsButton_->setAccessibleDescription(scope + QLatin1Char('\n') + description);
+        if (dimensionsNotice_) {
+            dimensionsNotice_->setFixedWidth(std::min(300, std::max(160, width() - 24)));
+            dimensionsNotice_->adjustSize();
+            dimensionsNotice_->move(12, topLeftOverlay_ && topLeftOverlay_->isVisible()
+                                            ? topLeftOverlay_->geometry().bottom() + 8
+                                            : 12);
+            dimensionsNotice_->setVisible(dimensionsVisible_ && document_ && dimensions_.crowded);
+            dimensionsNotice_->raise();
+        }
+    }
+    void selectMeasurement(MeasurementSelection selection) {
+        highlightFaces(selection.kind == MeasurementKind::Face && !flat_
+                           ? std::vector<std::size_t>{selection.id}
+                           : std::vector<std::size_t>{},
+                       revision_);
+        measureSelection_ = std::move(selection);
+        guarded([&] { context_->ClearSelected(false); });
+        refreshDimensions();
+        if (onBendSelection)
+            onBendSelection(revision_, -1);
+    }
+    bool selectBase(MeasurementSelection selection, Qt::KeyboardModifiers modifiers) {
+        if (!modifiers.testFlag(Qt::ShiftModifier) ||
+            measureSelection_.kind != MeasurementKind::Opening ||
+            selection.kind != MeasurementKind::Edge)
+            return false;
+        const auto *measures = flat_ ? flat_->info().measurements.get() : measurements_.get();
+        if (!measures)
+            return false;
+        const auto edge = std::find_if(measures->edges.begin(), measures->edges.end(),
+                                       [&](const auto &e) { return e.id == selection.id; });
+        const auto opening =
+            std::find_if(measures->openings.begin(), measures->openings.end(),
+                         [&](const auto &o) { return o.id == measureSelection_.id; });
+        if (edge == measures->edges.end() || opening == measures->openings.end() ||
+            !edge->straight || edge->bendBoundary ||
+            (std::find(measures->datumEdges.begin(), measures->datumEdges.end(), edge->id) ==
+                 measures->datumEdges.end() &&
+             std::none_of(measures->faces.begin(), measures->faces.end(), [&](const auto &face) {
+                 return std::find(opening->hostFaces.begin(), opening->hostFaces.end(), face.id) !=
+                            opening->hostFaces.end() &&
+                        std::find(face.outerEdges.begin(), face.outerEdges.end(), edge->id) !=
+                            face.outerEdges.end();
+             })))
+            return true;
+        const gp_Pnt a(edge->first.x, edge->first.y, edge->first.z),
+            b(edge->second.x, edge->second.y, edge->second.z);
+        gp_Pnt center(opening->center.x, opening->center.y, opening->center.z);
+        const gp_Vec normal(opening->normal.x, opening->normal.y, opening->normal.z), ab(a, b);
+        if (normal.SquareMagnitude() <= 1.e-12 || ab.SquareMagnitude() <= 1.e-12)
+            return true;
+        center.Translate(normal * (gp_Vec(center, a).Dot(normal) / normal.SquareMagnitude()));
+        const double foot = gp_Vec(a, center).Dot(ab) / ab.SquareMagnitude();
+        if (foot < -1.e-8 || foot > 1. + 1.e-8)
+            return true;
+        auto &bases = measureSelection_.bases;
+        if (std::find(bases.begin(), bases.end(), edge->id) == bases.end()) {
+            if (bases.size() == 2)
+                bases.clear();
+            bases.push_back(edge->id);
+        }
+        refreshDimensions();
+        return true;
+    }
+    std::optional<std::size_t> selectedFlatBend() const {
+        if (!flat_ || !document_ || !highlights_.measuredBend)
+            return std::nullopt;
+        const auto &bends = document_->metadata().bendAnalysis.bends;
+        const auto &selected = *highlights_.measuredBend;
+        for (std::size_t i = 0; i < bends.size(); ++i)
+            if (bends[i].innerFace == selected.innerFace &&
+                bends[i].outerFace == selected.outerFace)
+                return i;
+        return std::nullopt;
+    }
+    void refreshFlatSelection() {
+        if (!ready_ || !flat_ || presentation_.IsNull())
+            return;
+        const auto selected = selectedFlatBend();
+        const auto &lines = cad::OcctFlatPatternAccess::bendLines(*flat_);
+        const auto &bends = flat_->info().bends;
+        for (std::size_t i = 0; i < std::min(lines.size(), bends.size()); ++i) {
+            const bool active = selected && bends[i].bendIndex == *selected;
+            presentation_->SetCustomColor(lines[i],
+                                          active ? Quantity_Color(1., .85, .4, Quantity_TOC_RGB)
+                                                 : Quantity_Color(1., .45, .08, Quantity_TOC_RGB));
+            presentation_->SetCustomWidth(lines[i], active ? 4. : 2.5);
+        }
+        context_->Redisplay(presentation_, false);
+        if (!dimensionsVisible_)
+            view_->Redraw();
+    }
+    DimensionLayout dimensionLayout() const {
+        const auto separation = view_->Convert(qRound(50.0 * devicePixelRatioF()));
+        double dx, dy, dz, ux, uy, uz;
+        view_->Proj(dx, dy, dz);
+        view_->Up(ux, uy, uz);
+        const auto up = gp_Vec(ux, uy, uz).Normalized() * separation;
+        const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
+        DimensionLayout layout{right, up, {}, {}, {}};
+        layout.project = [this](const gp_Pnt &point) {
+            int x, y;
+            view_->Convert(point.X(), point.Y(), point.Z(), x, y);
+            return QPointF(x, y);
+        };
+        const auto size = physicalSize();
+        const auto ratio = devicePixelRatioF();
+        layout.viewport =
+            QRectF(8 * ratio, 8 * ratio, size.width() - 16 * ratio, size.height() - 16 * ratio);
+        layout.excluded.emplace_back(size.width() - 210 * ratio, 0, 210 * ratio, 220 * ratio);
+        for (const auto *overlay :
+             std::array<QWidget *, 3>{bottomOverlay_.data(), topLeftOverlay_.data(), sideLegend_})
+            if (overlay && overlay->isVisible())
+                layout.excluded.emplace_back(overlay->x() * ratio, overlay->y() * ratio,
+                                             overlay->width() * ratio, overlay->height() * ratio);
+
+        layout.unproject = [this](QPointF pixel, const gp_Pnt &anchor) {
+            double x, y, z, rayX, rayY, rayZ;
+            view_->ConvertWithProj(qRound(pixel.x()), qRound(pixel.y()), x, y, z, rayX, rayY, rayZ);
+            const gp_Pnt origin(x, y, z);
+            const gp_Vec ray(rayX, rayY, rayZ), normal(view_->Camera()->Direction());
+            const auto denominator = ray.Dot(normal);
+            return std::abs(denominator) > 1.e-12
+                       ? origin.Translated(ray * (gp_Vec(origin, anchor).Dot(normal) / denominator))
+                       : anchor;
+        };
+        return layout;
     }
     void refreshDimensions() {
         if (!dimensionsVisible_ && dimensions_.objects.empty()) {
@@ -1254,21 +1507,19 @@ class OcctCanvas final : public QWidget {
         guarded([&] {
             removeDimensions();
             if (dimensionsVisible_ && document_) {
-                const auto separation = view_->Convert(qRound(50.0 * devicePixelRatioF()));
-                double dx, dy, dz, ux, uy, uz;
-                view_->Proj(dx, dy, dz);
-                view_->Up(ux, uy, uz);
-                const auto up = gp_Vec(ux, uy, uz).Normalized() * separation;
-                const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
-                const DimensionLayout layout{right, up};
+                const auto layout = dimensionLayout();
                 dimensions_ =
-                    flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout)
+                    flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout,
+                                                  selectedFlatBend(),
+                                                  -view_->Camera()->Direction().Z(),
+                                                  measureSelection_)
                     : preview_
                         ? previewDimensions(cad::OcctPreviewAccess::frame(*preview_, previewFrame_),
-                                            preview_->model(), 14.0 * devicePixelRatioF(), layout)
+                                            preview_->model(), 14.0 * devicePixelRatioF(), layout,
+                                            animationRunning_)
                         : documentDimensions(document_->metadata(), faces_,
                                              highlights_.measuredBend, 14.0 * devicePixelRatioF(),
-                                             layout);
+                                             layout, measurements_.get(), measureSelection_);
                 for (const auto &object : dimensions_.objects) {
                     context_->Display(object, 0, -1, false);
                 }
@@ -1545,11 +1796,22 @@ class OcctCanvas final : public QWidget {
     DisplayStyle displayStyle_ = DisplayStyle::Edges;
     Handle(AIS_ViewCube) navigationCube_;
     double cubeRatio_ = 0;
+    bool animationRunning_ = false;
+    QLabel *dimensionsNotice_ = nullptr;
     DimensionAnnotations dimensions_;
+    std::shared_ptr<const application::ModelMeasurements> measurements_;
+    MeasurementSelection measureSelection_;
+    TopTools_IndexedMapOfShape edges_;
     application::DocumentPtr document_;
     application::BendPreviewPtr preview_;
 
   public:
+    void setAnimationRunning(bool running) {
+        if (animationRunning_ == running)
+            return;
+        animationRunning_ = running;
+        refreshDimensions();
+    }
     void highlightPreviewBend(std::optional<std::size_t> i) {
         if (hoverPreviewBend_ == i)
             return;
@@ -1705,6 +1967,9 @@ ViewerWidget::ViewerWidget(QWidget *parent) : QWidget(parent), impl_(std::make_u
     };
     impl_->canvas->onSelection = [this](quint64 revision, int face) {
         emit selectionChanged(revision, face);
+    };
+    impl_->canvas->onBendSelection = [this](quint64 revision, int index) {
+        emit bendSelectionChanged(revision, index);
     };
     impl_->canvas->onSurfaceChanged = [this] { queueOverlayLayout(); };
     impl_->canvas->onError = [this, reportError](const QString &message) {
@@ -1927,6 +2192,10 @@ QString ViewerWidget::presentBendPreview(application::BendPreviewPtr preview,
     } catch (const std::exception &error) {
         return QString::fromUtf8(error.what());
     }
+}
+void ViewerWidget::setAnimationRunning(bool running) {
+    if (impl_->canvas)
+        impl_->canvas->setAnimationRunning(running);
 }
 void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i) {
     if (impl_->canvas)

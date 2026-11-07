@@ -2,7 +2,7 @@
 #include "BendMessagePanel.h"
 #include "DrawingDialog.h"
 #include "PartInputDialog.h"
-#include "ProcessStepButton.h"
+#include "ProcessNavigationBar.h"
 #include "ToolSearchDialog.h"
 #include "ToolSelectionWidget.h"
 #include "ToolWorkspace.h"
@@ -18,7 +18,6 @@
 #include "ToolSegmentColorPreferences.h"
 #include <QAction>
 #include <QApplication>
-#include <QButtonGroup>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -57,7 +56,6 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
-#include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -469,7 +467,7 @@ class MainWindow::Impl {
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
         if (drawingAction)
             drawingAction->setEnabled(drawingDialog ||
-                                      (document && drawingBuilder && !controller->hasWork()));
+                                      (drawingBuilder && controller->canPrepareDrawing()));
         const bool cancellable =
             session.activeRequest().has_value() || controller->isPreparingPreview() ||
             controller->isPreparingDrawing() || controller->isPreparingFlatPattern() ||
@@ -533,6 +531,7 @@ class MainWindow::Impl {
         diagnostics->setVisible(!detail.isEmpty());
         refreshPreview();
         refreshFlat();
+        scheduleFlatPrefetch();
         if (pendingBendStage && !controller->hasWork()) {
             const auto revision = *pendingBendStage;
             pendingBendStage.reset();
@@ -630,6 +629,7 @@ class MainWindow::Impl {
         request.allowWorkpieceRotation = automatic;
         request.allowAxialPlacement = automatic && withTools;
         request.withTools = withTools;
+        request.manualExtraction = withTools && routePanel->manualExtraction();
         request.toolVariants = std::move(variants);
         const bool checkedTooling = !request.toolVariants.empty();
         request.allowPartialEndSupport = withTools;
@@ -1033,8 +1033,34 @@ class MainWindow::Impl {
                 editPartInputs();
         });
     }
+    void scheduleFlatPrefetch() {
+        const auto &s = controller->session();
+        if (!flatBuilder || !viewer->isReady() || !s.hasPartInputs() || controller->hasWork() ||
+            propertyTabs->currentIndex() != 0)
+            return;
+        const auto inputs =
+            std::pair{s.revision(), FlatPatternRequest{s.unfoldSettings(), s.manualThicknessMm()}};
+        if (scheduledFlatPrefetch == inputs)
+            return;
+        scheduledFlatPrefetch = inputs;
+        // The native source presentation redraws synchronously before publication. Give
+        // the event loop a short window for the first input before starting optional CAD.
+        QTimer::singleShot(350, window, [this, inputs] {
+            if (scheduledFlatPrefetch != inputs)
+                return;
+            const auto &current = controller->session();
+            if (current.revision() != inputs.first || !viewer->isReady() ||
+                propertyTabs->currentIndex() != 0 || controller->hasWork() ||
+                FlatPatternRequest{current.unfoldSettings(), current.manualThicknessMm()} !=
+                    inputs.second) {
+                scheduledFlatPrefetch.reset();
+                return;
+            }
+            controller->prefetchFlatPattern(flatBuilder);
+        });
+    }
     void showFlat() {
-        if (controller->hasWork() || !flatBuilder || !controller->session().document())
+        if (!flatBuilder || !controller->canPrepareFlatPattern())
             return;
         if (!controller->session().hasPartInputs()) {
             editPartInputs();
@@ -1056,7 +1082,8 @@ class MainWindow::Impl {
         const bool editable = s.document() && !controller->hasWork();
         partInputs->setText(partInputsSummary(s));
         editInputs->setEnabled(editable);
-        flatAction->setEnabled(editable && flatBuilder);
+        flatAction->setEnabled(flatBuilder && controller->canPrepareFlatPattern() &&
+                               !controller->isPreparingFlatPattern());
         flatAction->setText(controller->isPreparingFlatPattern()
                                 ? QStringLiteral("Готовим развёртку…")
                             : controller->flatPattern() ? QStringLiteral("Показать развёртку")
@@ -1068,6 +1095,8 @@ class MainWindow::Impl {
                 button->setEnabled(flatAction->isEnabled());
             }
         const auto flat = controller->flatPattern();
+        if (!flat && !controller->isPreparingFlatPattern())
+            wantFlat = false;
         if (displayedFlat && displayedFlat != flat) {
             (void)viewer->endBendPreview();
             displayedFlat.reset();
@@ -1163,23 +1192,28 @@ class MainWindow::Impl {
         partPrimary->setText(document ? QStringLiteral("К инструменту →")
                                       : QStringLiteral("Открыть деталь…"));
         const auto bendCount = document ? document->metadata().bendAnalysis.bends.size() : 0;
-        processSteps[0]->setStatus(document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
-                                            : QStringLiteral("Открыть STEP"));
+        processNavigation->setStageStatus(
+            0, document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
+                        : QStringLiteral("Открыть STEP"));
         if (document && bendCount > 1 && !toolContextId.empty()) {
             std::size_t assigned = 0;
             for (const auto index : session.orderedBends())
                 assigned += session.bend(index)->tools.has_value() ? 1 : 0;
-            processSteps[1]->setStatus(
-                QStringLiteral("По гибам: %1 из %2").arg(assigned).arg(bendCount));
+            processNavigation->setStageStatus(
+                1, QStringLiteral("По гибам: %1 из %2").arg(assigned).arg(bendCount));
         } else
-            processSteps[1]->setStatus(chosen && document ? toolSelection->shortSummary()
-                                                          : QStringLiteral("Выбрать пару"));
+            processNavigation->setStageStatus(1, chosen && document
+                                                     ? toolSelection->shortSummary()
+                                                     : QStringLiteral("Выбрать пару"));
         const auto bendingStatus =
             controller->isPreparingDraft() ? QStringLiteral("Проверяем столкновения…")
             : viewingDraft && controller->routeDraft() ? QStringLiteral("Ручной порядок")
             : controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
             : controller->bendRoute() && controller->bendRoute()->partialEndSupport
                 ? QStringLiteral("Торцевые подрезы")
+            : controller->bendRoute() && controller->bendRoute()->manualExtraction
+                ? QStringLiteral("Извлечение вручную · %1 шагов")
+                      .arg(controller->bendRoute()->steps.size())
             : scenePreview() && scenePreview()->hasPartialEndSupport()
                 ? QStringLiteral("Торцевые подрезы")
             : controller->bendRoute()
@@ -1199,9 +1233,9 @@ class MainWindow::Impl {
         std::size_t activeBends = 0;
         for (auto i : session.orderedBends())
             activeBends += included(session.bend(i)->review);
-        processSteps[2]->setStatus(
-            document ? QStringLiteral("Гибов: %1 · %2").arg(activeBends).arg(bendingStatus)
-                     : bendingStatus);
+        processNavigation->setStageStatus(
+            2, document ? QStringLiteral("Гибов: %1 · %2").arg(activeBends).arg(bendingStatus)
+                        : bendingStatus);
         const bool checking = propertyTabs->currentIndex() == 2 && !viewingSource;
         const bool transport =
             checking && (preview || previewReplacement || controller->isPreparingPreview() ||
@@ -1218,6 +1252,7 @@ class MainWindow::Impl {
     }
     void refreshPlaybackAction() {
         const bool playing = playback->isActive();
+        viewer->setAnimationRunning(playing);
         const auto action = playing ? QStringLiteral("Пауза") : QStringLiteral("Воспроизвести");
         const auto &icon = playbackIcons[playing ? 1 : 0];
         if (playBend->icon().cacheKey() != icon.cacheKey())
@@ -1493,12 +1528,14 @@ class MainWindow::Impl {
                         result += QStringLiteral(" Допуск %1 мм на каждый.").arg(*limit, 0, 'f', 2);
                 }
         } else if (preview && preview->pressMotion())
-            result = (viewingRoute ? QStringLiteral("Порядок проверен в модели.")
-                                   : QStringLiteral("Геометрическая проверка пройдена.")) +
-                     (preview->machineModel() == core::MachineModel::None
-                          ? QStringLiteral("\nГибка — по кадрам, отвод пуансона — непрерывно.\n"
-                                           "Станок, держатели и перенос не проверены.")
-                          : QString{});
+            result =
+                (preview->manualExtraction() ? QStringLiteral("Гибка проверена в модели.")
+                 : viewingRoute ? QStringLiteral("Порядок проверен в модели.")
+                                : QStringLiteral("Геометрическая проверка пройдена.")) +
+                (!preview->manualExtraction() && preview->machineModel() == core::MachineModel::None
+                     ? QStringLiteral("\nГибка — по кадрам, отвод пуансона — непрерывно.\n"
+                                      "Станок, держатели и перенос не проверены.")
+                     : QString{});
         else if (preview && preview->toolSetup())
             result = QStringLiteral("Начальная установка проверена.\n"
                                     "Одно положение; движение не проверено.");
@@ -1512,6 +1549,9 @@ class MainWindow::Impl {
                          ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
                          : QStringLiteral("Деталь и инструмент выбраны. Можно проверить.");
         if (preview && !preparing) {
+            if (preview->manualExtraction())
+                result += QStringLiteral("\nИзвлечение вручную: подъём пуансона и путь детали "
+                                         "не проверены.");
             if (preview->floorChecked())
                 result += QStringLiteral(
                     "\nДемонстрационный станок и пол · стол 900 мм. Проверка по кадрам; "
@@ -1907,6 +1947,11 @@ class MainWindow::Impl {
             setFrameText(QStringLiteral("Обнаружено столкновение · диагностическое положение"));
             return;
         }
+        if (preview->manualExtraction() && index + 1 == preview->frameCount()) {
+            setFrameText(approximation + segmented +
+                         QStringLiteral("Гибка завершена · извлечение вручную не проверено"));
+            return;
+        }
         if (const auto *state = preview->pressState(index)) {
             setFrameText(
                 approximation + segmented +
@@ -2127,7 +2172,8 @@ class MainWindow::Impl {
                 checkedToolVariants.clear();
                 toolSelection->rememberChoice();
                 status =
-                    route->partialEndSupport
+                    route->manualExtraction ? QStringLiteral("Гибка проверена · извлечение вручную")
+                    : route->partialEndSupport
                         ? QStringLiteral("Маршрут найден · торцевые подрезы")
                         : QStringLiteral("Проверенный порядок · %1 гибов").arg(route->steps.size());
             } else {
@@ -3020,6 +3066,7 @@ class MainWindow::Impl {
     std::shared_ptr<const SingleBendPreviewBuilder> previewBuilder;
     std::shared_ptr<const BendingDrawingBuilder> drawingBuilder;
     std::shared_ptr<const application::FlatPatternBuilder> flatBuilder;
+    std::optional<std::pair<std::uint64_t, FlatPatternRequest>> scheduledFlatPrefetch;
     application::FlatPatternPtr displayedFlat;
     bool wantFlat = false;
     QLabel *partInputs = nullptr;
@@ -3053,7 +3100,7 @@ class MainWindow::Impl {
     QWidget *kinematicsPanel = nullptr;
     ToolSelectionWidget *toolSelection = nullptr;
     QPushButton *checkBend = nullptr;
-    std::array<ProcessStepButton *, 3> processSteps{};
+    ProcessNavigationBar *processNavigation = nullptr;
     QPushButton *partPrimary = nullptr;
     QCheckBox *sheetSides = nullptr;
     QPushButton *changePartTools = nullptr;
@@ -3248,7 +3295,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             return;
         }
         const auto &session = impl_->controller->session();
-        if (!impl_->drawingBuilder || !session.document() || impl_->controller->hasWork())
+        if (!impl_->drawingBuilder || !impl_->controller->canPrepareDrawing())
             return;
         impl_->stopPlayback();
         auto *dialog = new DrawingDialog(
@@ -4249,64 +4296,24 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->routePanel->onPrepare = [this](bool automatic, bool withTools) {
         impl_->prepareRoute(automatic, withTools);
     };
-    auto *processBar = new QToolBar(QStringLiteral("Этапы работы"), this);
-    processBar->setObjectName(QStringLiteral("processNavigation"));
-    processBar->setMovable(false);
-    processBar->setFloatable(false);
-    processBar->setAllowedAreas(Qt::BottomToolBarArea);
-    processBar->setContextMenuPolicy(Qt::PreventContextMenu);
-    addToolBar(Qt::BottomToolBarArea, processBar);
-    auto *processPanel = new QWidget(processBar);
-    auto *processLayout = new QHBoxLayout(processPanel);
-    processLayout->setContentsMargins(16, 8, 16, 8);
-    processLayout->setSpacing(8);
-    processPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    processPanel->setStyleSheet(QStringLiteral(
-        "QToolButton{background:#FFFFFF;color:#526171;border:1px solid "
-        "#DCE3E9;border-radius:4px;padding:8px 16px;font-size:14px;}"
-        "QToolButton:checked{background:#E5F3F3;color:#087F83;border:2px solid #087F83;}"
-        "QToolButton:hover{background:#F0F3F6;}QToolButton:focus{border:2px solid #087F83;}"));
-    auto *processGroup = new QButtonGroup(processPanel);
-    processGroup->setExclusive(true);
-    const std::array<QString, 3> stageNames{QStringLiteral("Деталь"), QStringLiteral("Инструмент"),
-                                            QStringLiteral("Гибка")};
-    const std::array<int, 3> stageTabs{0, 3, 2};
-    for (int i = 0; i < 3; ++i) {
-        auto *button =
-            new ProcessStepButton(i, stageNames[static_cast<std::size_t>(i)], processPanel);
-        impl_->processSteps[static_cast<std::size_t>(i)] = button;
-        button->setObjectName(QStringLiteral("processStage%1").arg(i));
-        button->setShortcut(QKeySequence(QStringLiteral("Alt+%1").arg(i + 1)));
-        button->setToolTip(stageNames[static_cast<std::size_t>(i)] +
-                           QStringLiteral(" · Alt+%1").arg(i + 1));
-        processGroup->addButton(button, i);
-        processLayout->addWidget(button, 1);
-        connect(button, &QToolButton::clicked, this, [this, stageTabs, i] {
-            if (i == 0)
-                impl_->showSource();
-            else if (i == 2) {
-                impl_->enterBendingStage();
-                return;
-            }
-            impl_->propertyTabs->setCurrentIndex(stageTabs[static_cast<std::size_t>(i)]);
-            impl_->propertyTabs->parentWidget()->show();
-            impl_->refreshPreview();
-        });
-    }
-    processGroup->button(0)->setChecked(true);
-    auto *drawingButton = new ProcessStepButton(3, QStringLiteral("Чертёж / PDF"), processPanel);
-    drawingButton->setObjectName("drawingStageButton");
-    drawingButton->setStatus(QStringLiteral("Виды и развёртка"));
-    drawingButton->setEnabled(impl_->drawingAction->isEnabled());
-    processLayout->addWidget(drawingButton, 1);
-    connect(drawingButton, &QToolButton::clicked, impl_->drawingAction, &QAction::trigger);
-    connect(impl_->drawingAction, &QAction::changed, drawingButton,
-            [drawingButton, action = impl_->drawingAction] {
-                drawingButton->setEnabled(action->isEnabled());
+    impl_->processNavigation = new ProcessNavigationBar(*impl_->drawingAction, this);
+    addToolBar(Qt::BottomToolBarArea, impl_->processNavigation);
+    connect(impl_->processNavigation, &ProcessNavigationBar::stageRequested, this,
+            [this](int stage) {
+                if (stage == 0)
+                    impl_->showSource();
+                else if (stage == 2) {
+                    impl_->enterBendingStage();
+                    return;
+                }
+                constexpr std::array<int, 3> pages{0, 3, 2};
+                impl_->propertyTabs->setCurrentIndex(pages[static_cast<std::size_t>(stage)]);
+                impl_->propertyTabs->parentWidget()->show();
+                impl_->refreshPreview();
             });
-    connect(impl_->propertyTabs, &QTabWidget::currentChanged, this, [this, processGroup](int page) {
+    connect(impl_->propertyTabs, &QTabWidget::currentChanged, this, [this](int page) {
         const int stage = page == 3 ? 1 : page == 2 ? 2 : 0;
-        processGroup->button(stage)->setChecked(true);
+        impl_->processNavigation->setCurrentStage(stage);
         if (page != 2) {
             impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
@@ -4323,7 +4330,6 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->suggestInitialTools();
         }
     });
-    processBar->addWidget(processPanel);
 
     impl_->progress = new QProgressBar(this);
     impl_->progress->setObjectName(QStringLiteral("importProgress"));
@@ -4338,6 +4344,23 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     });
     connect(impl_->viewer, &viewer::ViewerWidget::renderingChanged, this,
             [this](bool) { impl_->refresh(); });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendSelectionChanged, this,
+            [this](quint64 revision, int index) {
+                const auto &session = impl_->controller->session();
+                if (revision != session.revision() || !session.document() ||
+                    impl_->controller->hasWork())
+                    return;
+                if (index < -1 ||
+                    (index >= 0 && static_cast<std::size_t>(index) >=
+                                       session.document()->metadata().bendAnalysis.bends.size()))
+                    return;
+                const auto item = index >= 0 ? impl_->bendModel->index(index, 0) : QModelIndex{};
+                // Canvas has already applied the source selection. Reflect it without
+                // starting another scene update or invoking the route/tool workflow.
+                const QSignalBlocker block(impl_->bendList->selectionModel());
+                impl_->bendList->setCurrentIndex(item);
+                impl_->showSelectedBend(false);
+            });
     connect(impl_->viewer, &viewer::ViewerWidget::selectionChanged, this,
             [this](quint64 revision, int index) {
                 const auto &session = impl_->controller->session();

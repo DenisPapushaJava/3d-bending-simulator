@@ -2,16 +2,30 @@
 #include <cstddef>
 #include <optional>
 #include <stop_token>
+#include <string>
 #include <vector>
 
 namespace bending::core {
 enum class SegmentShape { Straight, LeftHorn, RightHorn };
+// A through relief in the longitudinal plane, measured from the working tip.
+struct HornRelief {
+    double projectionMm = 0;
+    double radiusMm = 0;
+    double tipHeightMm = 0;
+    bool operator==(const HornRelief &) const = default;
+};
+[[nodiscard]] bool validHornRelief(const HornRelief &, double sectionLengthMm);
+[[nodiscard]] double hornRootHeight(const HornRelief &);
 struct ToolSegment {
     double lengthMm = 0;
     unsigned quantity = 0;
     SegmentShape shape = SegmentShape::Straight;
+    std::optional<HornRelief> horn = {};
+    std::string variantId = {}; // Configured horn identity within this profile snapshot.
     bool operator==(const ToolSegment &) const = default;
 };
+[[nodiscard]] bool usableToolSegment(const ToolSegment &);
+[[nodiscard]] bool hasHornGeometry(const std::vector<ToolSegment> &);
 struct ToolAssembly {
     std::vector<std::size_t> pieces; // Stock row indices, in installation order.
     double gapMm = 0;                // Uniform spacing when jointGapsMm is empty.
@@ -19,6 +33,8 @@ struct ToolAssembly {
     std::vector<double> jointGapsMm = {};
     bool operator==(const ToolAssembly &) const = default;
 };
+[[nodiscard]] bool usesHornSections(const std::vector<ToolSegment> &,
+                                    const std::optional<ToolAssembly> &);
 struct ToolSectionInterval {
     std::size_t stockRow;
     double fromMm, toMm; // Assembly-local axial coordinates, beginning at zero.
@@ -51,8 +67,31 @@ struct ToolWindow {
                                                    const ToolAssembly &);
 // Exact to 0.001 mm. Prefer gap-free stock: minimize excess length, then pieces.
 // Only when unavailable, try gaps up to maximumGapMm; minimize excess, gap, then pieces.
-// Horns need their own 3D geometry and are deliberately excluded from this first planner.
+// Straight-only reference; die/window planning retains this exact behaviour.
 [[nodiscard]] SegmentPlan planToolSegments(const std::vector<ToolSegment> &, double requiredMm,
                                            std::size_t stateBudget = 200000,
                                            double maximumGapMm = 0, std::stop_token stop = {});
+struct PunchAssemblyPlans {
+    SegmentPlanStatus status = SegmentPlanStatus::InvalidInput;
+    std::vector<SegmentPlan> plans; // Valid numeric assemblies, not collision certificates.
+    std::size_t work = 0;
+    [[nodiscard]] SegmentPlan best() const {
+        return plans.empty() ? SegmentPlan{status, {}, 0} : plans.front();
+    }
+};
+// Exact workshop rows at the two outer ends; an empty side requires no horn.
+// A missing constraint in planPunchAssemblies retains automatic family selection.
+struct PunchAssemblyEnds {
+    std::optional<std::size_t> left, right;
+    bool operator==(const PunchAssemblyEnds &) const = default;
+};
+[[nodiscard]] std::optional<PunchAssemblyEnds> punchAssemblyEnds(const std::vector<ToolSegment> &,
+                                                                 const ToolAssembly &);
+// Straight, left, right and paired ends; one shared middle table and work budget.
+// SearchLimit may retain valid plans. Unknown end geometry is never used.
+[[nodiscard]] PunchAssemblyPlans
+planPunchAssemblies(const std::vector<ToolSegment> &, double requiredMm,
+                    std::size_t workBudget = 200000, double maximumGapMm = 0,
+                    std::stop_token stop = {}, std::size_t maximumPlans = 8,
+                    std::optional<PunchAssemblyEnds> fixedEnds = {});
 } // namespace bending::core

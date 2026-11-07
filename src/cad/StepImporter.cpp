@@ -1,4 +1,5 @@
 #include "bending/cad/StepImporter.h"
+#include "ModelMeasurements.h"
 
 #include "BendRecognizer.h"
 #include "CadDocumentData.h"
@@ -403,10 +404,19 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
             return fail(StepImportErrorCode::UnsupportedComposition,
                         "Expected exactly one solid without extra surfaces or shells");
         }
-        if (!BRepCheck_Analyzer(shape).IsValid()) {
+        const bool hasAuxiliary = composition.hasAuxiliaryGeometry();
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(hasAuxiliary ? composition.solid : shape, TopAbs_FACE, faces);
+        // Use OCCT's joined validation for large parts while the importer still
+        // owns the transferred shape. Keep all geometric checks enabled.
+        constexpr int parallelValidationFaceThreshold = 512;
+        const bool parallelValidation = faces.Extent() > parallelValidationFaceThreshold;
+        if (!BRepCheck_Analyzer(shape, true, parallelValidation).IsValid()) {
             return fail(StepImportErrorCode::InvalidGeometry, "Transferred BRep is not valid");
         }
-        if (composition.hasAuxiliaryGeometry()) {
+        if (stop.stop_requested())
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled after validation");
+        if (hasAuxiliary) {
             diagnostics.push_back(
                 {ImportStage::Transfer, DiagnosticSeverity::Warning, 0,
                  "Выбрано единственное объёмное тело STEP. Вспомогательные элементы вне тела "
@@ -433,8 +443,6 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
             return fail(StepImportErrorCode::InvalidGeometry,
                         "Geometry has invalid bounds, volume or tolerances");
         }
-        TopTools_IndexedMapOfShape faces;
-        TopExp::MapShapes(shape, TopAbs_FACE, faces);
         DocumentMetadata metadata{std::filesystem::absolute(path).lexically_normal(),
                                   {},
                                   std::string(kernelVersion()),
@@ -466,8 +474,12 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
                      "исходная геометрия не исправлялась. Развёртка и движение проверяются "
                      "отдельно."});
         }
+        const auto &sourceBends = data->metadata.bendAnalysis;
+        const bool hasBendCandidates =
+            sourceBends.status == application::BendRecognitionStatus::Completed &&
+            (!sourceBends.bends.empty() || !sourceBends.interiorContourDiagnostics.empty());
         auto filled =
-            fillClosedCutouts(data->shape, data->metadata.bendAnalysis.lengthToleranceMm, stop);
+            fillClosedCutouts(data->shape, sourceBends.lengthToleranceMm, stop, hasBendCandidates);
         data->metadata.closedCutouts = filled.report;
         if (filled.report.status == application::ClosedCutoutStatus::Filled) {
             auto analysis = recognizeBends(filled.shape, tolerance, stop);
@@ -553,6 +565,18 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
                             "A face has no display triangulation");
             }
         }
+        try {
+            data->measurements =
+                prepareModelMeasurements(data->shape, data->metadata, stop, data->faces);
+        } catch (const Standard_Failure &) {
+            data->measurements
+                .reset(); // Optional display data must not turn a valid import into failure.
+        } catch (const std::exception &) {
+            data->measurements.reset();
+        }
+        if (stop.stop_requested())
+            return fail(StepImportErrorCode::Cancelled,
+                        "Import cancelled during measurement preparation");
         return std::unique_ptr<const CadDocument>(new CadDocument(std::move(data)));
     } catch (const Standard_Failure &error) {
         return fail(StepImportErrorCode::KernelFailure,

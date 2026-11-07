@@ -1,5 +1,6 @@
 #include "BendFixtures.h"
 #include "TrayFixtures.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -13,6 +14,7 @@
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -377,6 +379,73 @@ void trayPatterns(const std::filesystem::path &folder) {
     check(document->sourceStep() == bytes, "Tray source modified");
 }
 
+void densePerforation(const std::filesystem::path &folder) {
+    constexpr int rows = 11, columns = 12;
+    constexpr double t = 2, r = 4, length = 130, flange = 120, hole = 4;
+    constexpr double k = .45;
+    const auto source = fixtures::bentStrip(r, t, std::numbers::pi / 2, length, true, flange);
+    TopTools_ListOfShape arguments, tools;
+    arguments.Append(source);
+    for (int row = 0; row < rows; ++row)
+        for (int column = 0; column < columns; ++column) {
+            tools.Append(
+                BRepPrimAPI_MakeBox(gp_Pnt(3, -115 + row * 10, 5 + column * 10), 4, hole, hole)
+                    .Shape());
+            tools.Append(BRepPrimAPI_MakeCylinder(
+                             gp_Ax2(gp_Pnt(-113 + row * 10, 3, 7 + column * 10), gp_Dir(0, 1, 0)),
+                             hole / 2, 4)
+                             .Shape());
+        }
+    BRepAlgoAPI_Cut cut;
+    cut.SetArguments(arguments);
+    cut.SetTools(tools);
+    cut.Build();
+    check(cut.IsDone() && !cut.HasErrors(), "Dense perforation fixture failed");
+    const auto doc = load(cut.Shape(), folder / "dense-perforation.step");
+    const auto &metadata = doc->metadata();
+    check(metadata.faceCount > 512 &&
+              metadata.bendAnalysis.status == application::BendRecognitionStatus::Completed &&
+              metadata.bendAnalysis.bends.size() == 1,
+          "Dense perforation hid the bend");
+    const double removedVolume = rows * columns * hole * hole * (1 + std::numbers::pi / 4) * t;
+    check(metadata.thickness.status == application::ThicknessStatus::Unsupported &&
+              application::suggestThickness(metadata.thickness) == t &&
+              metadata.closedCutouts.status == application::ClosedCutoutStatus::Filled &&
+              std::abs(metadata.closedCutouts.addedVolumeMm3 - removedVolume) < 1e-4,
+          "Local thickness or verified cutout copy was lost");
+    const auto flat = build(doc, {core::SheetMaterial::MildSteel, k, 1});
+    const auto &openings = cad::OcctFlatPatternAccess::openingContours(*flat);
+    check(flat->info().bends.size() == 1 && flat->info().cutoutsIgnored &&
+              openings.size() == 2 * rows * columns,
+          "Dense perforation lost its bend or contours on the blank");
+
+    application::DrawingRequest request;
+    request.unfoldSettings = flat->info().settings;
+    request.preparedFlatPattern = flat;
+    const auto result = cad::BendingDrawingBuilder{}.build(doc, request, {});
+    if (const auto *error = std::get_if<application::DrawingError>(&result))
+        throw std::runtime_error(error->detail);
+    const auto drawing = std::get<application::BendingDrawingPtr>(result);
+    check(drawing->bends.size() == 1 && drawing->classicalViews && drawing->flatPattern,
+          "Dense perforation lost its views, bend or flat pattern on the drawing");
+    const auto &view = drawing->flatPattern->view;
+    const auto matches = [&](bool halfTurn) {
+        return std::equal(openings.rbegin(), openings.rend(), view.paths.rbegin(),
+                          [&](const auto &contour, const auto &path) {
+                              return !path.hidden &&
+                                     std::equal(contour.begin(), contour.end(), path.points.begin(),
+                                                path.points.end(), [&](auto a, auto b) {
+                                                    return halfTurn
+                                                               ? b.x == view.maximum.x - a.x &&
+                                                                     b.y == view.maximum.y - a.y
+                                                               : b.x == a.x && b.y == a.y;
+                                                });
+                          });
+    };
+    check(view.paths.size() > openings.size() && (matches(false) || matches(true)),
+          "Dense perforation lost closed opening contours on the drawing");
+}
+
 int main(int argc, char **argv) {
     try {
         if (argc == 3 && (std::string_view(argv[1]) == "--write-tray" ||
@@ -441,6 +510,7 @@ int main(int argc, char **argv) {
         trayPatterns(folder);
         treePatterns(folder);
         ignoredCutouts(folder);
+        densePerforation(folder);
         auto channel = load(fixtures::channel(), folder / "channel.step");
         auto p = build(channel);
         check(p->info().bends.size() == 2 &&

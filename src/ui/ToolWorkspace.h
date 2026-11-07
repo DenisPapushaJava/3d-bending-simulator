@@ -8,6 +8,8 @@ class QPushButton;
 namespace bending::ui {
 class ToolContourButton;
 class ToolSelectionWidget;
+class ToolAssemblyDiagram;
+class ToolEndButtons;
 // Graphical workspace; choices and inventory remain owned by ToolSelectionWidget.
 class ToolWorkspace final : public QWidget {
   public:
@@ -24,6 +26,9 @@ class ToolWorkspace final : public QWidget {
     QWidget *grooveRow_;
     std::optional<core::ToolPreset> shownDie_;
     QLabel *context_, *punch_, *die_;
-    QPushButton *editPunch_, *editDie_;
+    QPushButton *editPunch_, *editDie_, *fit_;
+    ToolAssemblyDiagram *punchAssembly_, *dieAssembly_;
+    ToolEndButtons *ends_;
+    QLabel *notice_;
 };
 } // namespace bending::ui

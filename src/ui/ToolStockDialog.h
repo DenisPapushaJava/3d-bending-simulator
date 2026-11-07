@@ -1,6 +1,7 @@
 #pragma once
 #include "bending/core/ToolCatalog.h"
 #include <QDialog>
+#include <QPointer>
 #include <functional>
 class QCheckBox;
 class QComboBox;
@@ -9,6 +10,7 @@ class QTableWidget;
 class QSpinBox;
 class QPushButton;
 namespace bending::ui {
+class HornSectionEditor;
 class ToolStockDialog final : public QDialog {
     Q_OBJECT
   public:
@@ -31,6 +33,8 @@ class ToolStockDialog final : public QDialog {
     void updateSet();
     void updateColors();
     void updateHornNotice();
+    void updateHornEditor();
+    std::optional<core::ToolSegment> sectionAt(int);
     void updateEditing();
     void chooseColor(double);
     void resetColor(double);
@@ -47,6 +51,8 @@ class ToolStockDialog final : public QDialog {
     QTableWidget *rows_;
     QLabel *status_;
     QLabel *hornNotice_;
+    HornSectionEditor *hornEditor_;
+    QPointer<QComboBox> editingHorn_;
     bool loading_ = false;
     bool inventoryEdited_ = false;
     bool embedded_ = false;

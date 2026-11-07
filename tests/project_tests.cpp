@@ -1,3 +1,4 @@
+#include "ProjectFormatFixtures.h"
 #include "ToolFixtures.h"
 #include "bending/application/DocumentSession.h"
 #include "bending/project/ProjectFiles.h"
@@ -68,7 +69,22 @@ void testProject() {
     const auto originalBytes = read(source);
     write(source, "source changed after import");
     const auto destination = temporary.path() + QStringLiteral("/Проект.bend");
-    require(!files.save(nativePath(destination), *document, 2.0, {}, {}), "Cannot save project");
+    ProjectDrawingSettings drawing;
+    drawing.name = "Пластина";
+    drawing.designation = "П-01";
+    drawing.material = "Сталь";
+    drawing.execution = "Левое";
+    drawing.quantity = 12;
+    drawing.baseFace = 2;
+    drawing.quarterTurns = 1;
+    drawing.reverseView = true;
+    drawing.allowBreaks = false;
+    drawing.flatSide = DrawingFlatSide::Opposite;
+    drawing.sectionEdits = {{{0, 2}, .376, true}};
+    drawing.views = {{{DrawingViewKind::Section, 0, {{0, 2}}}, false, .5},
+                     {{DrawingViewKind::Isometric, 0}, true, {}}};
+    require(!files.save(nativePath(destination), *document, 2.0, {}, {}, {}, drawing),
+            "Cannot save project");
     require(QFile::remove(source), "Cannot remove original source");
     const auto relocated = temporary.path() + QStringLiteral("/Перенос");
     require(QDir().mkpath(relocated), "Cannot create relocated folder");
@@ -78,12 +94,21 @@ void testProject() {
     const auto *project = std::get_if<OpenedProject>(&reopened);
     require(project && project->manualThicknessMm == 2.0 && project->path == nativePath(moved),
             "Portable project parameters/path lost");
+    require(project->drawing == drawing, "Portable drawing settings changed");
     require(std::abs(project->document->metadata().volumeMm3 - 12000.0) < 1.0e-5,
             "Embedded model changed");
     require(project->document->sourceStep() == originalBytes.toStdString() &&
                 project->document->metadata().sourceLengthUnits == std::vector<std::string>{"INCH"},
             "Save re-read modified source or lost original units");
     const auto originalProject = read(moved);
+    const auto compact = project_fixture::compactRoot(originalProject);
+    require(compact.value("source").toMap().value("data").toByteArray() == originalBytes,
+            "STEP is not stored as the original bytes");
+    auto badDrawing = drawing;
+    badDrawing.sectionEdits.front().fraction = 1;
+    require(files.save(nativePath(moved), *document, {}, {}, {}, {}, badDrawing) &&
+                read(moved) == originalProject,
+            "Invalid drawing settings overwrote the project");
     require(files.save(nativePath(moved), *document, 3.0, {}, {}).has_value() &&
                 read(moved) == originalProject,
             "Rejected save overwrote existing project");
@@ -137,6 +162,20 @@ void testProject() {
         }
     }
     const auto invalid = temporary.path() + QStringLiteral("/invalid.bend");
+    const auto rejectCompact = [&](const QByteArray &bytes) {
+        write(invalid, bytes);
+        const auto result = files.load(nativePath(invalid), {}, {});
+        const auto *error = std::get_if<ImportError>(&result);
+        require(error && error->code == ImportErrorCode::InvalidProject,
+                "Malformed compact project accepted");
+    };
+    rejectCompact(originalProject.chopped(1));
+    rejectCompact(originalProject + "extra");
+    auto invalidDrawing = compact.value("drawing").toMap();
+    invalidDrawing.insert(QStringLiteral("quantity"), -1);
+    auto invalidCompact = compact;
+    invalidCompact.insert(QStringLiteral("drawing"), invalidDrawing);
+    rejectCompact(project_fixture::compactBytes(invalidCompact));
     const auto reject = [&](QJsonObject root, ImportErrorCode expected) {
         write(invalid, QJsonDocument(root).toJson());
         const auto result = files.load(nativePath(invalid), {}, {});
@@ -144,7 +183,7 @@ void testProject() {
         require(error && error->code == expected,
                 "Malformed project was accepted or has wrong diagnostic");
     };
-    auto root = QJsonDocument::fromJson(originalProject).object();
+    auto root = project_fixture::legacyRoot(originalProject);
     auto changed = root;
     changed.insert(QStringLiteral("version"), 99);
     reject(changed, ImportErrorCode::UnsupportedProjectVersion);
@@ -202,8 +241,7 @@ void testBendProject() {
         require(!files.save(path, *session.document(), 2.0, entries, {}),
                 "Cannot save bend decisions");
         const auto bytes = read(destination);
-        auto root = QJsonDocument::fromJson(bytes).object();
-        require(root.value(QStringLiteral("version")).toInt() == 18, "Wrong output version");
+        auto root = project_fixture::legacyRoot(bytes);
         session.complete(session.beginImport(path), files.load(path, {}, {}));
         require(session.bend(0)->id == id && session.bend(0)->target == target &&
                     session.bend(0)->tools == tools &&
@@ -421,7 +459,35 @@ void testCatalogProject() {
     require(!files.save(nativePath(path), *session.document(), {}, session.bends(), {}),
             "Snapshot save failed");
     const auto bytes = read(path);
-    const auto root = QJsonDocument::fromJson(bytes).object();
+    const auto root = project_fixture::legacyRoot(bytes);
+    {
+        // Equal assignments share a table entry, while each bend keeps its own placement.
+        auto bends = session.bends();
+        auto second = bends.front();
+        second.id = "B02";
+        second.workpieceOffsetMm = 12.5;
+        bends.push_back(second);
+        require(!files.save(nativePath(path), *session.document(), {}, bends, {}),
+                "Cannot save repeated tools");
+        auto compact = project_fixture::compactRoot(read(path));
+        require(compact.value("toolAssignments").toArray().size() == 1,
+                "Equal tool assignments were stored more than once");
+        const auto loaded = files.load(nativePath(path), {}, {});
+        const auto &entries = std::get<OpenedProject>(loaded).bends;
+        require(entries.size() == 2 && entries[0].id == bends[0].id && entries[1].id == second.id &&
+                    entries[1].workpieceOffsetMm == 12.5 && entries[0].catalogTools == assignment &&
+                    entries[1].catalogTools == assignment,
+                "Referenced tools or bend placement changed");
+        auto rows = compact.value("bends").toArray();
+        auto bad = rows[0].toMap();
+        bad.insert(QStringLiteral("catalogTools"), 1);
+        rows[0] = bad;
+        compact.insert(QStringLiteral("bends"), rows);
+        write(path, project_fixture::compactBytes(compact));
+        require(std::holds_alternative<ImportError>(files.load(nativePath(path), {}, {})),
+                "Out of range tool reference accepted");
+        write(path, bytes);
+    }
     {
         auto legacyRoot = withoutWorkpieceOrientation(root);
         legacyRoot.insert(QStringLiteral("version"), 4);
@@ -532,6 +598,39 @@ void testCatalogProject() {
             "Unbounded catalogue accepted");
 }
 
+void testHornSnapshots() {
+    using namespace bending;
+    QTemporaryDir folder;
+    const auto destination = folder.filePath("horn.bend");
+    project::ProjectFiles files;
+    DocumentSession session;
+    session.complete(
+        session.beginImport("source.step"),
+        files.load(nativePath(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/trimmed-bend-2mm.step"),
+                   {}, {}));
+    auto a = tool_fixture::pair();
+    a.punch.segments = std::vector<core::ToolSegment>{
+        {100, 1, core::SegmentShape::LeftHorn, core::HornRelief{27, 27, 9}, "left"},
+        {200, 1},
+        {100, 1, core::SegmentShape::RightHorn, core::HornRelief{27, 27, 9}, "right"}};
+    a.punchAssembly = core::ToolAssembly{{0, 1, 2}, 0, {}};
+    require(session.setBendToolAssignment(0, a) &&
+                !files.save(nativePath(destination), *session.document(), {}, session.bends(), {}),
+            "Cannot save horn snapshot");
+    auto loaded = files.load(nativePath(destination), {}, {});
+    require(std::holds_alternative<OpenedProject>(loaded) &&
+                std::get<OpenedProject>(loaded).bends.front().catalogTools == a,
+            "Horn geometry/IDs/order lost from portable project snapshot");
+    auto root = project_fixture::legacyRoot(read(destination), 19);
+    write(destination, QJsonDocument(root).toJson());
+    require(std::holds_alternative<OpenedProject>(files.load(nativePath(destination), {}, {})),
+            "Legacy horn snapshot was rejected");
+    root.insert("version", 18);
+    write(destination, QJsonDocument(root).toJson());
+    require(std::holds_alternative<ImportError>(files.load(nativePath(destination), {}, {})),
+            "Horn geometry silently read as old straight snapshot");
+}
+
 void testLocalAssemblies() {
     using namespace bending;
     QTemporaryDir folder;
@@ -555,7 +654,7 @@ void testLocalAssemblies() {
     require(std::holds_alternative<OpenedProject>(loaded) &&
                 std::get<OpenedProject>(loaded).bends.front().catalogTools == a,
             "Per-joint gaps/stock/order lost in project");
-    const auto root = QJsonDocument::fromJson(read(destination)).object();
+    const auto root = project_fixture::legacyRoot(read(destination));
     for (int test = 0; test < 8; ++test) {
         auto bad = root;
         auto bends = bad.value("bends").toArray();
@@ -625,7 +724,7 @@ void testMachineProfile() {
                     b.workpieceOffsetMm == (modern ? 12.5 : -7.25) &&
                     (!catalog || b.catalogTools == assignment),
                 "Lost saved machine profile");
-        const auto root = QJsonDocument::fromJson(read(destination)).object();
+        const auto root = project_fixture::legacyRoot(read(destination));
         for (const auto &badValue :
              {QJsonValue("12.5"), QJsonValue(QJsonValue::Null), QJsonValue(1000001.)}) {
             auto bad = root;
@@ -724,6 +823,7 @@ int main(int argc, char **argv) {
         testPrivatePreparation();
         testMachineProfile();
         testLocalAssemblies();
+        testHornSnapshots();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

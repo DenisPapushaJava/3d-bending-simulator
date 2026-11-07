@@ -92,6 +92,69 @@ int main(int argc, char **argv) {
                 require(!frame.displayShape.IsNull(), "Route lost visible cutouts");
             }
         }
+        if (toolMode && !sample) {
+            auto forming = request;
+            forming.manualExtraction = true;
+            forming.automatic = forming.allowWorkpieceRotation = false;
+            forming.operations.clear();
+            for (const auto &step : route->steps) {
+                auto op = request.operations[step.bendIndex];
+                op.workpieceReversed = step.fixedSecond;
+                forming.operations.push_back(std::move(op));
+            }
+            cad::SingleBendPreviewBuilder builder;
+            const auto checked = builder.buildRoute(document, forming, {});
+            if (const auto *e = std::get_if<application::BendRouteError>(&checked))
+                throw std::runtime_error("Manual extraction: " + e->detail);
+            const auto manual = std::get<application::BendRoutePtr>(checked);
+            require(manual->manualExtraction && manual->steps.size() == route->steps.size(),
+                    "Manual scope or complete coverage lost");
+            for (std::size_t n = 0; n < manual->steps.size(); ++n) {
+                const auto &p = manual->steps[n].preview;
+                const auto &strict = route->steps[n].preview;
+                require(p->manualExtraction() && !p->unverifiedDraft() && !p->punchRetraction() &&
+                            p->frameCount() == 41 && !p->collision() &&
+                            p->pressState(40)->phase == simulation::PressPhase::Bending &&
+                            cad::OcctPreviewAccess::retractionSweep(*p).IsNull(),
+                        "Forming scope claimed or animated a verified return");
+                for (std::size_t frame = 0; frame < 41; ++frame)
+                    require(p->pressState(frame)->phase == strict->pressState(frame)->phase &&
+                                std::abs(p->pressState(frame)->punchTipYmm -
+                                         strict->pressState(frame)->punchTipYmm) < 1e-9 &&
+                                std::abs(p->pressState(frame)->section.angleRadians -
+                                         strict->pressState(frame)->section.angleRadians) < 1e-9,
+                            "Manual scope rescaled or skipped a forming sample");
+            }
+            const auto repeated = builder.buildRoute(document, forming, {});
+            const auto *hit = std::get_if<application::BendRoutePtr>(&repeated);
+            require(hit && (*hit)->statistics.reusedTransitions >= manual->steps.size(),
+                    "Forming-only transitions did not reuse exact inputs");
+            auto strictRequest = forming;
+            strictRequest.manualExtraction = false;
+            const auto strictResult = builder.buildRoute(document, strictRequest, {});
+            const auto *strict = std::get_if<application::BendRoutePtr>(&strictResult);
+            require(strict && !(*strict)->manualExtraction &&
+                        (*strict)->statistics.builtTransitions >= manual->steps.size(),
+                    "Strict mode reused a forming-only transition");
+            for (const auto &step : (*strict)->steps)
+                require(!step.preview->manualExtraction() && step.preview->punchRetraction() &&
+                            step.preview->frameCount() == 61,
+                        "Strict mode lost the continuous punch return");
+            auto shortTools = forming;
+            for (auto &op : shortTools.operations)
+                op.tools->lengthMm = 1;
+            const auto blocked = builder.buildRoute(document, shortTools, {});
+            const auto *error = std::get_if<application::BendRouteError>(&blocked);
+            require(error &&
+                        error->operationError == application::BendPreviewErrorCode::ToolTooShort,
+                    "Manual extraction waived tool length");
+            auto invalidScope = forming;
+            invalidScope.withTools = false;
+            const auto invalid = builder.buildRoute(document, invalidScope, {});
+            require(std::get<application::BendRouteError>(invalid).code ==
+                        application::BendRouteErrorCode::InvalidInput,
+                    "Manual extraction without tools accepted");
+        }
         require(document->sourceStep() == source, "Source changed");
         std::stop_source stopped;
         stopped.request_stop();

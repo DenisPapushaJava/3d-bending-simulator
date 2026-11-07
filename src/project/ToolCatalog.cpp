@@ -9,6 +9,7 @@
 #include <QLockFile>
 #include <QResource>
 #include <QSaveFile>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -52,7 +53,7 @@ ToolCatalogResult readFile(QFile &file, QByteArray *captured = nullptr) {
     if (root.value("format") != QStringLiteral("bending-tool-catalog") ||
         (root.value("version").toDouble(-1) != 1 && root.value("version").toDouble(-1) != 2 &&
          root.value("version").toDouble(-1) != 3 && root.value("version").toDouble(-1) != 4 &&
-         root.value("version").toDouble(-1) != 5) ||
+         root.value("version").toDouble(-1) != 5 && root.value("version").toDouble(-1) != 6) ||
         !root.value("tools").isArray() || root.value("tools").toArray().size() > 512) {
         return std::string("Unsupported catalogue format/version");
     }
@@ -66,12 +67,15 @@ ToolCatalogResult readFile(QFile &file, QByteArray *captured = nullptr) {
             return std::string("Groove orientations require catalogue version 3");
         if (root.value("version").toInt() < 4 && preset.segments)
             return std::string("Segment stock requires catalogue version 4");
+        if (root.value("version").toInt() < 6 && preset.segments &&
+            core::hasHornGeometry(*preset.segments))
+            return std::string("Horn geometry requires catalogue version 6");
         tools.push_back(std::move(preset));
     }
     if (!core::validToolCatalog(tools)) {
         return std::string("Invalid catalogue or duplicate tool IDs");
     }
-    if (root.value("version").toInt() == 5) {
+    if (root.value("version").toInt() >= 5) {
         if (!root.value("archived").isArray() || root.value("archived").toArray().size() > 512)
             return std::string("Invalid library archive");
         application::ToolLibraryData data{tools, {}};
@@ -79,6 +83,9 @@ ToolCatalogResult readFile(QFile &file, QByteArray *captured = nullptr) {
             core::ToolPreset preset;
             if (!item.isObject() || !readPreset(item.toObject(), preset))
                 return std::string("Invalid archived tool definition");
+            if (root.value("version").toInt() < 6 && preset.segments &&
+                core::hasHornGeometry(*preset.segments))
+                return std::string("Horn geometry requires catalogue version 6");
             data.archived.push_back(std::move(preset));
         }
         if (!application::validToolLibrary(data))
@@ -93,13 +100,21 @@ QJsonObject presetJson(const core::ToolPreset &t) {
     QJsonValue segments(QJsonValue::Null);
     if (t.segments) {
         QJsonArray rows;
-        for (const auto &s : *t.segments)
-            rows.append(
-                QJsonObject{{"lengthMm", s.lengthMm},
+        for (const auto &s : *t.segments) {
+            QJsonObject row{{"lengthMm", s.lengthMm},
                             {"quantity", static_cast<int>(s.quantity)},
                             {"shape", s.shape == core::SegmentShape::Straight   ? "straight"
                                       : s.shape == core::SegmentShape::LeftHorn ? "left-horn"
-                                                                                : "right-horn"}});
+                                                                                : "right-horn"}};
+            if (s.horn) {
+                row.insert("variantId", QString::fromStdString(s.variantId));
+                row.insert("hornRelief", QJsonObject{{"type", "round-through-v1"},
+                                                     {"projectionMm", s.horn->projectionMm},
+                                                     {"radiusMm", s.horn->radiusMm},
+                                                     {"tipHeightMm", s.horn->tipHeightMm}});
+            }
+            rows.append(row);
+        }
         segments = rows;
     }
     QJsonArray grooves;
@@ -156,10 +171,23 @@ bool readPreset(const QJsonObject &o, core::ToolPreset &t) {
                 std::floor(q) != q ||
                 (kind != "straight" && kind != "left-horn" && kind != "right-horn"))
                 return false;
-            t.segments->push_back({s.value("lengthMm").toDouble(), static_cast<unsigned>(q),
-                                   kind == "straight"    ? core::SegmentShape::Straight
-                                   : kind == "left-horn" ? core::SegmentShape::LeftHorn
-                                                         : core::SegmentShape::RightHorn});
+            core::ToolSegment segment{s.value("lengthMm").toDouble(), static_cast<unsigned>(q),
+                                      kind == "straight"    ? core::SegmentShape::Straight
+                                      : kind == "left-horn" ? core::SegmentShape::LeftHorn
+                                                            : core::SegmentShape::RightHorn};
+            if (s.contains("hornRelief") || s.contains("variantId")) {
+                const auto h = s.value("hornRelief").toObject();
+                if (!s.value("variantId").isString() || !s.value("hornRelief").isObject() ||
+                    h.value("type") != QStringLiteral("round-through-v1") ||
+                    !h.value("projectionMm").isDouble() || !h.value("radiusMm").isDouble() ||
+                    !h.value("tipHeightMm").isDouble())
+                    return false;
+                segment.variantId = s.value("variantId").toString().toStdString();
+                segment.horn = core::HornRelief{h.value("projectionMm").toDouble(),
+                                                h.value("radiusMm").toDouble(),
+                                                h.value("tipHeightMm").toDouble()};
+            }
+            t.segments->push_back(std::move(segment));
         }
     }
     for (const auto &[name, destination] : {std::pair{"id", &t.id},
@@ -454,10 +482,13 @@ std::optional<std::string> writeToolCatalog(const std::filesystem::path &path,
     QJsonArray tools;
     for (const auto &tool : catalog)
         tools.append(presetJson(tool));
-    const auto bytes =
-        QJsonDocument(
-            QJsonObject{{"format", "bending-tool-catalog"}, {"version", 4}, {"tools", tools}})
-            .toJson();
+    const bool extended = std::any_of(catalog.begin(), catalog.end(),
+                                      [](const auto &t) { return core::hasHornGeometry(t); });
+    QJsonObject root{
+        {"format", "bending-tool-catalog"}, {"version", extended ? 6 : 4}, {"tools", tools}};
+    if (extended)
+        root.insert("archived", QJsonArray{});
+    const auto bytes = QJsonDocument(root).toJson();
     if (bytes.size() > 4 * 1024 * 1024)
         return "Библиотека превышает 4 МиБ. Инструмент не добавлен.";
 #ifdef _WIN32
@@ -516,6 +547,9 @@ application::ToolLibraryResult writeToolLibrary(const std::filesystem::path &pat
     if (std::get<application::ToolLibrarySnapshot>(current).revision != expectedRevision)
         return std::string("Библиотека изменена другим окном или процессом. Закройте и откройте "
                            "программу, чтобы загрузить актуальную версию. Изменения не записаны.");
+    const auto horn = [](const auto &t) { return core::hasHornGeometry(t); };
+    const bool extended = std::any_of(data.tools.begin(), data.tools.end(), horn) ||
+                          std::any_of(data.archived.begin(), data.archived.end(), horn);
     if (expectedRevision != "missing") {
         QFile previous(name);
         if (!previous.open(QIODevice::ReadOnly))
@@ -526,8 +560,10 @@ application::ToolLibraryResult writeToolLibrary(const std::filesystem::path &pat
                 expectedRevision)
             return std::string("Библиотека изменилась во время сохранения. Изменения не записаны.");
         previous.close();
-        if (QJsonDocument::fromJson(original).object().value("version").toInt() < 5) {
-            QSaveFile backup(name + QStringLiteral(".pre-v5.json"));
+        if (QJsonDocument::fromJson(original).object().value("version").toInt() <
+            (extended ? 6 : 5)) {
+            QSaveFile backup(name + (extended ? QStringLiteral(".pre-v6.json")
+                                              : QStringLiteral(".pre-v5.json")));
             backup.setDirectWriteFallback(false);
             if (!backup.open(QIODevice::WriteOnly) || backup.write(original) != original.size() ||
                 !backup.commit())
@@ -541,7 +577,7 @@ application::ToolLibraryResult writeToolLibrary(const std::filesystem::path &pat
     for (const auto &tool : data.archived)
         archived.append(presetJson(tool));
     const auto bytes = QJsonDocument(QJsonObject{{"format", "bending-tool-catalog"},
-                                                 {"version", 5},
+                                                 {"version", extended ? 6 : 5},
                                                  {"tools", tools},
                                                  {"archived", archived}})
                            .toJson();

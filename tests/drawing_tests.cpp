@@ -1,5 +1,6 @@
 #include "BendFixtures.h"
 #include "DrawingLayoutChecks.h"
+#include "DrawingPaginationChecks.h"
 #include "DrawingSectionOrientationChecks.h"
 #include "ProfileFixtures.h"
 #include "TrayFixtures.h"
@@ -9,6 +10,7 @@
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
+#include "bending/project/ProjectFiles.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -1459,12 +1461,68 @@ void perforatedAngleDrawing(const QString &folder) {
             "An irregular hole was silently folded into an equal pitch");
     require(document->sourceStep() == bytes, "Pitch grouping modified the imported STEP");
 }
+void flatFollowsFront(const QString &folder) {
+    const auto shape =
+        BRepAlgoAPI_Cut(fixtures::tray(false),
+                        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(40, 25, -1), gp_Dir(0, 0, 1)), 3, 4))
+            .Shape();
+    const auto doc = load(shape, folder + "/asymmetric-flat-orientation.step");
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto prepared = cad::FlatPatternBuilder{}.build(doc, {*request.unfoldSettings, {}}, {});
+    request.preparedFlatPattern = std::get<application::FlatPatternPtr>(prepared);
+    const auto &original = request.preparedFlatPattern->info();
+    require(original.cutoutsIgnored &&
+                cad::OcctFlatPatternAccess::openingContours(*request.preparedFlatPattern).size() ==
+                    1,
+            "Asymmetric flat fixture did not exercise the filled-sheet mapping");
+    int alignedViews = 0;
+    for (int turns = 0; turns < 4; ++turns) {
+        request.quarterTurns = turns;
+        const auto drawing = build(doc, request);
+        const auto &front = drawing->views[0];
+        require(drawing->flatPattern && front.holeDiameters.size() == 1,
+                "Asymmetric hole lost its front or flat view");
+        const auto &flat = *drawing->flatPattern;
+        const bool frontWide =
+            front.maximum.x - front.minimum.x > front.maximum.y - front.minimum.y;
+        if (frontWide != (flat.view.maximum.x > flat.view.maximum.y))
+            continue; // Only the two views with parallel paper axes exercise the half-turn.
+        ++alignedViews;
+        const auto &hole = flat.view.paths.back().points;
+        const auto [low, high] = std::minmax_element(
+            hole.begin(), hole.end(), [](const auto &a, const auto &b) { return a.y < b.y; });
+        const double foldedY =
+            front.holeDiameters.front().first.y - (front.minimum.y + front.maximum.y) / 2;
+        const double flatY = (low->y + high->y - flat.view.maximum.y) / 2;
+        require(foldedY * flatY > 1,
+                "The flat hole is on the opposite vertical side from the front view");
+        require(flat.info.positiveZIsSideA == original.positiveZIsSideA &&
+                    flat.info.bends.size() == original.bends.size(),
+                "A flat half-turn changed its material side or number of bends");
+        for (std::size_t i = 0; i < original.bends.size(); ++i) {
+            const auto &before = original.bends[i];
+            const auto &after = flat.info.bends[i];
+            require(before.bendIndex == after.bendIndex && before.direction == after.direction &&
+                        std::abs(before.lengthMm() - after.lengthMm()) < 1e-7,
+                    "A flat half-turn changed bend identity, direction or length");
+        }
+    }
+    require(alignedViews == 2, "The flat fixture did not exercise both parallel directions");
+}
 void flatDrawing(const QString &folder) {
+    flatFollowsFront(folder);
     const auto doc = load(fixtures::channel(), folder + "/unfold-channel.step");
     application::DrawingRequest request;
     request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
     const auto result = build(doc, request);
     require(result->flatPattern && !result->flatPatternError, "Flat drawing snapshot missing");
+    const auto defaults = ui::DrawingSheet::defaultViews(*result);
+    require(std::any_of(defaults.begin(), defaults.end(),
+                        [](const auto &choice) {
+                            return choice.key.kind == ui::DrawingViewKind::Flat && choice.visible;
+                        }),
+            "A prepared flat pattern is not selected by default");
     const auto &flat = *result->flatPattern;
     const auto preview = ui::DrawingSheet::preview(*result, {}, 0, 1680);
     requireCompactOrientation(preview);
@@ -1519,8 +1577,16 @@ void flatDrawing(const QString &folder) {
             profiled->flatPattern->view.paths.size() >= 4 &&
             ui::DrawingSheet::writePdf(folder + "/unfold-profiled.pdf", *profiled, {}).isEmpty(),
         "Countersink rims or hole are missing from the flat drawing/PDF");
-    const auto unsupported =
+    const auto trimmed =
         build(load(fixtures::cornerTrimmedBend(), folder + "/unfold-trimmed.step"), request);
+    require(trimmed->flatPattern && !trimmed->flatPatternError && !trimmed->views[0].paths.empty(),
+            "Supported oblique blank is missing from the drawing");
+    const auto unsupported =
+        build(load(BRepAlgoAPI_Fuse(fixtures::bentStrip(),
+                                    BRepPrimAPI_MakeBox(gp_Pnt(5.5, -20, 30), 2, 5, 5))
+                       .Shape(),
+                   folder + "/unfold-boss.step"),
+              request);
     require(!unsupported->flatPattern && unsupported->flatPatternError &&
                 !unsupported->views[0].paths.empty(),
             "Unsupported blank replaced the valid drawing");
@@ -1793,6 +1859,12 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
         report.insert("bends", bends);
         application::DrawingRequest request;
         request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+        if (const auto k = qEnvironmentVariable("BENDING_DRAWING_AUDIT_K"); !k.isEmpty()) {
+            bool valid = false;
+            request.unfoldSettings->manualK = k.toDouble(&valid);
+            require(valid && core::validUnfoldSettings(*request.unfoldSettings),
+                    "Invalid audit K factor");
+        }
         const auto result = cad::BendingDrawingBuilder{}.build(doc, request, {});
         if (const auto *error = std::get_if<application::DrawingError>(&result)) {
             report.insert("drawingOk", false);
@@ -1811,6 +1883,8 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
             if (d.flatPattern) {
                 report.insert("flatWidth", d.flatPattern->info.bounds.maximum.x);
                 report.insert("flatLength", d.flatPattern->info.bounds.maximum.y);
+                if (!d.flatPattern->info.bends.empty())
+                    report.insert("flatK", d.flatPattern->info.bends.front().k);
             }
             if (d.flatPatternError)
                 report.insert("flatError", QString::fromStdString(d.flatPatternError->detail));
@@ -1828,6 +1902,22 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
                     title.plan =
                         ui::DrawingSheet::compose(source, ui::DrawingSheet::defaultViews(d));
                     report.insert("compositionMs", static_cast<double>(layoutTimer.elapsed()));
+                    QJsonArray placed;
+                    for (const auto &at : title.plan->views) {
+                        QJsonArray measurements;
+                        for (const auto &dim : at.dimensions)
+                            measurements.append(QJsonObject{{"source", int(dim.source)},
+                                                            {"index", int(dim.index)},
+                                                            {"value", dim.measurement.valueMm}});
+                        placed.append(QJsonObject{{"kind", int(at.key.kind)},
+                                                  {"index", int(at.key.index)},
+                                                  {"page", at.page},
+                                                  {"scale", at.scale},
+                                                  {"compact", at.compactDimensions},
+                                                  {"links", at.sheetLinks},
+                                                  {"dimensions", measurements}});
+                    }
+                    report.insert("placedViews", placed);
                     report.insert("dimensionedBends",
                                   static_cast<int>(title.plan->coverage.dimensioned));
                     QJsonArray missingPlaced;
@@ -2110,7 +2200,8 @@ void sectionControlsWorkflow(const QString &folder) {
     auto builder = std::make_shared<ControlledDrawingBuilder>();
     builder->hold = false;
     builder->fail = false;
-    ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
+    const auto files = std::make_shared<project::ProjectFiles>();
+    ui::MainWindow window({"test", "test"}, files);
     window.setAutomaticPartInputPrompt(false);
     window.setDrawingBuilder(builder);
     window.show();
@@ -2283,8 +2374,28 @@ void sectionControlsWorkflow(const QString &folder) {
         }
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".reversed.png"), "Cannot save reversed section");
-    builder->hold = true;
+    dialog->findChild<QSpinBox *>("drawingQuantity")->setValue(18);
+    dialog->findChild<QLineEdit *>("drawingName")->setText(QStringLiteral("Ручное сечение"));
+    const auto sectionChoices = ui::DrawingSheet::defaultViews(*controller.drawing());
+    const auto iso = std::find_if(sectionChoices.begin(), sectionChoices.end(), [](const auto &v) {
+        return v.key.kind == ui::DrawingViewKind::Isometric;
+    });
+    require(iso != sectionChoices.end(), "Isometric view missing");
+    const auto isoRow = static_cast<int>(iso - sectionChoices.begin());
+    list->item(isoRow)->setCheckState(Qt::Unchecked);
+    const auto savedSettings = controller.session().drawingSettings();
+    require(savedSettings && savedSettings->sectionEdits.size() == 1 &&
+                savedSettings->sectionEdits[0].reversed &&
+                savedSettings->sectionEdits[0].fraction == .35 && controller.session().modified(),
+            "Applied settings did not update the project");
     percent->setValue(42);
+    const auto savedPath = native(folder + "/section-controls.bend");
+    controller.saveProject(savedPath, files);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.saveError().isEmpty() &&
+                controller.session().drawingSettings() == savedSettings,
+            "Saving captured an unapplied section change");
+    builder->hold = true;
     rebuild->click();
     wait([&] { return controller.isPreparingDrawing(); });
     percent->setValue(61);
@@ -2317,6 +2428,42 @@ void sectionControlsWorkflow(const QString &folder) {
     QApplication::processEvents();
     require(builder->calls == calls && !controller.hasWork(),
             "Closing the dialog submitted unapplied section settings");
+    controller.closeDocument();
+    controller.open(savedPath);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.session().drawingSettings() == savedSettings &&
+                !controller.session().modified(),
+            "Project reload lost applied drawing settings");
+    window.findChild<QAction *>("bendingDrawingAction")->trigger();
+    auto *reopened = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(reopened, "Restored drawing window is missing");
+    auto *exportPdf = reopened->findChild<QPushButton *>("exportDrawingPdf");
+    wait([&] { return !controller.hasWork() && exportPdf->isEnabled(); });
+    const auto restored = controller.drawing();
+    auto *restoredViews = reopened->findChild<QListWidget *>("drawingViews");
+    const auto restoredChoices = ui::DrawingSheet::defaultViews(*restored);
+    bool sectionRestored = false, isometricHidden = false;
+    for (std::size_t i = 0; i < restoredChoices.size(); ++i) {
+        const auto key = restoredChoices[i].key;
+        if (key.kind == ui::DrawingViewKind::Isometric)
+            isometricHidden =
+                restoredViews->item(static_cast<int>(i))->checkState() == Qt::Unchecked;
+        if (key.kind != ui::DrawingViewKind::Section)
+            continue;
+        for (const auto &cut : restored->sections[key.index].locations)
+            if (cut.reversed && std::abs(cut.fraction - .35) < 1e-9) {
+                restoredViews->setCurrentRow(static_cast<int>(i));
+                sectionRestored = reopened->findChild<QComboBox *>("drawingViewScale")
+                                      ->currentData()
+                                      .toDouble() == .5;
+            }
+    }
+    require(sectionRestored && isometricHidden &&
+                reopened->findChild<QSpinBox *>("drawingQuantity")->value() == 18 &&
+                reopened->findChild<QLineEdit *>("drawingName")->text() ==
+                    QStringLiteral("Ручное сечение") &&
+                !controller.session().modified(),
+            "Rebuilt drawing lost section, scale, visibility or title");
     window.close();
 }
 void workflow(const QString &folder) {
@@ -2332,7 +2479,11 @@ void workflow(const QString &folder) {
                                      : sample);
     wait([&] { return !c.hasWork(); });
     require(c.session().document() != nullptr, "Workflow import failed");
-    require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, {}, 1}),
+    const auto manualK =
+        QApplication::arguments().contains(QStringLiteral("--workspace-sample-only"))
+            ? std::optional<double>{.45}
+            : std::optional<double>{};
+    require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, manualK, 1}),
             "Cannot select drawing material");
     const auto revision = c.session().editRevision();
     auto *action = window.findChild<QAction *>("bendingDrawingAction");
@@ -2356,6 +2507,76 @@ void workflow(const QString &folder) {
     if (!initialSnapshot.isEmpty())
         require(dialog->grab().save(initialSnapshot + ".default.png"),
                 "Cannot save default drawing workspace");
+    if (QApplication::arguments().contains(QStringLiteral("--reference-controls-only"))) {
+        auto *views = dialog->findChild<QListWidget *>("drawingViews");
+        auto *image = dialog->findChild<QLabel *>("drawingPreviewImage");
+        auto *page = dialog->findChild<QSpinBox *>("drawingPage");
+        const auto source = c.drawing();
+        const auto choices = ui::DrawingSheet::defaultViews(*source);
+        require(views && image && page && views->count() == static_cast<int>(choices.size()),
+                "Reference controls do not match drawing destinations");
+        const auto before = image->pixmap().toImage();
+        const auto initialPage = page->value();
+        bool changed = false;
+        for (std::size_t i = 0; i < choices.size(); ++i)
+            if (choices[i].key.kind == ui::DrawingViewKind::Section ||
+                choices[i].key.kind == ui::DrawingViewKind::Detail ||
+                choices[i].key.kind == ui::DrawingViewKind::Profile ||
+                choices[i].key.kind == ui::DrawingViewKind::Auxiliary) {
+                changed |= choices[i].visible;
+                views->item(static_cast<int>(i))->setCheckState(Qt::Unchecked);
+            }
+        wait([&] { return exportButton->isEnabled(); });
+        require(changed && image->pixmap().toImage() != before && c.drawing() == source &&
+                    !c.hasWork() && c.session().editRevision() == revision,
+                "Disabling drawing destinations failed to refresh preview or recomputed CAD");
+        if (!initialSnapshot.isEmpty())
+            require(dialog->grab().save(initialSnapshot + ".disabled.png"),
+                    "Cannot capture disabled reference controls");
+        for (std::size_t i = 0; i < choices.size(); ++i)
+            views->item(static_cast<int>(i))
+                ->setCheckState(choices[i].visible ? Qt::Checked : Qt::Unchecked);
+        wait([&] { return exportButton->isEnabled(); });
+        page->setValue(initialPage);
+        require(image->pixmap().toImage() == before && c.drawing() == source && !c.hasWork(),
+                "Restored drawing destinations differ from the original preview");
+        return;
+    }
+    if (QApplication::arguments().contains(QStringLiteral("--workspace-sample-only"))) {
+        const auto source = c.drawing();
+        const auto plan =
+            ui::DrawingSheet::compose(source, ui::DrawingSheet::defaultViews(*source));
+        auto *page = dialog->findChild<QSpinBox *>("drawingPage");
+        auto *views = dialog->findChild<QListWidget *>("drawingViews");
+        auto *scale = dialog->findChild<QComboBox *>("drawingViewScale");
+        require(page && views && scale && page->maximum() == plan->pages && plan->pages > 1,
+                "Paginated workspace has no complete page navigation");
+        const auto top = std::find_if(plan->views.begin(), plan->views.end(), [](const auto &at) {
+            return at.key.kind == ui::DrawingViewKind::Projection && at.key.index == 1;
+        });
+        require(top != plan->views.end(), "Paginated workspace omitted top projection");
+        views->setCurrentRow(1);
+        require(page->value() == top->page + 1 && c.drawing() == source && !c.hasWork(),
+                "Selecting a projection did not follow its page or recomputed CAD");
+        if (!initialSnapshot.isEmpty())
+            require(dialog->grab().save(initialSnapshot + ".top.png"),
+                    "Cannot save separate projection workspace");
+        const int oneToTen = scale->findData(.1);
+        require(oneToTen > 0, "Missing explicit projection scale");
+        scale->setCurrentIndex(oneToTen);
+        wait([&] { return exportButton->isEnabled(); });
+        for (int row = 0; row < 3; ++row)
+            require(views->item(row)->text().endsWith(QStringLiteral("1:10")),
+                    "Cross-sheet projection scale stopped applying to the whole family");
+        page->setValue(page->maximum());
+        require(exportButton->isEnabled() && c.drawing() == source && !c.hasWork() &&
+                    c.session().editRevision() == revision,
+                "Page/scale editing changed the CAD source or project inputs");
+        if (!initialSnapshot.isEmpty())
+            require(dialog->grab().save(initialSnapshot + ".last.png"),
+                    "Cannot save final drawing page");
+        return;
+    }
     dialog->showMinimized();
     action->trigger();
     QApplication::processEvents();
@@ -2379,6 +2600,16 @@ void workflow(const QString &folder) {
     auto *resetViews = dialog->findChild<QPushButton *>("resetDrawingComposition");
     require(viewList && viewScale && flatSide && resetViews && viewList->count() >= 5,
             "Drawing view controls are missing");
+    const auto defaults = ui::DrawingSheet::defaultViews(*oldDrawing);
+    const auto checkDefaultBoxes = [&] {
+        require(viewList->count() == static_cast<int>(defaults.size()),
+                "Drawing controls lost available views");
+        for (std::size_t i = 0; i < defaults.size(); ++i)
+            require(viewList->item(static_cast<int>(i))->checkState() ==
+                        (defaults[i].visible ? Qt::Checked : Qt::Unchecked),
+                    "Drawing controls do not match the default choices");
+    };
+    checkDefaultBoxes();
     for (int row = 0; row < viewList->count(); ++row)
         if (viewList->item(row)->text().startsWith(QStringLiteral("Развёртка"))) {
             viewList->setCurrentRow(row);
@@ -2599,6 +2830,7 @@ void workflow(const QString &folder) {
     dialog->resize(normal);
     resetViews->click();
     wait([&] { return exportButton->isEnabled(); });
+    checkDefaultBoxes();
     fittedPaper();
     require(page->maximum() == basePages && page->value() <= basePages &&
                 navigation->isVisible() == (basePages > 1),
@@ -2845,6 +3077,10 @@ int main(int argc, char **argv) {
     QTemporaryDir temp;
     ui::setPreferencesFile(temp.path() + "/settings.ini");
     try {
+        if (app.arguments().contains(QStringLiteral("--references-only"))) {
+            drawingReferenceChecks();
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--window-placement-only"))) {
             drawingWindowPlacement();
             return 0;
@@ -2852,6 +3088,14 @@ int main(int argc, char **argv) {
         if (app.arguments().contains(QStringLiteral("--workflow-only"))) {
             pdfDestinations(temp.path());
             previewStates();
+            workflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--reference-controls-only"))) {
+            workflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--workspace-sample-only"))) {
             workflow(temp.path());
             return 0;
         }
@@ -2877,6 +3121,10 @@ int main(int argc, char **argv) {
         }
         if (app.arguments().contains(QStringLiteral("--composition-only"))) {
             composition(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--pagination-only"))) {
+            drawingPaginationChecks();
             return 0;
         }
         if (app.arguments().contains(QStringLiteral("--layout-worker-only"))) {

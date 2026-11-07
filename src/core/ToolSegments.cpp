@@ -7,17 +7,58 @@
 #include <tuple>
 
 namespace bending::core {
+bool validHornRelief(const HornRelief &h, double length) {
+    return std::isfinite(length) && std::isfinite(h.projectionMm) && std::isfinite(h.radiusMm) &&
+           std::isfinite(h.tipHeightMm) && h.projectionMm >= .001 &&
+           h.projectionMm < length - 1e-6 && h.radiusMm >= .001 && h.radiusMm <= 100000 &&
+           h.tipHeightMm >= .001 && h.tipHeightMm <= 100000;
+}
+double hornRootHeight(const HornRelief &h) {
+    const double q = std::min(h.projectionMm, h.radiusMm);
+    return h.tipHeightMm + std::sqrt(q * (2 * h.radiusMm - q));
+}
+bool usableToolSegment(const ToolSegment &s) {
+    return (s.shape == SegmentShape::Straight && !s.horn && s.variantId.empty()) ||
+           ((s.shape == SegmentShape::LeftHorn || s.shape == SegmentShape::RightHorn) && s.horn &&
+            !s.variantId.empty() && validHornRelief(*s.horn, s.lengthMm));
+}
+bool hasHornGeometry(const std::vector<ToolSegment> &stock) {
+    return std::any_of(stock.begin(), stock.end(),
+                       [](const auto &s) { return s.horn.has_value(); });
+}
+bool usesHornSections(const std::vector<ToolSegment> &stock,
+                      const std::optional<ToolAssembly> &assembly) {
+    return assembly && std::any_of(assembly->pieces.begin(), assembly->pieces.end(), [&](auto row) {
+               return row < stock.size() && stock[row].horn.has_value();
+           });
+}
 bool validToolSegments(const std::vector<ToolSegment> &stock) {
     if (stock.size() > 64)
         return false;
-    std::set<std::pair<std::int64_t, SegmentShape>> unique;
+    std::set<std::tuple<std::int64_t, SegmentShape, bool, double, double, double>> unique;
+    std::set<std::string> ids;
     for (const auto &s : stock) {
         if (!std::isfinite(s.lengthMm) || s.lengthMm < 1 || s.lengthMm > 100000 ||
             std::abs(s.lengthMm * 1000 - std::round(s.lengthMm * 1000)) > 1.e-6 ||
             s.quantity > 1000 ||
             (s.shape != SegmentShape::Straight && s.shape != SegmentShape::LeftHorn &&
              s.shape != SegmentShape::RightHorn) ||
-            !unique.emplace(std::llround(s.lengthMm * 1000), s.shape).second)
+            (s.horn && (s.shape == SegmentShape::Straight ||
+                        !validHornRelief(*s.horn, s.lengthMm) || s.variantId.empty())) ||
+            (!s.horn && !s.variantId.empty()) || s.variantId.size() > 128 ||
+            (!s.variantId.empty() && (!ids.insert(s.variantId).second ||
+                                      !std::all_of(s.variantId.begin(), s.variantId.end(),
+                                                   [](unsigned char c) {
+                                                       return (c >= 'a' && c <= 'z') ||
+                                                              (c >= 'A' && c <= 'Z') ||
+                                                              (c >= '0' && c <= '9') || c == '-' ||
+                                                              c == '_';
+                                                   }))) ||
+            !unique
+                 .emplace(std::llround(s.lengthMm * 1000), s.shape, bool(s.horn),
+                          s.horn ? s.horn->projectionMm : 0, s.horn ? s.horn->radiusMm : 0,
+                          s.horn ? s.horn->tipHeightMm : 0)
+                 .second)
             return false;
     }
     return true;
@@ -51,7 +92,9 @@ std::optional<double> assemblyLength(const std::vector<ToolSegment> &stock,
     double length = 0;
     for (std::size_t i = 0; i < assembly.pieces.size(); ++i) {
         const auto row = assembly.pieces[i];
-        if (row >= stock.size() || stock[row].shape != SegmentShape::Straight ||
+        if (row >= stock.size() || !usableToolSegment(stock[row]) ||
+            (stock[row].shape == SegmentShape::LeftHorn && i != 0) ||
+            (stock[row].shape == SegmentShape::RightHorn && i + 1 != assembly.pieces.size()) ||
             ++used[row] > stock[row].quantity)
             return {};
         length += stock[row].lengthMm;

@@ -312,6 +312,47 @@ int main(int argc, char **argv) {
             std::make_shared<cad::ToolGeometryCache>(std::make_shared<project::GeometryCacheFiles>(
                 nativePath(folder.path()) / "cycle-cache"));
         fullCycle(cycleCache, folder.path());
+        // Horn body and true 3D return envelope use the same persistent cache,
+        // but their descriptors include the actual end relief and every joint.
+        auto horn = tool_fixture::pair();
+        horn.punch.segments = std::vector<core::ToolSegment>{
+            {100, 1, core::SegmentShape::LeftHorn, core::HornRelief{27, 27, 9}, "left"},
+            {100, 1, core::SegmentShape::RightHorn, core::HornRelief{27, 27, 9}, "right"}};
+        horn.punchAssembly = core::ToolAssembly{{0, 1}, 0, {2}};
+        horn.die.lengthMm = 202;
+        const auto buildHorn = [&] {
+            const auto g = *core::drawingToolGeometry(horn);
+            const auto source = cad::makeDrawingTools(horn, g, 3);
+            return std::array{
+                cad::segmentToolBody(source[1], horn.punch, horn.punchAssembly, 0, {}),
+                cad::drawingPunchSweep(horn, g, 3, 17, {})};
+        };
+        auto hornStore =
+            std::make_shared<project::GeometryCacheFiles>(nativePath(folder.path()) / "horn-cache");
+        auto hornCache = std::make_shared<cad::ToolGeometryCache>(hornStore);
+        std::array<TopoDS_Shape, 2> hornReference, hornReload;
+        {
+            cad::GeometryCacheScope scope(hornCache, {});
+            hornReference = buildHorn();
+        }
+        require(hornCache->statistics().builds >= 3, "Horn cache did not build real assets");
+        hornCache = std::make_shared<cad::ToolGeometryCache>(hornStore);
+        {
+            cad::GeometryCacheScope scope(hornCache, {});
+            hornReload = buildHorn();
+        }
+        require(hornCache->statistics().builds == 0 && hornCache->statistics().diskHits >= 3,
+                "Restart rebuilt unchanged horn body or return");
+        for (std::size_t i = 0; i < 2; ++i)
+            same(hornReference[i], hornReload[i]);
+        horn.punch.segments->front().horn->projectionMm = 26;
+        {
+            cad::GeometryCacheScope scope(hornCache, {});
+            hornReload = buildHorn();
+        }
+        require(hornCache->statistics().builds >= 2 &&
+                    std::abs(volume(hornReference[0]) - volume(hornReload[0])) > .01,
+                "Changed relief inherited old persistent body/return");
         std::cout << "Persistent tools: geometry, fingerprints, restart, corruption, concurrency "
                      "and fallback passed\n";
     } catch (const std::exception &e) {

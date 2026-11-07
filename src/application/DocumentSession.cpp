@@ -49,6 +49,8 @@ std::optional<std::string> projectSettingsError(const OpenedProject &project) {
         !core::validUnfoldSettings(project.unfold)) {
         return "Invalid saved bend preparations";
     }
+    if (project.drawing && !validProjectDrawingSettings(*project.drawing))
+        return "Invalid saved drawing settings";
     if (project.manualThicknessMm) {
         const auto validation =
             validateThickness(*project.manualThicknessMm, project.document->metadata().thickness);
@@ -101,6 +103,8 @@ bool DocumentSession::complete(const ImportRequest &request, ImportResult result
         ++editRevision_;
         manualThickness_ = project ? project->manualThicknessMm : std::nullopt;
         unfold_ = project ? project->unfold : core::UnfoldSettings{};
+        drawing_ = project ? project->drawing : std::nullopt;
+        ++drawingRevision_;
         projectPath_ = project ? project->path : std::filesystem::path{};
         modified_ = false;
         error_.reset();
@@ -131,6 +135,8 @@ void DocumentSession::close() {
     bends_.clear();
     bendBindings_ = {};
     unfold_ = {};
+    drawing_.reset();
+    ++drawingRevision_;
 }
 
 const BendPreparation *DocumentSession::bend(std::size_t recognizedIndex) const {
@@ -283,6 +289,16 @@ void DocumentSession::useAutomaticThickness() {
         ++editRevision_;
     }
 }
+bool DocumentSession::setDrawingSettings(std::uint64_t revision, ProjectDrawingSettings settings) {
+    if (!document_ || active_ || revision != revision_ || !validProjectDrawingSettings(settings) ||
+        drawing_ == settings)
+        return false;
+    drawing_ = std::move(settings);
+    ++drawingRevision_;
+    modified_ = true;
+    return true;
+}
+
 bool DocumentSession::markSaved(std::uint64_t editRevision, std::filesystem::path path) {
     if (!document_ || editRevision != editRevision_) {
         return false;

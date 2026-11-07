@@ -9,5 +9,6 @@ struct FilledCutouts {
     application::ClosedCutouts report;
 };
 // Separate approximation; never edits source topology. Only enclosed surface wires.
-FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance, std::stop_token stop);
+FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance, std::stop_token stop,
+                                bool hasBendCandidates);
 } // namespace bending::cad

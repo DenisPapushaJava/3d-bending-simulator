@@ -469,20 +469,14 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                     for (const auto &note : drawing.views[i].bendNotes)
                         if (!covered(note.second))
                             auxiliary.view.bendNotes.push_back(note);
-        for (const auto &label : drawing.views[i].labels) {
-            if (drawing.views[i].reverseProjection)
-                continue;
-            const auto found =
-                std::find_if(drawing.details.begin(), drawing.details.end(),
-                             [&](const auto &d) { return d.designation == label.second; });
-            if (found != drawing.details.end() && !covered(found->bendIndex)) {
-                v.labels.push_back(label);
-                for (const auto &circle : drawing.views[i].detailCircles)
-                    if (std::hypot(circle.first.x - label.first.x, circle.first.y - label.first.y) <
-                        tolerance)
-                        v.detailCircles.push_back(circle);
+        if (!drawing.views[i].reverseProjection)
+            for (const auto &locator : drawing.views[i].detailLocators) {
+                const auto found = std::find_if(
+                    drawing.details.begin(), drawing.details.end(),
+                    [&](const auto &d) { return d.designation == locator.designation; });
+                if (found != drawing.details.end() && !covered(found->bendIndex))
+                    v.detailLocators.push_back(locator);
             }
-        }
     }
     bool uncovered = false;
     for (std::size_t i = 0; i < bends.size(); ++i)

@@ -27,9 +27,9 @@ void recordViews(DrawingSheetPlan &plan, LayoutContext &context) {
                     DrawingLayoutInterruption::LimitExceeded,
                     "Достигнут лимит памяти чертежа. Уменьшите число видов.");
             context.bytes += bytes;
-            at.recording = std::make_shared<const DrawingViewRecording>(
-                DrawingViewRecording{QByteArray(picture.data(), picture.size()), at.key, at.page,
-                                     at.area, at.centre, at.scale, plan.flatSide});
+            at.recording = std::make_shared<const DrawingViewRecording>(DrawingViewRecording{
+                QByteArray(picture.data(), picture.size()), at.key, at.page, at.area, at.centre,
+                at.scale, plan.flatSide, at.compactDimensions, at.sheetLinks});
         }
     }
 }
@@ -37,7 +37,8 @@ void recordViews(DrawingSheetPlan &plan, LayoutContext &context) {
 void paintRecorded(QPainter &painter, const DrawingPlacedView &at, DrawingFlatSide side) {
     const auto &record = at.recording;
     if (!record || record->key != at.key || record->page != at.page || record->area != at.area ||
-        record->centre != at.centre || record->scale != at.scale || record->side != side)
+        record->centre != at.centre || record->scale != at.scale || record->side != side ||
+        record->compactDimensions != at.compactDimensions || record->sheetLinks != at.sheetLinks)
         throw std::runtime_error("Устаревшее изображение вида. Повторите компоновку.");
     // QPicture playback keeps vector paths and text in the PDF. Each replay owns
     // its stream cursor; immutable commands can be shared by preview/export.

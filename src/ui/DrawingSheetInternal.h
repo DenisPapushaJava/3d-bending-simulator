@@ -12,6 +12,8 @@ struct DrawingViewRecording {
     QPointF centre;
     double scale;
     DrawingFlatSide side;
+    bool compactDimensions;
+    QString sheetLinks;
 };
 } // namespace bending::ui
 namespace bending::ui::drawing {
@@ -37,13 +39,16 @@ class LayoutContext {
     std::chrono::steady_clock::time_point deadline;
     std::size_t probes = 0, bytes = 0;
     std::vector<DrawingPlacedDimension> *dimensions = nullptr;
+    // Fixed for this compose, shared by fit probes and final vector recording.
+    const std::vector<DrawingViewChoice> *choices = nullptr;
     DrawingDimensionSource source = DrawingDimensionSource::Overall;
     std::size_t index = 0;
 };
 void initializeFont();
 inline const QRectF contentArea{25, 22, 385, 215};
-std::vector<std::size_t> requiredDetails(const application::BendingDrawing &);
 application::DrawingView preparedView(const application::BendingDrawing &, DrawingViewKey);
+application::DrawingView selectedView(const application::BendingDrawing &, DrawingViewKey,
+                                      const std::vector<DrawingViewChoice> *);
 void paintPlaced(QPainter &, const application::BendingDrawing &, const DrawingPlacedView &,
                  DrawingFlatSide, std::vector<QRectF> &, QRectF *selectionBounds = nullptr,
                  LayoutContext *context = nullptr);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/BendPreparation.h"
+#include "bending/application/ProjectDrawingSettings.h"
 #include "bending/core/UnfoldRule.h"
 
 #include <functional>
@@ -41,6 +42,7 @@ struct OpenedProject {
     std::filesystem::path path;
     std::vector<BendPreparation> bends{};
     core::UnfoldSettings unfold{};
+    std::optional<ProjectDrawingSettings> drawing = {};
 };
 [[nodiscard]] std::optional<std::string> projectSettingsError(const OpenedProject &project);
 using ImportResult = std::variant<DocumentPtr, OpenedProject, ImportError>;

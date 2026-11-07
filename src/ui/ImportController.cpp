@@ -1,14 +1,13 @@
 #include "bending/ui/ImportController.h"
+#include "bending/application/BendRouteAcceptance.h"
 #include "bending/core/ToolSelection.h"
 
 #include <QPointer>
 #include <QThread>
 
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <optional>
-#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -155,8 +154,10 @@ class ImportController::Impl {
         if (activePrefetch && (!keep || !sameDraft(activePrefetch->job, *keep)))
             activePrefetch->stop.request_stop();
     }
-    void beginForeground(const DraftJob *keep = nullptr) {
+    void beginForeground(const DraftJob *keep = nullptr, bool keepFlat = false) {
         cancelPrefetch(keep);
+        if (!keepFlat)
+            cancelFlatJob();
         stop = std::stop_source{};
     }
     void dispatchPrefetch();
@@ -194,23 +195,46 @@ class ImportController::Impl {
     std::uint64_t drawingId = 0;
     bool preparingDrawing = false;
     std::optional<DrawingRequest> drawingRequest;
+    std::function<void(const FlatPatternResult *)> drawingAfterFlat;
     FlatPatternPtr flat;
     std::optional<FlatPatternError> flatError;
     std::optional<FlatPatternRequest> flatRequest;
-    std::uint64_t flatId = 0;
-    bool preparingFlat = false;
+    struct FlatJob {
+        DocumentPtr document;
+        FlatPatternRequest request;
+        std::uint64_t revision;
+        std::stop_source stop;
+        bool show = false; // GUI-thread intent. Drawing can independently await the same job.
+    };
+    std::shared_ptr<FlatJob> activeFlat;
+    [[nodiscard]] FlatPatternRequest currentFlatRequest() const {
+        return {session.unfoldSettings(), session.manualThicknessMm()};
+    }
+    static bool validFlat(const FlatPatternPtr &pattern, const FlatPatternRequest &request) {
+        if (!pattern)
+            return false;
+        const auto &info = pattern->info();
+        return info.settings == request.settings && std::isfinite(info.thicknessMm) &&
+               info.thicknessMm > 0 && std::isfinite(info.bounds.maximum.x) &&
+               info.bounds.maximum.x > 0 && std::isfinite(info.bounds.maximum.y) &&
+               info.bounds.maximum.y > 0;
+    }
+    void startFlat(std::shared_ptr<const FlatPatternBuilder>, bool show);
+    void cancelFlatJob() {
+        if (activeFlat) {
+            activeFlat->stop.request_stop();
+            activeFlat.reset();
+        }
+    }
     void invalidateFlat() {
-        ++flatId;
+        cancelFlatJob();
         flat.reset();
         flatError.reset();
         flatRequest.reset();
-        if (preparingFlat) {
-            stop.request_stop();
-            preparingFlat = false;
-        }
     }
     void invalidateDrawing() {
         ++drawingId;
+        drawingAfterFlat = {};
         drawing.reset();
         drawingError.reset();
         drawingRequest.reset();
@@ -232,7 +256,8 @@ class ImportController::Impl {
 };
 
 void ImportController::Impl::dispatchPrefetch() {
-    if (stopping || running || pending || pendingDraft || activePrefetch || !pendingPrefetch)
+    if (stopping || running || pending || pendingDraft || activePrefetch || activeFlat ||
+        !pendingPrefetch)
         return;
     auto job = std::move(*pendingPrefetch);
     pendingPrefetch.reset();
@@ -428,6 +453,7 @@ void ImportController::shutdown() {
     }
     impl_->stopping = true;
     impl_->cancelPrefetch();
+    impl_->cancelFlatJob();
     impl_->stop.request_stop();
     impl_->pending.reset();
     impl_->session.cancel();
@@ -443,7 +469,8 @@ const DocumentSession &ImportController::session() const {
 }
 
 bool ImportController::hasWork() const {
-    return impl_->running || impl_->pending.has_value() || impl_->pendingDraft.has_value();
+    return impl_->running || impl_->pending.has_value() || impl_->pendingDraft.has_value() ||
+           impl_->preparingDrawing || isPreparingFlatPattern();
 }
 
 bool ImportController::prepareToolProfile(ToolProfileInput input,
@@ -649,6 +676,13 @@ bool ImportController::isSaving() const {
 QString ImportController::saveError() const {
     return impl_->writeError;
 }
+bool ImportController::setDrawingSettings(std::uint64_t revision, ProjectDrawingSettings settings) {
+    if (impl_->stopping || !impl_->session.setDrawingSettings(revision, std::move(settings)))
+        return false;
+    QMetaObject::invokeMethod(this, [this] { emit stateChanged(); }, Qt::QueuedConnection);
+    return true;
+}
+
 void ImportController::saveProject(std::filesystem::path path,
                                    std::shared_ptr<const ProjectWriter> writer) {
     if (impl_->stopping || hasWork() || !impl_->session.document() || !writer) {
@@ -659,6 +693,8 @@ void ImportController::saveProject(std::filesystem::path path,
     const auto manual = state->session.manualThicknessMm();
     const auto unfold = state->session.unfoldSettings();
     const auto bends = state->session.bends();
+    const auto drawing = state->session.drawingSettings();
+    const auto drawingRevision = state->session.drawingRevision();
     const auto revision = state->session.editRevision();
     const auto id = ++state->saveId;
     state->beginForeground();
@@ -668,11 +704,11 @@ void ImportController::saveProject(std::filesystem::path path,
     state->writeError.clear();
     QMetaObject::invokeMethod(
         state->worker,
-        [state, document, manual, unfold, bends, revision, id, stop, path = std::move(path),
-         writer = std::move(writer)] {
+        [state, document, manual, unfold, bends, drawing, drawingRevision, revision, id, stop,
+         path = std::move(path), writer = std::move(writer)] {
             std::optional<std::string> error;
             try {
-                error = writer->save(path, *document, manual, bends, stop, unfold);
+                error = writer->save(path, *document, manual, bends, stop, unfold, drawing);
             } catch (const std::exception &failure) {
                 error = failure.what();
             } catch (...) {
@@ -680,7 +716,7 @@ void ImportController::saveProject(std::filesystem::path path,
             }
             QMetaObject::invokeMethod(
                 state->owner,
-                [state, revision, id, path, error] {
+                [state, revision, drawingRevision, id, path, error] {
                     state->running = false;
                     state->saving = false;
                     if (state->stopping) {
@@ -689,7 +725,7 @@ void ImportController::saveProject(std::filesystem::path path,
                     if (id == state->saveId) {
                         if (error) {
                             state->writeError = QString::fromStdString(*error);
-                        } else {
+                        } else if (state->session.drawingRevision() == drawingRevision) {
                             state->session.markSaved(revision, path);
                         }
                     }
@@ -1011,8 +1047,9 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
 bool ImportController::prefetchNextRouteDraft(
     std::shared_ptr<const SingleBendPreviewBuilder> builder) {
     auto *s = impl_.get();
-    if (s->stopping || hasWork() || !builder || !s->draft || s->routeBuilder.lock() != builder ||
-        s->session.activeRequest() || s->draft->source != s->session.document() ||
+    if (s->stopping || hasWork() || s->activeFlat || !builder || !s->draft ||
+        s->routeBuilder.lock() != builder || s->session.activeRequest() ||
+        s->draft->source != s->session.document() ||
         s->draft->request.step >= s->draft->request.operations.size())
         return false;
     auto request = s->draft->request;
@@ -1043,32 +1080,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
         return false;
     const auto &session = impl_->session;
-    if (request.operations.size() != session.document()->metadata().bendAnalysis.bends.size())
+    if (!prepareBendRouteRequest(session, request))
         return false;
-    std::set<std::size_t> seen;
-    for (const auto &op : request.operations) {
-        const auto *entry = session.bend(op.bendIndex);
-        if (!validWorkpieceOffset(op.workpieceOffsetMm) || !entry || !included(entry->review) ||
-            entry->id != op.id || session.bendTarget(op.bendIndex) != std::optional{op.target} ||
-            !seen.insert(op.bendIndex).second ||
-            (request.withTools &&
-             (!op.tools || !core::validPressTools(*op.tools) ||
-              (op.assignment && core::toolParameters(*op.assignment) != op.tools))))
-            return false;
-    }
-    request.manualThicknessMm = session.manualThicknessMm();
-    if ((request.allowAxialPlacement && (!request.automatic || !request.withTools)) ||
-        !validRouteAssemblySearch(request))
-        return false;
-    if (!request.toolVariants.empty()) {
-        if (request.toolVariants.size() > 64)
-            return false;
-        for (std::size_t i = 0; i < request.toolVariants.size(); ++i) {
-            auto candidate = request;
-            if (!applyRouteToolVariant(candidate, i))
-                return false;
-        }
-    }
     auto *s = impl_.get();
     s->cancelPrefetch();
     if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
@@ -1126,7 +1139,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
             }
             QMetaObject::invokeMethod(
                 s->owner,
-                [s, id, revision, edit, document, stop, request = std::move(request),
+                [s, id, revision, edit, stop, request = std::move(request),
                  result = std::move(result)]() mutable {
                     s->running = s->preparingRoute = false;
                     if (s->stopping)
@@ -1135,193 +1148,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                         edit == s->session.editRevision() && !stop.stop_requested() &&
                         !s->session.activeRequest()) {
                         if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
-                            bool selectedInput =
-                                *route && (request.toolVariants.empty()
-                                               ? !(*route)->selectedToolVariant
-                                               : (*route)->selectedToolVariant &&
-                                                     applyRouteToolVariant(
-                                                         request, *(*route)->selectedToolVariant));
-                            selectedInput = selectedInput && *route &&
-                                            applyRouteAssemblyResult(request, **route);
-                            bool valid = selectedInput && *route && (*route)->source == document &&
-                                         (*route)->withTools == request.withTools &&
-                                         !(*route)->steps.empty() &&
-                                         (*route)->steps.size() <= request.operations.size();
-                            std::set<std::string> ids;
-                            std::vector<std::string> order;
-                            bool partialEndSupport = false;
-                            if (valid)
-                                for (const auto &step : (*route)->steps) {
-                                    const auto found =
-                                        std::find_if(request.operations.begin(),
-                                                     request.operations.end(), [&](const auto &op) {
-                                                         return step.id == op.id &&
-                                                                step.bendIndex == op.bendIndex;
-                                                     });
-                                    const auto &p = step.preview;
-                                    std::vector<std::string> memberIds;
-                                    for (const auto &member : step.additionalBends) {
-                                        const auto input = std::find_if(
-                                            request.operations.begin(), request.operations.end(),
-                                            [&](const auto &op) {
-                                                return op.id == member.id &&
-                                                       op.bendIndex == member.bendIndex;
-                                            });
-                                        valid &= input != request.operations.end() &&
-                                                 ids.insert(member.id).second &&
-                                                 found != request.operations.end();
-                                        if (input != request.operations.end())
-                                            valid &= input->target == member.target &&
-                                                     input->tools == member.tools &&
-                                                     input->assignment == member.assignment && p &&
-                                                     member.workpieceOffsetMm ==
-                                                         p->workpieceOffsetMm() &&
-                                                     (request.allowAxialPlacement ||
-                                                      input->workpieceOffsetMm ==
-                                                          member.workpieceOffsetMm) &&
-                                                     (request.allowWorkpieceRotation ||
-                                                      input->workpieceReversed ==
-                                                          member.workpieceReversed);
-                                        if (found != request.operations.end())
-                                            valid &= std::abs(member.target.angleRadians -
-                                                              found->target.angleRadians) <=
-                                                         document->metadata()
-                                                             .bendAnalysis.angleToleranceRadians &&
-                                                     std::abs(member.target.innerRadiusMm -
-                                                              found->target.innerRadiusMm) <=
-                                                         document->metadata()
-                                                             .bendAnalysis.lengthToleranceMm &&
-                                                     (!request.withTools ||
-                                                      (member.tools == found->tools &&
-                                                       member.assignment == found->assignment));
-                                        memberIds.push_back(member.id);
-                                    }
-                                    valid &= p && p->activeBendCount() ==
-                                                      step.additionalBends.size() + 1;
-                                    valid &= found != request.operations.end() &&
-                                             ids.insert(step.id).second && p &&
-                                             !p->unverifiedDraft() && !p->collision() &&
-                                             p->frameCount() >= 2 &&
-                                             p->workpieceReversed() == step.fixedSecond &&
-                                             validWorkpieceOffset(p->workpieceOffsetMm()) &&
-                                             (request.allowAxialPlacement ||
-                                              (found != request.operations.end() &&
-                                               p->workpieceOffsetMm() ==
-                                                   (request.withTools ? found->workpieceOffsetMm
-                                                                      : 0))) &&
-                                             (request.allowWorkpieceRotation ||
-                                              (found != request.operations.end() &&
-                                               found->workpieceReversed == step.fixedSecond)) &&
-                                             (request.withTools
-                                                  ? p->pressMotion() && p->punchRetraction()
-                                                  : !p->toolSetup());
-                                    if (p && found != request.operations.end()) {
-                                        partialEndSupport |= p->hasPartialEndSupport();
-                                        if (request.withTools && found->tools)
-                                            valid &= toolCoversAxialPlacement(
-                                                *found->tools, p->model().widthMm,
-                                                p->workpieceOffsetMm(),
-                                                document->metadata()
-                                                    .bendAnalysis.lengthToleranceMm);
-                                        else
-                                            valid &= p->workpieceOffsetMm() == 0;
-                                        valid &= validEndSupportIntervals(
-                                            *p,
-                                            request.allowPartialEndSupport
-                                                ? request.maximumEndSupportLossMm
-                                                : std::optional<double>(0),
-                                            s->session.document()
-                                                        ->metadata()
-                                                        .bendAnalysis.lengthToleranceMm *
-                                                    4 +
-                                                1.e-8);
-                                        if (p->hasPartialEndSupport())
-                                            valid &=
-                                                request.withTools && request.allowPartialEndSupport;
-                                        const bool drawingPunch =
-                                            request.withTools && found->assignment &&
-                                            found->assignment->useDrawingGeometry &&
-                                            found->assignment->punch.drawing.has_value();
-                                        const bool drawingDie =
-                                            request.withTools && found->assignment &&
-                                            found->assignment->useDrawingGeometry &&
-                                            found->assignment->die.drawing.has_value();
-                                        valid &= p->usesDrawingPunch() == drawingPunch &&
-                                                 p->usesDrawingDie() == drawingDie &&
-                                                 p->otherFormedBends() == order.size();
-                                        valid &= p->machineModel() ==
-                                                 (request.withTools ? found->tools->machineModel
-                                                                    : core::MachineModel::None);
-                                        valid &=
-                                            p->floorChecked() ==
-                                            (p->machineModel() == core::MachineModel::DemoPressV3);
-                                        for (std::size_t f = 0; f < p->frameCount(); ++f)
-                                            valid &= !p->machineCollisionAtFrame(f);
-                                        if (request.withTools) {
-                                            valid &= !found->tools->backgauge ||
-                                                     (p->backgauge() &&
-                                                      p->backgauge()->setup ==
-                                                          *found->tools->backgauge &&
-                                                      p->backgauge()->status ==
-                                                          BackgaugeStatus::Checked);
-                                            const auto *ret = p->punchRetraction();
-                                            valid &= p->frameCount() >= 2 && p->toolSetup() &&
-                                                     p->toolSetup()->tools == *found->tools &&
-                                                     core::punchLengthMm(*found->tools) +
-                                                             document->metadata()
-                                                                 .bendAnalysis.lengthToleranceMm >=
-                                                         p->model().widthMm &&
-                                                     found->tools->lengthMm +
-                                                             document->metadata()
-                                                                 .bendAnalysis.lengthToleranceMm >=
-                                                         p->model().widthMm &&
-                                                     p->pressState(0) &&
-                                                     p->pressState(0)->phase ==
-                                                         simulation::PressPhase::Approach &&
-                                                     p->pressState(p->frameCount() - 1) &&
-                                                     p->pressState(p->frameCount() - 1)->phase ==
-                                                         simulation::PressPhase::Retracting &&
-                                                     ret && std::isfinite(ret->liftMm) &&
-                                                     ret->liftMm > 0 &&
-                                                     std::isfinite(ret->finalClearanceMm) &&
-                                                     ret->finalClearanceMm > 0;
-                                        }
-                                    }
-                                    order.push_back(step.id);
-                                    order.insert(order.end(), memberIds.begin(), memberIds.end());
-                                }
-                            valid &= ids.size() == request.operations.size();
-                            valid &= *route && (*route)->partialEndSupport == partialEndSupport;
-                            if (valid) {
-                                auto candidate = s->session;
-                                if (request.withTools)
-                                    for (const auto &op : request.operations) {
-                                        if (op.assignment)
-                                            valid &= candidate.setBendToolAssignment(
-                                                op.bendIndex, *op.assignment);
-                                        else
-                                            valid &= candidate.setBendTools(op.bendIndex, op.tools);
-                                    }
-                                for (const auto &step : (*route)->steps)
-                                    if (request.withTools || !step.additionalBends.empty()) {
-                                        valid &= candidate.setBendWorkpieceOrientation(
-                                            step.bendIndex, step.fixedSecond);
-                                        if (request.withTools)
-                                            valid &= candidate.setBendWorkpieceOffset(
-                                                step.bendIndex, step.preview->workpieceOffsetMm());
-                                        for (const auto &member : step.additionalBends) {
-                                            valid &= candidate.setBendWorkpieceOrientation(
-                                                member.bendIndex, member.workpieceReversed);
-                                            if (request.withTools)
-                                                valid &= candidate.setBendWorkpieceOffset(
-                                                    member.bendIndex, member.workpieceOffsetMm);
-                                        }
-                                    }
-                                valid &= candidate.setBendOrder(order);
-                                if (valid)
-                                    s->session = std::move(candidate);
-                            }
-                            if (valid) {
+                            if (applyBendRouteResult(s->session, std::move(request), *route)) {
                                 s->route = *route;
                                 s->routeRevision = revision;
                                 s->routeEditRevision = s->session.editRevision();
@@ -1353,16 +1180,26 @@ bool ImportController::isPreparingPreview() const {
 } // namespace bending::ui
 
 namespace bending::ui {
+bool ImportController::canPrepareDrawing() const {
+    const auto &s = *impl_;
+    return !s.stopping && !s.running && !s.preparingDrawing && !s.pending && !s.pendingDraft &&
+           s.session.document() && !s.session.activeRequest();
+}
+
 bool ImportController::prepareDrawing(
     std::shared_ptr<const application::BendingDrawingBuilder> builder,
     application::DrawingRequest request) {
-    if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
+    if (!builder || !canPrepareDrawing())
         return false;
     auto *state = impl_.get();
     request.manualThicknessMm = state->session.manualThicknessMm();
     request.unfoldSettings = state->session.unfoldSettings();
     request.preparedFlatPattern = state->flat;
-    if (state->drawing && state->drawingRequest == request) {
+    request.preparedFlatError.reset();
+    if (state->drawing && state->drawingRequest == request &&
+        (!request.preparedFlatPattern ||
+         state->drawing->preparedFlatPattern == request.preparedFlatPattern) &&
+        (!state->activeFlat || state->drawing->preparedFlatPattern)) {
         emit stateChanged();
         return true;
     }
@@ -1372,50 +1209,77 @@ bool ImportController::prepareDrawing(
     const auto document = state->session.document();
     const auto revision = state->session.revision();
     const auto editRevision = state->session.editRevision();
-    request.manualThicknessMm = state->session.manualThicknessMm();
-    state->beginForeground();
+    auto flatJob = state->activeFlat;
+    if (flatJob &&
+        (flatJob->document != document || flatJob->revision != revision ||
+         flatJob->request != state->currentFlatRequest() || flatJob->stop.stop_requested()))
+        flatJob.reset();
+    state->beginForeground(nullptr, bool(flatJob));
     const auto stop = state->stop.get_token();
-    state->running = true;
     state->preparingDrawing = true;
-    QMetaObject::invokeMethod(
-        state->worker,
-        [state, builder = std::move(builder), request, id, document, revision, editRevision, stop] {
-            application::DrawingResult result = application::DrawingError{"Drawing failed"};
-            try {
-                result = builder->build(document, request, stop);
-            } catch (const std::exception &e) {
-                result = application::DrawingError{e.what()};
-            } catch (...) {
-                result = application::DrawingError{"Unexpected drawing failure"};
-            }
-            QMetaObject::invokeMethod(
-                state->owner,
-                [state, result = std::move(result), id, revision, editRevision, stop] {
-                    state->running = false;
-                    state->preparingDrawing = false;
-                    if (state->stopping)
-                        return;
-                    if (!stop.stop_requested() && id == state->drawingId &&
-                        revision == state->session.revision() &&
-                        editRevision == state->session.editRevision() &&
-                        !state->session.activeRequest()) {
-                        if (const auto *drawing =
-                                std::get_if<application::BendingDrawingPtr>(&result)) {
-                            if (*drawing && application::drawingScale(**drawing))
-                                state->drawing = *drawing;
-                            else
-                                state->drawingError =
-                                    application::DrawingError{"Invalid drawing snapshot"};
-                        } else {
-                            state->drawingError = std::get<application::DrawingError>(result);
-                        }
+    auto submit = [state, builder = std::move(builder), request = std::move(request), id, document,
+                   revision, editRevision, stop](const FlatPatternResult *prepared) mutable {
+        if (prepared) {
+            if (const auto *flat = std::get_if<FlatPatternPtr>(prepared))
+                request.preparedFlatPattern = *flat;
+            else
+                request.preparedFlatError = std::get<FlatPatternError>(*prepared);
+        }
+        state->running = true;
+        QMetaObject::invokeMethod(
+            state->worker,
+            [state, builder = std::move(builder), request = std::move(request), id, document,
+             revision, editRevision, stop] {
+                application::DrawingResult result = application::DrawingError{"Cancelled", true};
+                if (!stop.stop_requested()) {
+                    try {
+                        result = builder->build(document, request, stop);
+                    } catch (const std::exception &e) {
+                        result = application::DrawingError{e.what()};
+                    } catch (...) {
+                        result = application::DrawingError{"Unexpected drawing failure"};
                     }
-                    state->dispatch();
-                    emit state->owner->stateChanged();
-                },
-                Qt::QueuedConnection);
-        },
-        Qt::QueuedConnection);
+                }
+                QMetaObject::invokeMethod(
+                    state->owner,
+                    [state, result = std::move(result), id, revision, editRevision, stop] {
+                        state->running = false;
+                        state->preparingDrawing = false;
+                        if (state->stopping)
+                            return;
+                        if (!stop.stop_requested() && id == state->drawingId &&
+                            revision == state->session.revision() &&
+                            editRevision == state->session.editRevision() &&
+                            !state->session.activeRequest()) {
+                            if (const auto *drawing =
+                                    std::get_if<application::BendingDrawingPtr>(&result)) {
+                                if (*drawing && application::drawingScale(**drawing)) {
+                                    state->drawing = *drawing;
+                                    const auto inputs = state->currentFlatRequest();
+                                    if (!state->flat &&
+                                        Impl::validFlat((*drawing)->preparedFlatPattern, inputs)) {
+                                        state->flat = (*drawing)->preparedFlatPattern;
+                                        state->flatRequest = inputs;
+                                        state->flatError.reset();
+                                    }
+                                } else
+                                    state->drawingError =
+                                        application::DrawingError{"Invalid drawing snapshot"};
+                            } else {
+                                state->drawingError = std::get<application::DrawingError>(result);
+                            }
+                        }
+                        state->dispatch();
+                        emit state->owner->stateChanged();
+                    },
+                    Qt::QueuedConnection);
+            },
+            Qt::QueuedConnection);
+    };
+    if (flatJob)
+        state->drawingAfterFlat = std::move(submit);
+    else
+        submit(nullptr);
     emit stateChanged();
     return true;
 }
@@ -1468,72 +1332,96 @@ bool ImportController::setUnfoldSettings(core::UnfoldSettings settings) {
     emit stateChanged();
     return changed;
 }
-bool ImportController::prepareFlatPattern(
-    std::shared_ptr<const application::FlatPatternBuilder> builder) {
-    if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
-        return false;
-    auto *s = impl_.get();
-    const application::FlatPatternRequest request{s->session.unfoldSettings(),
-                                                  s->session.manualThicknessMm()};
-    if (s->flat && s->flatRequest == request) {
-        emit stateChanged();
-        return true;
-    }
-    s->invalidateFlat();
-    s->flatRequest = request;
-    const auto id = s->flatId, revision = s->session.revision();
-    const auto document = s->session.document();
-    s->beginForeground();
-    const auto stop = s->stop.get_token();
-    s->running = true;
-    s->preparingFlat = true;
+void ImportController::Impl::startFlat(std::shared_ptr<const FlatPatternBuilder> builder,
+                                       bool show) {
+    cancelPrefetch();
+    auto job = std::make_shared<FlatJob>(
+        FlatJob{session.document(), currentFlatRequest(), session.revision(), {}, show});
+    activeFlat = job;
+    flatRequest = job->request;
+    flatError.reset();
     QMetaObject::invokeMethod(
-        s->worker,
-        [s, builder = std::move(builder), id, revision, document, request, stop] {
-            application::FlatPatternResult result = application::FlatPatternError{
-                application::FlatPatternErrorCode::Failed, "Flat pattern failed"};
-            try {
-                result = builder->build(document, request, stop);
-            } catch (const std::exception &e) {
-                result = application::FlatPatternError{application::FlatPatternErrorCode::Failed,
-                                                       e.what()};
-            } catch (...) {
-                result = application::FlatPatternError{application::FlatPatternErrorCode::Failed,
-                                                       "Unexpected flat pattern failure"};
+        worker,
+        [this, job, builder = std::move(builder)] {
+            const auto token = job->stop.get_token();
+            FlatPatternResult result =
+                FlatPatternError{FlatPatternErrorCode::Cancelled, "Cancelled"};
+            if (!token.stop_requested()) {
+                try {
+                    result = builder->build(job->document, job->request, token);
+                    if (const auto *pattern = std::get_if<FlatPatternPtr>(&result);
+                        pattern && !validFlat(*pattern, job->request))
+                        result =
+                            FlatPatternError{FlatPatternErrorCode::Failed, "Empty flat pattern"};
+                } catch (const std::exception &e) {
+                    result = FlatPatternError{FlatPatternErrorCode::Failed, e.what()};
+                } catch (...) {
+                    result = FlatPatternError{FlatPatternErrorCode::Failed,
+                                              "Unexpected flat pattern failure"};
+                }
             }
             QMetaObject::invokeMethod(
-                s->owner,
-                [s, id, revision, result = std::move(result), stop] {
-                    s->running = false;
-                    s->preparingFlat = false;
-                    if (s->stopping)
+                owner,
+                [this, job, token, result = std::move(result)] {
+                    if (stopping || activeFlat != job)
                         return;
-                    if (!stop.stop_requested() && id == s->flatId &&
-                        revision == s->session.revision() && !s->session.activeRequest()) {
-                        if (const auto *flat = std::get_if<application::FlatPatternPtr>(&result);
-                            flat && *flat &&
-                            (*flat)->info().settings == s->session.unfoldSettings() &&
-                            std::isfinite((*flat)->info().thicknessMm) &&
-                            (*flat)->info().thicknessMm > 0 &&
-                            std::isfinite((*flat)->info().bounds.maximum.x) &&
-                            (*flat)->info().bounds.maximum.x > 0 &&
-                            std::isfinite((*flat)->info().bounds.maximum.y) &&
-                            (*flat)->info().bounds.maximum.y > 0)
-                            s->flat = *flat;
-                        else if (const auto *error =
-                                     std::get_if<application::FlatPatternError>(&result))
-                            s->flatError = *error;
-                        else
-                            s->flatError = application::FlatPatternError{
-                                application::FlatPatternErrorCode::Failed, "Empty flat pattern"};
+                    activeFlat.reset();
+                    if (!token.stop_requested() && job->document == session.document() &&
+                        job->revision == session.revision() &&
+                        job->request == currentFlatRequest() && !session.activeRequest()) {
+                        if (const auto *pattern = std::get_if<FlatPatternPtr>(&result))
+                            flat = *pattern;
+                        else if (job->show)
+                            flatError = std::get<FlatPatternError>(result);
+                        if (auto submit = std::exchange(drawingAfterFlat, {}))
+                            submit(&result);
+                    } else if (drawingAfterFlat) {
+                        invalidateDrawing();
                     }
-                    s->dispatch();
-                    emit s->owner->stateChanged();
+                    dispatch();
+                    dispatchPrefetch();
+                    emit owner->stateChanged();
                 },
                 Qt::QueuedConnection);
         },
         Qt::QueuedConnection);
-    emit stateChanged();
+    if (show)
+        emit owner->stateChanged();
+}
+
+bool ImportController::canPrepareFlatPattern() const {
+    const auto &s = *impl_;
+    return !s.stopping && s.session.document() && !s.session.activeRequest() &&
+           (!hasWork() || s.activeFlat || (s.preparingDrawing && s.flat));
+}
+
+bool ImportController::prepareFlatPattern(std::shared_ptr<const FlatPatternBuilder> builder) {
+    if (!builder || !canPrepareFlatPattern())
+        return false;
+    auto *s = impl_.get();
+    if (s->flat && s->flatRequest == s->currentFlatRequest()) {
+        emit stateChanged();
+        return true;
+    }
+    if (s->activeFlat) {
+        s->activeFlat->show = true;
+        emit stateChanged();
+        return true;
+    }
+    s->startFlat(std::move(builder), true);
+    return true;
+}
+
+bool ImportController::prefetchFlatPattern(std::shared_ptr<const FlatPatternBuilder> builder) {
+    auto *s = impl_.get();
+    if (s->stopping || hasWork() || !builder || !s->session.hasPartInputs() ||
+        s->session.activeRequest() || s->activeFlat || s->activePrefetch || s->pendingPrefetch ||
+        s->flatRequest == s->currentFlatRequest())
+        return false;
+    const auto &analysis = s->session.document()->metadata().bendAnalysis;
+    if (analysis.status != BendRecognitionStatus::Completed || analysis.bends.empty())
+        return false;
+    s->startFlat(std::move(builder), false);
     return true;
 }
 application::FlatPatternPtr ImportController::flatPattern() const {
@@ -1543,6 +1431,6 @@ std::optional<application::FlatPatternError> ImportController::flatPatternError(
     return impl_->flatError;
 }
 bool ImportController::isPreparingFlatPattern() const {
-    return impl_->preparingFlat;
+    return impl_->activeFlat && impl_->activeFlat->show;
 }
 } // namespace bending::ui

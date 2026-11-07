@@ -26,6 +26,10 @@ struct BendSection {
     double angleRadians;
     std::optional<double> innerRadiusMm; // Infinite/unrepresentable radius in the flat limit.
 };
+// Outside free end -> virtual intersection of the two outer walls -> outside free end.
+// A flat/parallel section has no finite geometric corner.
+[[nodiscard]] std::optional<std::array<Point2Mm, 3>>
+outsideFlangePoints(const BendSection &) noexcept;
 [[nodiscard]] bool validSingleBend(const SingleBend &model) noexcept;
 [[nodiscard]] double bendAllowanceMm(const SingleBend &model) noexcept;
 [[nodiscard]] double blankLengthMm(const SingleBend &model) noexcept;

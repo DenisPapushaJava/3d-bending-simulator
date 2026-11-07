@@ -1,5 +1,7 @@
 #include "DrawingLayoutChecks.h"
 #include "DrawingLayoutController.h"
+#include "DrawingPaginationChecks.h"
+#include "DrawingSheetInternal.h"
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QPaintEngine>
@@ -213,17 +215,21 @@ void unevenProjectionDimensions() {
     check(ui::DrawingSheet::compose(d, choices));
     for (auto &choice : choices)
         choice.scale = .2;
-    bool rejected = false;
+    std::shared_ptr<const ui::DrawingSheetPlan> enlarged;
     try {
-        (void)ui::DrawingSheet::compose(d, choices);
+        enlarged = ui::DrawingSheet::compose(d, choices);
     } catch (const std::runtime_error &e) {
         const auto error = QString::fromUtf8(e.what());
-        rejected = error.contains(QStringLiteral("Связанные виды")) &&
-                   (error.contains(QStringLiteral("Главный вид")) ||
-                    error.contains(QStringLiteral("Вид сверху")) ||
-                    error.contains(QStringLiteral("Вид слева")));
+        require(error.contains(QStringLiteral("Связанные виды")),
+                "Wrong oversized-view diagnostic");
     }
-    require(rejected, "Fixed oversized scale was silently reduced or named the wrong view");
+    if (enlarged) {
+        require(enlarged->views.size() == 3,
+                "Oversized group dropped a projection while splitting");
+        for (const auto &at : enlarged->views)
+            require(at.scale == .2, "Oversized group silently reduced its explicit scale");
+        verifyRecordedDimensions(*d, *enlarged);
+    }
 }
 void sameLayout(const ui::DrawingSheetPlan &a, const ui::DrawingSheetPlan &b) {
     require(a.source == b.source && a.pages == b.pages && a.views.size() == b.views.size() &&
@@ -236,7 +242,8 @@ void sameLayout(const ui::DrawingSheetPlan &a, const ui::DrawingSheetPlan &b) {
         const auto &y = b.views[i];
         require(x.key == y.key && x.page == y.page && x.area == y.area && x.centre == y.centre &&
                     x.scale == y.scale && x.selectionBounds == y.selectionBounds &&
-                    x.dimensions.size() == y.dimensions.size(),
+                    x.dimensions.size() == y.dimensions.size() &&
+                    x.compactDimensions == y.compactDimensions && x.sheetLinks == y.sheetLinks,
                 "Fit reuse changed a view or reused another item's placement");
         for (std::size_t j = 0; j < x.dimensions.size(); ++j) {
             const auto &m = x.dimensions[j];
@@ -331,6 +338,201 @@ void fitCache() {
     const auto error = failure({});
     require(!error.empty() && error == failure(disabled),
             "Fit reuse hid an impossible explicit scale or changed its diagnostic");
+}
+void references() {
+    using namespace application;
+    using namespace ui;
+    auto d = std::make_shared<BendingDrawing>();
+    for (auto &v : d->views) {
+        v.minimum = {0, 0};
+        v.maximum = {120, 80};
+        v.paths = {{{{0, 0}, {120, 0}, {120, 80}, {0, 80}, {0, 0}}, false}};
+    }
+    d->bends.resize(2);
+    for (std::size_t i = 0; i < 2; ++i) {
+        DrawingSection section;
+        section.designation = i ? "Б" : "А";
+        section.view = d->views[0];
+        d->sections.push_back(section);
+        d->details.push_back({d->views[0], i, i ? "А2" : "А1"});
+    }
+    DrawingProfile profile;
+    profile.designation = "П1";
+    profile.view = d->views[0];
+    d->profiles.push_back(profile);
+    d->auxiliaryViews.push_back({d->views[0], "Ц", 1});
+    auto &source = d->views[0];
+    source.sectionMarkers = {{{40, 0}, {40, 80}, {-1, 0}, "А"},
+                             {{80, 0}, {80, 80}, {-1, 0}, "Б"},
+                             {{90, 0}, {90, 80}, {-1, 0}, "Б"}};
+    source.labels = {{{60, 10}, "П1"}, {{60, 70}, "Примечание"}};
+    source.detailLocators = {{{20, 40}, 8, "А1"}, {{20, 40}, 16, "А2"}};
+    source.circleCenters = {{{30, 30}, 3}};
+    source.viewArrows = {{{120, 40}, {-1, 0}, "Ц"}};
+    std::vector<DrawingViewChoice> choices{
+        {{DrawingViewKind::Projection, 0}},      {{DrawingViewKind::Section, 0}},
+        {{DrawingViewKind::Section, 1}, false},  {{DrawingViewKind::Detail, 0}},
+        {{DrawingViewKind::Detail, 1}, false},   {{DrawingViewKind::Profile, 0}, false},
+        {{DrawingViewKind::Auxiliary, 0}, false}};
+    const auto key = DrawingViewKey{DrawingViewKind::Projection, 0};
+    const auto selected = drawing::selectedView(*d, key, &choices);
+    require(selected.sectionMarkers.size() == 1 && selected.sectionMarkers[0].designation == "А" &&
+                selected.labels.size() == 1 && selected.labels[0].second == "Примечание" &&
+                selected.detailLocators.size() == 1 &&
+                selected.detailLocators[0].designation == "А1" &&
+                selected.detailLocators[0].radius == 8 && selected.viewArrows.empty() &&
+                selected.circleCenters.size() == 1 && selected.paths.size() == source.paths.size(),
+            "Disabled destination retained a marker or erased geometry/unrelated text");
+    auto reversed = choices;
+    for (auto &choice : reversed)
+        choice.visible = !choice.visible;
+    const auto alternate = drawing::selectedView(*d, key, &reversed);
+    require(alternate.sectionMarkers.size() == 2 && alternate.labels.size() == 2 &&
+                alternate.labels[0].second == "П1" && alternate.detailLocators.size() == 1 &&
+                alternate.detailLocators[0].designation == "А2" &&
+                alternate.detailLocators[0].radius == 16 && alternate.viewArrows.size() == 1,
+            "Related markers did not follow their individual destinations");
+    const std::vector<DrawingViewChoice> onlySource{{key}};
+    const auto none = drawing::selectedView(*d, key, &onlySource);
+    require(none.sectionMarkers.empty() && none.detailLocators.empty() && none.viewArrows.empty() &&
+                none.labels.size() == 1 && none.labels[0].second == "Примечание",
+            "Omitted destinations differ from unchecked destinations");
+    // Classical preparation can restore locators from the original projection.
+    // Selection is applied afterwards, so restoration cannot resurrect a hidden one.
+    d->classicalViews = std::array{d->views[0], d->views[1], d->views[2]};
+    (*d->classicalViews)[0].labels.clear();
+    (*d->classicalViews)[0].detailLocators.clear();
+    const auto classical = drawing::selectedView(*d, key, &choices);
+    require(classical.labels.empty() && classical.detailLocators.size() == 1 &&
+                classical.detailLocators[0].designation == "А1" &&
+                classical.detailLocators[0].radius == 8 && classical.sectionMarkers.size() == 1,
+            "Classical locator restoration borrowed a circle from the coincident detail");
+    const auto classicalAlternate = drawing::selectedView(*d, key, &reversed);
+    require(classicalAlternate.detailLocators.size() == 1 &&
+                classicalAlternate.detailLocators[0].designation == "А2" &&
+                classicalAlternate.detailLocators[0].radius == 16,
+            "Classical locator restoration lost the second coincident detail");
+    auto all = DrawingSheet::defaultViews(*d);
+    const auto defaultVisible = [](const auto &choice) {
+        return choice.key.kind == DrawingViewKind::Projection ||
+               choice.key.kind == DrawingViewKind::Section ||
+               choice.key.kind == DrawingViewKind::Isometric;
+    };
+    require(all.size() == 10 && std::all_of(all.begin(), all.end(),
+                                            [&](const auto &choice) {
+                                                return choice.visible == defaultVisible(choice);
+                                            }),
+            "Default choices omitted a destination or enabled an optional view");
+    const auto standard = drawing::selectedView(*d, key, &all);
+    require(standard.sectionMarkers.size() == 3 && standard.detailLocators.empty() &&
+                standard.viewArrows.empty(),
+            "Default choices retained references to optional views");
+    for (auto &choice : all)
+        choice.visible = true;
+    const auto complete = drawing::selectedView(*d, key, &all);
+    const auto original = drawing::preparedView(*d, key);
+    require(complete.sectionMarkers.size() == original.sectionMarkers.size() &&
+                complete.detailLocators.size() == 2 && original.detailLocators.size() == 2 &&
+                complete.labels.size() == original.labels.size() &&
+                complete.viewArrows.size() == original.viewArrows.size(),
+            "Visible references changed the original annotation set");
+    require(source.sectionMarkers.size() == 3 && source.labels.size() == 2 &&
+                source.detailLocators.size() == 2 && source.viewArrows.size() == 1,
+            "Reference filtering mutated the immutable CAD snapshot");
+
+    auto pair = choices;
+    pair[1].visible = false;
+    pair[4].visible = true;
+    DrawingTitle pairedTitle;
+    pairedTitle.plan = DrawingSheet::compose(d, pair);
+    const auto parentView =
+        std::find_if(pairedTitle.plan->views.begin(), pairedTitle.plan->views.end(),
+                     [&](const auto &at) { return at.key == key; });
+    require(parentView != pairedTitle.plan->views.end(), "Missing detail parent projection");
+    Device pairedDevice(96);
+    {
+        QPainter painter(&pairedDevice);
+        DrawingSheet::paint(painter, *d, pairedTitle, parentView->page);
+    }
+    const auto centre = parentView->centre + QPointF(-40 * parentView->scale, 0);
+    for (const auto &locator : source.detailLocators) {
+        const double radius = std::max(2.5, locator.radius * parentView->scale);
+        require(pairedDevice.engine.texts[QString::fromStdString(locator.designation)] == 1 &&
+                    std::any_of(pairedDevice.engine.lines.begin(), pairedDevice.engine.lines.end(),
+                                [&](const auto &line) {
+                                    return std::abs(QLineF(centre, line.p1()).length() - radius) <
+                                               1e-4 &&
+                                           QLineF(centre, line.p2()).length() > radius + 1 &&
+                                           std::abs(line.dx()) > 1e-3 && std::abs(line.dy()) > 1e-3;
+                                }),
+                "Concentric detail leader did not connect its own circle to a slanted line");
+    }
+
+    // The same policy must reach fit probes, recordings, preview and PDF. Keep
+    // one true section marker; all local detail locators are disabled here.
+    choices[3].visible = false;
+    const auto enabled = DrawingSheet::compose(d, choices);
+    DrawingTitle title;
+    title.plan = enabled;
+    Device with(96);
+    {
+        QPainter painter(&with);
+        for (int page = 0; page < enabled->pages; ++page)
+            DrawingSheet::paint(painter, *d, title, page);
+    }
+    require(with.engine.texts[QStringLiteral("А")] == 2 &&
+                with.engine.texts[QStringLiteral("Б")] == 0 &&
+                with.engine.texts[QStringLiteral("А1")] == 0 &&
+                with.engine.texts[QStringLiteral("А2")] == 0,
+            "Vector recording retained disabled callouts");
+    choices[1].visible = false;
+    const auto disabled = DrawingSheet::compose(d, choices);
+    title.plan = disabled;
+    Device without(96);
+    {
+        QPainter painter(&without);
+        for (int page = 0; page < disabled->pages; ++page)
+            DrawingSheet::paint(painter, *d, title, page);
+    }
+    require(without.engine.texts[QStringLiteral("А")] == 0 &&
+                without.engine.texts[QStringLiteral("Б")] == 0,
+            "Hidden section left arrows/letters in the recorded parent");
+    DrawingLayoutLimits reference;
+    reference.maximumCachedFits = 0;
+    sameLayout(*disabled, *DrawingSheet::compose(d, choices, {}, {}, reference));
+    choices[1].visible = true;
+    sameLayout(*enabled, *DrawingSheet::compose(d, choices));
+    auto paginated = std::make_shared<BendingDrawing>(*d);
+    auto &large = paginated->sections[0].view;
+    large.maximum = {300, 150};
+    large.paths = {{{{0, 0}, {300, 0}, {300, 150}, {0, 150}, {0, 0}}, false}};
+    auto fixed = choices;
+    for (auto &choice : fixed)
+        choice.scale = 1;
+    const auto multiPage = DrawingSheet::compose(paginated, fixed);
+    require(multiPage->pages >= 2, "Reference fixture did not separate source and target sheets");
+    const auto parent = std::find_if(multiPage->views.begin(), multiPage->views.end(),
+                                     [&](const auto &at) { return at.key == key; });
+    require(parent != multiPage->views.end(), "Cross-sheet source missing");
+    title.plan = multiPage;
+    Device crossSheet(96);
+    {
+        QPainter painter(&crossSheet);
+        DrawingSheet::paint(painter, *paginated, title, parent->page);
+    }
+    require(crossSheet.engine.texts[QStringLiteral("А")] == 2,
+            "A section on another sheet lost its parent marker");
+    if (const auto prefix = qEnvironmentVariable("BENDING_DRAWING_REFERENCES_OUTPUT");
+        !prefix.isEmpty()) {
+        title.plan = enabled;
+        require(DrawingSheet::writePdf(prefix + "-enabled.pdf", *d, title).isEmpty(),
+                "Cannot write selected-reference PDF");
+        title.plan = disabled;
+        require(DrawingSheet::writePdf(prefix + "-disabled.pdf", *d, title).isEmpty(),
+                "Cannot write hidden-reference PDF");
+        require(DrawingSheet::preview(*d, title, 0).save(prefix + "-preview.png"),
+                "Cannot write hidden-reference preview");
+    }
 }
 void worker() {
     struct Gate {
@@ -493,9 +695,18 @@ void verifyRecordedDimensions(const bending::application::BendingDrawing &drawin
     }
 }
 
+void verifySameDrawingLayout(const bending::ui::DrawingSheetPlan &a,
+                             const bending::ui::DrawingSheetPlan &b) {
+    sameLayout(a, b);
+}
+void drawingReferenceChecks() {
+    references();
+}
 void drawingLayoutChecks() {
+    references();
     limits();
     unevenProjectionDimensions();
+    drawingPaginationChecks();
     fitCache();
     worker();
 }

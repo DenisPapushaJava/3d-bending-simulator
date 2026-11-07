@@ -169,7 +169,7 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                                   const TopTools_IndexedMapOfShape &faces,
                                   const TopTools_IndexedDataMapOfShapeListOfShape &neighbors,
                                   double tolerance) {
-    BRepAdaptor_Surface surface(face, true);
+    BRepAdaptor_Surface surface(face, false);
     const auto cylinder = surface.Cylinder();
     double u0, u1, v0, v1;
     BRepTools::UVBounds(face, u0, u1, v0, v1);
@@ -226,7 +226,7 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
             return {};
         }
         const auto &other = adjacent.First().IsSame(face) ? adjacent.Last() : adjacent.First();
-        BRepAdaptor_Surface otherSurface(TopoDS::Face(other), true);
+        BRepAdaptor_Surface otherSurface(TopoDS::Face(other), false);
         BRepAdaptor_Curve curve(edge);
         if (curve.GetType() == GeomAbs_Line &&
             parallel(curve.Line().Direction(), cylinder.Axis().Direction())) {
@@ -316,8 +316,7 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     if (inner.outward || !outer.outward || thickness <= 20.0 * tolerance ||
         !parallel(inner.cylinder.Axis().Direction(), outer.cylinder.Axis().Direction()) ||
         gp_Lin(inner.cylinder.Axis()).Distance(outer.cylinder.Location()) > tolerance ||
-        std::abs(inner.angle - outer.angle) > angularTolerance ||
-        std::abs(inner.length - outer.length) > tolerance || inner.caps != outer.caps ||
+        std::abs(inner.angle - outer.angle) > angularTolerance || inner.caps != outer.caps ||
         !inner.middleRadial.IsEqual(outer.middleRadial, angularTolerance)) {
         return {};
     }
@@ -335,7 +334,10 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     const auto outerCore = coreInterval(outer);
     const double straightLength =
         std::min(innerCore[1], outerCore[1]) - std::max(innerCore[0], outerCore[0]);
-    if ((!sameEnds && !reversedEnds) || straightLength <= 20.0 * tolerance) {
+    const bool sameSpan =
+        (sameEnds || reversedEnds) && std::abs(inner.length - outer.length) <= tolerance;
+    if ((!sameSpan && !inner.trimmedEnds && !outer.trimmedEnds) ||
+        straightLength <= 20.0 * tolerance) {
         return {};
     }
     std::array<std::size_t, 4> flanges{};
@@ -356,6 +358,15 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     // Canonical axis direction independent of the surface parametrisation.
     auto start = inner.start;
     auto end = inner.end;
+    if (!sameSpan) {
+        // A shared oblique cap can reach different axial coordinates at the
+        // two radii. Keep the full occupied span, not just the inner skin.
+        const double outerA = gp_Vec(inner.start, outer.start).Dot(axis);
+        const double outerB = gp_Vec(inner.start, outer.end).Dot(axis);
+        start = inner.start.Translated(axis * std::min({0., outerA, outerB}));
+        end = inner.start.Translated(axis * std::max({inner.length, outerA, outerB}));
+    }
+    const double fullLength = sameSpan ? inner.length : start.Distance(end);
     const gp_Vec direction(start, end);
     const std::array<double, 3> components{direction.X(), direction.Y(), direction.Z()};
     for (const auto value : components) {
@@ -368,7 +379,7 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     }
     return RecognizedBend{point(start),  point(end),
                           inner.angle,   inner.cylinder.Radius(),
-                          thickness,     inner.length,
+                          thickness,     fullLength,
                           inner.face,    outer.face,
                           flanges,       inner.trimmedEnds || outer.trimmedEnds,
                           straightLength};
@@ -399,24 +410,49 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
         TopTools_IndexedMapOfShape faces, edges;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
         TopExp::MapShapes(shape, TopAbs_EDGE, edges);
-        if (faces.Extent() > 512 || edges.Extent() > 2048) {
+        const bool large = faces.Extent() > 512 || edges.Extent() > 2048;
+        if (faces.Extent() > 4096 || edges.Extent() > 16384) {
+            result.status = BendRecognitionStatus::LimitReached;
+            return result;
+        }
+        std::vector<int> candidates;
+        constexpr std::size_t maximumLargeCandidates = 128;
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            if (stop.stop_requested())
+                return {};
+            const auto &face = TopoDS::Face(faces(i));
+            if (BRepAdaptor_Surface(face, false).GetType() != GeomAbs_Cylinder)
+                continue;
+            ++result.unrecognizedCylindricalFaces;
+            if (large) {
+                double u0, u1, v0, v1;
+                BRepTools::UVBounds(face, u0, u1, v0, v1);
+                // Whole cylindrical hole walls cannot form an open bend sector.
+                const double angle = u1 - u0;
+                if (!std::isfinite(angle) || angle < minimumAngle || angle > maximumAngle)
+                    continue;
+                if (candidates.size() == maximumLargeCandidates) {
+                    result.status = BendRecognitionStatus::LimitReached;
+                    return result;
+                }
+            }
+            candidates.push_back(i);
+        }
+        if (large && candidates.empty()) {
             result.status = BendRecognitionStatus::LimitReached;
             return result;
         }
         TopTools_IndexedDataMapOfShapeListOfShape neighbors;
         TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, neighbors);
         std::vector<Patch> patches;
-        for (int i = 1; i <= faces.Extent(); ++i) {
+        for (const int i : candidates) {
             if (stop.stop_requested()) {
                 return BendAnalysis{};
             }
             const auto &face = TopoDS::Face(faces(i));
-            if (BRepAdaptor_Surface(face, true).GetType() == GeomAbs_Cylinder) {
-                ++result.unrecognizedCylindricalFaces;
-                if (const auto patch = inspectPatch(face, static_cast<std::size_t>(i), faces,
-                                                    neighbors, result.lengthToleranceMm)) {
-                    patches.push_back(*patch);
-                }
+            if (const auto patch = inspectPatch(face, static_cast<std::size_t>(i), faces, neighbors,
+                                                result.lengthToleranceMm)) {
+                patches.push_back(*patch);
             }
         }
         // Do not silently choose a partner if a patch has several matching surfaces.

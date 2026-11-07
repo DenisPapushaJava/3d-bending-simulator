@@ -57,6 +57,13 @@ class DocumentSession final {
         return bendBindings_;
     }
     [[nodiscard]] const BendPreparation *bend(std::size_t recognizedIndex) const;
+    bool setDrawingSettings(std::uint64_t revision, ProjectDrawingSettings);
+    [[nodiscard]] const std::optional<ProjectDrawingSettings> &drawingSettings() const {
+        return drawing_;
+    }
+    [[nodiscard]] std::uint64_t drawingRevision() const {
+        return drawingRevision_;
+    }
     bool markSaved(std::uint64_t editRevision, std::filesystem::path path);
     [[nodiscard]] const std::optional<double> &manualThicknessMm() const {
         return manualThickness_;
@@ -101,5 +108,7 @@ class DocumentSession final {
     std::vector<BendPreparation> bends_;
     BendBindings bendBindings_;
     core::UnfoldSettings unfold_;
+    std::optional<ProjectDrawingSettings> drawing_;
+    std::uint64_t drawingRevision_ = 0;
 };
 } // namespace bending::application

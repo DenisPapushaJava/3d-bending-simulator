@@ -1,5 +1,6 @@
 #pragma once
 #include "bending/application/Document.h"
+#include "bending/application/ModelMeasurements.h"
 #include "bending/core/UnfoldRule.h"
 #include <cmath>
 #include <optional>
@@ -34,6 +35,7 @@ struct FlatPatternInfo {
     bool cutoutsIgnored = false;
     // Source material side A after unfolding; unknown must not invent a side.
     std::optional<bool> positiveZIsSideA = {};
+    std::shared_ptr<const ModelMeasurements> measurements = {};
 };
 class FlatPattern {
   public:

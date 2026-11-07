@@ -25,7 +25,7 @@
 namespace bending::cad {
 namespace {
 gp_Vec normal(const TopoDS_Face &face) {
-    auto n = gp_Vec(BRepAdaptor_Surface(face).Plane().Axis().Direction());
+    auto n = gp_Vec(BRepAdaptor_Surface(face, false).Plane().Axis().Direction());
     return face.Orientation() == TopAbs_REVERSED ? -n : n;
 }
 bool on(const TopoDS_Face &face, gp_Pnt p, double tolerance) {
@@ -33,7 +33,7 @@ bool on(const TopoDS_Face &face, gp_Pnt p, double tolerance) {
     return test.State() == TopAbs_IN || test.State() == TopAbs_ON;
 }
 bool sameSurface(const TopoDS_Face &a, const TopoDS_Face &b, double tolerance) {
-    BRepAdaptor_Surface x(a), y(b);
+    BRepAdaptor_Surface x(a, false), y(b, false);
     if (x.GetType() != y.GetType())
         return false;
     if (x.GetType() == GeomAbs_Plane)
@@ -106,7 +106,9 @@ SheetOrientationData classifySheetOrientation(const TopoDS_Shape &shape,
             if (around.Extent() != 2)
                 continue;
             const auto a = TopoDS::Face(around.First()), b = TopoDS::Face(around.Last());
-            if (BRepAdaptor_Surface(a).GetType() == GeomAbs_Plane && sameSurface(a, b, 1e-5))
+            // Only the supporting surface is needed here. Its trimmed UV bounds
+            // can require visiting every opening again for each adjacent edge.
+            if (BRepAdaptor_Surface(a, false).GetType() == GeomAbs_Plane && sameSurface(a, b, 1e-5))
                 link(faces.FindIndex(a), faces.FindIndex(b), 0);
         }
         std::size_t root = 0, fallbackRoot = 0;
@@ -114,12 +116,12 @@ SheetOrientationData classifySheetOrientation(const TopoDS_Shape &shape,
         const auto estimatedThickness = application::suggestThickness(metadata.thickness);
         for (std::size_t i = 1; i <= count; ++i) {
             const auto face = TopoDS::Face(faces(static_cast<int>(i)));
-            if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane)
+            if (BRepAdaptor_Surface(face, false).GetType() != GeomAbs_Plane)
                 continue;
             if (reference) {
                 if (reference->normal.SquareMagnitude() > .5 &&
                     normal(face).Dot(reference->normal) > 1 - 1e-7 &&
-                    BRepAdaptor_Surface(face).Plane().Distance(reference->point) < 1e-5 &&
+                    BRepAdaptor_Surface(face, false).Plane().Distance(reference->point) < 1e-5 &&
                     on(face, reference->point, 1e-5)) {
                     root = i;
                     break;
@@ -239,9 +241,9 @@ SheetOrientationData classifySheetOrientation(const TopoDS_Shape &shape,
                 reference->point.Translated(-reference->normal * reference->thicknessMm);
             for (std::size_t i = 1; i <= count; ++i) {
                 const auto face = TopoDS::Face(faces(static_cast<int>(i)));
-                if (i != root && BRepAdaptor_Surface(face).GetType() == GeomAbs_Plane &&
+                if (i != root && BRepAdaptor_Surface(face, false).GetType() == GeomAbs_Plane &&
                     normal(face).Dot(reference->normal) < -1 + 1e-7 &&
-                    BRepAdaptor_Surface(face).Plane().Distance(opposite) < 1e-5 &&
+                    BRepAdaptor_Surface(face, false).Plane().Distance(opposite) < 1e-5 &&
                     on(face, opposite, 1e-5))
                     link(root, i, 1);
             }

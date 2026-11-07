@@ -56,6 +56,13 @@ struct ToolPreset {
     bool operator==(const ToolPreset &) const = default;
 };
 using ToolCatalog = std::vector<ToolPreset>;
+[[nodiscard]] inline bool hasHornGeometry(const ToolPreset &tool) {
+    return tool.segments && hasHornGeometry(*tool.segments);
+}
+[[nodiscard]] inline bool usesHornSections(const ToolPreset &tool,
+                                           const std::optional<ToolAssembly> &assembly) {
+    return tool.segments && usesHornSections(*tool.segments, assembly);
+}
 struct ToolAssignment {
     ToolPreset punch;
     ToolPreset die;
@@ -70,6 +77,9 @@ struct ToolAssignment {
     std::optional<BackgaugeSetup> backgauge = std::nullopt;
     bool operator==(const ToolAssignment &) const = default;
 };
+[[nodiscard]] inline bool hasHornGeometry(const ToolAssignment &a) {
+    return hasHornGeometry(a.punch) || hasHornGeometry(a.die);
+}
 [[nodiscard]] bool validToolPreset(const ToolPreset &tool);
 // Workshop entries require a captured millimetre DXF contour. Legacy project data is separate.
 [[nodiscard]] bool hasLibraryProfile(const ToolPreset &tool);

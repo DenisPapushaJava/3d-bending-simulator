@@ -1,5 +1,8 @@
+#include "ProjectFormatFixtures.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
+#include "bending/cad/occt/DocumentAccess.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
@@ -15,9 +18,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QListView>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
@@ -72,6 +79,114 @@ class LateBuilder final : public application::FlatPatternBuilder {
         return application::FlatPatternPtr(std::make_shared<Snapshot>());
     }
 };
+class SharedFlatBuilder final : public application::FlatPatternBuilder {
+  public:
+    mutable std::atomic<int> calls = 0;
+    std::atomic<bool> release = false;
+    bool fail = false;
+    application::FlatPatternResult build(application::DocumentPtr document,
+                                         application::FlatPatternRequest request,
+                                         std::stop_token stop) const override {
+        ++calls;
+        while (!release && !stop.stop_requested())
+            QThread::msleep(1);
+        if (stop.stop_requested())
+            return application::FlatPatternError{application::FlatPatternErrorCode::Cancelled,
+                                                 "Cancelled"};
+        if (fail)
+            return application::FlatPatternError{
+                application::FlatPatternErrorCode::UnsupportedGeometry, "Test unsupported blank"};
+        return cad::FlatPatternBuilder{}.build(std::move(document), request, stop);
+    }
+};
+class SharedDrawingBuilder final : public application::BendingDrawingBuilder {
+  public:
+    mutable std::atomic<int> calls = 0;
+    mutable application::FlatPatternPtr prepared;
+    application::DrawingResult build(application::DocumentPtr document,
+                                     application::DrawingRequest request,
+                                     std::stop_token stop) const override {
+        ++calls;
+        prepared = request.preparedFlatPattern;
+        return cad::BendingDrawingBuilder{}.build(std::move(document), std::move(request), stop);
+    }
+};
+void sharedFlatWorkflow(const QString &sample) {
+    ui::ImportController c(std::make_shared<cad::StepImporter>(),
+                           [](application::DocumentPtr, std::uint64_t) { return QString{}; });
+    c.open(native(sample));
+    wait([&] { return !c.hasWork(); });
+    check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .45, 1}),
+          "Cannot set shared flat inputs");
+    auto drawing = std::make_shared<SharedDrawingBuilder>();
+    check(c.prepareDrawing(drawing, {}), "Cold drawing did not start");
+    wait([&] { return !c.hasWork(); });
+    check(c.drawing() && c.flatPattern() && c.flatPattern() == c.drawing()->preparedFlatPattern,
+          "Cold drawing did not publish its prepared stock for the viewport");
+
+    for (bool drawingFirst : {true, false}) {
+        check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, drawingFirst ? .46 : .47, 1}),
+              "Shared flat inputs did not invalidate the cache");
+        auto flat = std::make_shared<SharedFlatBuilder>();
+        check(c.prefetchFlatPattern(flat) && !c.hasWork() && !c.isPreparingFlatPattern(),
+              "Speculative flat blocked the foreground");
+        wait([&] { return flat->calls == 1; });
+        if (drawingFirst) {
+            check(c.prepareDrawing(drawing, {}), "Drawing could not await speculative stock");
+            c.cancelDrawing();
+            check(!c.hasWork(), "Closing drawing left a speculative flat marked busy");
+            check(c.prepareDrawing(drawing, {}) && c.prepareFlatPattern(flat),
+                  "Viewport could not adopt flat already awaited by drawing");
+            c.cancelDrawing();
+            check(c.isPreparingFlatPattern() && !c.isPreparingDrawing(),
+                  "Closing drawing cancelled the viewport consumer");
+        } else {
+            check(c.prepareFlatPattern(flat) && c.prepareDrawing(drawing, {}),
+                  "Drawing could not adopt flat already awaited by viewport");
+        }
+        flat->release = true;
+        wait([&] { return !c.hasWork(); });
+        check(flat->calls == 1 && c.flatPattern(), "Shared flat restarted or failed to publish");
+        if (drawingFirst) {
+            check(!c.drawing() && c.prepareDrawing(drawing, {}), "Cancelled drawing was published");
+            wait([&] { return !c.hasWork(); });
+        }
+        check(c.drawing() && drawing->prepared == c.flatPattern(),
+              "Drawing did not consume the viewport's exact stock snapshot");
+    }
+
+    check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .48, 1}),
+          "Cannot set unsupported flat test inputs");
+    auto unsupported = std::make_shared<SharedFlatBuilder>();
+    unsupported->fail = true;
+    check(c.prefetchFlatPattern(unsupported) && c.prepareDrawing(drawing, {}),
+          "Drawing could not attach to a failing flat job");
+    unsupported->release = true;
+    wait([&] { return !c.hasWork(); });
+    check(unsupported->calls == 1 && c.drawing() && !c.drawing()->flatPattern &&
+              c.drawing()->flatPatternError &&
+              c.drawing()->flatPatternError->detail == "Test unsupported blank" &&
+              !c.flatPatternError(),
+          "Failed warm-up hid folded views, recalculated stock or exposed a background error");
+    auto recovered = std::make_shared<SharedFlatBuilder>();
+    recovered->release = true;
+    check(c.prepareFlatPattern(recovered), "Explicit flat retry did not start");
+    wait([&] { return !c.hasWork(); });
+    check(c.flatPattern() && c.prepareDrawing(drawing, {}), "Recovered flat is missing");
+    wait([&] { return !c.hasWork(); });
+    check(c.drawing() && c.drawing()->flatPattern && drawing->prepared == c.flatPattern(),
+          "The old folded-only drawing masked a recovered flat snapshot");
+
+    check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .49, 1}),
+          "Cannot set cancelled flat test inputs");
+    auto stale = std::make_shared<SharedFlatBuilder>();
+    check(c.prefetchFlatPattern(stale), "Cancellable flat job did not start");
+    wait([&] { return stale->calls == 1; });
+    c.open(native(sample));
+    wait([&] { return !c.hasWork(); });
+    check(c.session().document() && !c.flatPattern() && !c.flatPatternError(),
+          "Opening another document reused the old flat job");
+}
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
@@ -87,6 +202,7 @@ int main(int argc, char **argv) {
             app.arguments().contains(QStringLiteral("--sample"))
                 ? app.arguments().at(app.arguments().indexOf(QStringLiteral("--sample")) + 1)
                 : QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step";
+        sharedFlatWorkflow(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step");
         window.openStep(sample);
         auto &c = window.importController();
         wait([&] { return !c.hasWork(); });
@@ -134,26 +250,126 @@ int main(int argc, char **argv) {
             check(viewer->dimensionsVisible(), "Flat dimensions are not shown");
             const auto *dimensions = viewer->findChild<QToolButton *>("showDimensions");
             check(dimensions != nullptr, "Missing dimensions control");
-            const auto labels = dimensions->accessibleDescription().split(QLatin1Char('\n'));
-            int coordinates = 0, callouts = 0;
-            for (const auto &label : labels) {
-                if (!label.startsWith(QLatin1Char('B')))
-                    continue;
-                if (label.contains(QChar(0x2191)) || label.contains(QChar(0x2193)))
-                    ++callouts;
-                else
-                    ++coordinates;
-            }
-            check(callouts == static_cast<int>(first->info().bends.size()),
-                  "Flat annotations lost individual bend IDs");
-            if (app.arguments().contains(QStringLiteral("--expect-coordinate-rows"))) {
-                bool ok = false;
-                const auto expected =
-                    app.arguments()
-                        .at(app.arguments().indexOf(QStringLiteral("--expect-coordinate-rows")) + 1)
-                        .toInt(&ok);
-                check(ok && coordinates == expected,
-                      "Coincident bend coordinates were not grouped");
+            auto *bends = window.findChild<QListView *>("bendList");
+            check(bends != nullptr, "No bend list");
+            // Overview must not carry every bend's full dimensions.
+            viewer->highlightFaces({}, c.session().revision());
+            check(!dimensions->accessibleDescription().contains(QStringLiteral("ВВЕРХ")) &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral("ВНИЗ")),
+                  "Overview retained full bend callouts");
+            const auto revisionBeforeSelection = c.session().editRevision();
+            int picked = -1;
+            QObject::connect(viewer, &viewer::ViewerWidget::bendSelectionChanged, &window,
+                             [&](quint64, int index) { picked = index; });
+            auto *canvas = viewer->findChild<QWidget *>("cadCanvas");
+            const auto sendClick = [&](QPoint point) {
+                QMouseEvent event(QEvent::MouseButtonPress, QPointF(point),
+                                  QPointF(canvas->mapToGlobal(point)), Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(canvas, &event);
+                QMouseEvent release(QEvent::MouseButtonRelease, QPointF(point),
+                                    QPointF(canvas->mapToGlobal(point)), Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(canvas, &release);
+            };
+            // Pick an actual rendered orange bend line, not a hard-coded camera position.
+            const auto overview = viewer->captureImage();
+            if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT"); !path.isEmpty())
+                overview.save(path + "-overview.png");
+            bool clicked = false;
+            for (int y = 30; y < overview.height() - 30 && !clicked; ++y)
+                for (int x = 30; x < overview.width() - 220 && !clicked; ++x) {
+                    const auto color = overview.pixelColor(x, y);
+                    if (color.red() > 200 && color.green() > 70 && color.green() < 190 &&
+                        color.blue() < 110) {
+                        sendClick(QPoint(x, y) / canvas->devicePixelRatioF());
+                        clicked = picked >= 0;
+                    }
+                }
+            check(clicked && picked >= 0 && bends->currentIndex().row() == picked,
+                  "Flat line click did not select its source bend in the list");
+            check(dimensions->accessibleDescription().contains(QStringLiteral(" · L ")) &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral(" · Y ")) &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral(" · X ")) &&
+                      !c.hasWork() && c.flatPattern() == first &&
+                      c.session().editRevision() == revisionBeforeSelection,
+                  "Flat selection recalculated CAD/edited project or omitted selected dimensions");
+            if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT"); !path.isEmpty())
+                viewer->captureImage().save(path + "-selected-bend.png");
+            const auto topLabels = dimensions->accessibleDescription();
+            const auto measuredLabels = [](const QString &description) {
+                // Compact ID visibility depends on viewport fitting, while the
+                // selected measurements and their datum must remain identical.
+                const QRegularExpression marker(QStringLiteral("^B[0-9]+(?:/B[0-9]+)*$"));
+                QStringList result;
+                for (const auto &line : description.split('\n'))
+                    if (!marker.match(line).hasMatch())
+                        result << line;
+                return result;
+            };
+            const bool up = topLabels.contains(QStringLiteral("ВВЕРХ"));
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Bottom);
+            check(dimensions->accessibleDescription().contains(up ? QStringLiteral("ВНИЗ")
+                                                                  : QStringLiteral("ВВЕРХ")),
+                  "Reverse flat side kept the old bend direction");
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
+            const auto returnedLabels = dimensions->accessibleDescription();
+            check(measuredLabels(returnedLabels) == measuredLabels(topLabels),
+                  "Returning to the flat side changed the selected measurement");
+            viewer->highlightFaces({}, c.session().revision() + 1);
+            check(dimensions->accessibleDescription() == returnedLabels,
+                  "Stale selection changed flat labels");
+            sendClick(QPoint(20, canvas->height() / 2));
+            check(picked == -1 && !bends->currentIndex().isValid() &&
+                      !dimensions->accessibleDescription().contains(QStringLiteral(" · L ")),
+                  "Empty flat click retained selected dimensions");
+            // Source-list changes must update this same flat snapshot.
+            bends->setCurrentIndex(bends->model()->index(0, 0));
+            check(dimensions->accessibleDescription().contains(QStringLiteral("B01 ·")) &&
+                      c.flatPattern() == first && !c.hasWork(),
+                  "List selection did not refresh the flat bend or triggered a calculation");
+            if (const auto measures = first->info().measurements;
+                measures && !measures->openings.empty()) {
+                const auto image = viewer->captureImage();
+                int minX = image.width(), maxX = 0, minY = image.height(), maxY = 0;
+                for (int y = 0; y < image.height(); ++y)
+                    for (int x = 0; x < image.width(); ++x) {
+                        const auto color = image.pixelColor(x, y);
+                        if (color.red() > 50 && color.green() > 110 &&
+                            color.green() > color.red() * 1.35 && color.blue() > color.green()) {
+                            minX = std::min(minX, x);
+                            maxX = std::max(maxX, x);
+                            minY = std::min(minY, y);
+                            maxY = std::max(maxY, y);
+                        }
+                    }
+                check(maxX > minX && maxY > minY, "Cannot locate rendered flat stock");
+                const auto &opening = measures->openings.front();
+                const auto &bounds = first->info().bounds;
+                const QPoint position(
+                    qRound(minX + opening.center.x * (maxX - minX) / bounds.maximum.x),
+                    qRound(maxY - opening.center.y * (maxY - minY) / bounds.maximum.y));
+                const auto beforeClick = c.session().editRevision();
+                std::cout << "Opening center " << opening.center.x << ',' << opening.center.y
+                          << " pixel " << position.x() << ',' << position.y() << " body " << minX
+                          << ',' << minY << ':' << maxX << ',' << maxY << '\n';
+                sendClick(position / canvas->devicePixelRatioF());
+                check(dimensions->accessibleDescription().contains(
+                          opening.circular ? QStringLiteral("Отверстие") : QStringLiteral("Вырез")),
+                      "Flat opening click did not reveal measured dimensions");
+                check(dimensions->accessibleDescription().contains(QStringLiteral("Развёртка")) &&
+                          dimensions->accessibleDescription().contains(QStringLiteral("Ширина")) &&
+                          c.session().editRevision() == beforeClick && !c.hasWork(),
+                      "Opening selection removed permanent dimensions or changed CAD/project");
+                if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT");
+                    !path.isEmpty())
+                    viewer->captureImage(true).save(path + "-opening.png");
+                QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QApplication::sendEvent(canvas, &escape);
+                check(!dimensions->accessibleDescription().contains(QStringLiteral("Отверстие")) &&
+                          !dimensions->accessibleDescription().contains(QStringLiteral("Вырез")) &&
+                          dimensions->accessibleDescription().contains(QStringLiteral("Развёртка")),
+                      "Escape did not preserve the permanent dimension layer");
             }
             wait([&] { return !viewer->captureImage().isNull(); });
             if (const auto output = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT");
@@ -180,6 +396,81 @@ int main(int argc, char **argv) {
                       .contains(QStringLiteral("Неактуальная")),
                   "Stale flat accepted by viewer");
             check(viewer->endBendPreview().isEmpty(), "Return to source failed");
+            viewer->highlightFaces({}, revision);
+            if (const auto path = qEnvironmentVariable("BENDING_FLAT_SNAPSHOT"); !path.isEmpty()) {
+                viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+                viewer->captureImage(true).save(path + "-source.png");
+            }
+            if (const auto nativeDoc =
+                    std::dynamic_pointer_cast<const cad::CadDocument>(c.session().document())) {
+                const auto data = cad::OcctDocumentAccess::measurements(*nativeDoc);
+                if (data && !data->openings.empty()) {
+                    viewer->setOrientation(viewer::ViewerWidget::Orientation::Top);
+                    const auto image = viewer->captureImage();
+                    int minX = image.width(), maxX = 0, minY = image.height(), maxY = 0;
+                    for (int y = 0; y < image.height(); ++y)
+                        for (int x = 0; x < image.width(); ++x) {
+                            const auto color = image.pixelColor(x, y);
+                            if (color.red() > 50 && color.green() > 110 &&
+                                color.green() > color.red() * 1.35 &&
+                                color.blue() > color.green()) {
+                                minX = std::min(minX, x);
+                                maxX = std::max(maxX, x);
+                                minY = std::min(minY, y);
+                                maxY = std::max(maxY, y);
+                            }
+                        }
+                    const auto &bounds = nativeDoc->metadata().bounds;
+                    const auto project = [&](application::PointMm p) {
+                        return QPoint(qRound(minX + (p.x - bounds.minimum.x) * (maxX - minX) /
+                                                        (bounds.maximum.x - bounds.minimum.x)),
+                                      qRound(maxY - (p.y - bounds.minimum.y) * (maxY - minY) /
+                                                        (bounds.maximum.y - bounds.minimum.y))) /
+                               canvas->devicePixelRatioF();
+                    };
+                    const auto measurementEdit = c.session().editRevision();
+                    int drawingSelections = 0;
+                    const auto connection =
+                        QObject::connect(viewer, &viewer::ViewerWidget::selectionChanged, &window,
+                                         [&](quint64, int) { ++drawingSelections; });
+                    const auto &opening = data->openings.front();
+                    const auto rim =
+                        std::find_if(data->edges.begin(), data->edges.end(), [&](const auto &edge) {
+                            return std::find(opening.edges.begin(), opening.edges.end(), edge.id) !=
+                                   opening.edges.end();
+                        });
+                    check(rim != data->edges.end(), "Source hole has no prepared rim");
+                    sendClick(project(rim->first));
+                    check(
+                        dimensions->accessibleDescription().contains(QStringLiteral("Отверстие")) &&
+                            dimensions->accessibleDescription().contains(QStringLiteral("X ")),
+                        "Source hole selection lost permanent dimensions or did not use prepared "
+                        "hole data");
+                    const auto face = std::max_element(
+                        data->faces.begin(), data->faces.end(),
+                        [](const auto &a, const auto &b) { return a.areaMm2 < b.areaMm2; });
+                    if (face != data->faces.end()) {
+                        sendClick(project(face->anchor));
+                        check(dimensions->accessibleDescription().contains(
+                                  QStringLiteral("Плоская грань")),
+                              "Source plane selection did not reveal its measured area");
+                    }
+                    const auto edge = std::max_element(
+                        data->edges.begin(), data->edges.end(),
+                        [](const auto &a, const auto &b) { return a.lengthMm < b.lengthMm; });
+                    if (edge != data->edges.end() && edge->straight) {
+                        sendClick(project({(edge->first.x + edge->second.x) / 2,
+                                           (edge->first.y + edge->second.y) / 2,
+                                           (edge->first.z + edge->second.z) / 2}));
+                        check(dimensions->accessibleDescription().contains(QStringLiteral("Ребро")),
+                              "Source edge selection did not reveal its actual length");
+                    }
+                    check(drawingSelections == 0 && c.session().editRevision() == measurementEdit &&
+                              !c.hasWork(),
+                          "Measurement picking changed drawing/project inputs or started CAD work");
+                    QObject::disconnect(connection);
+                }
+            }
             check(viewer->presentFlatPattern(first, revision).isEmpty(), "Return to flat failed");
             viewer->setDimensionsVisible(false);
             viewer->setDimensionsVisible(true);
@@ -209,7 +500,7 @@ int main(int argc, char **argv) {
         // Malformed rule data is rejected before it can modify the session.
         QFile saved(qtPath(path));
         check(saved.open(QIODevice::ReadOnly), "Cannot read saved project");
-        auto root = QJsonDocument::fromJson(saved.readAll()).object();
+        auto root = project_fixture::legacyRoot(saved.readAll());
         saved.close();
         // An explicitly saved material-table mode must not become the new default constant.
         auto tableRoot = root;

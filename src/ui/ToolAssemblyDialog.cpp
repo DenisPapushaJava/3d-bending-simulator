@@ -1,76 +1,78 @@
 #include "ToolAssemblyDialog.h"
-#include "ToolSegmentColorPreferences.h"
+#include "ToolAssemblyDiagram.h"
+#include "ToolEndButtons.h"
+#include "bending/core/ToolAssemblyEdits.h"
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
-#include <QPainter>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <algorithm>
-#include <functional>
 
 namespace bending::ui {
-namespace {
-class AssemblyDiagram final : public QWidget {
-  public:
-    std::function<std::optional<std::vector<core::ToolSectionInterval>>()> intervals;
-    explicit AssemblyDiagram(QWidget *parent) : QWidget(parent) {
-        setMinimumHeight(84);
-        setAccessibleName(QStringLiteral("Расположение секций вдоль инструмента"));
-    }
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-        const auto sections = intervals ? intervals() : std::nullopt;
-        if (!sections || sections->empty())
-            return;
-        const double scale = (width() - 24.) / sections->back().toMm;
-        const double y = 16;
-        const auto colors = toolSegmentColors();
-        for (std::size_t i = 0; i < sections->size(); ++i) {
-            const auto &s = (*sections)[i];
-            const double x = 12 + s.fromMm * scale;
-            const double w = (s.toMm - s.fromMm) * scale;
-            p.setPen(QColor("#507781"));
-            p.setBrush(viewer::toolSegmentColor(s.toMm - s.fromMm, colors));
-            p.drawRect(QRectF(x, y, w, 30));
-            p.setPen(palette().color(QPalette::Text));
-            if (w >= 30)
-                p.drawText(QRectF(x, y, w, 30), Qt::AlignCenter, QString::number(i + 1));
-            if (i + 1 < sections->size() && (*sections)[i + 1].fromMm > s.toMm) {
-                const double right = 12 + (*sections)[i + 1].fromMm * scale;
-                p.setPen(QPen(QColor("#956a38"), 1, Qt::DashLine));
-                p.drawLine(QPointF(x + w, y + 38), QPointF(right, y + 38));
-            }
-        }
-    }
-};
-} // namespace
 ToolAssemblyDialog::ToolAssemblyDialog(core::ToolPreset tool,
-                                       std::optional<core::ToolAssembly> initial, QWidget *parent)
-    : QDialog(parent), tool_(std::move(tool)), initial_(std::move(initial)) {
+                                       std::optional<core::ToolAssembly> initial, QWidget *parent,
+                                       std::optional<double> requiredMm, double maximumGapMm)
+    : QDialog(parent), tool_(std::move(tool)), initial_(std::move(initial)),
+      maximumGapMm_(maximumGapMm) {
     setObjectName("toolAssemblyDialog");
     setWindowTitle((tool_.kind == core::ToolKind::Punch ? QStringLiteral("Секции пуансона · ")
                                                         : QStringLiteral("Секции матрицы · ")) +
                    QString::fromStdString(tool_.code));
     setWindowModality(Qt::WindowModal);
-    resize(620, 520);
+    resize(680, tool_.kind == core::ToolKind::Punch ? 660 : 520);
     auto *layout = new QVBoxLayout(this);
     auto *caption = new QLabel(tool_.kind == core::ToolKind::Punch
                                    ? QStringLiteral("Секции вдоль инструмента · обычная ориентация")
                                    : QStringLiteral("Секции вдоль инструмента"),
                                this);
     layout->addWidget(caption);
-    auto *diagram = new AssemblyDiagram(this);
+    auto *diagram = new ToolAssemblyDiagram(tool_, this);
     diagram_ = diagram;
     diagram->intervals = [this] {
         return tool_.segments ? core::assemblyIntervals(*tool_.segments, draft_) : std::nullopt;
     };
+    diagram->required = [this] { return target_ ? target_->value() : 0; };
+    diagram->selected = [this] { return rows_->currentRow(); };
+    diagram->onSelected = [this](int row) {
+        rows_->selectRow(row);
+        rows_->scrollTo(rows_->model()->index(row, 0));
+    };
     layout->addWidget(diagram);
+    if (tool_.kind == core::ToolKind::Punch) {
+        ends_ = new ToolEndButtons(this);
+        ends_->onSelected = [this](const core::ToolPreset &snapshot, bool right,
+                                   std::optional<std::size_t> row) {
+            if (snapshot == tool_)
+                setEnd(right ? 1 : 0, row);
+        };
+        layout->addWidget(ends_);
+        auto *fit = new QHBoxLayout;
+        fit->addWidget(new QLabel(QStringLiteral("Длина подбора, мм"), this));
+        target_ = new QDoubleSpinBox(this);
+        target_->setObjectName("assemblyRequiredLength");
+        target_->setAccessibleName(QStringLiteral("Длина подбора, мм"));
+        target_->setRange(0, 100000);
+        target_->setDecimals(3);
+        target_->setSpecialValueText(QStringLiteral("Укажите длину"));
+        target_->setValue(requiredMm.value_or(0));
+        fit->addWidget(target_, 1);
+        fitMiddle_ = new QPushButton(QStringLiteral("Подобрать середину"), this);
+        fitMiddle_->setObjectName("assemblyFitMiddle");
+        fitMiddle_->setToolTip(
+            QStringLiteral("Сохранить крайние сапожки и подобрать прямые секции между ними."));
+        fit->addWidget(fitMiddle_);
+        layout->addLayout(fit);
+        connect(target_, &QDoubleSpinBox::valueChanged, this, [this] {
+            notice_.clear();
+            refresh();
+        });
+        connect(fitMiddle_, &QPushButton::clicked, this, [this] { fitMiddle(); });
+    }
     rows_ = new QTableWidget(0, 2, this);
     rows_->setObjectName("assemblyRows");
     rows_->setHorizontalHeaderLabels(
@@ -122,7 +124,7 @@ ToolAssemblyDialog::ToolAssemblyDialog(core::ToolPreset tool,
             return;
         for (std::size_t i = 0; i < tool_.segments->size(); ++i) {
             const auto &s = (*tool_.segments)[i];
-            if (s.shape != core::SegmentShape::Straight ||
+            if (!core::usableToolSegment(s) ||
                 static_cast<unsigned>(std::count(draft_.pieces.begin(), draft_.pieces.end(), i)) >=
                     s.quantity)
                 continue;
@@ -176,6 +178,7 @@ ToolAssemblyDialog::ToolAssemblyDialog(core::ToolPreset tool,
     rebuild(0);
 }
 void ToolAssemblyDialog::rebuild(int selected) {
+    notice_.clear();
     rows_->setRowCount(0);
     if (!tool_.segments)
         return;
@@ -184,10 +187,22 @@ void ToolAssemblyDialog::rebuild(int selected) {
         auto *section = new QComboBox(rows_);
         for (std::size_t row = 0; row < tool_.segments->size(); ++row) {
             const auto &s = (*tool_.segments)[row];
-            if (s.shape == core::SegmentShape::Straight && s.quantity)
-                section->addItem(
-                    QStringLiteral("%1 мм · в наличии %2 шт.").arg(s.lengthMm).arg(s.quantity),
-                    static_cast<int>(row));
+            if (core::usableToolSegment(s) && s.quantity) {
+                QString label =
+                    QStringLiteral("%1 мм · в наличии %2 шт.").arg(s.lengthMm).arg(s.quantity);
+                if (s.horn)
+                    label =
+                        QStringLiteral("%1 мм · %2 · %3/R%4/%5 · %6 шт.")
+                            .arg(s.lengthMm)
+                            .arg(s.shape == core::SegmentShape::LeftHorn ? QStringLiteral("Левый")
+                                                                         : QStringLiteral("Правый"))
+                            .arg(s.horn->projectionMm)
+                            .arg(s.horn->radiusMm)
+                            .arg(s.horn->tipHeightMm)
+                            .arg(s.quantity);
+                section->addItem(label, static_cast<int>(row));
+                section->setItemData(section->count() - 1, label, Qt::ToolTipRole);
+            }
         }
         section->setCurrentIndex(section->findData(static_cast<int>(draft_.pieces[i])));
         rows_->setCellWidget(static_cast<int>(i), 0, section);
@@ -201,12 +216,14 @@ void ToolAssemblyDialog::rebuild(int selected) {
         connect(section, &QComboBox::currentIndexChanged, this, [this, section, i] {
             if (section->currentIndex() >= 0) {
                 draft_.pieces[i] = static_cast<std::size_t>(section->currentData().toInt());
+                notice_.clear();
                 refresh();
             }
         });
         connect(gap, &QDoubleSpinBox::valueChanged, this, [this, i](double value) {
             if (i < draft_.jointGapsMm.size()) {
                 draft_.jointGapsMm[i] = value;
+                notice_.clear();
                 refresh();
             }
         });
@@ -222,13 +239,18 @@ void ToolAssemblyDialog::refresh() {
     status_->setText(
         length
             ? QStringLiteral("%1 секц. · общая длина %2 мм").arg(draft_.pieces.size()).arg(*length)
-            : QStringLiteral("Добавьте доступные секции. Количество не должно "
-                             "превышать указанное наличие."));
+            : QStringLiteral(
+                  "Проверьте наличие и порядок: левый сапожок — слева, правый — справа."));
+    if (length && target_ && target_->value() >= 1 && *length + 1e-5 < target_->value())
+        status_->setText(status_->text() +
+                         QStringLiteral(" · не хватает %1 мм").arg(target_->value() - *length));
+    if (!notice_.isEmpty())
+        status_->setText(status_->text() + QLatin1Char('\n') + notice_);
     add_->setEnabled(
         tool_.segments && draft_.pieces.size() < 512 &&
         std::any_of(tool_.segments->begin(), tool_.segments->end(), [this](const auto &s) {
             const auto row = static_cast<std::size_t>(&s - tool_.segments->data());
-            return s.shape == core::SegmentShape::Straight &&
+            return core::usableToolSegment(s) &&
                    static_cast<unsigned>(
                        std::count(draft_.pieces.begin(), draft_.pieces.end(), row)) < s.quantity;
         }));
@@ -236,6 +258,52 @@ void ToolAssemblyDialog::refresh() {
     remove_->setEnabled(row >= 0);
     up_->setEnabled(row > 0);
     down_->setEnabled(row >= 0 && row + 1 < rows_->rowCount());
+    if (fitMiddle_)
+        fitMiddle_->setEnabled(tool_.segments && target_->value() >= 1);
+    if (ends_)
+        ends_->setSource(tool_, draft_);
     diagram_->update();
+}
+void ToolAssemblyDialog::setEnd(std::size_t side, std::optional<std::size_t> row) {
+    if (!tool_.segments || side > 1)
+        return;
+    const auto next = core::withPunchEnd(*tool_.segments, draft_, side != 0, row);
+    if (!next) {
+        notice_ = QStringLiteral("Проверьте наличие и порядок секций. Прежний состав сохранён.");
+        refresh();
+        return;
+    }
+    draft_ = *next;
+    rebuild(side ? static_cast<int>(draft_.pieces.size()) - 1 : 0);
+}
+void ToolAssemblyDialog::selectPiece(std::size_t piece) {
+    if (piece < static_cast<std::size_t>(rows_->rowCount()))
+        rows_->selectRow(static_cast<int>(piece));
+}
+void ToolAssemblyDialog::fitMiddle() {
+    if (!tool_.segments || !target_ || target_->value() < 1)
+        return;
+    const auto ends = draft_.pieces.empty() ? std::optional{core::PunchAssemblyEnds{}}
+                                            : core::punchAssemblyEnds(*tool_.segments, draft_);
+    if (!ends) {
+        notice_ = QStringLiteral("Уточните порядок и наличие секций перед подбором середины.");
+        refresh();
+        return;
+    }
+    const auto result = core::planPunchAssemblies(*tool_.segments, target_->value(), 200000,
+                                                  maximumGapMm_, {}, 1, ends);
+    if (result.status != core::SegmentPlanStatus::Complete || result.plans.empty()) {
+        notice_ = result.status == core::SegmentPlanStatus::SearchLimit
+                      ? QStringLiteral("Достигнут предел подбора. Прежний состав сохранён.")
+                      : QStringLiteral(
+                            "Не хватает прямых секций для этой длины. Прежний состав сохранён.");
+        refresh();
+        return;
+    }
+    draft_ = result.best().assembly;
+    for (std::size_t i = 1; i < draft_.pieces.size(); ++i)
+        draft_.jointGapsMm.push_back(draft_.gapMm);
+    draft_.gapMm = 0;
+    rebuild(0);
 }
 } // namespace bending::ui

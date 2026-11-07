@@ -138,6 +138,18 @@ int main(int argc, char **argv) {
         const auto tool = run(builder, doc, request);
         const auto warm = run(builder, doc, request);
         require(warm->visual == tool->visual, "Warm draft recomputed geometry");
+        if (request.operations.size() > 1) {
+            auto future = request;
+            future.operations.back().tools->punchReversed = true;
+            const auto unchanged = run(builder, doc, future);
+            require(unchanged->visual == warm->visual && unchanged->request == future &&
+                        unchanged->reusedVisual,
+                    "Future tooling invalidated the current visual or returned stale metadata");
+            future.operations.back().target.innerRadiusMm += 1;
+            require(
+                std::holds_alternative<BendRouteError>(builder.buildRouteDraft(doc, future, {})),
+                "Visual hit bypassed complete target validation");
+        }
         for (const bool shortPunch : {false, true}) {
             auto shortRequest = request;
             const double length = doc->metadata().bendAnalysis.bends.front().lengthMm;
@@ -226,6 +238,15 @@ int main(int argc, char **argv) {
                         "Draft collision lost its localized marker");
             }
             require(seen, "Known DXF collision was missed");
+            if (request.operations.size() > 1) {
+                auto future = request;
+                future.operations.back().workpieceReversed =
+                    !future.operations.back().workpieceReversed;
+                const auto reused = run(builder, doc, future);
+                require(reused->reusedVisual && reused->visual == collision->visual &&
+                            reused->checkedToolPositions == collision->checkedToolPositions,
+                        "Unchanged collision result lost its checked positions");
+            }
         }
         std::reverse(request.operations.begin(), request.operations.end());
         request.withTools = false;

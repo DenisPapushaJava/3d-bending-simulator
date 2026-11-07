@@ -1,12 +1,15 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "Backgauge.h"
 #include "BendOperation.h"
+#include "BendWorkpiece.h"
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
 #include "CollisionReuse.h"
+#include "FlatWallRegions.h"
 #include "GeometryCacheInternal.h"
 #include "JointBends.h"
 #include "RouteGeometry.h"
+#include "SheetGeometry.h"
 #include "SheetOrientation.h"
 #include "TrimmedBend.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -72,12 +75,28 @@ double area(const TopoDS_Shape &shape) {
     BRepGProp::SurfaceProperties(shape, properties);
     return properties.Mass();
 }
-struct FrameBasis {
-    gp_Pnt origin;
-    gp_Vec x;
-    gp_Vec y;
-    gp_Vec z;
-};
+// Complete exact construction inputs for the intrinsic frame. No profile/rounded angle key.
+IntrinsicSectionKey intrinsicKey(const FrameBasis &basis, const simulation::BendSection &section) {
+    IntrinsicSectionKey result{};
+    auto out = result.begin();
+    const auto add = [&](const auto &points) {
+        for (const auto &p : points) {
+            *out++ = p.x;
+            *out++ = p.y;
+        }
+    };
+    add(section.fixed);
+    add(section.moving);
+    add(section.innerArc);
+    add(section.outerArc);
+    *out++ = section.angleRadians;
+    *out++ = section.innerRadiusMm.has_value();
+    *out++ = section.innerRadiusMm.value_or(0);
+    for (const auto &v : {basis.origin.XYZ(), basis.x.XYZ(), basis.y.XYZ(), basis.z.XYZ()})
+        for (int i = 1; i <= 3; ++i)
+            *out++ = v.Coord(i);
+    return result;
+}
 gp_Pnt sectionPoint(const FrameBasis &basis, simulation::Point2Mm p) {
     return basis.origin.Translated(basis.x * p.x + basis.y * p.y);
 }
@@ -223,7 +242,10 @@ TopoDS_Shape compound(const std::vector<TopoDS_Shape> &parts) {
     return result;
 }
 std::optional<TopoDS_Shape> extractFlange(const TopoDS_Shape &source, const TopoDS_Shape &envelope,
-                                          double tolerance, bool multiple = false) {
+                                          double tolerance, bool multiple = false,
+                                          bool *ambiguous = nullptr) {
+    if (ambiguous)
+        *ambiguous = false;
     BRepAlgoAPI_Common common;
     TopTools_ListOfShape arguments, tools;
     arguments.Append(source);
@@ -238,6 +260,8 @@ std::optional<TopoDS_Shape> extractFlange(const TopoDS_Shape &source, const Topo
     }
     TopTools_IndexedMapOfShape solids;
     TopExp::MapShapes(common.Shape(), TopAbs_SOLID, solids);
+    if (ambiguous)
+        *ambiguous = solids.Extent() > 1;
     if (!solids.Extent() || (!multiple && solids.Extent() != 1) ||
         !std::isfinite(volume(solids(1))) || volume(solids(1)) <= 0) {
         return {};
@@ -355,18 +379,6 @@ splitAtBend(const TopoDS_Shape &source, const PreviewFrame &seed,
         return {};
     return std::array<TopoDS_Shape, 2>{compound(parts[0]), compound(parts[1])};
 }
-struct SkinNode {
-    gp_Pnt point;
-    unsigned regions = 0;
-};
-struct SkinFace {
-    Handle(Poly_Triangulation) original;
-    TopAbs_Orientation orientation;
-    std::vector<SkinNode> nodes;
-    std::size_t region = 0;
-    SheetSide side = SheetSide::Neutral;
-};
-using WholePartSkin = std::vector<SkinFace>;
 WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
                                    const std::array<TopoDS_Shape, 2> &flanges,
                                    const TopoDS_Shape &sector, double tolerance,
@@ -609,6 +621,11 @@ PreviewFrame makeSectionFrame(const simulation::SingleBend &model, const FrameBa
                                             extrusion,
                                             state.angleRadians,
                                             state.innerRadiusMm};
+    if (const auto outside = simulation::outsideFlangePoints(state))
+        frame.dimensions->outsideFlanges = {position((*outside)[0]), position((*outside)[1]),
+                                            position((*outside)[2])};
+    else if (std::abs(state.angleRadians) < 1.e-10)
+        frame.dimensions->blankEnds = {position(state.fixed[2]), position(state.moving[2])};
     if (withEnvelopes) {
         frame.regions[0] = flange(state.fixed);
         frame.regions[2] = flange(state.moving);
@@ -828,13 +845,16 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
         }
     return gp_Dir(axis);
 }
-PreparedBendOperationResult
-prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
-                     bool fixedSecond, std::stop_token stop,
-                     std::optional<core::PressTools> toolParameters, bool withMotion,
-                     std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-                     std::optional<double> maximumEndSupportLossMm,
-                     std::optional<gp_Dir> referenceAxis, std::span<const std::size_t> jointBends) {
+PreparedBendOperationResult prepareBendOperation(
+    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
+    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
+    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis,
+    std::span<const std::size_t> jointBends, BendWorkpieceReuse *workpieceReuse,
+    const FlatPatternPtr &verifiedFlat, bool manualExtraction) {
+    if (manualExtraction && (!withMotion || !toolParameters))
+        return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                "Manual extraction requires a forming cycle with tools"};
     const bool requestedReversed = fixedSecond;
     const auto unsupported = [](const char *detail) -> BendPreviewError {
         return BendPreviewError{BendPreviewErrorCode::UnsupportedGeometry, detail};
@@ -879,210 +899,380 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                 "Target must match the imported final shape"};
     }
     try {
-        const auto &source = OcctDocumentAccess::simulationShape(*native);
-        TopTools_IndexedMapOfShape faces;
-        TopExp::MapShapes(source, TopAbs_FACE, faces);
-        const auto &cylinder = TopoDS::Face(faces(static_cast<int>(bend.innerFace)));
-        const auto &flangeA = TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[0])));
-        const auto &flangeB = TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[2])));
-        auto axis = gp_Vec(point(bend.axisStart), point(bend.axisEnd)).Normalized();
-        auto radialA =
-            railRadial(cylinder, flangeA, point(bend.axisStart), axis, analysis.lengthToleranceMm);
-        auto radialB =
-            railRadial(cylinder, flangeB, point(bend.axisStart), axis, analysis.lengthToleranceMm);
-        if (!radialA || !radialB) {
-            return unsupported("Cannot determine tangency rails");
-        }
-        // The axis alone does not determine the direction or which walls move.
-        // Match tangency rails, accepting only an unambiguous common section.
-        std::vector<RecognizedBend> jointZones;
-        for (const auto index : jointBends) {
-            auto zone = analysis.bends[index];
-            const auto &inner = TopoDS::Face(faces(static_cast<int>(zone.innerFace)));
-            auto a = railRadial(inner, TopoDS::Face(faces(static_cast<int>(zone.flangeFaces[0]))),
-                                point(bend.axisStart), axis, analysis.lengthToleranceMm);
-            auto b = railRadial(inner, TopoDS::Face(faces(static_cast<int>(zone.flangeFaces[2]))),
-                                point(bend.axisStart), axis, analysis.lengthToleranceMm);
-            if (!a || !b)
-                return unsupported("Cannot determine a joint zone's tangency rails");
-            const auto aligned = [&](gp_Vec u, gp_Vec v) {
-                return u.IsEqual(v, analysis.lengthToleranceMm, analysis.angleToleranceRadians);
-            };
-            if (aligned(*a, *radialB) && aligned(*b, *radialA)) {
-                std::swap(zone.flangeFaces[0], zone.flangeFaces[2]);
-                std::swap(zone.flangeFaces[1], zone.flangeFaces[3]);
-                std::swap(a, b);
+        std::shared_ptr<const PreparedBendWorkpiece> workpiece;
+        const auto axisEqual = [](const auto &a, const auto &b) {
+            return bool(a) == bool(b) &&
+                   (!a || (a->X() == b->X() && a->Y() == b->Y() && a->Z() == b->Z()));
+        };
+        if (workpieceReuse) {
+            const auto hit = std::find_if(
+                workpieceReuse->entries.begin(), workpieceReuse->entries.end(), [&](const auto &v) {
+                    return v->document == document && v->bendIndex == bendIndex &&
+                           v->target == target && v->requestedReversed == requestedReversed &&
+                           axisEqual(v->referenceAxis, referenceAxis) &&
+                           std::equal(v->jointIds.begin(), v->jointIds.end(), jointBends.begin(),
+                                      jointBends.end());
+                });
+            if (hit != workpieceReuse->entries.end()) {
+                workpiece = *hit;
+                workpieceReuse->entries.erase(hit);
+                workpieceReuse->entries.push_back(workpiece);
+                ++workpieceReuse->reused;
             }
-            if (!aligned(*a, *radialA) || !aligned(*b, *radialB))
-                return unsupported("Joint zones require different forming directions");
-            jointZones.push_back(zone);
         }
-        if (referenceAxis) {
-            auto normal = axis;
-            if (radialA->Crossed(*radialB).Dot(normal) < 0)
-                normal.Reverse();
-            if (std::abs(normal.Dot(gp_Vec(*referenceAxis))) < .999999)
-                return unsupported("Inconsistent workpiece reference axis");
-            fixedSecond = fixedSecond != (normal.Dot(gp_Vec(*referenceAxis)) < 0);
-        }
-        if (fixedSecond) {
-            std::swap(radialA, radialB);
-        }
-        if (radialA->Crossed(*radialB).Dot(axis) < 0.0) {
-            axis.Reverse();
-        }
-        const auto origin = axis.Dot(gp_Vec(point(bend.axisStart), point(bend.axisEnd))) > 0.0
-                                ? point(bend.axisStart)
-                                : point(bend.axisEnd);
-        FrameBasis basis{origin.Translated(*radialA * bend.innerRadiusMm), axis.Crossed(*radialA),
-                         -*radialA, axis};
-        const FrameBasis sourceBasis = basis;
-        simulation::SingleBend model{
-            bend.thicknessMm, bend.innerRadiusMm, bend.angleRadians, bend.lengthMm, 1, 1};
-        const auto seed = simulation::singleBendSection(model, 1.0);
-        if (!seed) {
-            return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
-                                    "Unsupported bend dimensions/angle"};
-        }
-        const std::array<std::size_t, 2> innerIndices{fixedSecond ? 2U : 0U, fixedSecond ? 0U : 2U};
-        std::array<double, 2> extents{};
-        for (std::size_t i = 0; i < extents.size(); ++i) {
-            const auto index = innerIndices[i];
-            extents[i] = flangeExtent(faces(static_cast<int>(bend.flangeFaces[index])),
-                                      faces(static_cast<int>(bend.flangeFaces[index + 1])),
-                                      flangeAxes(basis, *seed, i == 1));
-            for (const auto &zone : jointZones)
-                extents[i] = std::max(
-                    extents[i], flangeExtent(faces(static_cast<int>(zone.flangeFaces[index])),
-                                             faces(static_cast<int>(zone.flangeFaces[index + 1])),
-                                             flangeAxes(basis, *seed, i == 1)));
-        }
-        model.fixedFlangeMm = extents[0];
-        model.movingFlangeMm = extents[1];
-        if (!simulation::validSingleBend(model)) {
-            return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
-                                    "Supported sizes: thickness/radius 0.1–100000 mm, "
-                                    "width/flanges 1–100000 mm, angle 5–175 degrees"};
-        }
-        const auto sourceSection = *simulation::singleBendSection(model, 1.0);
-        auto finalFrame = makeFrame(model, basis, 1.0);
-        std::vector<std::pair<double, double>> supportIntervals;
-        std::vector<TopoDS_Shape> jointSectors;
-        if (joint) {
-            std::vector<TopoDS_Shape> sectors;
-            for (const auto &zone : jointZones) {
-                if (stop.stop_requested())
-                    return cancelled();
-                const double a = gp_Vec(origin, point(zone.axisStart)).Dot(axis);
-                const double b = gp_Vec(origin, point(zone.axisEnd)).Dot(axis);
-                const double from = std::min(a, b), to = std::max(a, b);
-                auto zoneModel = model;
-                zoneModel.widthMm = to - from;
-                auto zoneBasis = basis;
-                zoneBasis.origin.Translate(basis.z * from);
-                const auto envelope = makeFrame(zoneModel, zoneBasis, 1.0);
-                const auto region =
-                    extractFlange(source, envelope.regions[1], analysis.lengthToleranceMm);
-                if (!region)
-                    return unsupported("Cannot isolate each joint bend sector");
-                const auto radial = zone.trimmedEnds
-                                        ? mapTrimmedBend(
-                                              *region, [](gp_Pnt p) { return p; }, 1,
-                                              analysis.lengthToleranceMm, nullptr, stop)
-                                        : envelope.regions[1];
-                if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
-                                std::max(1e-4, volume(source) * 1e-7), stop))
-                    return unsupported("A joint sector is not a supported radial surface");
-                sectors.push_back(*region);
-                jointSectors.push_back(*region);
-                supportIntervals.emplace_back(from, to);
-            }
-            finalFrame.regions[1] = compound(sectors);
-        } else if (bend.trimmedEnds) {
-            const auto region =
-                extractFlange(source, finalFrame.regions[1], analysis.lengthToleranceMm);
-            if (!region)
-                return unsupported("Cannot isolate the trimmed bend region");
-            finalFrame.regions[1] = *region;
-            const auto radial = mapTrimmedBend(
-                *region, [](gp_Pnt p) { return p; }, 1, analysis.lengthToleranceMm, nullptr, stop);
-            if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
-                            std::max(1e-4, volume(source) * 1e-7), stop))
-                return unsupported("The trimmed end is not a supported radial ruled surface");
-        }
-        const auto sourceSector = finalFrame.regions[1];
-        std::array<TopoDS_Shape, 2> flanges;
-        if (multi) {
-            std::array<std::vector<TopoDS_Face>, 2> anchors;
-            std::array<TopTools_IndexedMapOfShape, 2> uniqueAnchors;
-            const auto addAnchors = [&](const RecognizedBend &zone) {
-                for (std::size_t side = 0; side < anchors.size(); ++side)
-                    for (std::size_t offset = 0; offset < 2; ++offset) {
-                        const auto &face = TopoDS::Face(
-                            faces(static_cast<int>(zone.flangeFaces[innerIndices[side] + offset])));
-                        if (!uniqueAnchors[side].Contains(face)) {
-                            uniqueAnchors[side].Add(face);
-                            anchors[side].push_back(face);
+        if (!workpiece) {
+            const auto prepareGeometry = [&]()
+                -> std::variant<std::shared_ptr<const PreparedBendWorkpiece>, BendPreviewError> {
+                const auto &source = OcctDocumentAccess::simulationShape(*native);
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(source, TopAbs_FACE, faces);
+                const auto &cylinder = TopoDS::Face(faces(static_cast<int>(bend.innerFace)));
+                const auto &flangeA = TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[0])));
+                const auto &flangeB = TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[2])));
+                auto axis = gp_Vec(point(bend.axisStart), point(bend.axisEnd)).Normalized();
+                auto radialA = railRadial(cylinder, flangeA, point(bend.axisStart), axis,
+                                          analysis.lengthToleranceMm);
+                auto radialB = railRadial(cylinder, flangeB, point(bend.axisStart), axis,
+                                          analysis.lengthToleranceMm);
+                if (!radialA || !radialB) {
+                    return unsupported("Cannot determine tangency rails");
+                }
+                // The axis alone does not determine the direction or which walls move.
+                // Match tangency rails, accepting only an unambiguous common section.
+                std::vector<RecognizedBend> jointZones;
+                for (const auto index : jointBends) {
+                    auto zone = analysis.bends[index];
+                    const auto &inner = TopoDS::Face(faces(static_cast<int>(zone.innerFace)));
+                    auto a = railRadial(inner,
+                                        TopoDS::Face(faces(static_cast<int>(zone.flangeFaces[0]))),
+                                        point(bend.axisStart), axis, analysis.lengthToleranceMm);
+                    auto b = railRadial(inner,
+                                        TopoDS::Face(faces(static_cast<int>(zone.flangeFaces[2]))),
+                                        point(bend.axisStart), axis, analysis.lengthToleranceMm);
+                    if (!a || !b)
+                        return unsupported("Cannot determine a joint zone's tangency rails");
+                    const auto aligned = [&](gp_Vec u, gp_Vec v) {
+                        return u.IsEqual(v, analysis.lengthToleranceMm,
+                                         analysis.angleToleranceRadians);
+                    };
+                    if (aligned(*a, *radialB) && aligned(*b, *radialA)) {
+                        std::swap(zone.flangeFaces[0], zone.flangeFaces[2]);
+                        std::swap(zone.flangeFaces[1], zone.flangeFaces[3]);
+                        std::swap(a, b);
+                    }
+                    if (!aligned(*a, *radialA) || !aligned(*b, *radialB))
+                        return unsupported("Joint zones require different forming directions");
+                    jointZones.push_back(zone);
+                }
+                if (referenceAxis) {
+                    auto normal = axis;
+                    if (radialA->Crossed(*radialB).Dot(normal) < 0)
+                        normal.Reverse();
+                    if (std::abs(normal.Dot(gp_Vec(*referenceAxis))) < .999999)
+                        return unsupported("Inconsistent workpiece reference axis");
+                    fixedSecond = fixedSecond != (normal.Dot(gp_Vec(*referenceAxis)) < 0);
+                }
+                if (fixedSecond) {
+                    std::swap(radialA, radialB);
+                }
+                if (radialA->Crossed(*radialB).Dot(axis) < 0.0) {
+                    axis.Reverse();
+                }
+                const auto origin =
+                    axis.Dot(gp_Vec(point(bend.axisStart), point(bend.axisEnd))) > 0.0
+                        ? point(bend.axisStart)
+                        : point(bend.axisEnd);
+                FrameBasis basis{origin.Translated(*radialA * bend.innerRadiusMm),
+                                 axis.Crossed(*radialA), -*radialA, axis};
+                const FrameBasis sourceBasis = basis;
+                simulation::SingleBend model{
+                    bend.thicknessMm, bend.innerRadiusMm, bend.angleRadians, bend.lengthMm, 1, 1};
+                const auto seed = simulation::singleBendSection(model, 1.0);
+                if (!seed) {
+                    return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                            "Unsupported bend dimensions/angle"};
+                }
+                const std::array<std::size_t, 2> innerIndices{fixedSecond ? 2U : 0U,
+                                                              fixedSecond ? 0U : 2U};
+                std::array<double, 2> extents{};
+                for (std::size_t i = 0; i < extents.size(); ++i) {
+                    const auto index = innerIndices[i];
+                    extents[i] = flangeExtent(faces(static_cast<int>(bend.flangeFaces[index])),
+                                              faces(static_cast<int>(bend.flangeFaces[index + 1])),
+                                              flangeAxes(basis, *seed, i == 1));
+                    for (const auto &zone : jointZones)
+                        extents[i] = std::max(
+                            extents[i],
+                            flangeExtent(faces(static_cast<int>(zone.flangeFaces[index])),
+                                         faces(static_cast<int>(zone.flangeFaces[index + 1])),
+                                         flangeAxes(basis, *seed, i == 1)));
+                }
+                model.fixedFlangeMm = extents[0];
+                model.movingFlangeMm = extents[1];
+                if (!simulation::validSingleBend(model)) {
+                    return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
+                                            "Supported sizes: thickness/radius 0.1–100000 mm, "
+                                            "width/flanges 1–100000 mm, angle 5–175 degrees"};
+                }
+                const auto sourceSection = *simulation::singleBendSection(model, 1.0);
+                auto finalFrame = makeFrame(model, basis, 1.0);
+                std::vector<std::pair<double, double>> supportIntervals;
+                std::vector<TopoDS_Shape> jointSectors;
+                bool nonRadialEnds = false;
+                std::optional<SheetGeometryResult> sheetGeometry;
+                const auto sectorFor = [&](const RecognizedBend &zone,
+                                           const TopoDS_Shape &envelope) {
+                    bool ambiguous = false;
+                    auto sector = extractFlange(source, envelope, analysis.lengthToleranceMm, false,
+                                                &ambiguous);
+                    if (sector || !ambiguous || stop.stop_requested())
+                        return sector;
+                    // A neighbour's corner may be inside this envelope. Reuse the full
+                    // D201 partition proof; selecting one component alone is insufficient.
+                    if (!sheetGeometry) {
+                        if (verifiedFlat &&
+                            OcctFlatPatternAccess::belongsTo(*verifiedFlat, *document))
+                            sheetGeometry = VerifiedSheetGeometry{
+                                document,
+                                std::shared_ptr<const SheetLayout>(
+                                    verifiedFlat, &OcctFlatPatternAccess::layout(*verifiedFlat))};
+                        else
+                            sheetGeometry = prepareSheetGeometry(document, stop);
+                    }
+                    if (const auto *verified =
+                            std::get_if<VerifiedSheetGeometry>(&*sheetGeometry)) {
+                        const auto at = std::find_if(analysis.bends.begin(), analysis.bends.end(),
+                                                     [&](const auto &b) {
+                                                         return b.innerFace == zone.innerFace &&
+                                                                b.outerFace == zone.outerFace;
+                                                     });
+                        if (at != analysis.bends.end()) {
+                            const auto id = static_cast<std::size_t>(at - analysis.bends.begin());
+                            for (const auto &region : verified->layout->bends)
+                                if (region.bendIndex == id)
+                                    return std::optional<TopoDS_Shape>{
+                                        BRepBuilderAPI_Copy(region.solid, true, false).Shape()};
                         }
                     }
-            };
-            if (joint)
+                    return std::optional<TopoDS_Shape>{};
+                };
+                if (joint) {
+                    std::vector<TopoDS_Shape> sectors;
+                    for (const auto &zone : jointZones) {
+                        if (stop.stop_requested())
+                            return cancelled();
+                        const double a = gp_Vec(origin, point(zone.axisStart)).Dot(axis);
+                        const double b = gp_Vec(origin, point(zone.axisEnd)).Dot(axis);
+                        const double from = std::min(a, b), to = std::max(a, b);
+                        auto zoneModel = model;
+                        zoneModel.widthMm = to - from;
+                        auto zoneBasis = basis;
+                        zoneBasis.origin.Translate(basis.z * from);
+                        const auto envelope = makeFrame(zoneModel, zoneBasis, 1.0);
+                        const auto region = sectorFor(zone, envelope.regions[1]);
+                        if (stop.stop_requested())
+                            return cancelled();
+                        if (!region)
+                            return unsupported("Cannot isolate each joint bend sector");
+                        bool nonRadial = false;
+                        const auto radial =
+                            zone.trimmedEnds
+                                ? mapTrimmedBend(
+                                      *region, [](gp_Pnt p) { return p; }, 1,
+                                      analysis.lengthToleranceMm, nullptr, stop, &nonRadial)
+                                : envelope.regions[1];
+                        nonRadialEnds |= nonRadial;
+                        if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
+                                        std::max(1e-4, volume(source) * 1e-7), stop))
+                            return unsupported("A joint sector is not a supported radial surface");
+                        sectors.push_back(*region);
+                        jointSectors.push_back(*region);
+                        supportIntervals.emplace_back(from, to);
+                    }
+                    finalFrame.regions[1] = compound(sectors);
+                } else if (bend.trimmedEnds) {
+                    const auto region = sectorFor(bend, finalFrame.regions[1]);
+                    if (stop.stop_requested())
+                        return cancelled();
+                    if (!region)
+                        return unsupported("Cannot isolate the trimmed bend region");
+                    finalFrame.regions[1] = *region;
+                    const auto radial = mapTrimmedBend(
+                        *region, [](gp_Pnt p) { return p; }, 1, analysis.lengthToleranceMm, nullptr,
+                        stop, &nonRadialEnds);
+                    if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
+                                    std::max(1e-4, volume(source) * 1e-7), stop))
+                        return unsupported(
+                            "The trimmed end is not a supported radial ruled surface");
+                }
+                const auto sourceSector = finalFrame.regions[1];
+                std::array<TopoDS_Shape, 2> flanges;
+                if (multi) {
+                    std::array<std::vector<TopoDS_Face>, 2> anchors;
+                    std::array<TopTools_IndexedMapOfShape, 2> uniqueAnchors;
+                    const auto addAnchors = [&](const RecognizedBend &zone) {
+                        for (std::size_t side = 0; side < anchors.size(); ++side)
+                            for (std::size_t offset = 0; offset < 2; ++offset) {
+                                const auto &face = TopoDS::Face(faces(static_cast<int>(
+                                    zone.flangeFaces[innerIndices[side] + offset])));
+                                if (!uniqueAnchors[side].Contains(face)) {
+                                    uniqueAnchors[side].Add(face);
+                                    anchors[side].push_back(face);
+                                }
+                            }
+                    };
+                    if (joint)
+                        for (const auto &zone : jointZones)
+                            addAnchors(zone);
+                    else
+                        addAnchors(bend);
+                    const auto split = splitAtBend(source, finalFrame, anchors,
+                                                   analysis.lengthToleranceMm, stop, joint);
+                    if (stop.stop_requested())
+                        return cancelled();
+                    if (!split)
+                        return unsupported(
+                            "The selected zone does not separate the whole part into two "
+                            "supported components");
+                    flanges = *split;
+                    for (std::size_t s = 0; s < 2; ++s)
+                        finalFrame.regions[s * 2] = flanges[s];
+                } else
+                    for (std::size_t i = 0; i < flanges.size(); ++i) {
+                        if (stop.stop_requested()) {
+                            return cancelled();
+                        }
+                        const auto extracted = extractFlange(source, finalFrame.regions[i * 2],
+                                                             analysis.lengthToleranceMm);
+                        if (!extracted) {
+                            return unsupported(
+                                "Cannot isolate one connected solid for each planar flange");
+                        }
+                        flanges[i] = *extracted;
+                        finalFrame.regions[i * 2] = *extracted;
+                    }
+                const double expectedVolume = volume(source);
+                const double budget = std::max(expectedVolume * 1.0e-8,
+                                               area(source) * analysis.lengthToleranceMm * 2.0);
+                double reconstructedVolume = 0;
+                const auto reconstructsSource = [&] {
+                    assemble(finalFrame);
+                    reconstructedVolume = volume(finalFrame.shape);
+                    return std::abs(reconstructedVolume - expectedVolume) <= budget &&
+                           sameVolume(source, finalFrame.shape, analysis.lengthToleranceMm, budget,
+                                      stop);
+                };
+                bool partitionedWalls = multi;
+                bool reconstructed = reconstructsSource();
+                if (!reconstructed && !multi && !joint && !bend.trimmedEnds &&
+                    expectedVolume - reconstructedVolume > budget && !stop.stop_requested()) {
+                    // One planar wall may extend axially past the bend-width envelope.
+                    // Recover only complete sheet walls, including both real anchor faces.
+                    std::vector<std::array<TopoDS_Face, 2>> anchors;
+                    for (const auto index : innerIndices)
+                        anchors.push_back(
+                            {TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[index]))),
+                             TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[index + 1])))});
+                    const auto walls = isolateFlatWalls(source, {sourceSector}, anchors,
+                                                        analysis.lengthToleranceMm, stop);
+                    if (walls && !stop.stop_requested()) {
+                        for (std::size_t i = 0; i < flanges.size(); ++i) {
+                            flanges[i] = (*walls)[i];
+                            finalFrame.regions[i * 2] = flanges[i];
+                        }
+                        reconstructed = reconstructsSource();
+                        partitionedWalls = true;
+                    }
+                }
+                // Unchanged large walls must not hide a small collision near the active bend.
+                double collisionWidth = model.widthMm;
                 for (const auto &zone : jointZones)
-                    addAnchors(zone);
-            else
-                addAnchors(bend);
-            const auto split =
-                splitAtBend(source, finalFrame, anchors, analysis.lengthToleranceMm, stop, joint);
-            if (stop.stop_requested())
-                return cancelled();
-            if (!split)
-                return unsupported("The selected zone does not separate the whole part into two "
-                                   "supported components");
-            flanges = *split;
-            for (std::size_t s = 0; s < 2; ++s)
-                finalFrame.regions[s * 2] = flanges[s];
-        } else
-            for (std::size_t i = 0; i < flanges.size(); ++i) {
-                if (stop.stop_requested()) {
-                    return cancelled();
+                    collisionWidth = std::min(collisionWidth, zone.lengthMm);
+                const double collisionBudget = std::max(1.e-6, collisionWidth * model.thicknessMm *
+                                                                   analysis.lengthToleranceMm * 2.);
+                if (!reconstructed) {
+                    if (stop.stop_requested()) {
+                        return cancelled();
+                    }
+                    return unsupported(
+                        "Isolated flanges and complete bend do not match the entire STEP");
                 }
-                const auto extracted =
-                    extractFlange(source, finalFrame.regions[i * 2], analysis.lengthToleranceMm);
-                if (!extracted) {
-                    return unsupported("Cannot isolate one connected solid for each planar flange");
+                for (const auto &flange : flanges) {
+                    if (stop.stop_requested())
+                        return cancelled();
+                    if (!BRepCheck_Analyzer(flange).IsValid())
+                        return unsupported("Invalid isolated material component");
+                    BRepMesh_IncrementalMesh mesh(flange, .05, false, .35, false);
+                    if (!mesh.IsDone())
+                        return BendPreviewError{BendPreviewErrorCode::Failed,
+                                                "Cannot prepare the rigid material mesh"};
                 }
-                flanges[i] = *extracted;
-                finalFrame.regions[i * 2] = *extracted;
+                const double rigidVolume = volume(flanges[0]) + volume(flanges[1]);
+                const auto displaySource =
+                    !OcctDocumentAccess::routeSkin(*native).IsNull()
+                        ? OcctDocumentAccess::routeSkin(*native)
+                    : metadata.closedCutouts.status == ClosedCutoutStatus::Filled ||
+                            bend.trimmedEnds
+                        ? visibleSource(OcctDocumentAccess::shape(*native))
+                        : TopoDS_Shape{};
+                auto value = std::make_shared<PreparedBendWorkpiece>();
+                value->document = document;
+                value->bendIndex = bendIndex;
+                value->target = target;
+                value->requestedReversed = requestedReversed;
+                value->referenceAxis = referenceAxis;
+                value->jointIds.assign(jointBends.begin(), jointBends.end());
+                value->source = source;
+                value->sourceSector = sourceSector;
+                value->model = model;
+                value->basis = basis;
+                value->sourceBasis = sourceBasis;
+                value->sourceSection = sourceSection;
+                value->jointZones = std::move(jointZones);
+                value->jointSectors = std::move(jointSectors);
+                value->supportIntervals = std::move(supportIntervals);
+                value->nonRadialEnds = nonRadialEnds;
+                value->partitionedWalls = partitionedWalls;
+                value->flanges = std::move(flanges);
+                value->expectedVolume = expectedVolume;
+                value->budget = budget;
+                value->collisionBudget = collisionBudget;
+                value->rigidVolume = rigidVolume;
+                value->displaySource = displaySource;
+                return std::shared_ptr<const PreparedBendWorkpiece>(std::move(value));
+            };
+            const auto geometry = prepareGeometry();
+            if (const auto *error = std::get_if<BendPreviewError>(&geometry))
+                return *error;
+            workpiece = std::get<std::shared_ptr<const PreparedBendWorkpiece>>(geometry);
+            if (workpieceReuse) {
+                ++workpieceReuse->built;
+                if (workpieceReuse->entries.size() == 4)
+                    workpieceReuse->entries.erase(workpieceReuse->entries.begin());
+                workpieceReuse->entries.push_back(workpiece);
             }
-        assemble(finalFrame);
-        const double expectedVolume = volume(source);
-        const double budget =
-            std::max(expectedVolume * 1.0e-8, area(source) * analysis.lengthToleranceMm * 2.0);
-        // Unchanged large walls must not hide a small collision near the active bend.
-        double collisionWidth = model.widthMm;
-        for (const auto &zone : jointZones)
-            collisionWidth = std::min(collisionWidth, zone.lengthMm);
-        const double collisionBudget =
-            std::max(1.e-6, collisionWidth * model.thicknessMm * analysis.lengthToleranceMm * 2.);
-        if (std::abs(volume(finalFrame.shape) - expectedVolume) > budget ||
-            !sameVolume(source, finalFrame.shape, analysis.lengthToleranceMm, budget, stop)) {
-            if (stop.stop_requested()) {
-                return cancelled();
-            }
-            return unsupported("Isolated flanges and complete bend do not match the entire STEP");
         }
-        for (const auto &flange : flanges) {
-            if (stop.stop_requested())
-                return cancelled();
-            if (!BRepCheck_Analyzer(flange).IsValid())
-                return unsupported("Invalid isolated material component");
-            BRepMesh_IncrementalMesh mesh(flange, .05, false, .35, false);
-            if (!mesh.IsDone())
-                return BendPreviewError{BendPreviewErrorCode::Failed,
-                                        "Cannot prepare the rigid material mesh"};
-        }
-        const double rigidVolume = volume(flanges[0]) + volume(flanges[1]);
+        if (stop.stop_requested())
+            return cancelled();
+        const auto &source = workpiece->source;
+        const auto &sourceSector = workpiece->sourceSector;
+        const auto &model = workpiece->model;
+        auto basis = workpiece->basis;
+        const auto &sourceBasis = workpiece->sourceBasis;
+        const auto &sourceSection = workpiece->sourceSection;
+        auto jointZones = workpiece->jointZones;
+        auto jointSectors = workpiece->jointSectors;
+        auto supportIntervals = workpiece->supportIntervals;
+        const auto &nonRadialEnds = workpiece->nonRadialEnds;
+        const auto &flanges = workpiece->flanges;
+        const auto &expectedVolume = workpiece->expectedVolume;
+        const auto &budget = workpiece->budget;
+        const auto &collisionBudget = workpiece->collisionBudget;
+        const auto &rigidVolume = workpiece->rigidVolume;
+        const auto &displaySource = workpiece->displaySource;
+        const bool partitionedWalls = workpiece->partitionedWalls;
         auto preview = std::make_shared<CadPreview>();
+        preview->manualExit = manualExtraction;
         preview->supportLimit =
             allowPartialEndSupport ? maximumEndSupportLossMm : std::optional<double>(0);
         preview->reversed = requestedReversed;
@@ -1111,11 +1301,6 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
             preview->gaps = {
                 realTools->dieAssembly ? core::maximumAssemblyGap(*realTools->dieAssembly) : 0,
                 realTools->punchAssembly ? core::maximumAssemblyGap(*realTools->punchAssembly) : 0};
-        const auto displaySource = !OcctDocumentAccess::routeSkin(*native).IsNull()
-                                       ? OcctDocumentAccess::routeSkin(*native)
-                                   : preview->filledCutouts || bend.trimmedEnds
-                                       ? visibleSource(OcctDocumentAccess::shape(*native))
-                                       : TopoDS_Shape{};
         if (toolParameters) {
             const auto placement = simulation::flatToolSetup(model, *toolParameters,
                                                              analysis.lengthToleranceMm, shoulders);
@@ -1322,28 +1507,37 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
             initialTools[1] = orientPunch(initialTools[1], *toolParameters);
             orientPunchSegments(initialSegments[1], *toolParameters);
         }
-        const auto &orientation = OcctDocumentAccess::sheetOrientation(*native);
-        const auto &nativeShape = OcctDocumentAccess::shape(*native);
-        const std::array<std::vector<SheetSide>, 2> flangeSides{
-            matchSheetSides(flanges[0], nativeShape, orientation),
-            matchSheetSides(flanges[1], nativeShape, orientation)};
-        const auto innerLabels =
-            matchSheetSides(faces(static_cast<int>(bend.innerFace)), nativeShape, orientation);
-        const auto innerSide = innerLabels.size() == 2 ? innerLabels[1] : SheetSide::Neutral;
-        std::optional<std::size_t> referenceFlange;
-        if (orientation.available)
-            referenceFlange =
-                sheetReferenceRegion(orientation.reference, flanges, analysis.lengthToleranceMm);
-        const auto displaySides = displaySource.IsNull() ? std::vector<SheetSide>{}
-                                  : !OcctDocumentAccess::routeSkin(*native).IsNull()
-                                      ? OcctDocumentAccess::routeSkinSides(*native)
-                                      : matchSheetSides(displaySource, nativeShape, orientation);
-        auto skin = multi && !displaySource.IsNull()
-                        ? prepareWholePartSkin(displaySource, flanges, sourceSector,
-                                               analysis.lengthToleranceMm, stop, displaySides)
-                        : WholePartSkin{};
-        if (stop.stop_requested())
-            return cancelled();
+        if (!workpiece->display) {
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(source, TopAbs_FACE, faces);
+            const auto &orientation = OcctDocumentAccess::sheetOrientation(*native);
+            const auto &nativeShape = OcctDocumentAccess::shape(*native);
+            const std::array<std::vector<SheetSide>, 2> flangeSides{
+                matchSheetSides(flanges[0], nativeShape, orientation),
+                matchSheetSides(flanges[1], nativeShape, orientation)};
+            const auto innerLabels =
+                matchSheetSides(faces(static_cast<int>(bend.innerFace)), nativeShape, orientation);
+            const auto innerSide = innerLabels.size() == 2 ? innerLabels[1] : SheetSide::Neutral;
+            std::optional<std::size_t> referenceFlange;
+            if (orientation.available)
+                referenceFlange = sheetReferenceRegion(orientation.reference, flanges,
+                                                       analysis.lengthToleranceMm);
+            const auto displaySides =
+                displaySource.IsNull() ? std::vector<SheetSide>{}
+                : !OcctDocumentAccess::routeSkin(*native).IsNull()
+                    ? OcctDocumentAccess::routeSkinSides(*native)
+                    : matchSheetSides(displaySource, nativeShape, orientation);
+            auto value = std::make_shared<BendWorkpieceDisplay>();
+            value->flangeSides = flangeSides;
+            value->innerSide = innerSide;
+            value->referenceFlange = referenceFlange;
+            value->displaySides = displaySides;
+            workpiece->display = std::move(value);
+        }
+        const auto &flangeSides = workpiece->display->flangeSides;
+        const auto innerSide = workpiece->display->innerSide;
+        const auto referenceFlange = workpiece->display->referenceFlange;
+        const auto &displaySides = workpiece->display->displaySides;
         std::optional<MachineAssembly> machine;
         if (preview->setup && toolParameters->machineModel != core::MachineModel::None)
             machine.emplace(*toolParameters, initialTools, stop, realTools);
@@ -1351,15 +1545,29 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
         const double tolerance = analysis.lengthToleranceMm;
         auto evaluate =
             [native, source, prototype = std::shared_ptr<const CadPreview>(std::move(preview)),
-             centralBasis = basis, model, sourceBasis, sourceSection, flanges, bend, multi, joint,
-             jointZones = std::move(jointZones), jointSectors = std::move(jointSectors),
-             supportIntervals = std::move(supportIntervals), sourceSector, expectedVolume, budget,
-             collisionBudget, rigidVolume, toolParameters, withMotion, toolGeometry,
+             centralBasis = basis, model, sourceBasis, sourceSection, flanges, bend,
+             partitionedWalls, joint, jointZones = std::move(jointZones),
+             jointSectors = std::move(jointSectors), supportIntervals = std::move(supportIntervals),
+             sourceSector, expectedVolume, budget, collisionBudget, rigidVolume, toolParameters,
+             withMotion, manualExtraction, toolGeometry, nonRadialEnds,
              realTools = std::move(realTools), machine = std::move(machine), initialTools,
              initialSegments = std::move(initialSegments), flangeSides, innerSide, referenceFlange,
-             displaySource, displaySides, skin = std::move(skin), requestedReversed, tolerance](
+             displaySource, displaySides, workpiece, workpieceReuse, requestedReversed, tolerance](
                 double workpieceOffsetMm, std::stop_token placementStop, bool prepareDiagnostic,
                 BackgaugeSearchStatistics *gaugeStatistics) -> BendPreviewResult {
+            const auto ensureSkin = [&]() -> bool {
+                if (!workpiece->display->skin) {
+                    auto skin = partitionedWalls && !displaySource.IsNull()
+                                    ? prepareWholePartSkin(displaySource, flanges, sourceSector,
+                                                           tolerance, placementStop, displaySides)
+                                    : WholePartSkin{};
+                    if (placementStop.stop_requested())
+                        return false;
+                    workpiece->display->skin =
+                        std::make_shared<const WholePartSkin>(std::move(skin));
+                }
+                return !placementStop.stop_requested();
+            };
             const auto placementCancelled = []() -> BendPreviewError {
                 return {BendPreviewErrorCode::Cancelled, "Preview cancelled"};
             };
@@ -1373,6 +1581,8 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                                             workpieceOffsetMm, tolerance))
                 return BendPreviewError{BendPreviewErrorCode::ToolTooShort,
                                         "Tool assemblies do not cover the axial bend placement"};
+            if (prepareDiagnostic && !ensureSkin())
+                return placementCancelled();
             auto placedPreview = std::make_shared<CadPreview>(*prototype);
             placedPreview->axialOffset = workpieceOffsetMm;
             if (realTools && toolParameters) {
@@ -1420,15 +1630,20 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
             RigidClearanceCache rigidClearances;
             bool returnSweepClear = true;
             constexpr std::size_t formingIntervals = 40;
-            const std::size_t intervals = withMotion       ? formingIntervals + 20
-                                          : toolParameters ? 0
-                                                           : 20;
+            const std::size_t fullIntervals = withMotion       ? formingIntervals + 20
+                                              : toolParameters ? 0
+                                                               : 20;
+            // Preserve the exact approach/forming samples. Do not rescale this prefix
+            // to progress=1, which would animate the unverified vertical return.
+            const std::size_t intervals =
+                withMotion && manualExtraction ? formingIntervals : fullIntervals;
             for (std::size_t i = 0; i <= intervals; ++i) {
                 if (placementStop.stop_requested()) {
                     return placementCancelled();
                 }
                 const double progress =
-                    intervals ? static_cast<double>(i) / static_cast<double>(intervals) : 0.0;
+                    fullIntervals ? static_cast<double>(i) / static_cast<double>(fullIntervals)
+                                  : 0.0;
                 if (withMotion) {
                     const auto state =
                         simulation::pressMotionState(model, *placedPreview->motion, progress);
@@ -1483,30 +1698,57 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                 }
                 const bool rigidVolumePreserved =
                     placeFlanges(frame, flanges, sourceBasis, sourceSection, placedBasis, section);
-                if (multi)
-                    for (const auto &pair :
-                         {std::pair{0U, 1U}, std::pair{0U, 2U}, std::pair{1U, 2U}}) {
-                        bool completed = false;
-                        if (!disjointVolumes(frame.regions[pair.first], frame.regions[pair.second],
-                                             tolerance, collisionBudget, &completed))
-                            return BendPreviewError{
-                                completed ? BendPreviewErrorCode::SheetIntersection
-                                          : BendPreviewErrorCode::Failed,
-                                completed ? "The two formed components intersect "
-                                            "during the selected operation"
-                                          : "Component intersection Boolean failed",
-                                i};
-                    }
                 const auto materialShape = frame.shape;
-                // Direct isometries preserve the independently measured rigid components.
-                // Always measure the freshly deformed sector; retain the full fallback.
-                const double materialVolume = rigidVolumePreserved
-                                                  ? rigidVolume + volume(frame.regions[1])
-                                                  : volume(frame.shape);
-                if (!std::isfinite(materialVolume) ||
-                    std::abs(materialVolume - expectedVolume) > budget) {
-                    return BendPreviewError{BendPreviewErrorCode::Failed,
-                                            "Intermediate state changed material volume"};
+                if (placementStop.stop_requested())
+                    return placementCancelled();
+                const auto intrinsic = intrinsicKey(placedBasis, section);
+                const bool checked =
+                    workpieceReuse &&
+                    std::find(workpiece->checkedSections.begin(), workpiece->checkedSections.end(),
+                              intrinsic) != workpiece->checkedSections.end();
+                if (checked)
+                    ++workpieceReuse->reusedChecks;
+                else {
+                    if (workpieceReuse)
+                        ++workpieceReuse->checked;
+                    if (partitionedWalls)
+                        for (const auto &pair :
+                             {std::pair{0U, 1U}, std::pair{0U, 2U}, std::pair{1U, 2U}}) {
+                            bool completed = false;
+                            if (!disjointVolumes(frame.regions[pair.first],
+                                                 frame.regions[pair.second], tolerance,
+                                                 collisionBudget, &completed))
+                                return BendPreviewError{
+                                    completed ? BendPreviewErrorCode::SheetIntersection
+                                              : BendPreviewErrorCode::Failed,
+                                    completed ? "The two formed components intersect "
+                                                "during the selected operation"
+                                              : "Component intersection Boolean failed",
+                                    i};
+                        }
+                    // Direct isometries preserve the independently measured rigid components.
+                    // A cache miss measures the freshly deformed sector; retain the full fallback.
+                    const double materialVolume = rigidVolumePreserved
+                                                      ? rigidVolume + volume(frame.regions[1])
+                                                      : volume(frame.shape);
+                    if (!std::isfinite(materialVolume) ||
+                        std::abs(materialVolume - expectedVolume) > budget) {
+                        if (nonRadialEnds && std::isfinite(materialVolume))
+                            return BendPreviewError{
+                                BendPreviewErrorCode::UnsupportedGeometry,
+                                "The current bend kinematics do not preserve the volume of a "
+                                "thickness-dependent end contour"};
+                        return BendPreviewError{BendPreviewErrorCode::Failed,
+                                                "Intermediate state changed material volume"};
+                    }
+
+                    if (placementStop.stop_requested())
+                        return placementCancelled();
+                    if (workpieceReuse) {
+                        if (workpiece->checkedSections.size() == 128)
+                            workpiece->checkedSections.erase(workpiece->checkedSections.begin());
+                        workpiece->checkedSections.push_back(intrinsic);
+                    }
                 }
                 if (withMotion && i == formingIntervals) {
                     // Independently place the already verified CAD reconstruction into the machine
@@ -1531,7 +1773,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                             "Contact endpoint differs from the verified STEP reconstruction", i};
                     }
                 }
-                if (withMotion && i == formingIntervals) {
+                if (withMotion && !manualExtraction && i == formingIntervals) {
                     const double tip = placedPreview->states.back().punchTipYmm;
                     const double lift = model.thicknessMm + toolParameters->clearanceMm - tip;
                     if (!std::isfinite(lift) || lift <= tolerance) {
@@ -1542,7 +1784,8 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                         placedPreview->realPunch
                             ? drawingPunchSweep(*realTools, *toolGeometry, tip, lift, placementStop)
                             : makePunch(*toolParameters, tip, lift);
-                    if (realTools)
+                    if (realTools &&
+                        !core::usesHornSections(realTools->punch, realTools->punchAssembly))
                         placedPreview->sweep = segmentToolBody(
                             placedPreview->sweep, realTools->punch, realTools->punchAssembly,
                             (toolParameters->lengthMm - core::punchLengthMm(*toolParameters)) / 2,
@@ -1701,9 +1944,10 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                 return BendPreviewError{BendPreviewErrorCode::Failed,
                                                         "Collision snapshot mesh failed", i};
                             if (!displaySource.IsNull()) {
-                                if (multi)
-                                    makeWholePartDisplay(frame, skin, model, sourceBasis,
-                                                         placedBasis, section, placementStop);
+                                if (partitionedWalls)
+                                    makeWholePartDisplay(frame, *workpiece->display->skin, model,
+                                                         sourceBasis, placedBasis, section,
+                                                         placementStop);
                                 else
                                     makeDisplay(frame, displaySource, model, sourceBasis,
                                                 placedBasis, section, placementStop, displaySides);
@@ -1802,7 +2046,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                                     "Punch contact/clearance mismatch", i};
                         }
                     }
-                    if (withMotion && i == intervals) {
+                    if (withMotion && !manualExtraction && i == intervals) {
                         BRepExtrema_DistShapeShape distance(frame.shape, frame.tools[1]);
                         if (!distance.IsDone() || !std::isfinite(distance.Value()) ||
                             distance.Value() <= tolerance) {
@@ -1823,17 +2067,25 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                     }
                     frame.shape = assembly;
                 }
-                BRepMesh_IncrementalMesh mesh(materialShape, 0.05, false, 0.35, false);
-                if (!mesh.IsDone()) {
-                    return BendPreviewError{BendPreviewErrorCode::Failed, "Preview mesh failed"};
-                }
-                if (!displaySource.IsNull()) {
-                    if (multi)
-                        makeWholePartDisplay(frame, skin, model, sourceBasis, placedBasis, section,
-                                             placementStop);
-                    else
-                        makeDisplay(frame, displaySource, model, sourceBasis, placedBasis, section,
-                                    placementStop, displaySides);
+                // Backgauge contacts require the real source skin, including holes.
+                // Search-only failures before that contact need no display preparation.
+                if (prepareDiagnostic ||
+                    (i == 0 && placedPreview->setup && placedPreview->setup->tools.backgauge)) {
+                    if (!ensureSkin())
+                        return placementCancelled();
+                    BRepMesh_IncrementalMesh mesh(materialShape, 0.05, false, 0.35, false);
+                    if (!mesh.IsDone()) {
+                        return BendPreviewError{BendPreviewErrorCode::Failed,
+                                                "Preview mesh failed"};
+                    }
+                    if (!displaySource.IsNull()) {
+                        if (partitionedWalls)
+                            makeWholePartDisplay(frame, *workpiece->display->skin, model,
+                                                 sourceBasis, placedBasis, section, placementStop);
+                        else
+                            makeDisplay(frame, displaySource, model, sourceBasis, placedBasis,
+                                        section, placementStop, displaySides);
+                    }
                 }
                 frameOrientation(frame, placedOrientation, flangeSides, innerSide, placedBasis,
                                  section, referenceFlange);
@@ -1881,6 +2133,43 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                         prepareDiagnostic && failed ? BendPreviewPtr(placedPreview)
                                                                     : BendPreviewPtr{}};
             }
+            if (!prepareDiagnostic) {
+                if (!ensureSkin())
+                    return placementCancelled();
+                Bnd_Box renderedEnvelope;
+                for (std::size_t f = 0; f < placedPreview->frames.size(); ++f) {
+                    if (placementStop.stop_requested())
+                        return placementCancelled();
+                    auto &frame = placedPreview->frames[f];
+                    const auto material =
+                        compound({frame.regions[0], frame.regions[1], frame.regions[2]});
+                    BRepMesh_IncrementalMesh mesh(material, .05, false, .35, false);
+                    if (!mesh.IsDone())
+                        return BendPreviewError{BendPreviewErrorCode::Failed,
+                                                "Preview mesh failed"};
+                    const auto section =
+                        withMotion ? placedPreview->states[f].section
+                                   : *simulation::singleBendSection(
+                                         model, intervals ? double(f) / double(intervals) : 0);
+                    if (!displaySource.IsNull()) {
+                        frame.orientation.sides = {};
+                        if (partitionedWalls)
+                            makeWholePartDisplay(frame, *workpiece->display->skin, model,
+                                                 sourceBasis, placedBasis, section, placementStop);
+                        else
+                            makeDisplay(frame, displaySource, model, sourceBasis, placedBasis,
+                                        section, placementStop, displaySides);
+                    }
+                    BRepBndLib::Add(frame.shape, renderedEnvelope);
+                }
+                renderedEnvelope.Get(
+                    placedPreview->envelope.minimum.x, placedPreview->envelope.minimum.y,
+                    placedPreview->envelope.minimum.z, placedPreview->envelope.maximum.x,
+                    placedPreview->envelope.maximum.y, placedPreview->envelope.maximum.z);
+                expandBackgaugeEnvelope(*placedPreview);
+            }
+            if (placementStop.stop_requested())
+                return placementCancelled();
             return BendPreviewPtr(std::move(placedPreview));
         };
         return PreparedBendOperationPtr(

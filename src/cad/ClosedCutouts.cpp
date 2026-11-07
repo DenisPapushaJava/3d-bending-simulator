@@ -1,5 +1,6 @@
 #include "ClosedCutouts.h"
 
+#include <BOPAlgo_PaveFiller.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -41,24 +42,28 @@ double area(const TopoDS_Shape &shape) {
     return props.Mass();
 }
 } // namespace
-FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
-                                std::stop_token stop) {
+FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance, std::stop_token stop,
+                                bool hasBendCandidates) {
     FilledCutouts result;
     using Status = application::ClosedCutoutStatus;
     try {
         TopTools_IndexedMapOfShape faces, edges;
         TopExp::MapShapes(source, TopAbs_FACE, faces);
         TopExp::MapShapes(source, TopAbs_EDGE, edges);
-        if (faces.Extent() > 512 || edges.Extent() > 2048 || tolerance > .01) {
+        const bool large = faces.Extent() > 512 || edges.Extent() > 2048;
+        if ((large && !hasBendCandidates) || faces.Extent() > 4096 || edges.Extent() > 16384 ||
+            tolerance > .01) {
             result.report.status = Status::Unsupported;
             return result;
         }
         TopTools_IndexedDataMapOfShapeListOfShape adjacent;
         TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, adjacent);
         std::set<int> hosts;
+        std::vector<TopoDS_Wire> outerWires(static_cast<std::size_t>(faces.Extent() + 1));
         std::vector<TopTools_IndexedMapOfShape> outerEdges(
             static_cast<std::size_t>(faces.Extent() + 1));
         std::vector<int> seeds;
+        int innerWires = 0;
         for (int i = 1; i <= faces.Extent(); ++i) {
             if (stop.stop_requested())
                 return {};
@@ -67,12 +72,18 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
             TopExp::MapShapes(face, TopAbs_WIRE, wires);
             if (wires.Extent() <= 1)
                 continue;
+            innerWires += wires.Extent() - 1;
+            if (large && innerWires > 1024) {
+                result.report.status = Status::Unsupported;
+                return result;
+            }
             const auto outer = BRepTools::OuterWire(face);
             if (outer.IsNull() || !wires.Contains(outer)) {
                 result.report.status = Status::Unsupported;
                 return result;
             }
             hosts.insert(i);
+            outerWires[static_cast<std::size_t>(i)] = outer;
             TopExp::MapShapes(outer, TopAbs_EDGE, outerEdges[static_cast<std::size_t>(i)]);
         }
         if (hosts.empty())
@@ -82,7 +93,7 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
             TopTools_IndexedMapOfShape wires;
             const auto face = TopoDS::Face(faces(i));
             TopExp::MapShapes(face, TopAbs_WIRE, wires);
-            const auto outer = BRepTools::OuterWire(face);
+            const auto &outer = outerWires[static_cast<std::size_t>(i)];
             for (int j = 1; j <= wires.Extent(); ++j) {
                 if (wires(j).IsSame(outer))
                     continue;
@@ -182,10 +193,25 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
         if (originalBox.CornerMin().Distance(filledBox.CornerMin()) > tolerance ||
             originalBox.CornerMax().Distance(filledBox.CornerMax()) > tolerance)
             return result;
-        BRepAlgoAPI_Cut missing;
         TopTools_ListOfShape arguments, tools;
         arguments.Append(source);
         tools.Append(solid);
+
+        // Both differences use the same intersections. Build each result separately
+        // so its geometry and volume are still checked in its own direction.
+        auto operands = arguments;
+        operands.Append(solid);
+        BOPAlgo_PaveFiller filler;
+        filler.SetArguments(operands);
+        filler.SetNonDestructive(true);
+        filler.SetFuzzyValue(tolerance);
+        filler.Perform();
+        if (stop.stop_requested())
+            return {};
+        if (filler.HasErrors())
+            return result;
+
+        BRepAlgoAPI_Cut missing(filler);
         missing.SetArguments(arguments);
         missing.SetTools(tools);
         missing.SetNonDestructive(true);
@@ -194,10 +220,12 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
         if (stop.stop_requested())
             return {};
         if (!missing.IsDone() || missing.HasErrors() ||
-            !BRepCheck_Analyzer(missing.Shape()).IsValid() ||
-            !std::isfinite(volume(missing.Shape())) || volume(missing.Shape()) > budget)
+            !BRepCheck_Analyzer(missing.Shape()).IsValid())
             return result;
-        BRepAlgoAPI_Cut added;
+        const double lostVolume = volume(missing.Shape());
+        if (!std::isfinite(lostVolume) || lostVolume > budget)
+            return result;
+        BRepAlgoAPI_Cut added(filler);
         added.SetArguments(tools);
         added.SetTools(arguments);
         added.SetNonDestructive(true);
@@ -205,10 +233,11 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance,
         added.Build();
         if (stop.stop_requested())
             return {};
-        if (!added.IsDone() || added.HasErrors() || !BRepCheck_Analyzer(added.Shape()).IsValid() ||
-            !std::isfinite(volume(added.Shape())) || volume(added.Shape()) <= positiveBudget ||
-            std::abs(filledVolume - originalVolume - volume(added.Shape()) +
-                     volume(missing.Shape())) > budget)
+        if (!added.IsDone() || added.HasErrors() || !BRepCheck_Analyzer(added.Shape()).IsValid())
+            return result;
+        const double addedVolume = volume(added.Shape());
+        if (!std::isfinite(addedVolume) || addedVolume <= positiveBudget ||
+            std::abs(filledVolume - originalVolume - addedVolume + lostVolume) > budget)
             return result;
         result.shape = solid;
         result.report.status = Status::Filled;

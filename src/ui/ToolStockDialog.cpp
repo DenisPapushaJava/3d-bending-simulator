@@ -1,4 +1,5 @@
 #include "ToolStockDialog.h"
+#include "HornSectionEditor.h"
 #include "ToolSegmentColorPreferences.h"
 #include <QAction>
 #include <QCheckBox>
@@ -10,10 +11,13 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStringList>
 #include <QTableWidget>
+#include <QTimer>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <array>
@@ -91,12 +95,11 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
                        QString::fromStdString(t.code));
     layout->addWidget(tool_);
     tool_->setVisible(!embedded_);
-    auto *help = new QLabel(
-        QStringLiteral(
-            "Укажите доступное количество секций одного профиля. "
-            "Шаблон не подтверждает наличие: новые количества равны нулю. "
-            "Рожковые секции хранятся отдельно и пока не участвуют в автоматической сборке."),
-        this);
+    auto *help =
+        new QLabel(QStringLiteral("Укажите доступное количество секций одного профиля. "
+                                  "Шаблон не подтверждает наличие: новые количества равны нулю. "
+                                  "Сапожки участвуют в подборе после настройки размеров выемки."),
+                   this);
     help->setWordWrap(true);
     layout->addWidget(help);
     help->setVisible(!embedded_);
@@ -135,19 +138,33 @@ ToolStockDialog::ToolStockDialog(core::ToolCatalog catalog,
     if (embedded_)
         enabled_->setText(QStringLiteral("Указать наличие секций"));
     layout->addWidget(enabled_);
-    rows_ = new QTableWidget(0, 4, this);
+    rows_ = new QTableWidget(0, 5, this);
     rows_->setObjectName("stockRows");
     rows_->setHorizontalHeaderLabels({QStringLiteral("Длина, мм"),
                                       QStringLiteral("Количество, шт."), QStringLiteral("Форма"),
-                                      QStringLiteral("Цвет")});
+                                      QStringLiteral("Цвет"), QStringLiteral("Геометрия")});
     rows_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     rows_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
     rows_->setColumnWidth(3, 64);
+    rows_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
+    rows_->setColumnWidth(4, 112);
     rows_->setSelectionBehavior(QAbstractItemView::SelectRows);
     layout->addWidget(rows_);
-    hornNotice_ = new QLabel(QStringLiteral("Сапожки пока доступны только для учёта наличия. Их "
-                                            "точная форма и симуляция — следующий этап."),
-                             this);
+    hornEditor_ = new HornSectionEditor(this);
+    hornEditor_->hide();
+    layout->addWidget(hornEditor_);
+    hornEditor_->onEdited = [this] {
+        if (loading_ || !editingHorn_)
+            return;
+        editingHorn_->setProperty("hornFields", hornEditor_->draft());
+        inventoryEdited_ = true;
+        status_->clear();
+    };
+    connect(rows_, &QTableWidget::itemSelectionChanged, this, [this] { updateHornEditor(); });
+    hornNotice_ =
+        new QLabel(QStringLiteral("Выберите сапожок и нажмите «Настроить», чтобы задать выемку. "
+                                  "Настроенные секции учитываются при подборе и проверке гибки."),
+                   this);
     hornNotice_->setObjectName("stockHornNotice");
     hornNotice_->setWordWrap(true);
     hornNotice_->hide();
@@ -238,8 +255,15 @@ void ToolStockDialog::add(core::ToolSegment s) {
     shape->addItems({QStringLiteral("Прямая"), QStringLiteral("Левый сапожок"),
                      QStringLiteral("Правый сапожок")});
     shape->setToolTip(QStringLiteral(
-        "Сапожки учитываются отдельно. Их точная форма и расчёт пока не поддержаны."));
+        "Выберите форму секции. Для сапожка задайте размеры выемки через «Настроить»."));
     shape->setCurrentIndex(static_cast<int>(s.shape));
+    QStringList hornFields;
+    if (s.horn)
+        hornFields = {QString::number(s.horn->projectionMm, 'g', 17),
+                      QString::number(s.horn->radiusMm, 'g', 17),
+                      QString::number(s.horn->tipHeightMm, 'g', 17)};
+    shape->setProperty("hornFields", hornFields);
+    shape->setProperty("hornVariantId", QString::fromStdString(s.variantId));
     rows_->setCellWidget(row, 0, length);
     rows_->setCellWidget(row, 1, quantity);
     rows_->setCellWidget(row, 2, shape);
@@ -247,6 +271,28 @@ void ToolStockDialog::add(core::ToolSegment s) {
     color->setObjectName("stockColor");
     color->setContextMenuPolicy(Qt::CustomContextMenu);
     rows_->setCellWidget(row, 3, color);
+    auto *geometry = new QPushButton(QStringLiteral("Настроить…"), rows_);
+    geometry->setObjectName("stockHornGeometry");
+    geometry->setEnabled(s.shape != core::SegmentShape::Straight &&
+                         toolKind() == core::ToolKind::Punch && enabled_->isChecked());
+    rows_->setCellWidget(row, 4, geometry);
+    connect(geometry, &QPushButton::clicked, this, [this, shape] {
+        for (int i = 0; i < rows_->rowCount(); ++i)
+            if (rows_->cellWidget(i, 2) == shape) {
+                rows_->selectRow(i);
+                updateHornEditor();
+                break;
+            }
+        QTimer::singleShot(0, this, [this] {
+            if (!editingHorn_)
+                return;
+            for (auto *p = parentWidget(); p; p = p->parentWidget())
+                if (auto *scroll = qobject_cast<QScrollArea *>(p)) {
+                    scroll->ensureWidgetVisible(findChild<QPushButton *>("stockSave"), 8, 8);
+                    break;
+                }
+        });
+    });
     connect(color, &QPushButton::clicked, this, [this, length] { chooseColor(length->value()); });
     connect(color, &QWidget::customContextMenuRequested, this, [this, color, length](QPoint p) {
         QMenu menu(color);
@@ -259,16 +305,29 @@ void ToolStockDialog::add(core::ToolSegment s) {
         if (!loading_)
             inventoryEdited_ = true;
         updateColors();
+        updateHornEditor();
     });
     connect(quantity, &QSpinBox::valueChanged, this, [this] {
         if (!loading_)
             inventoryEdited_ = true;
         updateHornNotice();
     });
-    connect(shape, &QComboBox::currentIndexChanged, this, [this] {
+    connect(shape, &QComboBox::currentIndexChanged, this, [this, shape, geometry] {
         if (!loading_)
             inventoryEdited_ = true;
         updateHornNotice();
+        if (shape->currentIndex() == 0) {
+            shape->setProperty("hornFields", QStringList{});
+            shape->setProperty("hornVariantId", QString{});
+        }
+        geometry->setEnabled(shape->currentIndex() > 0 && toolKind() == core::ToolKind::Punch &&
+                             enabled_->isChecked());
+        for (int i = 0; i < rows_->rowCount(); ++i)
+            if (rows_->cellWidget(i, 2) == shape) {
+                rows_->selectRow(i);
+                break;
+            }
+        updateHornEditor();
     });
     if (!loading_) {
         inventoryEdited_ = true;
@@ -281,6 +340,8 @@ void ToolStockDialog::load() {
     if (index >= catalog_.size())
         return;
     loading_ = true;
+    editingHorn_.clear();
+    hornEditor_->hide();
     const auto &s = catalog_[index].segments;
     {
         const QSignalBlocker blocked(set_);
@@ -341,13 +402,64 @@ void ToolStockDialog::updateEditing() {
     for (int row = 0; row < rows_->rowCount(); ++row)
         static_cast<QSpinBox *>(rows_->cellWidget(row, 1))
             ->setSpecialValueText(enabled_->isChecked() ? QString{} : QStringLiteral("—"));
+    for (int row = 0; row < rows_->rowCount(); ++row)
+        rows_->cellWidget(row, 4)->setEnabled(
+            enabled_->isChecked() && toolKind() == core::ToolKind::Punch &&
+            static_cast<QComboBox *>(rows_->cellWidget(row, 2))->currentIndex() > 0);
+    updateHornEditor();
+}
+void ToolStockDialog::updateHornEditor() {
+    if (loading_)
+        return;
+    const int row = rows_->currentRow();
+    auto *shape = row >= 0 ? qobject_cast<QComboBox *>(rows_->cellWidget(row, 2)) : nullptr;
+    if (!shape || shape->currentIndex() == 0 || toolKind() != core::ToolKind::Punch ||
+        !enabled_->isChecked()) {
+        editingHorn_.clear();
+        hornEditor_->hide();
+        updateHornNotice();
+        return;
+    }
+    editingHorn_ = shape;
+    const auto index = static_cast<std::size_t>(tool_->currentIndex());
+    hornEditor_->setSection(static_cast<QDoubleSpinBox *>(rows_->cellWidget(row, 0))->value(),
+                            index < catalog_.size() ? catalog_[index].heightMm.value_or(0) : 0,
+                            static_cast<core::SegmentShape>(shape->currentIndex()), {},
+                            shape->property("hornFields").toStringList());
+    hornEditor_->show();
+    updateHornNotice();
+}
+std::optional<core::ToolSegment> ToolStockDialog::sectionAt(int row) {
+    auto *shape = static_cast<QComboBox *>(rows_->cellWidget(row, 2));
+    core::ToolSegment result{
+        static_cast<QDoubleSpinBox *>(rows_->cellWidget(row, 0))->value(),
+        static_cast<unsigned>(static_cast<QSpinBox *>(rows_->cellWidget(row, 1))->value()),
+        static_cast<core::SegmentShape>(shape->currentIndex())};
+    if (result.shape != core::SegmentShape::Straight) {
+        const auto index = static_cast<std::size_t>(tool_->currentIndex());
+        const auto error = HornSectionEditor::read(
+            shape->property("hornFields").toStringList(), result.lengthMm,
+            index < catalog_.size() ? catalog_[index].heightMm.value_or(0) : 0, result.horn);
+        if (!error.isEmpty()) {
+            status_->setText(error);
+            rows_->selectRow(row);
+            updateHornEditor();
+            return {};
+        }
+        if (result.horn) {
+            result.variantId = shape->property("hornVariantId").toString().toStdString();
+            if (result.variantId.empty())
+                result.variantId = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+        }
+    }
+    return result;
 }
 void ToolStockDialog::updateHornNotice() {
     bool horns = false;
     for (int row = 0; row < rows_->rowCount(); ++row)
         if (auto *shape = qobject_cast<QComboBox *>(rows_->cellWidget(row, 2)))
             horns |= shape->currentIndex() > 0;
-    hornNotice_->setVisible(embedded_ && horns);
+    hornNotice_->setVisible(embedded_ && horns && hornEditor_->isHidden());
 }
 void ToolStockDialog::selectTool(const std::string &id) {
     for (std::size_t i = 0; i < catalog_.size(); ++i)
@@ -440,15 +552,15 @@ void ToolStockDialog::addSet(bool available) {
     if (available && (set_->currentIndex() <= 0 || copies_->value() <= 0))
         return;
     std::vector<core::ToolSegment> merged;
-    for (int i = 0; i < rows_->rowCount(); ++i)
-        merged.push_back(
-            {static_cast<QDoubleSpinBox *>(rows_->cellWidget(i, 0))->value(),
-             static_cast<unsigned>(static_cast<QSpinBox *>(rows_->cellWidget(i, 1))->value()),
-             static_cast<core::SegmentShape>(
-                 static_cast<QComboBox *>(rows_->cellWidget(i, 2))->currentIndex())});
+    for (int i = 0; i < rows_->rowCount(); ++i) {
+        const auto row = sectionAt(i);
+        if (!row)
+            return;
+        merged.push_back(*row);
+    }
     for (const auto &s : referenceSections(toolKind(), set_->currentIndex())) {
         auto found = std::find_if(merged.begin(), merged.end(), [&](const auto &r) {
-            return r.lengthMm == s.lengthMm && r.shape == s.shape;
+            return r.lengthMm == s.lengthMm && r.shape == s.shape && !r.horn;
         });
         if (found == merged.end()) {
             merged.push_back({s.lengthMm, 0, s.shape});
@@ -475,8 +587,7 @@ void ToolStockDialog::addSet(bool available) {
 }
 void ToolStockDialog::save() {
     if (!inventoryEdited_) {
-        status_->setText(
-            QStringLiteral("Наличие сохранено без изменений. Цвета сохраняются сразу."));
+        status_->setText(QStringLiteral("Всё сохранено без изменений. Цвета сохраняются сразу."));
         return;
     }
     const auto index = static_cast<std::size_t>(tool_->currentIndex());
@@ -486,12 +597,12 @@ void ToolStockDialog::save() {
     tool.segments.reset();
     if (enabled_->isChecked()) {
         tool.segments.emplace();
-        for (int i = 0; i < rows_->rowCount(); ++i)
-            tool.segments->push_back(
-                {static_cast<QDoubleSpinBox *>(rows_->cellWidget(i, 0))->value(),
-                 static_cast<unsigned>(static_cast<QSpinBox *>(rows_->cellWidget(i, 1))->value()),
-                 static_cast<core::SegmentShape>(
-                     static_cast<QComboBox *>(rows_->cellWidget(i, 2))->currentIndex())});
+        for (int i = 0; i < rows_->rowCount(); ++i) {
+            const auto section = sectionAt(i);
+            if (!section)
+                return;
+            tool.segments->push_back(*section);
+        }
     }
     if (!core::validToolPreset(tool)) {
         status_->setText(QStringLiteral("Проверьте длины и повторяющиеся строки одной формы."));
@@ -502,8 +613,14 @@ void ToolStockDialog::save() {
         return;
     }
     catalog_[index] = std::move(tool);
+    if (catalog_[index].segments)
+        for (int i = 0; i < rows_->rowCount(); ++i)
+            rows_->cellWidget(i, 2)->setProperty(
+                "hornVariantId",
+                QString::fromStdString(
+                    catalog_[index].segments->at(static_cast<std::size_t>(i)).variantId));
     inventoryEdited_ = false;
     status_->setText(
-        QStringLiteral("Наличие сохранено. Существующие проекты сохраняют свои снимки сборок."));
+        QStringLiteral("Всё сохранено. Существующие проекты сохраняют свои снимки сборок."));
 }
 } // namespace bending::ui

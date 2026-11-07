@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/ModelMeasurements.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/occt/SheetOrientation.h"
 #include <TopoDS_Shape.hxx>
@@ -11,6 +12,8 @@ namespace bending::cad {
 // Derived route states are prepared privately in the CAD worker, never in the viewer.
 class OcctDocumentAccess final {
   public:
+    [[nodiscard]] static std::shared_ptr<const application::ModelMeasurements>
+    measurements(const CadDocument &);
     [[nodiscard]] static const TopoDS_Shape &shape(const CadDocument &document);
     [[nodiscard]] static const TopoDS_Shape &simulationShape(const CadDocument &document);
     [[nodiscard]] static const application::BendAnalysis &
