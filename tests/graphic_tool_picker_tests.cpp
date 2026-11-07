@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
         QApplication::processEvents();
         auto *punch = window.findChild<QToolButton *>("punchProfile");
         auto *matrix = window.findChild<QToolButton *>("dieProfile");
-        auto *fitSections = window.findChild<QPushButton *>("fitSelectedToolSections");
+        auto *fitSections = window.findChild<QPushButton *>("workspaceFitSections");
         require(fitSections && fitSections->isVisible() && !fitSections->isEnabled(),
                 "Section fitting must be visible but unavailable without a part");
         require(punch && matrix && punch->isVisible() && matrix->isVisible(),
@@ -312,7 +312,9 @@ int main(int argc, char **argv) {
                     !controller.bendPreview() &&
                     window.findChild<QLabel *>("toolWorkspacePunchSegments")->text() ==
                         previousPieces &&
-                    window.findChild<QLabel *>("toolRecommendation")->text().contains("не хватает"),
+                    window.findChild<QLabel *>("workspaceAssemblyNotice")
+                        ->text()
+                        .contains("не хватает"),
                 "Insufficient sections silently substituted a tool or lost the old composition");
         QApplication::processEvents();
         if (const auto shot = qEnvironmentVariable("BENDING_TOOL_PICKER_SNAPSHOT"); !shot.isEmpty())
