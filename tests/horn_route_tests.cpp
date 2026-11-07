@@ -92,8 +92,8 @@ int main() {
         {
             const auto warm = builder.buildRoute(doc, q, {});
             const auto *cached = std::get_if<application::BendRoutePtr>(&warm);
-            if (const auto *e = std::get_if<application::BendRouteError>(&warm))
-                throw std::runtime_error("Warm horn route: " + e->detail);
+            if (const auto *warmError = std::get_if<application::BendRouteError>(&warm))
+                throw std::runtime_error("Warm horn route: " + warmError->detail);
             std::cout << "cold transitions=" << route->statistics.builtTransitions
                       << " warm transitions=" << (*cached)->statistics.builtTransitions
                       << " reused transitions=" << (*cached)->statistics.reusedTransitions

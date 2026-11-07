@@ -1386,8 +1386,8 @@ DrawingDialog::DrawingDialog(ImportController &c,
         impl_->persistSettings();
         impl_->render();
     };
-    for (auto *field : {impl_->name, impl_->designation, impl_->material, impl_->execution})
-        connect(field, &QLineEdit::textChanged, this, titleEdited);
+    for (auto *editor : {impl_->name, impl_->designation, impl_->material, impl_->execution})
+        connect(editor, &QLineEdit::textChanged, this, titleEdited);
     connect(impl_->quantity, &QSpinBox::valueChanged, this, titleEdited);
     connect(impl_->views, &QListWidget::currentRowChanged, this,
             [this](int row) { impl_->selectView(row); });
