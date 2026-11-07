@@ -404,10 +404,19 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
             return fail(StepImportErrorCode::UnsupportedComposition,
                         "Expected exactly one solid without extra surfaces or shells");
         }
-        if (!BRepCheck_Analyzer(shape).IsValid()) {
+        const bool hasAuxiliary = composition.hasAuxiliaryGeometry();
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(hasAuxiliary ? composition.solid : shape, TopAbs_FACE, faces);
+        // Use OCCT's joined validation for large parts while the importer still
+        // owns the transferred shape. Keep all geometric checks enabled.
+        constexpr int parallelValidationFaceThreshold = 512;
+        const bool parallelValidation = faces.Extent() > parallelValidationFaceThreshold;
+        if (!BRepCheck_Analyzer(shape, true, parallelValidation).IsValid()) {
             return fail(StepImportErrorCode::InvalidGeometry, "Transferred BRep is not valid");
         }
-        if (composition.hasAuxiliaryGeometry()) {
+        if (stop.stop_requested())
+            return fail(StepImportErrorCode::Cancelled, "Import cancelled after validation");
+        if (hasAuxiliary) {
             diagnostics.push_back(
                 {ImportStage::Transfer, DiagnosticSeverity::Warning, 0,
                  "Выбрано единственное объёмное тело STEP. Вспомогательные элементы вне тела "
@@ -434,8 +443,6 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
             return fail(StepImportErrorCode::InvalidGeometry,
                         "Geometry has invalid bounds, volume or tolerances");
         }
-        TopTools_IndexedMapOfShape faces;
-        TopExp::MapShapes(shape, TopAbs_FACE, faces);
         DocumentMetadata metadata{std::filesystem::absolute(path).lexically_normal(),
                                   {},
                                   std::string(kernelVersion()),

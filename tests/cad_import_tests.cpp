@@ -22,6 +22,7 @@
 #include <StepData_StepWriter.hxx>
 #include <StepGeom_GeomRepContextAndGlobUnitAssCtxAndGlobUncertaintyAssCtx.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Wire.hxx>
 #include <XSControl_Controller.hxx>
 #include <XSControl_WorkSession.hxx>
 #include <gp_Pln.hxx>
@@ -520,6 +521,43 @@ void testThickness(const std::filesystem::path &directory) {
             "Thickness analysis ignored cancellation");
 }
 
+void testPerforatedPlate(const std::filesystem::path &directory) {
+    const auto rectangle = [](double x, double y, double width, double height) {
+        BRepBuilderAPI_MakePolygon wire;
+        wire.Add(gp_Pnt(x, y, 0));
+        wire.Add(gp_Pnt(x + width, y, 0));
+        wire.Add(gp_Pnt(x + width, y + height, 0));
+        wire.Add(gp_Pnt(x, y + height, 0));
+        wire.Close();
+        return wire.Wire();
+    };
+    constexpr int columns = 12, rows = 11;
+    constexpr double width = 130, height = 120, thickness = 2, opening = 4;
+    BRepBuilderAPI_MakeFace plate(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)),
+                                  rectangle(0, 0, width, height), true);
+    for (int row = 0; row < rows; ++row)
+        for (int column = 0; column < columns; ++column) {
+            auto hole = rectangle(5 + column * 10, 5 + row * 10, opening, opening);
+            hole.Reverse();
+            plate.Add(hole);
+        }
+    const auto path = directory / "perforated.step";
+    writeStep(path, BRepPrimAPI_MakePrism(plate.Face(), gp_Vec(0, 0, thickness)).Shape(), "MM");
+    const auto document = load(path);
+    require(document->metadata().faceCount == 6 + 4 * columns * rows &&
+                document->faces().size() == document->metadata().faceCount,
+            "Large perforated STEP lost faces during validation or presentation preparation");
+    requireNear(document->metadata().volumeMm3,
+                (width * height - rows * columns * opening * opening) * thickness, 1e-4,
+                "perforated plate volume (mm^3)");
+    const auto again = load(path);
+    require(again->sourceStep() == document->sourceStep() &&
+                again->metadata().faceCount == document->metadata().faceCount,
+            "Reimport changed a large perforated STEP");
+    requireNear(again->metadata().volumeMm3, document->metadata().volumeMm3, 1e-4,
+                "reimported perforated plate volume (mm^3)");
+}
+
 } // namespace
 
 int main() {
@@ -530,6 +568,7 @@ int main() {
         testImport(fixtures.path);
         testAppearanceAndReferenceGeometry(fixtures.path);
         testThickness(fixtures.path);
+        testPerforatedPlate(fixtures.path);
         std::cout << "STEP import: units, metadata, Unicode paths, failures and ownership passed\n";
     } catch (const Standard_Failure &error) {
         std::cerr << "OCCT fixture failure: " << error.GetMessageString() << '\n';
