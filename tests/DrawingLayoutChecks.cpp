@@ -413,6 +413,20 @@ void references() {
                 classicalAlternate.detailLocators[0].radius == 16,
             "Classical locator restoration lost the second coincident detail");
     auto all = DrawingSheet::defaultViews(*d);
+    const auto defaultVisible = [](const auto &choice) {
+        return choice.key.kind == DrawingViewKind::Projection ||
+               choice.key.kind == DrawingViewKind::Section ||
+               choice.key.kind == DrawingViewKind::Isometric;
+    };
+    require(all.size() == 10 && std::all_of(all.begin(), all.end(),
+                                            [&](const auto &choice) {
+                                                return choice.visible == defaultVisible(choice);
+                                            }),
+            "Default choices omitted a destination or enabled an optional view");
+    const auto standard = drawing::selectedView(*d, key, &all);
+    require(standard.sectionMarkers.size() == 3 && standard.detailLocators.empty() &&
+                standard.viewArrows.empty(),
+            "Default choices retained references to optional views");
     for (auto &choice : all)
         choice.visible = true;
     const auto complete = drawing::selectedView(*d, key, &all);

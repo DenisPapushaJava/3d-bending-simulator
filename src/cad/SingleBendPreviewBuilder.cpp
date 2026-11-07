@@ -5,6 +5,7 @@
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
 #include "CollisionReuse.h"
+#include "FlatWallRegions.h"
 #include "GeometryCacheInternal.h"
 #include "JointBends.h"
 #include "RouteGeometry.h"
@@ -1150,19 +1151,46 @@ PreparedBendOperationResult prepareBendOperation(
                         flanges[i] = *extracted;
                         finalFrame.regions[i * 2] = *extracted;
                     }
-                assemble(finalFrame);
                 const double expectedVolume = volume(source);
                 const double budget = std::max(expectedVolume * 1.0e-8,
                                                area(source) * analysis.lengthToleranceMm * 2.0);
+                double reconstructedVolume = 0;
+                const auto reconstructsSource = [&] {
+                    assemble(finalFrame);
+                    reconstructedVolume = volume(finalFrame.shape);
+                    return std::abs(reconstructedVolume - expectedVolume) <= budget &&
+                           sameVolume(source, finalFrame.shape, analysis.lengthToleranceMm, budget,
+                                      stop);
+                };
+                bool partitionedWalls = multi;
+                bool reconstructed = reconstructsSource();
+                if (!reconstructed && !multi && !joint && !bend.trimmedEnds &&
+                    expectedVolume - reconstructedVolume > budget && !stop.stop_requested()) {
+                    // One planar wall may extend axially past the bend-width envelope.
+                    // Recover only complete sheet walls, including both real anchor faces.
+                    std::vector<std::array<TopoDS_Face, 2>> anchors;
+                    for (const auto index : innerIndices)
+                        anchors.push_back(
+                            {TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[index]))),
+                             TopoDS::Face(faces(static_cast<int>(bend.flangeFaces[index + 1])))});
+                    const auto walls = isolateFlatWalls(source, {sourceSector}, anchors,
+                                                        analysis.lengthToleranceMm, stop);
+                    if (walls && !stop.stop_requested()) {
+                        for (std::size_t i = 0; i < flanges.size(); ++i) {
+                            flanges[i] = (*walls)[i];
+                            finalFrame.regions[i * 2] = flanges[i];
+                        }
+                        reconstructed = reconstructsSource();
+                        partitionedWalls = true;
+                    }
+                }
                 // Unchanged large walls must not hide a small collision near the active bend.
                 double collisionWidth = model.widthMm;
                 for (const auto &zone : jointZones)
                     collisionWidth = std::min(collisionWidth, zone.lengthMm);
                 const double collisionBudget = std::max(1.e-6, collisionWidth * model.thicknessMm *
                                                                    analysis.lengthToleranceMm * 2.);
-                if (std::abs(volume(finalFrame.shape) - expectedVolume) > budget ||
-                    !sameVolume(source, finalFrame.shape, analysis.lengthToleranceMm, budget,
-                                stop)) {
+                if (!reconstructed) {
                     if (stop.stop_requested()) {
                         return cancelled();
                     }
@@ -1204,6 +1232,7 @@ PreparedBendOperationResult prepareBendOperation(
                 value->jointSectors = std::move(jointSectors);
                 value->supportIntervals = std::move(supportIntervals);
                 value->nonRadialEnds = nonRadialEnds;
+                value->partitionedWalls = partitionedWalls;
                 value->flanges = std::move(flanges);
                 value->expectedVolume = expectedVolume;
                 value->budget = budget;
@@ -1241,6 +1270,7 @@ PreparedBendOperationResult prepareBendOperation(
         const auto &collisionBudget = workpiece->collisionBudget;
         const auto &rigidVolume = workpiece->rigidVolume;
         const auto &displaySource = workpiece->displaySource;
+        const bool partitionedWalls = workpiece->partitionedWalls;
         auto preview = std::make_shared<CadPreview>();
         preview->manualExit = manualExtraction;
         preview->supportLimit =
@@ -1515,19 +1545,19 @@ PreparedBendOperationResult prepareBendOperation(
         const double tolerance = analysis.lengthToleranceMm;
         auto evaluate =
             [native, source, prototype = std::shared_ptr<const CadPreview>(std::move(preview)),
-             centralBasis = basis, model, sourceBasis, sourceSection, flanges, bend, multi, joint,
-             jointZones = std::move(jointZones), jointSectors = std::move(jointSectors),
-             supportIntervals = std::move(supportIntervals), sourceSector, expectedVolume, budget,
-             collisionBudget, rigidVolume, toolParameters, withMotion, manualExtraction,
-             toolGeometry, nonRadialEnds, realTools = std::move(realTools),
-             machine = std::move(machine), initialTools,
+             centralBasis = basis, model, sourceBasis, sourceSection, flanges, bend,
+             partitionedWalls, joint, jointZones = std::move(jointZones),
+             jointSectors = std::move(jointSectors), supportIntervals = std::move(supportIntervals),
+             sourceSector, expectedVolume, budget, collisionBudget, rigidVolume, toolParameters,
+             withMotion, manualExtraction, toolGeometry, nonRadialEnds,
+             realTools = std::move(realTools), machine = std::move(machine), initialTools,
              initialSegments = std::move(initialSegments), flangeSides, innerSide, referenceFlange,
              displaySource, displaySides, workpiece, workpieceReuse, requestedReversed, tolerance](
                 double workpieceOffsetMm, std::stop_token placementStop, bool prepareDiagnostic,
                 BackgaugeSearchStatistics *gaugeStatistics) -> BendPreviewResult {
             const auto ensureSkin = [&]() -> bool {
                 if (!workpiece->display->skin) {
-                    auto skin = multi && !displaySource.IsNull()
+                    auto skin = partitionedWalls && !displaySource.IsNull()
                                     ? prepareWholePartSkin(displaySource, flanges, sourceSector,
                                                            tolerance, placementStop, displaySides)
                                     : WholePartSkin{};
@@ -1681,7 +1711,7 @@ PreparedBendOperationResult prepareBendOperation(
                 else {
                     if (workpieceReuse)
                         ++workpieceReuse->checked;
-                    if (multi)
+                    if (partitionedWalls)
                         for (const auto &pair :
                              {std::pair{0U, 1U}, std::pair{0U, 2U}, std::pair{1U, 2U}}) {
                             bool completed = false;
@@ -1914,7 +1944,7 @@ PreparedBendOperationResult prepareBendOperation(
                                 return BendPreviewError{BendPreviewErrorCode::Failed,
                                                         "Collision snapshot mesh failed", i};
                             if (!displaySource.IsNull()) {
-                                if (multi)
+                                if (partitionedWalls)
                                     makeWholePartDisplay(frame, *workpiece->display->skin, model,
                                                          sourceBasis, placedBasis, section,
                                                          placementStop);
@@ -2049,7 +2079,7 @@ PreparedBendOperationResult prepareBendOperation(
                                                 "Preview mesh failed"};
                     }
                     if (!displaySource.IsNull()) {
-                        if (multi)
+                        if (partitionedWalls)
                             makeWholePartDisplay(frame, *workpiece->display->skin, model,
                                                  sourceBasis, placedBasis, section, placementStop);
                         else
@@ -2123,7 +2153,7 @@ PreparedBendOperationResult prepareBendOperation(
                                          model, intervals ? double(f) / double(intervals) : 0);
                     if (!displaySource.IsNull()) {
                         frame.orientation.sides = {};
-                        if (multi)
+                        if (partitionedWalls)
                             makeWholePartDisplay(frame, *workpiece->display->skin, model,
                                                  sourceBasis, placedBasis, section, placementStop);
                         else

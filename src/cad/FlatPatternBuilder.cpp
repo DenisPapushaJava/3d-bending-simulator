@@ -57,6 +57,7 @@ class CadFlatPattern final : public FlatPattern {
     std::vector<std::vector<PointMm>> contours;
     std::vector<TopoDS_Shape> lines;
     SheetLayout layout;
+    std::map<std::size_t, std::size_t> sourceWallOwners;
     SheetOrientationVisual orientation;
     const FlatPatternInfo &info() const noexcept override {
         return data;
@@ -276,6 +277,12 @@ const std::vector<TopoDS_Shape> &OcctFlatPatternAccess::bendLines(const FlatPatt
 }
 const SheetLayout &OcctFlatPatternAccess::layout(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).layout;
+}
+const gp_Trsf *OcctFlatPatternAccess::sourceWallToFlat(const FlatPattern &p, std::size_t faceId) {
+    const auto &flat = dynamic_cast<const CadFlatPattern &>(p);
+    const auto found = flat.sourceWallOwners.find(faceId);
+    return found == flat.sourceWallOwners.end() ? nullptr
+                                                : &flat.layout.walls[found->second].toFlat;
 }
 const SheetOrientationVisual &OcctFlatPatternAccess::orientation(const FlatPattern &p) {
     return dynamic_cast<const CadFlatPattern &>(p).orientation;
@@ -761,9 +768,10 @@ static FlatPatternResult buildSheet(DocumentPtr document, FlatPatternRequest req
         result->display = display;
         try {
             if (const auto measures = OcctDocumentAccess::measurements(*native))
-                result->data.measurements = flatModelMeasurements(
-                    *measures, OcctDocumentAccess::shape(*native), source, flat,
-                    result->layout.walls, origin, cutoutsIgnored, tolerance, stop);
+                result->data.measurements =
+                    flatModelMeasurements(*measures, OcctDocumentAccess::shape(*native), source,
+                                          flat, result->layout.walls, origin, cutoutsIgnored,
+                                          tolerance, stop, result->sourceWallOwners);
         } catch (const Standard_Failure &) {
             result->data.measurements
                 .reset(); // Do not block a valid unfolding/PDF for optional annotations.

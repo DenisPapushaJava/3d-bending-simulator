@@ -1,4 +1,5 @@
 #include "ProjectFormatFixtures.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -78,6 +79,114 @@ class LateBuilder final : public application::FlatPatternBuilder {
         return application::FlatPatternPtr(std::make_shared<Snapshot>());
     }
 };
+class SharedFlatBuilder final : public application::FlatPatternBuilder {
+  public:
+    mutable std::atomic<int> calls = 0;
+    std::atomic<bool> release = false;
+    bool fail = false;
+    application::FlatPatternResult build(application::DocumentPtr document,
+                                         application::FlatPatternRequest request,
+                                         std::stop_token stop) const override {
+        ++calls;
+        while (!release && !stop.stop_requested())
+            QThread::msleep(1);
+        if (stop.stop_requested())
+            return application::FlatPatternError{application::FlatPatternErrorCode::Cancelled,
+                                                 "Cancelled"};
+        if (fail)
+            return application::FlatPatternError{
+                application::FlatPatternErrorCode::UnsupportedGeometry, "Test unsupported blank"};
+        return cad::FlatPatternBuilder{}.build(std::move(document), request, stop);
+    }
+};
+class SharedDrawingBuilder final : public application::BendingDrawingBuilder {
+  public:
+    mutable std::atomic<int> calls = 0;
+    mutable application::FlatPatternPtr prepared;
+    application::DrawingResult build(application::DocumentPtr document,
+                                     application::DrawingRequest request,
+                                     std::stop_token stop) const override {
+        ++calls;
+        prepared = request.preparedFlatPattern;
+        return cad::BendingDrawingBuilder{}.build(std::move(document), std::move(request), stop);
+    }
+};
+void sharedFlatWorkflow(const QString &sample) {
+    ui::ImportController c(std::make_shared<cad::StepImporter>(),
+                           [](application::DocumentPtr, std::uint64_t) { return QString{}; });
+    c.open(native(sample));
+    wait([&] { return !c.hasWork(); });
+    check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .45, 1}),
+          "Cannot set shared flat inputs");
+    auto drawing = std::make_shared<SharedDrawingBuilder>();
+    check(c.prepareDrawing(drawing, {}), "Cold drawing did not start");
+    wait([&] { return !c.hasWork(); });
+    check(c.drawing() && c.flatPattern() && c.flatPattern() == c.drawing()->preparedFlatPattern,
+          "Cold drawing did not publish its prepared stock for the viewport");
+
+    for (bool drawingFirst : {true, false}) {
+        check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, drawingFirst ? .46 : .47, 1}),
+              "Shared flat inputs did not invalidate the cache");
+        auto flat = std::make_shared<SharedFlatBuilder>();
+        check(c.prefetchFlatPattern(flat) && !c.hasWork() && !c.isPreparingFlatPattern(),
+              "Speculative flat blocked the foreground");
+        wait([&] { return flat->calls == 1; });
+        if (drawingFirst) {
+            check(c.prepareDrawing(drawing, {}), "Drawing could not await speculative stock");
+            c.cancelDrawing();
+            check(!c.hasWork(), "Closing drawing left a speculative flat marked busy");
+            check(c.prepareDrawing(drawing, {}) && c.prepareFlatPattern(flat),
+                  "Viewport could not adopt flat already awaited by drawing");
+            c.cancelDrawing();
+            check(c.isPreparingFlatPattern() && !c.isPreparingDrawing(),
+                  "Closing drawing cancelled the viewport consumer");
+        } else {
+            check(c.prepareFlatPattern(flat) && c.prepareDrawing(drawing, {}),
+                  "Drawing could not adopt flat already awaited by viewport");
+        }
+        flat->release = true;
+        wait([&] { return !c.hasWork(); });
+        check(flat->calls == 1 && c.flatPattern(), "Shared flat restarted or failed to publish");
+        if (drawingFirst) {
+            check(!c.drawing() && c.prepareDrawing(drawing, {}), "Cancelled drawing was published");
+            wait([&] { return !c.hasWork(); });
+        }
+        check(c.drawing() && drawing->prepared == c.flatPattern(),
+              "Drawing did not consume the viewport's exact stock snapshot");
+    }
+
+    check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .48, 1}),
+          "Cannot set unsupported flat test inputs");
+    auto unsupported = std::make_shared<SharedFlatBuilder>();
+    unsupported->fail = true;
+    check(c.prefetchFlatPattern(unsupported) && c.prepareDrawing(drawing, {}),
+          "Drawing could not attach to a failing flat job");
+    unsupported->release = true;
+    wait([&] { return !c.hasWork(); });
+    check(unsupported->calls == 1 && c.drawing() && !c.drawing()->flatPattern &&
+              c.drawing()->flatPatternError &&
+              c.drawing()->flatPatternError->detail == "Test unsupported blank" &&
+              !c.flatPatternError(),
+          "Failed warm-up hid folded views, recalculated stock or exposed a background error");
+    auto recovered = std::make_shared<SharedFlatBuilder>();
+    recovered->release = true;
+    check(c.prepareFlatPattern(recovered), "Explicit flat retry did not start");
+    wait([&] { return !c.hasWork(); });
+    check(c.flatPattern() && c.prepareDrawing(drawing, {}), "Recovered flat is missing");
+    wait([&] { return !c.hasWork(); });
+    check(c.drawing() && c.drawing()->flatPattern && drawing->prepared == c.flatPattern(),
+          "The old folded-only drawing masked a recovered flat snapshot");
+
+    check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .49, 1}),
+          "Cannot set cancelled flat test inputs");
+    auto stale = std::make_shared<SharedFlatBuilder>();
+    check(c.prefetchFlatPattern(stale), "Cancellable flat job did not start");
+    wait([&] { return stale->calls == 1; });
+    c.open(native(sample));
+    wait([&] { return !c.hasWork(); });
+    check(c.session().document() && !c.flatPattern() && !c.flatPatternError(),
+          "Opening another document reused the old flat job");
+}
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
@@ -93,6 +202,7 @@ int main(int argc, char **argv) {
             app.arguments().contains(QStringLiteral("--sample"))
                 ? app.arguments().at(app.arguments().indexOf(QStringLiteral("--sample")) + 1)
                 : QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step";
+        sharedFlatWorkflow(QString::fromUtf8(BENDING_EXAMPLE_DIR) + "/bend-90-6mm.step");
         window.openStep(sample);
         auto &c = window.importController();
         wait([&] { return !c.hasWork(); });

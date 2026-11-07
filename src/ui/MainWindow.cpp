@@ -467,7 +467,7 @@ class MainWindow::Impl {
         closeAction->setEnabled(document != nullptr || session.activeRequest().has_value());
         if (drawingAction)
             drawingAction->setEnabled(drawingDialog ||
-                                      (document && drawingBuilder && !controller->hasWork()));
+                                      (drawingBuilder && controller->canPrepareDrawing()));
         const bool cancellable =
             session.activeRequest().has_value() || controller->isPreparingPreview() ||
             controller->isPreparingDrawing() || controller->isPreparingFlatPattern() ||
@@ -531,6 +531,7 @@ class MainWindow::Impl {
         diagnostics->setVisible(!detail.isEmpty());
         refreshPreview();
         refreshFlat();
+        scheduleFlatPrefetch();
         if (pendingBendStage && !controller->hasWork()) {
             const auto revision = *pendingBendStage;
             pendingBendStage.reset();
@@ -1032,8 +1033,34 @@ class MainWindow::Impl {
                 editPartInputs();
         });
     }
+    void scheduleFlatPrefetch() {
+        const auto &s = controller->session();
+        if (!flatBuilder || !viewer->isReady() || !s.hasPartInputs() || controller->hasWork() ||
+            propertyTabs->currentIndex() != 0)
+            return;
+        const auto inputs =
+            std::pair{s.revision(), FlatPatternRequest{s.unfoldSettings(), s.manualThicknessMm()}};
+        if (scheduledFlatPrefetch == inputs)
+            return;
+        scheduledFlatPrefetch = inputs;
+        // The native source presentation redraws synchronously before publication. Give
+        // the event loop a short window for the first input before starting optional CAD.
+        QTimer::singleShot(350, window, [this, inputs] {
+            if (scheduledFlatPrefetch != inputs)
+                return;
+            const auto &current = controller->session();
+            if (current.revision() != inputs.first || !viewer->isReady() ||
+                propertyTabs->currentIndex() != 0 || controller->hasWork() ||
+                FlatPatternRequest{current.unfoldSettings(), current.manualThicknessMm()} !=
+                    inputs.second) {
+                scheduledFlatPrefetch.reset();
+                return;
+            }
+            controller->prefetchFlatPattern(flatBuilder);
+        });
+    }
     void showFlat() {
-        if (controller->hasWork() || !flatBuilder || !controller->session().document())
+        if (!flatBuilder || !controller->canPrepareFlatPattern())
             return;
         if (!controller->session().hasPartInputs()) {
             editPartInputs();
@@ -1055,7 +1082,8 @@ class MainWindow::Impl {
         const bool editable = s.document() && !controller->hasWork();
         partInputs->setText(partInputsSummary(s));
         editInputs->setEnabled(editable);
-        flatAction->setEnabled(editable && flatBuilder);
+        flatAction->setEnabled(flatBuilder && controller->canPrepareFlatPattern() &&
+                               !controller->isPreparingFlatPattern());
         flatAction->setText(controller->isPreparingFlatPattern()
                                 ? QStringLiteral("Готовим развёртку…")
                             : controller->flatPattern() ? QStringLiteral("Показать развёртку")
@@ -1067,6 +1095,8 @@ class MainWindow::Impl {
                 button->setEnabled(flatAction->isEnabled());
             }
         const auto flat = controller->flatPattern();
+        if (!flat && !controller->isPreparingFlatPattern())
+            wantFlat = false;
         if (displayedFlat && displayedFlat != flat) {
             (void)viewer->endBendPreview();
             displayedFlat.reset();
@@ -3036,6 +3066,7 @@ class MainWindow::Impl {
     std::shared_ptr<const SingleBendPreviewBuilder> previewBuilder;
     std::shared_ptr<const BendingDrawingBuilder> drawingBuilder;
     std::shared_ptr<const application::FlatPatternBuilder> flatBuilder;
+    std::optional<std::pair<std::uint64_t, FlatPatternRequest>> scheduledFlatPrefetch;
     application::FlatPatternPtr displayedFlat;
     bool wantFlat = false;
     QLabel *partInputs = nullptr;
@@ -3264,7 +3295,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             return;
         }
         const auto &session = impl_->controller->session();
-        if (!impl_->drawingBuilder || !session.document() || impl_->controller->hasWork())
+        if (!impl_->drawingBuilder || !impl_->controller->canPrepareDrawing())
             return;
         impl_->stopPlayback();
         auto *dialog = new DrawingDialog(

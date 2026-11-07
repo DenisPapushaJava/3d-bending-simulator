@@ -59,6 +59,7 @@ struct PreparedBendWorkpiece {
     std::vector<TopoDS_Shape> jointSectors;
     std::vector<std::pair<double, double>> supportIntervals;
     bool nonRadialEnds;
+    bool partitionedWalls;
     std::array<TopoDS_Shape, 2> flanges;
     double expectedVolume, budget, collisionBudget, rigidVolume;
     mutable std::shared_ptr<const BendWorkpieceDisplay> display;

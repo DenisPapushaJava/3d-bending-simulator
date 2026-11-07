@@ -1392,19 +1392,6 @@ void operatorSheet(QPainter &p, const BendingDrawing &d, const DrawingTitle &tit
         }
     }
 }
-QString flatMaterial(core::SheetMaterial material) {
-    switch (material) {
-    case core::SheetMaterial::MildSteel:
-        return QStringLiteral("Низкоуглеродистая сталь");
-    case core::SheetMaterial::StainlessSteel:
-        return QStringLiteral("Нержавеющая сталь");
-    case core::SheetMaterial::Aluminium:
-        return QStringLiteral("Алюминий");
-    case core::SheetMaterial::Unknown:
-        return QStringLiteral("Материал не задан");
-    }
-    return {};
-}
 double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt = 0,
                 DrawingFlatSide side = DrawingFlatSide::Automatic,
                 std::optional<double> requestedScale = {}, QRectF *selectionBounds = nullptr,
@@ -1463,14 +1450,6 @@ double flatView(QPainter &p, const BendingDrawing &d, QRectF cell, int attempt =
     const bool sameK = std::all_of(info.bends.begin(), info.bends.end(), [&](const auto &b) {
         return std::abs(b.k - info.bends.front().k) < 1e-7;
     });
-    const auto k = sameK ? QStringLiteral("K=%1").arg(number(info.bends.front().k))
-                         : QStringLiteral("K по Ri/t");
-    text(p, QRectF(cell.left(), cell.top() + 7, cell.width(), 6),
-         QStringLiteral("Теоретическая · %1 · t%2 · %3 · %4")
-             .arg(flatMaterial(info.settings.material), number(info.thicknessMm), k,
-                  info.settings.manualK ? QStringLiteral("вручную")
-                                        : QStringLiteral("Wiz Parts v1")),
-         2.5);
     std::vector<QRectF> occupied;
     std::vector<QLineF> dimensionLines;
     view(p, d, v, center, *scale, {}, false, false, false, &occupied, false, area, true,
@@ -2153,9 +2132,6 @@ int sourcePages(const BendingDrawing &d, const DrawingTitle &title) {
 namespace drawing {
 void initializeFont() {
     (void)family();
-}
-std::vector<std::size_t> requiredDetails(const BendingDrawing &d) {
-    return classicalDetails(d);
 }
 DrawingView preparedView(const BendingDrawing &d, DrawingViewKey key) {
     switch (key.kind) {

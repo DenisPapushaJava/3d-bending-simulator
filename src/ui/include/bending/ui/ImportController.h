@@ -82,6 +82,7 @@ class ImportController final : public QObject {
     [[nodiscard]] bool isPreparingPreview() const;
     bool prepareDrawing(std::shared_ptr<const application::BendingDrawingBuilder> builder,
                         application::DrawingRequest request);
+    [[nodiscard]] bool canPrepareDrawing() const;
     [[nodiscard]] application::BendingDrawingPtr drawing() const;
     [[nodiscard]] std::optional<application::DrawingError> drawingError() const;
     [[nodiscard]] bool isPreparingDrawing() const;
@@ -90,6 +91,8 @@ class ImportController final : public QObject {
     bool setPartInputs(std::uint64_t revision, std::uint64_t editRevision,
                        std::optional<double> manualThicknessMm, core::UnfoldSettings);
     bool prepareFlatPattern(std::shared_ptr<const application::FlatPatternBuilder>);
+    bool prefetchFlatPattern(std::shared_ptr<const application::FlatPatternBuilder>);
+    [[nodiscard]] bool canPrepareFlatPattern() const;
     [[nodiscard]] application::FlatPatternPtr flatPattern() const;
     [[nodiscard]] std::optional<application::FlatPatternError> flatPatternError() const;
     [[nodiscard]] bool isPreparingFlatPattern() const;

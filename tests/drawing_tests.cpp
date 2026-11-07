@@ -1461,12 +1461,68 @@ void perforatedAngleDrawing(const QString &folder) {
             "An irregular hole was silently folded into an equal pitch");
     require(document->sourceStep() == bytes, "Pitch grouping modified the imported STEP");
 }
+void flatFollowsFront(const QString &folder) {
+    const auto shape =
+        BRepAlgoAPI_Cut(fixtures::tray(false),
+                        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(40, 25, -1), gp_Dir(0, 0, 1)), 3, 4))
+            .Shape();
+    const auto doc = load(shape, folder + "/asymmetric-flat-orientation.step");
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto prepared = cad::FlatPatternBuilder{}.build(doc, {*request.unfoldSettings, {}}, {});
+    request.preparedFlatPattern = std::get<application::FlatPatternPtr>(prepared);
+    const auto &original = request.preparedFlatPattern->info();
+    require(original.cutoutsIgnored &&
+                cad::OcctFlatPatternAccess::openingContours(*request.preparedFlatPattern).size() ==
+                    1,
+            "Asymmetric flat fixture did not exercise the filled-sheet mapping");
+    int alignedViews = 0;
+    for (int turns = 0; turns < 4; ++turns) {
+        request.quarterTurns = turns;
+        const auto drawing = build(doc, request);
+        const auto &front = drawing->views[0];
+        require(drawing->flatPattern && front.holeDiameters.size() == 1,
+                "Asymmetric hole lost its front or flat view");
+        const auto &flat = *drawing->flatPattern;
+        const bool frontWide =
+            front.maximum.x - front.minimum.x > front.maximum.y - front.minimum.y;
+        if (frontWide != (flat.view.maximum.x > flat.view.maximum.y))
+            continue; // Only the two views with parallel paper axes exercise the half-turn.
+        ++alignedViews;
+        const auto &hole = flat.view.paths.back().points;
+        const auto [low, high] = std::minmax_element(
+            hole.begin(), hole.end(), [](const auto &a, const auto &b) { return a.y < b.y; });
+        const double foldedY =
+            front.holeDiameters.front().first.y - (front.minimum.y + front.maximum.y) / 2;
+        const double flatY = (low->y + high->y - flat.view.maximum.y) / 2;
+        require(foldedY * flatY > 1,
+                "The flat hole is on the opposite vertical side from the front view");
+        require(flat.info.positiveZIsSideA == original.positiveZIsSideA &&
+                    flat.info.bends.size() == original.bends.size(),
+                "A flat half-turn changed its material side or number of bends");
+        for (std::size_t i = 0; i < original.bends.size(); ++i) {
+            const auto &before = original.bends[i];
+            const auto &after = flat.info.bends[i];
+            require(before.bendIndex == after.bendIndex && before.direction == after.direction &&
+                        std::abs(before.lengthMm() - after.lengthMm()) < 1e-7,
+                    "A flat half-turn changed bend identity, direction or length");
+        }
+    }
+    require(alignedViews == 2, "The flat fixture did not exercise both parallel directions");
+}
 void flatDrawing(const QString &folder) {
+    flatFollowsFront(folder);
     const auto doc = load(fixtures::channel(), folder + "/unfold-channel.step");
     application::DrawingRequest request;
     request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
     const auto result = build(doc, request);
     require(result->flatPattern && !result->flatPatternError, "Flat drawing snapshot missing");
+    const auto defaults = ui::DrawingSheet::defaultViews(*result);
+    require(std::any_of(defaults.begin(), defaults.end(),
+                        [](const auto &choice) {
+                            return choice.key.kind == ui::DrawingViewKind::Flat && choice.visible;
+                        }),
+            "A prepared flat pattern is not selected by default");
     const auto &flat = *result->flatPattern;
     const auto preview = ui::DrawingSheet::preview(*result, {}, 0, 1680);
     requireCompactOrientation(preview);
@@ -2544,6 +2600,16 @@ void workflow(const QString &folder) {
     auto *resetViews = dialog->findChild<QPushButton *>("resetDrawingComposition");
     require(viewList && viewScale && flatSide && resetViews && viewList->count() >= 5,
             "Drawing view controls are missing");
+    const auto defaults = ui::DrawingSheet::defaultViews(*oldDrawing);
+    const auto checkDefaultBoxes = [&] {
+        require(viewList->count() == static_cast<int>(defaults.size()),
+                "Drawing controls lost available views");
+        for (std::size_t i = 0; i < defaults.size(); ++i)
+            require(viewList->item(static_cast<int>(i))->checkState() ==
+                        (defaults[i].visible ? Qt::Checked : Qt::Unchecked),
+                    "Drawing controls do not match the default choices");
+    };
+    checkDefaultBoxes();
     for (int row = 0; row < viewList->count(); ++row)
         if (viewList->item(row)->text().startsWith(QStringLiteral("Развёртка"))) {
             viewList->setCurrentRow(row);
@@ -2764,6 +2830,7 @@ void workflow(const QString &folder) {
     dialog->resize(normal);
     resetViews->click();
     wait([&] { return exportButton->isEnabled(); });
+    checkDefaultBoxes();
     fittedPaper();
     require(page->maximum() == basePages && page->value() <= basePages &&
                 navigation->isVisible() == (basePages > 1),

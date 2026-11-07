@@ -1,5 +1,6 @@
 #include "BendFixtures.h"
 #include "TrayFixtures.h"
+#include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
@@ -413,9 +414,36 @@ void densePerforation(const std::filesystem::path &folder) {
               std::abs(metadata.closedCutouts.addedVolumeMm3 - removedVolume) < 1e-4,
           "Local thickness or verified cutout copy was lost");
     const auto flat = build(doc, {core::SheetMaterial::MildSteel, k, 1});
+    const auto &openings = cad::OcctFlatPatternAccess::openingContours(*flat);
     check(flat->info().bends.size() == 1 && flat->info().cutoutsIgnored &&
-              cad::OcctFlatPatternAccess::openingContours(*flat).size() == 2 * rows * columns,
+              openings.size() == 2 * rows * columns,
           "Dense perforation lost its bend or contours on the blank");
+
+    application::DrawingRequest request;
+    request.unfoldSettings = flat->info().settings;
+    request.preparedFlatPattern = flat;
+    const auto result = cad::BendingDrawingBuilder{}.build(doc, request, {});
+    if (const auto *error = std::get_if<application::DrawingError>(&result))
+        throw std::runtime_error(error->detail);
+    const auto drawing = std::get<application::BendingDrawingPtr>(result);
+    check(drawing->bends.size() == 1 && drawing->classicalViews && drawing->flatPattern,
+          "Dense perforation lost its views, bend or flat pattern on the drawing");
+    const auto &view = drawing->flatPattern->view;
+    const auto matches = [&](bool halfTurn) {
+        return std::equal(openings.rbegin(), openings.rend(), view.paths.rbegin(),
+                          [&](const auto &contour, const auto &path) {
+                              return !path.hidden &&
+                                     std::equal(contour.begin(), contour.end(), path.points.begin(),
+                                                path.points.end(), [&](auto a, auto b) {
+                                                    return halfTurn
+                                                               ? b.x == view.maximum.x - a.x &&
+                                                                     b.y == view.maximum.y - a.y
+                                                               : b.x == a.x && b.y == a.y;
+                                                });
+                          });
+    };
+    check(view.paths.size() > openings.size() && (matches(false) || matches(true)),
+          "Dense perforation lost closed opening contours on the drawing");
 }
 
 int main(int argc, char **argv) {

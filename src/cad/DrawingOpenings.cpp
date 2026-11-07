@@ -24,6 +24,7 @@
 #include <gp_Elips.hxx>
 #include <gp_Pln.hxx>
 #include <numbers>
+#include <optional>
 
 namespace bending::cad {
 namespace {
@@ -82,8 +83,28 @@ bool intervalsCover(Intervals visible, const Intervals &required, double epsilon
     }
     return true;
 }
-bool visibleCoverage(const TopoDS_Shape &wire, const TopoDS_Shape &visible) {
+struct VisibleCurve {
+    BRepAdaptor_Curve curve;
+    GeomAbs_CurveType type;
+    std::optional<gp_Pnt> firstSample = {};
+};
+std::vector<VisibleCurve> visibleCurves(const TopoDS_Shape &visible, std::stop_token stop) {
+    std::vector<VisibleCurve> result;
+    for (TopExp_Explorer ei(visible, TopAbs_EDGE); ei.More(); ei.Next()) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        BRepAdaptor_Curve curve(TopoDS::Edge(ei.Current()));
+        const auto type = curve.GetType();
+        if (type == GeomAbs_Line || type == GeomAbs_Circle || type == GeomAbs_Ellipse)
+            result.push_back({std::move(curve), type});
+    }
+    return result;
+}
+bool visibleCoverage(const TopoDS_Shape &wire, std::vector<VisibleCurve> &visible,
+                     std::stop_token stop) {
     for (TopExp_Explorer source(wire, TopAbs_EDGE); source.More(); source.Next()) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
         BRepAdaptor_Curve reference(TopoDS::Edge(source.Current()));
         const auto type = reference.GetType();
         const bool periodic = type == GeomAbs_Circle || type == GeomAbs_Ellipse;
@@ -123,24 +144,33 @@ bool visibleCoverage(const TopoDS_Shape &wire, const TopoDS_Shape &visible) {
             return ranges;
         };
         Intervals fragments;
-        for (TopExp_Explorer ei(visible, TopAbs_EDGE); ei.More(); ei.Next()) {
-            BRepAdaptor_Curve curve(TopoDS::Edge(ei.Current()));
-            if (curve.GetType() != type) {
-                if (!periodic ||
-                    (curve.GetType() != GeomAbs_Circle && curve.GetType() != GeomAbs_Ellipse))
+        for (auto &edge : visible) {
+            const auto &curve = edge.curve;
+            if (edge.type != type) {
+                if (!periodic || (edge.type != GeomAbs_Circle && edge.type != GeomAbs_Ellipse))
                     continue;
                 const auto ellipse =
                     type == GeomAbs_Ellipse ? reference.Ellipse() : curve.Ellipse();
                 if (std::abs(ellipse.MajorRadius() - ellipse.MinorRadius()) > tolerance)
                     continue; // HLR can express a projected circle as a near-circular ellipse.
             }
+            const auto outsideSupport = [&](const gp_Pnt &point) {
+                return point.Distance(at(parameter(point))) > tolerance;
+            };
+            if (!edge.firstSample) {
+                auto point = curve.Value(curve.FirstParameter());
+                point.SetZ(0);
+                edge.firstSample = point;
+            }
+            if (outsideSupport(*edge.firstSample))
+                continue;
             bool same = true;
-            for (int sample = 0; sample <= 4; ++sample) {
+            for (int sample = 1; sample <= 4; ++sample) {
                 auto point =
                     curve.Value(curve.FirstParameter() +
                                 (curve.LastParameter() - curve.FirstParameter()) * sample / 4.);
                 point.SetZ(0);
-                if (point.Distance(at(parameter(point))) > tolerance) {
+                if (outsideSupport(point)) {
                     same = false;
                     break;
                 }
@@ -287,6 +317,7 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
                         const TopoDS_Shape &visible, application::DrawingView &view,
                         std::stop_token stop) {
     std::vector<DrawingPoint> centers;
+    std::optional<std::vector<VisibleCurve>> curves;
     for (const auto &opening : openings) {
         if (stop.stop_requested())
             throw DrawingError{"Cancelled", true};
@@ -320,11 +351,13 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
                                              tolerance;
                               })
                 : false;
-        const bool fullyVisible =
-            knownCircle ||
-            visibleCoverage(BRepBuilderAPI_Transform(opening.wire, flatten, true).Shape(), visible);
-        if (!fullyVisible)
-            continue;
+        if (!knownCircle) {
+            if (!curves)
+                curves = visibleCurves(visible, stop);
+            if (!visibleCoverage(BRepBuilderAPI_Transform(opening.wire, flatten, true).Shape(),
+                                 *curves, stop))
+                continue;
+        }
         if (opening.circular)
             view.holeDiameters.push_back({c, 2 * opening.major.Magnitude()});
         if (duplicate)

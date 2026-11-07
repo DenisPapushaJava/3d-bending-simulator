@@ -78,32 +78,11 @@ std::vector<DrawingViewChoice> DrawingSheet::defaultViews(const BendingDrawing &
     for (std::size_t i = 0; i < d.sections.size(); ++i)
         result.push_back({{DrawingViewKind::Section, i}});
     for (std::size_t i = 0; i < d.profiles.size(); ++i)
-        result.push_back({{DrawingViewKind::Profile, i}, d.sections.empty()});
-    std::set<std::size_t> covered, profileCovered;
-    for (const auto &choice : result)
-        if (choice.visible) {
-            const auto v = drawing::preparedView(d, choice.key);
-            covered.insert(v.dimensionedBends.begin(), v.dimensionedBends.end());
-            if (choice.key.kind == DrawingViewKind::Profile)
-                profileCovered.insert(v.dimensionedBends.begin(), v.dimensionedBends.end());
-        }
-    const auto enlargements = drawing::requiredDetails(d);
-    for (std::size_t i = 0; i < d.details.size(); ++i) {
-        const auto &v = d.details[i].view;
-        const bool missing = v.dimensionedBends.empty()
-                                 ? !covered.contains(d.details[i].bendIndex)
-                                 : std::any_of(v.dimensionedBends.begin(), v.dimensionedBends.end(),
-                                               [&](auto b) { return !covered.contains(b); });
-        const bool needed = missing || (!profileCovered.contains(d.details[i].bendIndex) &&
-                                        std::find(enlargements.begin(), enlargements.end(), i) !=
-                                            enlargements.end());
-        result.push_back({{DrawingViewKind::Detail, i}, needed});
-        if (needed) {
-            covered.insert(v.dimensionedBends.begin(), v.dimensionedBends.end());
-        }
-    }
+        result.push_back({{DrawingViewKind::Profile, i}, false});
+    for (std::size_t i = 0; i < d.details.size(); ++i)
+        result.push_back({{DrawingViewKind::Detail, i}, false});
     for (std::size_t i = 0; i < d.auxiliaryViews.size(); ++i)
-        result.push_back({{DrawingViewKind::Auxiliary, i}});
+        result.push_back({{DrawingViewKind::Auxiliary, i}, false});
     if (d.flatPattern)
         result.push_back({{DrawingViewKind::Flat}});
     result.push_back({{DrawingViewKind::Isometric}});
@@ -396,6 +375,10 @@ std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
                                       const std::vector<std::size_t> &order, DrawingSheetPlan &plan,
                                       std::map<FitKey, CachedFit> &fitCache,
                                       drawing::LayoutContext &context) {
+    struct FitAttempt {
+        std::optional<std::vector<DrawingPlacedView>> placed;
+        bool checked = false;
+    };
     const auto cacheLimit = std::min(context.limits.maximumCachedFits, std::size_t{4096});
     std::size_t begin = 0;
     while (begin < order.size()) {
@@ -403,36 +386,39 @@ std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
         bool packed = false;
         for (auto count = std::min(std::size_t{6}, order.size() - begin); count && !packed; --count)
             for (const auto &areas : cells(count)) {
-                std::vector<std::vector<std::optional<std::vector<DrawingPlacedView>>>> fits(
-                    count, std::vector<std::optional<std::vector<DrawingPlacedView>>>(count));
-                for (std::size_t i = 0; i < count; ++i)
-                    for (std::size_t j = 0; j < count; ++j) {
-                        // Check cancellation/deadline even for a cached negative result.
-                        context.checkpoint();
-                        const auto key = fitKey(order[begin + i], plan.pages, areas[j]);
-                        if (const auto cached = fitCache.find(key); cached != fitCache.end()) {
-                            fits[i][j] = restoreFit(cached->second, plan.pages);
-                            ++plan.fitCacheHits;
-                            continue;
-                        }
-                        ++plan.fitCalls;
-                        try {
-                            fits[i][j] = fitItem(*plan.source, items[order[begin + i]], areas[j],
-                                                 plan.flatSide, plan.pages, context);
-                            if (fitCache.size() < cacheLimit)
-                                fitCache.emplace(key, cacheFit(*fits[i][j]));
-                        } catch (const DrawingLayoutInterrupted &) {
-                            throw;
-                        } catch (const std::runtime_error &) {
-                            if (fitCache.size() < cacheLimit)
-                                fitCache.emplace(key, std::nullopt);
-                        }
+                std::vector fits(count, std::vector<FitAttempt>(count));
+                // Matching explores cells in the same order, evaluating only the pairs it visits.
+                const auto fitsCell = [&](std::size_t i, std::size_t j) {
+                    context.checkpoint();
+                    auto &attempt = fits[i][j];
+                    if (attempt.checked)
+                        return attempt.placed.has_value();
+                    attempt.checked = true;
+                    const auto key = fitKey(order[begin + i], plan.pages, areas[j]);
+                    if (const auto cached = fitCache.find(key); cached != fitCache.end()) {
+                        attempt.placed = restoreFit(cached->second, plan.pages);
+                        ++plan.fitCacheHits;
+                        return attempt.placed.has_value();
                     }
+                    ++plan.fitCalls;
+                    try {
+                        attempt.placed = fitItem(*plan.source, items[order[begin + i]], areas[j],
+                                                 plan.flatSide, plan.pages, context);
+                        if (fitCache.size() < cacheLimit)
+                            fitCache.emplace(key, cacheFit(*attempt.placed));
+                    } catch (const DrawingLayoutInterrupted &) {
+                        throw;
+                    } catch (const std::runtime_error &) {
+                        if (fitCache.size() < cacheLimit)
+                            fitCache.emplace(key, std::nullopt);
+                    }
+                    return attempt.placed.has_value();
+                };
                 std::vector<int> owner(count, -1);
                 const auto match = [&](auto &&self, std::size_t i,
                                        std::vector<bool> &visited) -> bool {
                     for (std::size_t j = 0; j < count; ++j)
-                        if (!visited[j] && fits[i][j]) {
+                        if (!visited[j] && fitsCell(i, j)) {
                             visited[j] = true;
                             if (owner[j] < 0 ||
                                 self(self, static_cast<std::size_t>(owner[j]), visited)) {
@@ -450,7 +436,7 @@ std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
                 if (!complete)
                     continue;
                 for (std::size_t j = 0; j < count; ++j) {
-                    const auto &at = *fits[static_cast<std::size_t>(owner[j])][j];
+                    const auto &at = *fits[static_cast<std::size_t>(owner[j])][j].placed;
                     plan.views.insert(plan.views.end(), at.begin(), at.end());
                 }
                 begin += count;

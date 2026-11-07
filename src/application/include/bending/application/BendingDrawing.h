@@ -179,6 +179,7 @@ struct DrawingRequest {
     std::optional<core::UnfoldSettings> unfoldSettings = {};
     FlatPatternPtr preparedFlatPattern = {}; // Optional cache; not an input affecting equality.
     std::vector<DrawingSectionEdit> sectionEdits;
+    std::optional<FlatPatternError> preparedFlatError = {}; // Matching in-flight preparation only.
     bool operator==(const DrawingRequest &other) const {
         return baseFace == other.baseFace && reverseView == other.reverseView &&
                quarterTurns == other.quarterTurns && allowBreaks == other.allowBreaks &&
@@ -214,6 +215,7 @@ struct BendingDrawing {
     std::vector<DrawingAuxiliaryView> auxiliaryViews;
     std::optional<DrawingFlatPattern> flatPattern = {};
     std::optional<FlatPatternError> flatPatternError = {};
+    FlatPatternPtr preparedFlatPattern = {}; // Original stock snapshot, before paper orientation.
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
 struct DrawingError {

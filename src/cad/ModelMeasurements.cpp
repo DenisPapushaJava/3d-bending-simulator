@@ -347,7 +347,8 @@ std::shared_ptr<const application::ModelMeasurements>
 flatModelMeasurements(const application::ModelMeasurements &data, const TopoDS_Shape &original,
                       const TopoDS_Shape &calculation, const TopoDS_Shape &stock,
                       std::span<const SheetWallRegion> walls, const gp_Trsf &origin,
-                      bool differentTopology, double tolerance, std::stop_token stop) {
+                      bool differentTopology, double tolerance, std::stop_token stop,
+                      std::map<std::size_t, std::size_t> &sourceWallOwners) {
     using namespace application;
     auto result = std::make_shared<ModelMeasurements>();
     TopTools_IndexedMapOfShape sourceFaces, targetFaces;
@@ -372,8 +373,13 @@ flatModelMeasurements(const application::ModelMeasurements &data, const TopoDS_S
                 if (stop.stop_requested())
                     return result;
                 if (!differentTopology) {
-                    if (index == face.id)
+                    if (index == face.id) {
+                        if (owner && *owner != w) {
+                            ambiguous = true;
+                            break;
+                        }
                         owner = w;
+                    }
                     continue;
                 }
                 const auto targetFace = TopoDS::Face(targetFaces(static_cast<int>(index)));
@@ -522,6 +528,7 @@ flatModelMeasurements(const application::ModelMeasurements &data, const TopoDS_S
                 break;
         }
     }
+    sourceWallOwners = std::move(owners);
     return result;
 }
 

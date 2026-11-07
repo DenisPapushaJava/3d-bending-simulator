@@ -958,7 +958,7 @@ class DrawingDialog::Impl {
         for (auto *w : {static_cast<QWidget *>(base), static_cast<QWidget *>(turn),
                         static_cast<QWidget *>(reverse), static_cast<QWidget *>(breaks)})
             w->setEnabled(same && !busy);
-        prepare->setEnabled(same && !busy);
+        prepare->setEnabled(same && controller.canPrepareDrawing());
         const auto drawing = controller.drawing();
         views->setEnabled(same && !busy && drawing && !settingsChanged);
         flatSide->setEnabled(same && !busy && drawing && !settingsChanged);
@@ -1084,8 +1084,7 @@ class DrawingDialog::Impl {
         }
     }
     void build() {
-        if (!controller.session().document() || controller.session().revision() != revision ||
-            controller.hasWork())
+        if (controller.session().revision() != revision || !controller.canPrepareDrawing())
             return;
         application::DrawingRequest request;
         if (base->currentIndex() == 1)

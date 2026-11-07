@@ -46,7 +46,6 @@ class LayoutContext {
 };
 void initializeFont();
 inline const QRectF contentArea{25, 22, 385, 215};
-std::vector<std::size_t> requiredDetails(const application::BendingDrawing &);
 application::DrawingView preparedView(const application::BendingDrawing &, DrawingViewKey);
 application::DrawingView selectedView(const application::BendingDrawing &, DrawingViewKey,
                                       const std::vector<DrawingViewChoice> *);

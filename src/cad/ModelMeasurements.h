@@ -2,6 +2,7 @@
 #include "bending/application/ModelMeasurements.h"
 #include <TopoDS_Shape.hxx>
 #include <gp_Trsf.hxx>
+#include <map>
 #include <memory>
 #include <span>
 #include <stop_token>
@@ -12,7 +13,8 @@ struct SheetWallRegion;
 flatModelMeasurements(const application::ModelMeasurements &, const TopoDS_Shape &source,
                       const TopoDS_Shape &calculation, const TopoDS_Shape &stock,
                       std::span<const SheetWallRegion>, const gp_Trsf &origin,
-                      bool differentTopology, double tolerance, std::stop_token);
+                      bool differentTopology, double tolerance, std::stop_token,
+                      std::map<std::size_t, std::size_t> &sourceWallOwners);
 
 [[nodiscard]] std::shared_ptr<const application::ModelMeasurements>
 prepareModelMeasurements(const TopoDS_Shape &, const application::DocumentMetadata &,
