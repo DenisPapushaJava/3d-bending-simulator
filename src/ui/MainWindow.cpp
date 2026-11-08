@@ -7,6 +7,7 @@
 #include "ToolSelectionWidget.h"
 #include "ToolWorkspace.h"
 #include "UpdateDialog.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/ToolGeometry.h"
 #include "bending/ui/Preferences.h"
 #include "bending/update/UpdateClient.h"
@@ -2074,6 +2075,7 @@ class MainWindow::Impl {
         const bool toolEditable = entry && included(entry->review) && !controller->hasWork();
         const bool allBends = multiple && !perBend && toolMode->currentIndex() == 0;
         std::optional<core::ToolSelectionRequest> selectionRequest;
+        std::optional<double> compactSectionMinimum;
         if (document && entry && included(entry->review) && matchingThickness && row >= 0 &&
             static_cast<std::size_t>(row) < document->metadata().bendAnalysis.bends.size()) {
             const auto &bend =
@@ -2082,6 +2084,20 @@ class MainWindow::Impl {
                 selectionRequest = core::ToolSelectionRequest{
                     bend.thicknessMm, target->angleRadians, target->innerRadiusMm,
                     std::max(bend.lengthMm, toolContextSpan)};
+            if (selectionRequest && perBend && toolContextMembers.empty() &&
+                toolContextSpan <= bend.lengthMm) {
+                const auto core = trimmedAxialCore(bend);
+                const auto limit = toolSelection->maximumEndSupportLossMm();
+                if (core && allowsShortToolEndSupport(true, limit)) {
+                    const double loss = std::min(
+                        {(*core)[0], bend.lengthMm - (*core)[1], limit.value_or(bend.lengthMm)});
+                    const double minimum = bend.lengthMm - 2 * loss;
+                    if (minimum >= 1 &&
+                        minimum + document->metadata().bendAnalysis.lengthToleranceMm <
+                            bend.lengthMm)
+                        compactSectionMinimum = minimum;
+                }
+            }
             if (allBends && selectionRequest) {
                 const auto &bends = document->metadata().bendAnalysis.bends;
                 for (std::size_t i = 0; i < bends.size(); ++i)
@@ -2121,7 +2137,8 @@ class MainWindow::Impl {
         }
         toolSelection->setSelectionRequest(
             selectionRequest, allBends,
-            document ? document->metadata().bendAnalysis.lengthToleranceMm : 1.e-5);
+            document ? document->metadata().bendAnalysis.lengthToleranceMm : 1.e-5,
+            compactSectionMinimum);
         if (checkedToolJob && controller->hasWork() && !controller->isPreparingRoute()) {
             // Toolbar cancellation or another command can stop the worker too.
             checkedToolCancelled = true;

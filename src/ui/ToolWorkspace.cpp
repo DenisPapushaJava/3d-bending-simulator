@@ -119,8 +119,6 @@ ToolWorkspace::ToolWorkspace(QWidget *parent) : QWidget(parent) {
     layout->addWidget(profiles_, 1);
     fit_ = new QPushButton(QStringLiteral("Подобрать секции"), this);
     fit_->setObjectName("workspaceFitSections");
-    fit_->setToolTip(
-        QStringLiteral("Подобрать длину обоих инструментов, сохранив выбранные крайние сапожки."));
     layout->addWidget(fit_);
     notice_ = new QLabel(this);
     notice_->setObjectName("workspaceAssemblyNotice");
@@ -178,6 +176,13 @@ void ToolWorkspace::refresh() {
         ends_->setSource(*punch, selection_->selectedAssembly(core::ToolKind::Punch));
     ends_->setEnabled(selection_->canEditAssemblies());
     fit_->setEnabled(selection_->isEnabled() && selection_->canFitAssemblies());
+    if (const auto minimum = selection_->compactSectionMinimumMm())
+        fit_->setToolTip(QStringLiteral("Подобрать непрерывные сборки от %1 мм до длины гиба. "
+                                        "Проём проверяется в симуляции.")
+                             .arg(*minimum, 0, 'f', 2));
+    else
+        fit_->setToolTip(QStringLiteral(
+            "Подобрать длину обоих инструментов, сохранив выбранные крайние сапожки."));
 
     editPunch_->setEnabled(selection_->isEnabled() && punch && punch->segments.has_value());
     editDie_->setEnabled(selection_->isEnabled() && die && die->segments.has_value());

@@ -201,6 +201,34 @@ void endEditorChecks(core::ToolPreset tool) {
     if (const auto output = qEnvironmentVariable("BENDING_HORN_INLINE_SNAPSHOT"); !output.isEmpty())
         require(window.grab().save(output), "Inline tool workspace snapshot");
     owner.onChanged = {};
+    auto narrow = tool_fixture::pair();
+    narrow.punch.segments = std::vector<core::ToolSegment>{
+        {835, 1},
+        {200, 1},
+        {100, 1, core::SegmentShape::LeftHorn, core::HornRelief{27, 27, 9}, "left"},
+        {50, 1},
+        {40, 1}};
+    narrow.die.segments =
+        std::vector<core::ToolSegment>{{835, 1}, {200, 1}, {100, 1}, {50, 1}, {40, 1}};
+    narrow.punchAssembly = core::ToolAssembly{{2, 0, 1}, 0, {}};
+    narrow.dieAssembly = core::ToolAssembly{{0, 1}, 0, {}};
+    ui::ToolSelectionWidget compactOwner({narrow.punch, narrow.die}, nullptr);
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5,
+                                     1024);
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                compactOwner.parameters()->lengthMm == 1025 &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1025 &&
+                core::punchAssemblyEnds(*narrow.punch.segments,
+                                        *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
+                    core::PunchAssemblyEnds{2, {}},
+            "Compact fitting preferred full length or lost the selected horn");
+    narrow.punchAssembly = core::ToolAssembly{{0, 1}, 0, {}};
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    require(!compactOwner.fitSelectedAssemblies().isEmpty() &&
+                compactOwner.selectedAssembly(core::ToolKind::Punch) == narrow.punchAssembly &&
+                compactOwner.selectedAssembly(core::ToolKind::Die) == narrow.dieAssembly,
+            "An oversized straight assembly was proposed or the previous pair changed");
     tool.segments->at(1).quantity = 0;
     tool.segments->at(2).horn.reset();
     tool.segments->at(2).variantId.clear();
