@@ -1,12 +1,15 @@
+#include "FlatPatternDisplay.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
@@ -15,6 +18,7 @@
 #include <TopoDS.hxx>
 #include <algorithm>
 #include <cmath>
+#include <gp_Pln.hxx>
 #include <iostream>
 #include <numbers>
 #include <stdexcept>
@@ -57,10 +61,45 @@ int displayTriangles(const bending::cad::PreviewFrame &frame, const TopoDS_Shape
     }
     return triangles;
 }
+void sourceFaceOwnership() {
+    using namespace bending::cad;
+    const auto plane = gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
+    const auto face = BRepBuilderAPI_MakeFace(plane, 0, 1, 0, 1).Face();
+    const auto spanning = BRepBuilderAPI_MakeFace(plane, 0, 2, 0, 1).Face();
+    const std::array<TopoDS_Shape, 2> solids{BRepPrimAPI_MakeBox(1, 1, 1).Shape(),
+                                             BRepPrimAPI_MakeBox(gp_Pnt(1, 0, 0), 1, 1, 1).Shape()};
+    std::array<Bnd_Box, 2> boxes;
+    boxes[0].Add(gp_Pnt(0, 0, 0));
+    boxes[0].Add(gp_Pnt(1, 1, 1));
+    boxes[1].Add(gp_Pnt(1, 0, 0));
+    boxes[1].Add(gp_Pnt(2, 1, 1));
+    std::size_t checks = 0;
+    require(sourceFaceRegionOwner(face, solids, boxes, .001, checks, {}) == 0 && checks == 2,
+            "Edge contact hid the full face owner");
+    require(!sourceFaceRegionOwner(spanning, solids, boxes, .001, checks, {}),
+            "A face crossing two bodies was assigned a single owner");
+    checks = sourceFaceRegionQueryLimit;
+    require(!sourceFaceRegionOwner(face, solids, boxes, .001, checks, {}),
+            "Exhausting the ownership budget returned a guess");
+    const auto display =
+        flatCutoutDisplay(face,
+                          {{solids[0], [](gp_Pnt p) { return p; }},
+                           {solids[1], [](gp_Pnt p) { return p.Translated(gp_Vec(3, 0, 0)); }}},
+                          {}, .001, {});
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(display.surface, TopAbs_FACE, faces);
+    require(faces.Extent() == 1, "Ambiguous boundary duplicated the source face");
+    TopLoc_Location location;
+    const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces(1)), location);
+    require(!mesh.IsNull() && mesh->NbNodes() >= 4, "Missing remapped face mesh");
+    for (int i = 1; i <= mesh->NbNodes(); ++i)
+        require(mesh->Node(i).X() <= 1. + 1.e-7, "The adjacent transform moved a cap vertex");
+}
 } // namespace
 int main() {
     using namespace bending;
     try {
+        sourceFaceOwnership();
         for (const auto *name : {"bend-zone-hole-6mm.step", "bend-zone-pocket-6mm.step",
                                  "profiled-bend-6mm.step", "channel-zone-hole-2mm.step"}) {
             const auto loaded =

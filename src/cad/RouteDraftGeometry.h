@@ -2,7 +2,8 @@
 #include "bending/application/BendRoute.h"
 #include "bending/application/FlatPattern.h"
 namespace bending::cad {
-// One immutable, classified source skin per imported document/kinematic thickness.
+// One classified source skin per imported document/kinematic thickness.
+// Successful fallback bindings are retained under the route cache's worker lock.
 class RouteDraftBasis {
   public:
     RouteDraftBasis(application::DocumentPtr, application::FlatPatternPtr, std::stop_token);

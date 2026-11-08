@@ -5,6 +5,7 @@
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
 #include "CollisionReuse.h"
+#include "FlatPatternDisplay.h"
 #include "FlatWallRegions.h"
 #include "GeometryCacheInternal.h"
 #include "JointBends.h"
@@ -52,6 +53,7 @@
 #include <gp_Lin.hxx>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <numbers>
 #include <optional>
@@ -379,10 +381,23 @@ splitAtBend(const TopoDS_Shape &source, const PreviewFrame &seed,
         return {};
     return std::array<TopoDS_Shape, 2>{compound(parts[0]), compound(parts[1])};
 }
+std::optional<gp_Pnt> mapWholePartRegion(gp_Pnt point, std::size_t region,
+                                         const std::array<gp_Trsf, 2> &maps,
+                                         const simulation::SingleBend &model,
+                                         const FrameBasis &from, const FrameBasis &to,
+                                         const simulation::BendSection &section) {
+    if (region != 1)
+        return point.Transformed(maps[region / 2]);
+    const gp_Vec v(from.origin, point);
+    if (const auto local = simulation::mapBendPoint(model, {v.Dot(from.x), v.Dot(from.y)}, section))
+        return sectionPoint(to, *local).Translated(to.z * v.Dot(from.z));
+    return {};
+}
 WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
                                    const std::array<TopoDS_Shape, 2> &flanges,
                                    const TopoDS_Shape &sector, double tolerance,
-                                   std::stop_token stop, const std::vector<SheetSide> &sides) {
+                                   std::stop_token stop, const std::vector<SheetSide> &sides,
+                                   const simulation::SingleBend &model, const FrameBasis &basis) {
     // Membership is in immutable SOURCE components and does not depend on the
     // displayed angle. Preserve all rail memberships; never cache across operations.
     WholePartSkin result;
@@ -397,6 +412,13 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
             classifiers[r].push_back(std::make_unique<BRepClass3d_SolidClassifier>(solids(i)));
     }
     std::size_t boundaryFallbacks = 0;
+    std::size_t ownerQueries = 0;
+    std::optional<std::array<Bnd_Box, 3>> ownerBoxes;
+    const auto flat = *simulation::singleBendSection(model, 0.);
+    const auto final = *simulation::singleBendSection(model, 1.);
+    std::array<gp_Trsf, 2> maps;
+    for (std::size_t s = 0; s < maps.size(); ++s)
+        maps[s].SetDisplacement(flangeAxes(basis, final, s == 1), flangeAxes(basis, flat, s == 1));
     TopTools_IndexedMapOfShape sourceFaces;
     TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
     for (TopExp_Explorer f(source, TopAbs_FACE); f.More(); f.Next()) {
@@ -455,6 +477,43 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
         }
         skin.region =
             static_cast<std::size_t>(std::max_element(votes.begin(), votes.end()) - votes.begin());
+        const bool conflict = std::any_of(skin.nodes.begin(), skin.nodes.end(), [&](const auto &n) {
+            if (std::has_single_bit(n.regions))
+                return false;
+            std::optional<gp_Pnt> mapped;
+            for (std::size_t r = 0; r < bodies.size(); ++r) {
+                if (!(n.regions & (1u << r)))
+                    continue;
+                const auto next = mapWholePartRegion(n.point, r, maps, model, basis, basis, flat);
+                if (!next || (mapped && mapped->Distance(*next) > .02))
+                    return true;
+                mapped = next;
+            }
+            return false;
+        });
+        if (conflict) {
+            if (!ownerBoxes) {
+                ownerBoxes.emplace();
+                for (std::size_t r = 0; r < bodies.size(); ++r) {
+                    BRepBndLib::AddOptimal(bodies[r], (*ownerBoxes)[r], false, false);
+                    (*ownerBoxes)[r].Enlarge(tolerance * 10);
+                }
+            }
+            const auto owner =
+                sourceFaceRegionOwner(face, bodies, *ownerBoxes, tolerance, ownerQueries, stop);
+            if (stop.stop_requested())
+                return {};
+            if (!owner)
+                throw std::runtime_error("Inconsistent surface mapping at the active bend rail");
+            const unsigned membership = 1u << *owner;
+            for (auto &node : skin.nodes) {
+                if (!(node.regions & membership))
+                    throw std::runtime_error(
+                        "Source face owner disagrees with the active bend rail");
+                node.regions = membership;
+            }
+            skin.region = *owner;
+        }
         result.push_back(std::move(skin));
     }
     return result;
@@ -485,17 +544,10 @@ void makeWholePartDisplay(PreviewFrame &frame, const WholePartSkin &source,
             for (std::size_t r = 0; r < 3; ++r) {
                 if (!(regions & (1u << r)))
                     continue;
-                gp_Pnt next;
-                if (r == 1) {
-                    const gp_Vec v(from.origin, point);
-                    const auto local =
-                        simulation::mapBendPoint(model, {v.Dot(from.x), v.Dot(from.y)}, section);
-                    if (!local)
-                        throw std::runtime_error("Cannot map active zone surface");
-                    next = sectionPoint(to, *local).Translated(to.z * v.Dot(from.z));
-                } else
-                    next = point.Transformed(maps[r / 2]);
-                if (mapped && mapped->Distance(next) > .02)
+                const auto next = mapWholePartRegion(point, r, maps, model, from, to, section);
+                if (!next)
+                    throw std::runtime_error("Cannot map active zone surface");
+                if (mapped && mapped->Distance(*next) > .02)
                     throw std::runtime_error(
                         "Inconsistent surface mapping at the active bend rail");
                 mapped = next;
@@ -1557,10 +1609,11 @@ PreparedBendOperationResult prepareBendOperation(
                 BackgaugeSearchStatistics *gaugeStatistics) -> BendPreviewResult {
             const auto ensureSkin = [&]() -> bool {
                 if (!workpiece->display->skin) {
-                    auto skin = partitionedWalls && !displaySource.IsNull()
-                                    ? prepareWholePartSkin(displaySource, flanges, sourceSector,
-                                                           tolerance, placementStop, displaySides)
-                                    : WholePartSkin{};
+                    auto skin =
+                        partitionedWalls && !displaySource.IsNull()
+                            ? prepareWholePartSkin(displaySource, flanges, sourceSector, tolerance,
+                                                   placementStop, displaySides, model, sourceBasis)
+                            : WholePartSkin{};
                     if (placementStop.stop_requested())
                         return false;
                     workpiece->display->skin =

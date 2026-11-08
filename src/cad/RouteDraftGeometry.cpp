@@ -4,6 +4,7 @@
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
 #include "CollisionReuse.h"
+#include "FlatPatternDisplay.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -53,6 +54,8 @@ struct Face {
     std::vector<Node> nodes;
     std::size_t region;
     SheetSide side = SheetSide::Neutral;
+    TopoDS_Face source; // Retained while nodes can still require an exact owner.
+    std::optional<std::size_t> owner;
 };
 TopoDS_Compound compound() {
     TopoDS_Compound c;
@@ -102,6 +105,8 @@ struct RouteDraftBasis::Impl {
     application::FlatPatternPtr flat;
     std::vector<Face> faces;
     std::vector<std::uint32_t> nodeRegions;
+    std::vector<TopoDS_Shape> regionSolids;
+    std::vector<Bnd_Box> regionBoxes;
     std::vector<bool> referenceReversed;
     std::optional<std::size_t> referenceWall;
 };
@@ -119,9 +124,10 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         impl_->referenceReversed[b.bendIndex] =
             normalBendAxis(native, b.bendIndex).Dot(b.sectionAxes.Direction()) < 0;
     std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> classifiers;
-    std::vector<Bnd_Box> boxes;
+    auto &boxes = impl_->regionBoxes;
     const auto add = [&](const TopoDS_Shape &s) {
         classifiers.push_back(std::make_unique<BRepClass3d_SolidClassifier>(s));
+        impl_->regionSolids.push_back(s);
         auto b = box(s);
         b.Enlarge(tolerance * 10);
         boxes.push_back(b);
@@ -159,8 +165,7 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         TopLoc_Location loc;
         const auto mesh = BRep_Tool::Triangulation(face, loc);
         require(!mesh.IsNull(), "Missing draft mesh");
-        Face skin{mesh, face.Orientation(), {}, 0};
-        skin.side = sideLabels[copiedFaces.FindIndex(face)];
+        Face skin{mesh, face.Orientation(), {}, 0, sideLabels[copiedFaces.FindIndex(face)], {}, {}};
         std::vector<std::size_t> votes(classifiers.size());
         for (int i = 1; i <= mesh->NbNodes(); ++i) {
             if ((i & 255) == 0)
@@ -178,6 +183,8 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
             }
             const auto count = impl_->nodeRegions.size() - first;
             require(count != 0, "Original surface is outside the draft decomposition");
+            if (count > 1 && skin.source.IsNull())
+                skin.source = face;
             require(impl_->nodeRegions.size() <= std::numeric_limits<std::uint32_t>::max(),
                     "Draft membership storage limit reached");
             skin.nodes.push_back(
@@ -290,6 +297,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     if (withTools)
         materialBounds.reserve(layout.walls.size() + layout.bends.size());
     RigidClearanceCache rigidClearances;
+    std::size_t ownerQueries = 0;
     const std::size_t count = request.step ? 21 : 1;
     for (std::size_t f = 0; f < count; ++f) {
         cancelled(stop);
@@ -403,22 +411,58 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         std::array<TopoDS_Compound, 3> regions{compound(), compound(), compound()};
         for (std::size_t i = 0; i < n; ++i)
             frame.bendZones.push_back(compound());
-        for (const auto &face : impl_->faces) {
+        for (auto &face : impl_->faces) {
             cancelled(stop);
             Handle(Poly_Triangulation) mesh =
                 new Poly_Triangulation(face.mesh->NbNodes(), face.mesh->NbTriangles(), false);
-            for (std::size_t i = 0; i < face.nodes.size(); ++i) {
-                const auto &node = face.nodes[i];
-                std::optional<gp_Pnt> mapped;
-                for (const auto r :
-                     std::span(impl_->nodeRegions).subspan(node.firstRegion, node.regionCount)) {
-                    const auto next = maps[r](node.point).Transformed(machine);
-                    require(!mapped || mapped->Distance(next) <= .02,
-                            "Inconsistent draft boundary mapping");
-                    mapped = next;
+            const auto setNode = [&](std::size_t i, const gp_Pnt &point) {
+                mesh->SetNode(static_cast<int>(i + 1), point);
+                envelope.Add(point);
+            };
+            if (!face.source.IsNull()) {
+                const auto envelopeBeforeFace = envelope;
+                bool conflict = false;
+                for (std::size_t i = 0; i < face.nodes.size() && !conflict; ++i) {
+                    const auto &node = face.nodes[i];
+                    std::optional<gp_Pnt> mapped;
+                    for (const auto r : std::span(impl_->nodeRegions)
+                                            .subspan(node.firstRegion, node.regionCount)) {
+                        const auto next = maps[r](node.point).Transformed(machine);
+                        if (mapped && mapped->Distance(next) > .02) {
+                            conflict = true;
+                            break;
+                        }
+                        mapped = next;
+                    }
+                    if (mapped)
+                        setNode(i, *mapped);
                 }
-                mesh->SetNode(static_cast<int>(i + 1), *mapped);
-                envelope.Add(*mapped);
+                if (conflict) {
+                    envelope = envelopeBeforeFace;
+                    const auto owner =
+                        sourceFaceRegionOwner(face.source, impl_->regionSolids, impl_->regionBoxes,
+                                              tolerance, ownerQueries, stop);
+                    cancelled(stop);
+                    require(owner.has_value(), "Inconsistent draft boundary mapping");
+                    for (const auto &node : face.nodes) {
+                        const auto candidates = std::span(impl_->nodeRegions)
+                                                    .subspan(node.firstRegion, node.regionCount);
+                        require(std::find(candidates.begin(), candidates.end(), *owner) !=
+                                    candidates.end(),
+                                "Source face owner disagrees with the draft boundary");
+                    }
+                    face.owner = owner;
+                    face.source.Nullify();
+                }
+            }
+            // With one candidate per vertex there is no ambiguity to resolve. Most of a
+            // perforated sheet's faces use this direct path at every frame.
+            if (face.source.IsNull()) {
+                for (std::size_t i = 0; i < face.nodes.size(); ++i) {
+                    const auto &node = face.nodes[i];
+                    const auto region = face.owner.value_or(impl_->nodeRegions[node.firstRegion]);
+                    setNode(i, maps[region](node.point).Transformed(machine));
+                }
             }
             for (int i = 1; i <= face.mesh->NbTriangles(); ++i)
                 mesh->SetTriangle(i, face.mesh->Triangle(i));
@@ -426,17 +470,16 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             TopoDS_Face skin;
             builder.MakeFace(skin, mesh);
             skin.Orientation(face.orientation);
+            const auto region = face.owner.value_or(face.region);
             const bool selected =
-                request.step &&
-                face.region ==
-                    layout.walls.size() + static_cast<std::size_t>(link - layout.bends.begin());
+                request.step && region == layout.walls.size() +
+                                              static_cast<std::size_t>(link - layout.bends.begin());
             builder.Add(regions[selected ? 1 : 0], skin);
             if (face.side != SheetSide::Neutral)
                 frame.orientation.sides[face.side == SheetSide::A ? 0 : 1].push_back(skin);
-            if (face.region >= layout.walls.size())
-                builder.Add(
-                    frame.bendZones[layout.bends[face.region - layout.walls.size()].bendIndex],
-                    skin);
+            if (region >= layout.walls.size())
+                builder.Add(frame.bendZones[layout.bends[region - layout.walls.size()].bendIndex],
+                            skin);
         }
         auto display = compound();
         for (std::size_t i = 0; i < 3; ++i) {
