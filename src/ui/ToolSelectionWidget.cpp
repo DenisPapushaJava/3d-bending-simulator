@@ -1263,9 +1263,8 @@ QString ToolSelectionWidget::fitSelectedAssemblies() {
         }
     }
     const double length = selectionRequest_->bendLengthMm;
-    const auto lengthLabel = compact ? QStringLiteral("Рабочая длина %1–%2 мм.")
+    const auto lengthLabel = compact ? QStringLiteral("Для опоры нужно не менее %1 мм.")
                                            .arg(*compactSectionMinimumMm_, 0, 'f', 2)
-                                           .arg(length, 0, 'f', 2)
                                      : QStringLiteral("Длина гиба %1 мм.").arg(length);
     QString message;
     if (!issues.isEmpty()) {
@@ -1312,14 +1311,13 @@ ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only, bool pres
                          std::optional<core::ToolAssembly> &assembly) -> core::SegmentPlan {
         if (!tool)
             return {};
-        const double maximum = tool->kind == core::ToolKind::Punch
-                                   ? compactPunchMaximumMm_.value_or(nominal)
-                                   : nominal;
+        const auto maximum =
+            compact && tool->kind == core::ToolKind::Punch ? compactPunchMaximumMm_ : std::nullopt;
         const auto fits = [&](double length) {
             return length + 1e-5 >= required &&
-                   (!compact || length <= maximum + lengthToleranceMm_);
+                   (!maximum || length <= *maximum + lengthToleranceMm_);
         };
-        if (compact && maximum + lengthToleranceMm_ < required)
+        if (maximum && *maximum + lengthToleranceMm_ < required)
             return {core::SegmentPlanStatus::InsufficientStock, {}, 0};
         if (!tool->segments)
             return {fits(tool->lengthMm) ? core::SegmentPlanStatus::Complete

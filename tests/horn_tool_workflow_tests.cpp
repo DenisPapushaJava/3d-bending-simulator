@@ -241,6 +241,20 @@ void endEditorChecks(core::ToolPreset tool) {
                 compactOwner.selectedAssembly(core::ToolKind::Punch) == narrow.punchAssembly &&
                 compactOwner.selectedAssembly(core::ToolKind::Die) == narrow.dieAssembly,
             "An oversized straight assembly was proposed or the previous pair changed");
+    narrow.punchAssembly = core::ToolAssembly{{2, 0, 1}, 0, {}};
+    narrow.die.segments = std::vector<core::ToolSegment>{{835, 1}, {200, 1}};
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1025 &&
+                compactOwner.parameters()->lengthMm == 1035,
+            "The punch opening also rejected a longer die");
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5,
+                                     1024);
+    narrow.punchAssembly = core::ToolAssembly{{0, 1}, 0, {}};
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1035,
+            "An unconstrained longer punch was rejected by the nominal bend length");
     tool.segments->at(1).quantity = 0;
     tool.segments->at(2).horn.reset();
     tool.segments->at(2).variantId.clear();

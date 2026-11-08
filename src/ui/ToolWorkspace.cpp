@@ -182,7 +182,7 @@ void ToolWorkspace::refresh() {
                                         "Свободный ход проверяется в симуляции.")
                              .arg(*maximum, 0, 'f', 2));
     else if (const auto minimum = selection_->compactSectionMinimumMm())
-        fit_->setToolTip(QStringLiteral("Подобрать непрерывные сборки от %1 мм до длины гиба. "
+        fit_->setToolTip(QStringLiteral("Подобрать непрерывные сборки от %1 мм. "
                                         "Проём проверяется в симуляции.")
                              .arg(*minimum, 0, 'f', 2));
     else

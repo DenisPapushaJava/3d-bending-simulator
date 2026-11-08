@@ -2110,9 +2110,7 @@ class MainWindow::Impl {
                     const double loss = std::min(
                         {(*core)[0], bend.lengthMm - (*core)[1], limit.value_or(bend.lengthMm)});
                     const double minimum = bend.lengthMm - 2 * loss;
-                    if (minimum >= 1 &&
-                        minimum + document->metadata().bendAnalysis.lengthToleranceMm <
-                            bend.lengthMm)
+                    if (minimum >= 1)
                         compactSectionMinimum = minimum;
                 }
                 const auto draft = controller->routeDraft();
@@ -2130,10 +2128,13 @@ class MainWindow::Impl {
                                        return operation.bendIndex == index;
                                    })) {
                         const double clearance = std::max(.1, tolerance);
-                        compactPunchMaximum =
-                            std::min(bend.lengthMm, *draft->centredPunchOpeningMm - 2 * clearance);
+                        compactPunchMaximum = *draft->centredPunchOpeningMm - 2 * clearance;
                     }
                 }
+                if (compactSectionMinimum && !compactPunchMaximum &&
+                    *compactSectionMinimum + document->metadata().bendAnalysis.lengthToleranceMm >=
+                        bend.lengthMm)
+                    compactSectionMinimum.reset();
             }
             if (allBends && selectionRequest) {
                 const auto &bends = document->metadata().bendAnalysis.bends;
