@@ -1659,16 +1659,20 @@ PreparedBendOperationResult prepareBendOperation(
                 auto &report = placedPreview->supportIntervals.front().material;
                 report.supportedFromMm = std::max(report.supportedFromMm, span[0]);
                 report.supportedToMm = std::min(report.supportedToMm, span[1]);
-                if (!coversAxialInterval(span, *core, tolerance))
-                    return BendPreviewError{BendPreviewErrorCode::ToolTooShort,
-                                            "Continuous tools do not cover the straight bend core"};
-                if (!coversAxialInterval({report.supportedFromMm, report.supportedToMm}, *core,
+                const bool covered = coversAxialInterval(span, *core, tolerance);
+                if (!covered ||
+                    !coversAxialInterval({report.supportedFromMm, report.supportedToMm}, *core,
                                          tolerance) ||
                     !withinEndSupportLimit(report, prototype->supportLimit.value_or(model.widthMm),
-                                           tolerance))
-                    return BendPreviewError{
-                        BendPreviewErrorCode::SupportNotProven,
-                        "The straight bend core or permitted end support is not covered"};
+                                           tolerance)) {
+                    BendPreviewError failure{
+                        covered ? BendPreviewErrorCode::SupportNotProven
+                                : BendPreviewErrorCode::ToolTooShort,
+                        covered ? "The straight bend core or permitted end support is not covered"
+                                : "Continuous tools do not cover the straight bend core"};
+                    failure.axialSupportGap = true;
+                    return failure;
+                }
             }
             if (realTools && toolParameters) {
                 const double from =

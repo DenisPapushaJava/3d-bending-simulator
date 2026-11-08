@@ -57,4 +57,23 @@ trimmedAxialCore(const RecognizedBend &bend) noexcept {
                                                     std::optional<double> limit) noexcept {
     return partial && (!limit || *limit > 0);
 }
+// Offsets that cover the required material with both working edges. A shorter
+// continuous pair can have an off-centre range even when the nominal range is zero.
+[[nodiscard]] inline std::array<double, 2>
+axialSupportOffsets(const core::PressTools &tools, double width,
+                    const std::array<double, 2> &required) noexcept {
+    const auto span = commonToolSpan(tools, width, 0);
+    return {span[0] - required[0], span[1] - required[1]};
+}
+
+// Best axial alignment of the punch within the estimated wall window, constrained
+// by the support range. An open end is represented by an infinite boundary.
+[[nodiscard]] inline double preferredPunchOffset(double width, double punch,
+                                                 const std::array<double, 2> &window,
+                                                 const std::array<double, 2> &offsets) noexcept {
+    const double low = (width + punch) / 2 - window[1];
+    const double high = (width - punch) / 2 - window[0];
+    const double desired = low <= high ? std::clamp(0., low, high) : (low + high) / 2;
+    return std::clamp(desired, offsets[0], offsets[1]);
+}
 } // namespace bending::application

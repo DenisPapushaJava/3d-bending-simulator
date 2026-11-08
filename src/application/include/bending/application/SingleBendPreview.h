@@ -206,7 +206,7 @@ struct BendPreviewError {
     std::optional<std::size_t> frameIndex = std::nullopt;
     BendPreviewPtr diagnostic = {}; // Safe prefix + failed state, never a successful ToolMotion.
     std::optional<BendEndSupport> endSupport = std::nullopt;
-    // This exact tool-gap refusal may change with workpiece Z; source-strip failures do not.
+    // Tool coverage of the support strip may change with workpiece Z.
     bool axialSupportGap = false;
     std::optional<ToolCollisionPair> toolCollision = std::nullopt;
     // Proposal from the actual Common at this exact pose; never a clearance certificate.

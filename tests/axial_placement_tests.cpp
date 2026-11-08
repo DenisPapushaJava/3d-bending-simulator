@@ -83,6 +83,22 @@ int main() {
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
         std::filesystem::create_directories(folder);
+        core::PressTools shortPunch;
+        shortPunch.lengthMm = 120;
+        shortPunch.punchLengthMm = 98;
+        const auto support = application::axialSupportOffsets(shortPunch, 100, {4, 100});
+        const double offset = application::preferredPunchOffset(100, 98, {2, 101}, support);
+        check(support == std::array{-3., -1.} && offset == -1 &&
+                  application::commonToolSpan(shortPunch, 100, offset) == std::array{2., 100.},
+              "An asymmetric core did not leave an off-centre fit");
+        const auto reversed = application::axialSupportOffsets(shortPunch, 100, {0, 96});
+        check(application::preferredPunchOffset(100, 98, {-1, 98}, reversed) == -offset &&
+                  application::preferredPunchOffset(
+                      100, 98, {2, std::numeric_limits<double>::infinity()}, support) == offset,
+              "Reflected or open wall window changed the axial fit");
+        const auto tight = application::preferredPunchOffset(100, 98, {7, 97}, support);
+        check(tight >= support[0] && tight <= support[1],
+              "An estimated obstruction overrode material support");
         const auto doc = load(corner(), folder / "corner.step");
         check(doc->metadata().bendAnalysis.bends.size() == 2, "Corner lost bends");
         auto q = request(doc);
