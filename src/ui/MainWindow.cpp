@@ -3977,7 +3977,9 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     };
     impl_->checkedToolDialog = new ToolSearchDialog(this);
     impl_->checkedToolDialog->onCancel = [this] { impl_->cancelCheckedToolSelection(); };
-    impl_->checkedToolDialog->onContinue = [this] { impl_->prepareCheckedToolSelection(); };
+    impl_->checkedToolDialog->onContinue = [this] {
+        impl_->prepareCheckedToolSelection(impl_->checkedSectionsOnly);
+    };
     impl_->checkedToolDialog->onQuick = [this] {
         impl_->checkedToolDialog->hide();
         findChild<QAction *>("recommendToolsQuick")->trigger();

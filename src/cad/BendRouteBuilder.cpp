@@ -376,8 +376,8 @@ class RouteSearch {
             std::chrono::steady_clock::now() - started >
                 std::chrono::milliseconds(request.maximumTimeMs))
             throw BendRouteError{BendRouteErrorCode::SearchLimit,
-                                 "Route search budget reached; " + lastFailure, failedBend,
-                                 attempts};
+                                 lastFailure.empty() ? "Route search budget reached" : lastFailure,
+                                 failedBend, attempts, lastOperationError};
         if (commonAssemblyPhase && (attempts >= phaseCheckLimit ||
                                     std::chrono::steady_clock::now() - started >
                                         std::chrono::milliseconds(request.maximumTimeMs / 2)))
@@ -2086,14 +2086,15 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                 totals.commonAssemblyChecks += s.commonAssemblyChecks;
                 totals.usedCommonAssembly |= s.usedCommonAssembly;
             };
-            for (const auto choice : toolOrder) {
+            bool limited = false, unsupported = false;
+            for (std::size_t slot = 0; slot < toolOrder.size(); ++slot) {
+                const auto choice = toolOrder[slot];
                 cancelled(stop);
                 const auto spent = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now() - started)
                                        .count();
                 if (attempts >= request.maximumChecks || spent >= request.maximumTimeMs) {
-                    last.code = BendRouteErrorCode::SearchLimit;
-                    last.detail = "Shared checked-tooling search budget reached; " + last.detail;
+                    limited = true;
                     break;
                 }
                 auto trial = request;
@@ -2117,8 +2118,15 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                         p.checkedOperations += attempts;
                         report(std::move(p));
                     };
-                trial.maximumChecks = request.maximumChecks - attempts;
-                trial.maximumTimeMs = request.maximumTimeMs - static_cast<unsigned>(spent);
+                const auto checksLeft = request.maximumChecks - attempts;
+                const auto timeLeft = request.maximumTimeMs - static_cast<unsigned>(spent);
+                // Give the highest ranked pairs a useful first pass while reserving
+                // budget for alternatives. Leave at least one stroke per bend when
+                // the remaining check budget permits a split.
+                const auto shares = std::min({std::size_t{3}, toolOrder.size() - slot,
+                                              std::max(std::size_t{1}, checksLeft / n)});
+                trial.maximumChecks = checksLeft / shares;
+                trial.maximumTimeMs = std::max(1u, timeLeft / static_cast<unsigned>(shares));
                 if (invariantGaugeSpan &&
                     std::any_of(trial.operations.begin(), trial.operations.end(),
                                 [&](const auto &op) {
@@ -2145,10 +2153,33 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     invariantGaugeSpan = last.invariantGaugeSpanMm;
                 attempts += last.evaluatedOperations;
                 add(last.statistics);
-                // An incomplete trial is never a rejected tool. Keep its exact cached
-                // work for an explicit continuation instead of trying all pairs indefinitely.
-                if (last.code != BendRouteErrorCode::NoRoute)
+                // A partial verdict for one pair does not preclude testing another.
+                // Document-wide errors still terminate the request immediately.
+                if (last.code == BendRouteErrorCode::SearchLimit)
+                    limited = true;
+                else if (last.code == BendRouteErrorCode::Unsupported && last.bendIndex)
+                    unsupported = true;
+                else if (last.code != BendRouteErrorCode::NoRoute)
                     break;
+                if (last.code == BendRouteErrorCode::SearchLimit ||
+                    last.code == BendRouteErrorCode::Unsupported) {
+                    const auto &pair = request.toolVariants[choice].assignment;
+                    const auto next = toolOrder.begin() + static_cast<std::ptrdiff_t>(slot + 1);
+                    const auto different = std::find_if(next, toolOrder.end(), [&](std::size_t i) {
+                        const auto &other = request.toolVariants[i].assignment;
+                        return pair.punch.id != other.punch.id || pair.die.id != other.die.id ||
+                               pair.groove != other.groove;
+                    });
+                    if (different != toolOrder.end())
+                        std::rotate(next, different, std::next(different));
+                }
+            }
+            if (last.code == BendRouteErrorCode::NoRoute ||
+                (last.code == BendRouteErrorCode::Unsupported && last.bendIndex)) {
+                if (limited)
+                    last.code = BendRouteErrorCode::SearchLimit;
+                else if (unsupported)
+                    last.code = BendRouteErrorCode::Unsupported;
             }
             last.evaluatedOperations = attempts;
             last.statistics = totals;

@@ -124,8 +124,8 @@ void ToolSearchDialog::finish(application::BendRouteErrorCode code, const QStrin
                     : code == Code::NoRoute ? QStringLiteral("Проверенный вариант не найден")
                                             : QStringLiteral("Не удалось завершить проверку"));
     detail_->setText(
-        resumable_ ? QStringLiteral("Можно продолжить с готовыми проверками или выбрать "
-                                    "инструмент другим способом.")
+        resumable_ ? QStringLiteral("Достигнут лимит поиска. Можно продолжить с готовыми "
+                                    "проверками или выбрать инструмент другим способом.")
         : code == Code::Unsupported
             ? QStringLiteral("Попробуйте другой инструмент или ручной порядок.")
             : QStringLiteral("Можно попробовать быстрый или ручной выбор инструмента."));
