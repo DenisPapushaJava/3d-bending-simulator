@@ -242,6 +242,9 @@ void verifyToolStageTransitions(const QString &folder) {
             "An unchanged tool batch emitted a refresh");
     QObject::disconnect(transaction);
     require(c.setBendWorkpieceOrientation(indices[1], true), "Cannot turn the part");
+    std::vector<bool> orientations(indices.size());
+    for (const auto i : indices)
+        orientations.at(i) = c.session().bend(i)->workpieceReversed;
     auto stage = [&](int n) {
         window.findChild<QToolButton *>(QStringLiteral("processStage%1").arg(n))->click();
         wait([&] { return !c.hasWork(); });
@@ -358,7 +361,7 @@ void verifyToolStageTransitions(const QString &folder) {
         const auto &a = *c.session().bend(i)->catalogTools;
         require(a.punch == (i == indices[1] ? hook : pair.punch) &&
                     a.die == (i == indices[1] ? specialDie : pair.die) &&
-                    c.session().bend(i)->workpieceReversed == (i == indices[1]),
+                    c.session().bend(i)->workpieceReversed == orientations.at(i),
                 "Local tool choice changed another bend, die or part orientation");
     }
     require(c.session().bend(indices[1])->catalogTools->dieAssembly == other.dieAssembly,
@@ -376,7 +379,7 @@ void verifyToolStageTransitions(const QString &folder) {
     for (const auto i : indices) {
         const auto &a = *c.session().bend(i)->catalogTools;
         require(a.punch == hook && a.die == (i == indices[1] ? specialDie : pair.die) &&
-                    c.session().bend(i)->workpieceReversed == (i == indices[1]),
+                    c.session().bend(i)->workpieceReversed == orientations.at(i),
                 "Global punch choice reset another field");
     }
     const auto ready = c.routeDraft();
@@ -674,17 +677,20 @@ int main(int argc, char **argv) {
         auto *partTurn = window.findChild<QToolButton *>("reverseWorkpiece");
         require(partTurn && partTurn->isEnabled(), "Manual workpiece turn missing");
         const auto unturned = controller.routeDraft()->visual;
+        const bool turned = !unturned->workpieceReversed();
         const auto activePart = controller.routeDraft()->request.operations[0].bendIndex;
         partTurn->click();
         wait([&] { return !controller.hasWork(); });
-        require(controller.routeDraft() && controller.routeDraft()->visual->workpieceReversed() &&
-                    controller.session().bend(activePart)->workpieceReversed &&
+        require(controller.routeDraft() &&
+                    controller.routeDraft()->visual->workpieceReversed() == turned &&
+                    controller.session().bend(activePart)->workpieceReversed == turned &&
                     builder->searches == searchesBefore && slider->value() == 10 &&
                     !controller.routeDraft()->request.operations[0].tools->punchReversed,
                 "Manual part turn changed punch, frame or started order search");
         reverse->click();
         wait([&] { return !controller.hasWork(); });
-        require(controller.routeDraft() && controller.routeDraft()->visual->workpieceReversed(),
+        require(controller.routeDraft() &&
+                    controller.routeDraft()->visual->workpieceReversed() == turned,
                 "Manual punch turn reset the workpiece installation");
         reverse->click();
         wait([&] { return !controller.hasWork(); });
