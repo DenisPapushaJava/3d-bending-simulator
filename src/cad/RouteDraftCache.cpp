@@ -25,6 +25,7 @@ RouteDraftPtr RouteDraftCache::find(DocumentPtr source, const RouteDraftRequest 
     result->checkedToolPositions = found->second.checkedToolPositions;
     result->toolNotice = found->second.notice;
     result->toolLengths = found->second.lengths;
+    result->centredPunchOpeningMm = found->second.centredPunchOpeningMm;
     result->reusedBasis = result->reusedVisual = true;
     entries_.splice(entries_.begin(), entries_, found);
     return result;
@@ -42,8 +43,8 @@ void RouteDraftCache::put(Key wanted, Visual visual) {
     }
 }
 void RouteDraftCache::remember(const RouteDraftPtr &draft) {
-    put(key(draft->request),
-        {draft->visual, draft->checkedToolPositions, draft->toolNotice, draft->toolLengths});
+    put(key(draft->request), {draft->visual, draft->checkedToolPositions, draft->toolNotice,
+                              draft->toolLengths, draft->centredPunchOpeningMm});
 }
 void RouteDraftCache::rememberBlank(DocumentPtr source, RouteOperation active,
                                     const BendPreviewPtr &cycle) {
@@ -102,6 +103,6 @@ void RouteDraftCache::rememberBlank(DocumentPtr source, RouteOperation active,
     RouteDraftRequest request;
     request.withTools = true;
     request.operations.push_back(std::move(active));
-    put(key(request), {std::move(blank), 1, {}, {}});
+    put(key(request), {std::move(blank), 1, {}, {}, {}});
 }
 } // namespace bending::cad

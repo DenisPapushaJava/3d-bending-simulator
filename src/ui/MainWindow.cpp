@@ -2076,6 +2076,7 @@ class MainWindow::Impl {
         const bool allBends = multiple && !perBend && toolMode->currentIndex() == 0;
         std::optional<core::ToolSelectionRequest> selectionRequest;
         std::optional<double> compactSectionMinimum;
+        std::optional<double> compactPunchMaximum;
         if (document && entry && included(entry->review) && matchingThickness && row >= 0 &&
             static_cast<std::size_t>(row) < document->metadata().bendAnalysis.bends.size()) {
             const auto &bend =
@@ -2096,6 +2097,25 @@ class MainWindow::Impl {
                         minimum + document->metadata().bendAnalysis.lengthToleranceMm <
                             bend.lengthMm)
                         compactSectionMinimum = minimum;
+                }
+                const auto draft = controller->routeDraft();
+                if (compactSectionMinimum && draft && draft->source == document &&
+                    draft->centredPunchOpeningMm && draft->request.step > 0) {
+                    const auto &operations = draft->request.operations;
+                    const auto step = draft->request.step;
+                    const auto order = session.orderedBends();
+                    const double tolerance = document->metadata().bendAnalysis.lengthToleranceMm;
+                    if (step <= order.size() && step <= operations.size() &&
+                        operations[step - 1].bendIndex == static_cast<std::size_t>(row) &&
+                        std::abs(operations[step - 1].workpieceOffsetMm) <= tolerance &&
+                        std::equal(operations.begin(), operations.begin() + step, order.begin(),
+                                   [](const auto &operation, std::size_t index) {
+                                       return operation.bendIndex == index;
+                                   })) {
+                        const double clearance = std::max(.1, tolerance);
+                        compactPunchMaximum =
+                            std::min(bend.lengthMm, *draft->centredPunchOpeningMm - 2 * clearance);
+                    }
                 }
             }
             if (allBends && selectionRequest) {
@@ -2138,7 +2158,7 @@ class MainWindow::Impl {
         toolSelection->setSelectionRequest(
             selectionRequest, allBends,
             document ? document->metadata().bendAnalysis.lengthToleranceMm : 1.e-5,
-            compactSectionMinimum);
+            compactSectionMinimum, compactPunchMaximum);
         if (checkedToolJob && controller->hasWork() && !controller->isPreparingRoute()) {
             // Toolbar cancellation or another command can stop the worker too.
             checkedToolCancelled = true;

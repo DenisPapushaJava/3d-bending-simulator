@@ -176,7 +176,12 @@ void ToolWorkspace::refresh() {
         ends_->setSource(*punch, selection_->selectedAssembly(core::ToolKind::Punch));
     ends_->setEnabled(selection_->canEditAssemblies());
     fit_->setEnabled(selection_->isEnabled() && selection_->canFitAssemblies());
-    if (const auto minimum = selection_->compactSectionMinimumMm())
+    const auto maximum = selection_->compactPunchMaximumMm();
+    if (maximum)
+        fit_->setToolTip(QStringLiteral("Пуансон до %1 мм с зазором у полок. "
+                                        "Свободный ход проверяется в симуляции.")
+                             .arg(*maximum, 0, 'f', 2));
+    else if (const auto minimum = selection_->compactSectionMinimumMm())
         fit_->setToolTip(QStringLiteral("Подобрать непрерывные сборки от %1 мм до длины гиба. "
                                         "Проём проверяется в симуляции.")
                              .arg(*minimum, 0, 'f', 2));
@@ -196,6 +201,9 @@ void ToolWorkspace::refresh() {
                         : QString{});
     if (punch && selection_->punchReversed())
         punch_->setText(punch_->text() + QStringLiteral(" · схема в обычной ориентации"));
+    if (maximum)
+        punch_->setText(punch_->text() +
+                        QStringLiteral(" · по проёму до %1 мм").arg(*maximum, 0, 'f', 2));
     die_->setText(die ? QString::fromStdString(die->code) + QStringLiteral(" · ") +
                             sections(*die, selection_->selectedAssembly(core::ToolKind::Die))
                       : QString{});

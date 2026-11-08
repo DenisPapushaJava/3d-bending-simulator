@@ -1041,13 +1041,17 @@ void ToolSelectionWidget::rememberChoice() {
 }
 void ToolSelectionWidget::setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
                                               bool allBends, double lengthToleranceMm,
-                                              std::optional<double> compactSectionMinimumMm) {
+                                              std::optional<double> compactSectionMinimumMm,
+                                              std::optional<double> compactPunchMaximumMm) {
     const bool different = selectionRequest_ != request || allBends_ != allBends;
     const bool toleranceChanged = lengthToleranceMm_ != lengthToleranceMm;
     lengthToleranceMm_ = lengthToleranceMm;
     const auto compact = request && !allBends ? compactSectionMinimumMm : std::nullopt;
-    const bool compactChanged = compactSectionMinimumMm_ != compact;
+    const auto punchMaximum = compact ? compactPunchMaximumMm : std::nullopt;
+    const bool compactChanged =
+        compactSectionMinimumMm_ != compact || compactPunchMaximumMm_ != punchMaximum;
     compactSectionMinimumMm_ = compact;
+    compactPunchMaximumMm_ = punchMaximum;
     if (different) {
         allBends_ = allBends;
         selectionRequest_ = request;
@@ -1219,6 +1223,9 @@ std::optional<double> ToolSelectionWidget::compactSectionMinimumMm() const {
     const auto *die = preset(die_);
     return punch && punch->drawing && die && die->drawing ? compactSectionMinimumMm_ : std::nullopt;
 }
+std::optional<double> ToolSelectionWidget::compactPunchMaximumMm() const {
+    return compactSectionMinimumMm() ? compactPunchMaximumMm_ : std::nullopt;
+}
 QString ToolSelectionWidget::fitSelectedAssemblies() {
     if (!canEditAssemblies() || !usesCatalog() || !selectionRequest_ || !preset(punch_) ||
         !preset(die_))
@@ -1233,7 +1240,10 @@ QString ToolSelectionWidget::fitSelectedAssemblies() {
         case core::SegmentPlanStatus::Complete:
             break;
         case core::SegmentPlanStatus::InsufficientStock:
-            if (compact)
+            if (compact && i == 0 && compactPunchMaximumMm_)
+                issues << names[i] + QStringLiteral(": нет сборки для проёма (до %1 мм с зазором).")
+                                         .arg(*compactPunchMaximumMm_, 0, 'f', 2);
+            else if (compact)
                 issues << names[i] + QStringLiteral(": нет непрерывной сборки в заданной длине.");
             else if (const auto *tool = preset(i == 0 ? punch_ : die_); tool && !tool->segments)
                 issues << names[i] + QStringLiteral(": цельная длина %1 мм меньше нужной.")
@@ -1298,13 +1308,19 @@ ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only, bool pres
     const double nominal = selectionRequest_->bendLengthMm;
     const double required = compact ? compactSectionMinimumMm_.value_or(nominal) : nominal;
     const double gap = compact ? 0 : segmentGap_->value();
-    const auto fits = [&](double length) {
-        return length + 1e-5 >= required && (!compact || length <= nominal + lengthToleranceMm_);
-    };
     const auto fit = [&](const core::ToolPreset *tool,
                          std::optional<core::ToolAssembly> &assembly) -> core::SegmentPlan {
         if (!tool)
             return {};
+        const double maximum = tool->kind == core::ToolKind::Punch
+                                   ? compactPunchMaximumMm_.value_or(nominal)
+                                   : nominal;
+        const auto fits = [&](double length) {
+            return length + 1e-5 >= required &&
+                   (!compact || length <= maximum + lengthToleranceMm_);
+        };
+        if (compact && maximum + lengthToleranceMm_ < required)
+            return {core::SegmentPlanStatus::InsufficientStock, {}, 0};
         if (!tool->segments)
             return {fits(tool->lengthMm) ? core::SegmentPlanStatus::Complete
                                          : core::SegmentPlanStatus::InsufficientStock,

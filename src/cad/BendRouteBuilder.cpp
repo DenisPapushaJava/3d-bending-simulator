@@ -403,11 +403,7 @@ class RouteSearch {
                         referenceAxes[b.bendIndex],
                         source->metadata().bendAnalysis.angleToleranceRadians))
                     continue;
-                std::optional<std::size_t> farWall;
-                if (a.parent == b.parent || a.child == b.parent)
-                    farWall = b.child;
-                else if (a.parent == b.child || a.child == b.child)
-                    farWall = b.parent;
+                const auto farWall = adjacentSheetWall(a, b);
                 if (!farWall || wallBounds[*farWall].IsVoid() || wallBounds[*farWall].IsOpen())
                     continue;
                 const auto &box = wallBounds[*farWall];
@@ -424,19 +420,10 @@ class RouteSearch {
                 // axis when the active bend opens. Read its actual extrema for
                 // trimmed fits, where a world-aligned box can consume the gap.
                 if (bend.trimmedEnds && mayPlan(a.bendIndex)) {
-                    try {
-                        gp_Trsf local;
-                        local.SetTransformation(gp_Ax3(origin, referenceAxes[a.bendIndex]));
-                        Bnd_Box projected;
-                        BRepBndLib::AddOptimal(
-                            layout->walls[*farWall].solid.Moved(TopLoc_Location(local)), projected,
-                            false, false);
-                        if (!projected.IsVoid() && !projected.IsOpen()) {
-                            low = projected.CornerMin().Z();
-                            high = projected.CornerMax().Z();
-                        }
-                    } catch (const Standard_Failure &) {
-                        // Bounds only schedule candidates; the original estimate is usable.
+                    if (const auto span = projectedWallSpan(layout->walls[*farWall].solid, origin,
+                                                            referenceAxes[a.bendIndex])) {
+                        low = (*span)[0];
+                        high = (*span)[1];
                     }
                     cancelled(stop);
                 }

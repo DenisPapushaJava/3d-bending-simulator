@@ -230,6 +230,28 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     result->source = impl_->source;
     result->request = request;
     result->reusedBasis = reused;
+    if (request.step > 1 && trimmedAxialCore(bend)) {
+        const gp_Pnt start(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z);
+        const gp_Pnt end(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z);
+        const gp_Dir axis(gp_Vec(start, end));
+        const double middle = bend.lengthMm / 2;
+        std::optional<double> left, right;
+        for (const auto &other : layout.bends) {
+            cancelled(stop);
+            if (progress[other.bendIndex] != 1 ||
+                axis.IsParallel(other.sectionAxes.Direction(), analysis.angleToleranceRadians))
+                continue;
+            if (const auto wall = adjacentSheetWall(*link, other))
+                if (const auto span = projectedWallSpan(layout.walls[*wall].solid, start, axis)) {
+                    if ((*span)[1] < middle)
+                        left = std::max(left.value_or((*span)[1]), (*span)[1]);
+                    else if ((*span)[0] > middle)
+                        right = std::min(right.value_or((*span)[0]), (*span)[0]);
+                }
+        }
+        if (left && right)
+            result->centredPunchOpeningMm = 2 * std::min(middle - *left, *right - middle);
+    }
     std::array<TopoDS_Shape, 2> tools;
     std::array<std::vector<ToolDisplaySegment>, 2> segments;
     std::optional<simulation::DieShoulders> shoulders;

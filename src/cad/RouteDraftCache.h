@@ -31,6 +31,7 @@ class RouteDraftCache final {
         std::size_t checkedToolPositions;
         std::string notice;
         std::optional<application::BendRouteToolLengthIssue> lengths;
+        std::optional<double> centredPunchOpeningMm;
     };
     static Key key(const application::RouteDraftRequest &);
     void put(Key, Visual);

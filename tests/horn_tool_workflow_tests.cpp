@@ -223,6 +223,18 @@ void endEditorChecks(core::ToolPreset tool) {
                                         *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
                     core::PunchAssemblyEnds{2, {}},
             "Compact fitting preferred full length or lost the selected horn");
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
+                                     1024.8);
+    require(compactOwner.fitSelectedAssemblies().contains(QStringLiteral("проёма")) &&
+                compactOwner.selectedAssembly(core::ToolKind::Punch) == narrow.punchAssembly &&
+                compactOwner.selectedAssembly(core::ToolKind::Die) == narrow.dieAssembly,
+            "A nominally compact tool did not respect the measured opening");
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
+                                     1026.8);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1025,
+            "A tool inside the measured opening was refused");
     narrow.punchAssembly = core::ToolAssembly{{0, 1}, 0, {}};
     compactOwner.setChoice(core::toolParameters(narrow), narrow);
     require(!compactOwner.fitSelectedAssemblies().isEmpty() &&
