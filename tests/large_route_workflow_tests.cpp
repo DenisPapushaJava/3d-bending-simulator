@@ -147,6 +147,49 @@ int main(int argc, char **argv) {
               "Flat step became reorderable");
         const bool fastPrefetch = app.arguments().contains("--audit-prefetch-fast");
         const bool auditPrefetch = fastPrefetch || app.arguments().contains("--audit-prefetch");
+        if (app.arguments().contains("--audit-manual-prefetch")) {
+            QElapsedTimer timer;
+            const auto select = [&](int step) {
+                timer.start();
+                panel->select(step);
+                wait([&] { return !c.hasWork(); });
+                check(c.routeDraft() &&
+                          c.routeDraft()->request.step == static_cast<std::size_t>(step),
+                      "Manual audit lost selected step");
+                return static_cast<double>(timer.nsecsElapsed()) / 1.e6;
+            };
+            const auto idleWithoutPrefetch = [&] {
+                QTimer dwell;
+                dwell.setSingleShot(true);
+                dwell.start(300);
+                wait([&] { return !dwell.isActive() || c.isPrefetchingRouteDraft(); });
+                check(!dwell.isActive() && !c.isPrefetchingRouteDraft(),
+                      "Jump started speculative work");
+            };
+            builder->impl.discardRouteCache();
+            select(1); // Prepare the common geometry before timing an unseen step.
+            const auto cold = select(3);
+            idleWithoutPrefetch();
+            select(0);
+            idleWithoutPrefetch();
+            builder->impl.discardRouteCache();
+            select(1);
+            for (int step : {1, 2}) {
+                const auto current = c.routeDraft();
+                wait([&] { return c.isPrefetchingRouteDraft(); });
+                check(!c.hasWork() && c.routeDraft() == current,
+                      "Manual warm-up blocked navigation");
+                wait([&] { return !c.isPrefetchingRouteDraft(); });
+                check(c.routeDraft() == current, "Manual warm-up changed the visible step");
+                const auto ready = select(step + 1);
+                check(c.routeDraft()->reusedVisual, "Adjacent manual step missed warm cache");
+                std::cout << "manual transition step=" << step + 1 << " readyMs=" << ready
+                          << " coldStep3Ms=" << cold << '\n';
+            }
+            select(2);
+            idleWithoutPrefetch();
+            check(builder->searches == 0, "Manual prefetch launched route search");
+        }
         if (app.arguments().contains("--audit-transitions") || auditPrefetch) {
             QElapsedTimer heartbeat, total;
             QTimer pulse;

@@ -840,6 +840,8 @@ class MainWindow::Impl {
     }
 
     void showSource() {
+        manualDraftWarmup.stop();
+        warmDraftAfterSelection = false;
         controller->cancelRouteDraftPrefetch();
         stopPlayback();
         previewReplacement.reset();
@@ -1274,9 +1276,11 @@ class MainWindow::Impl {
     }
     void prefetchDraftStep() {
         if (!viewingDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
-            !playback->isActive() || shortToolPlaybackBlocked())
+            !previewDisplayError.isEmpty() || shortToolPlaybackBlocked())
             return;
-        if (const auto draft = controller->routeDraft(); !draft || draft->toolLengths)
+        if (const auto draft = controller->routeDraft();
+            !draft || draft->toolLengths ||
+            draft->request.step != static_cast<std::size_t>(routePanel->selected()))
             return; // Explicit short-tool diagnostics are local to the selected operation.
         const auto preview = scenePreview();
         if (!preview)
@@ -1356,6 +1360,8 @@ class MainWindow::Impl {
         return result;
     }
     void beginPreviewReplacement(bool preserveFrame = false) {
+        manualDraftWarmup.stop();
+        warmDraftAfterSelection = false;
         shortToolDiagnosticDraft.reset();
         if (!viewingSource && displayedPreview && !previewReplacement) {
             previewReplacement = PreviewReplacement{
@@ -1836,7 +1842,7 @@ class MainWindow::Impl {
         const auto &e = controller->bendPreviewError();
         return e ? e->diagnostic : nullptr;
     }
-    void prepareManualDraft() {
+    void prepareManualDraft(bool warmNext = false) {
         const auto &session = controller->session();
         if (!session.document() || !previewBuilder)
             return;
@@ -1876,8 +1882,11 @@ class MainWindow::Impl {
         viewingSource = false;
         wantFlat = false;
         positionedPreview.reset();
+        warmDraftAfterSelection = warmNext;
         if (controller->prepareRouteDraft(std::move(request), previewBuilder))
             showPlaybackPanel();
+        else
+            warmDraftAfterSelection = false;
     }
     void showPreviewFrame() {
         const auto preview = scenePreview();
@@ -2590,6 +2599,11 @@ class MainWindow::Impl {
                 prefetchDraftStep();
             }
         }
+        if (warmDraftAfterSelection && !controller->isPreparingDraft()) {
+            warmDraftAfterSelection = false;
+            if (draft && preview && !playback->isActive())
+                manualDraftWarmup.start();
+        }
         refreshWorkflow();
     }
 
@@ -3033,6 +3047,8 @@ class MainWindow::Impl {
     double toolContextSpan = 0;
     bool viewingRoute = false;
     bool viewingDraft = false, draftAutoPlay = false;
+    bool warmDraftAfterSelection = false;
+    QTimer manualDraftWarmup;
     std::weak_ptr<const application::RouteDraft> shortToolDiagnosticDraft;
     QToolButton *shortToolDiagnostic = nullptr;
     bool lastRouteAutomatic = true;
@@ -4124,6 +4140,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->playback = new QTimer(this);
     impl_->playback->setObjectName(QStringLiteral("bendPlaybackTimer"));
     impl_->playback->setInterval(50); // New 1x equals the former 3x.
+    impl_->manualDraftWarmup.setSingleShot(true);
+    // Give another click priority when the user is quickly browsing the strip.
+    impl_->manualDraftWarmup.setInterval(180);
+    connect(&impl_->manualDraftWarmup, &QTimer::timeout, this, [this] {
+        if (!impl_->playback->isActive())
+            impl_->prefetchDraftStep();
+    });
     const auto updatePlaybackSpeed = [this](int step) {
         const double multiplier = 1.0 + static_cast<double>(step) / 4.0;
         const auto value = number(multiplier) + QStringLiteral("×");
@@ -4169,6 +4192,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         }
     });
     connect(impl_->playBend, &QPushButton::clicked, this, [this] {
+        impl_->manualDraftWarmup.stop();
         if (impl_->playback->isActive()) {
             impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
@@ -4222,7 +4246,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->operationOverlay->hide();
     impl_->bendMessages = new BendMessagePanel(this);
     impl_->viewer->setTopLeftOverlay(impl_->bendMessages);
-    impl_->routePanel->onSelect = [this](int) {
+    impl_->routePanel->onSelect = [this](int step) {
+        const auto previous = impl_->controller->routeDraft();
+        const bool manualAdvance = !impl_->playback->isActive() && previous && step > 0 &&
+                                   static_cast<std::size_t>(step) == previous->request.step + 1;
         impl_->beginPreviewReplacement();
         impl_->stopPlayback();
         impl_->draftAutoPlay = false;
@@ -4251,7 +4278,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->wantFlat = false;
             impl_->positionedPreview.reset();
         } else {
-            impl_->prepareManualDraft();
+            impl_->prepareManualDraft(manualAdvance);
             return;
         }
         impl_->refreshPreview();
@@ -4315,6 +4342,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         const int stage = page == 3 ? 1 : page == 2 ? 2 : 0;
         impl_->processNavigation->setCurrentStage(stage);
         if (page != 2) {
+            impl_->manualDraftWarmup.stop();
+            impl_->warmDraftAfterSelection = false;
             impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
             impl_->pendingBendStage.reset();
