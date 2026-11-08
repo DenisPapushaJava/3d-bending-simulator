@@ -89,7 +89,7 @@ struct PunchAssemblyEnds {
                                                                  const ToolAssembly &);
 // Straight, left, right and paired ends; one shared middle table and work budget.
 // SearchLimit may retain valid plans. Unknown end geometry is never used.
-// A span cap with fixed ends requests the closest diagnostic assembly below the cap.
+// A span cap requests the closest diagnostic assembly in each allowed family below the cap.
 // Such a plan can be shorter than requiredMm and does not certify coverage.
 [[nodiscard]] PunchAssemblyPlans
 planPunchAssemblies(const std::vector<ToolSegment> &, double requiredMm,

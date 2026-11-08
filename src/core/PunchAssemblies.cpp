@@ -110,8 +110,8 @@ PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, do
     if (!validToolSegments(stock) || !std::isfinite(required) || required < 1 ||
         required > 100000 || !std::isfinite(maximumGap) || maximumGap < 0 || maximumGap > 1000 ||
         !budget || budget > 200000 || !maximumPlans || maximumPlans > 32 ||
-        (diagnosticSpanCapMm && (!fixedEnds || !std::isfinite(*diagnosticSpanCapMm) ||
-                                 *diagnosticSpanCapMm < 1 || *diagnosticSpanCapMm > 100000)))
+        (diagnosticSpanCapMm && (!std::isfinite(*diagnosticSpanCapMm) || *diagnosticSpanCapMm < 1 ||
+                                 *diagnosticSpanCapMm > 100000)))
         return result;
     std::vector<std::optional<std::size_t>> left{std::nullopt}, right{std::nullopt};
     if (fixedEnds) {

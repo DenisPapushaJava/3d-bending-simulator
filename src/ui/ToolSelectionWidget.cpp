@@ -33,6 +33,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <tuple>
 
 namespace bending::ui {
 namespace {
@@ -1363,15 +1364,40 @@ ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only, bool pres
                         : core::planToolSegments(*tool->segments, required, 200000, gap);
         if (plan.status == core::SegmentPlanStatus::Complete && compact && !fits(plan.lengthMm))
             plan = {core::SegmentPlanStatus::InsufficientStock, {}, 0};
+        const bool chooseHorn = preservePunchEnds && tool->kind == core::ToolKind::Punch &&
+                                (!fixedEnds || (!fixedEnds->left && !fixedEnds->right)) &&
+                                core::hasHornGeometry(*tool->segments);
+        if (chooseHorn && plan.status == core::SegmentPlanStatus::InsufficientStock &&
+            maximum + lengthToleranceMm_ >= required) {
+            const auto alternatives =
+                core::planPunchAssemblies(*tool->segments, required, 200000, gap);
+            const auto rank = [](const auto &candidate) {
+                return std::tuple{candidate.assembly.gapMm > 0, candidate.lengthMm,
+                                  candidate.assembly.gapMm, candidate.assembly.pieces.size()};
+            };
+            for (const auto &candidate : alternatives.plans)
+                if (fits(candidate.lengthMm) && (plan.status != core::SegmentPlanStatus::Complete ||
+                                                 rank(candidate) < rank(plan)))
+                    plan = candidate;
+        }
         if (compact && plan.status == core::SegmentPlanStatus::InsufficientStock) {
             const double cap = std::isfinite(maximum) ? std::min(nominal, maximum) : required;
             if (cap >= 1) {
                 const auto diagnostic = core::planPunchAssemblies(
-                    *tool->segments, required, 200000, segmentGap_->value(), {}, 1,
-                    fixedEnds.value_or(core::PunchAssemblyEnds{}), cap);
-                plan = diagnostic.status == core::SegmentPlanStatus::Complete
-                           ? diagnostic.best()
-                           : core::SegmentPlan{diagnostic.status, {}, 0};
+                    *tool->segments, required, 200000, segmentGap_->value(), {}, 8,
+                    chooseHorn ? std::nullopt
+                               : std::optional{fixedEnds.value_or(core::PunchAssemblyEnds{})},
+                    cap);
+                plan = {diagnostic.status, {}, 0};
+                if (diagnostic.status == core::SegmentPlanStatus::Complete) {
+                    const auto material = [](const auto &candidate) {
+                        return candidate.lengthMm -
+                               candidate.assembly.gapMm * (candidate.assembly.pieces.size() - 1);
+                    };
+                    for (const auto &candidate : diagnostic.plans)
+                        if (plan.assembly.pieces.empty() || material(candidate) > material(plan))
+                            plan = candidate;
+                }
             }
         }
         if (plan.status == core::SegmentPlanStatus::Complete)
