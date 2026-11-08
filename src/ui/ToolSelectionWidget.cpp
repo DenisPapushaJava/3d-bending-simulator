@@ -572,19 +572,19 @@ std::optional<core::PressTools> ToolSelectionWidget::rawParameters() const {
     return {}; // Saved manual parameters may be read, but cannot create a new tool body.
 }
 QString ToolSelectionWidget::lengthIssue(const application::BendRouteToolLengthIssue &lengths) {
-    const auto number = [](double value) { return QLocale().toString(value, 'g', 6); };
-    QString result = QStringLiteral("Длина гиба: %1 мм.").arg(number(lengths.bendLengthMm));
+    QStringList issues;
     const auto append = [&](const QString &name, double length) {
-        result += QStringLiteral("\n%1: %2 мм").arg(name, number(length));
-        if (length < lengths.bendLengthMm)
-            result +=
-                QStringLiteral(" — не хватает %1 мм").arg(number(lengths.bendLengthMm - length));
-        result += QLatin1Char('.');
+        const double missing = lengths.bendLengthMm - length;
+        if (missing > 0) {
+            const auto value = missing < .01
+                                   ? QStringLiteral("< %1").arg(QLocale().toString(.01, 'f', 2))
+                                   : QLocale().toString(missing, 'f', 2);
+            issues << QStringLiteral("%1: не хватает %2 мм").arg(name, value);
+        }
     };
     append(QStringLiteral("Пуансон"), lengths.punchLengthMm);
     append(QStringLiteral("Матрица"), lengths.dieLengthMm);
-    return result + QStringLiteral("\nТолько просмотр: гибка не подтверждена. "
-                                   "Подберите секции или другой инструмент.");
+    return issues.join(QLatin1Char('\n'));
 }
 QString ToolSelectionWidget::lengthIssue() const {
     const auto tools = rawParameters();

@@ -15,6 +15,7 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QLabel>
+#include <QLocale>
 #include <QPainter>
 #include <QProcess>
 #include <QPushButton>
@@ -344,6 +345,29 @@ void verifyToolStageTransitions(const QString &folder) {
     require(c.routeDraft()->toolLengths && !timer->isActive() && play->isEnabled() &&
                 slider->isEnabled() && slider->value() == 0,
             "Automatic playback continued into a short-tool operation");
+    const auto original = *c.session().bend(indices[1])->catalogTools;
+    auto near = original;
+    near.punchAssembly.reset();
+    const auto &zone = c.session().document()->metadata().bendAnalysis.bends[indices[1]];
+    near.punch.lengthMm = zone.lengthMm - .31259934;
+    near.dieAssembly.reset();
+    near.die.segments.reset();
+    near.die.lengthMm = zone.lengthMm + 1;
+    require(c.setBendToolAssignment(indices[1], near), "Cannot install the nearly full punch");
+    step(2);
+    require(c.routeDraft() && c.routeDraft()->toolLengths &&
+                c.routeDraft()->toolLengths->coversBend(.5) &&
+                window.findChild<QLabel *>("bendCheckSummary")
+                    ->text()
+                    .contains(QLocale().toString(.31, 'f', 2) + QStringLiteral(" мм")),
+            "Minor shortfall disappeared or retained excessive precision");
+    step(1);
+    slider->setValue(slider->maximum() - 1);
+    play->click();
+    wait([&] { return !c.hasWork() && c.routeDraft() && c.routeDraft()->request.step == 3; });
+    if (timer->isActive())
+        play->click();
+    require(c.setBendToolAssignment(indices[1], original), "Cannot restore the short punch");
     step(2);
     window.findChild<QToolButton *>("reversePunch")->click();
     wait([&] { return !c.hasWork(); });

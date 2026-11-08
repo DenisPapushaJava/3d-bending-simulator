@@ -1290,14 +1290,22 @@ class MainWindow::Impl {
         playback->stop();
         refreshPlaybackAction();
     }
+    static bool canChainDraft(const application::RouteDraftPtr &draft) {
+        // A small nominal deficit affects only playback continuity. It does
+        // not certify end support or bridge gaps between sections.
+        constexpr double playbackLengthAllowanceMm = .5;
+        return draft && (!draft->toolLengths ||
+                         (draft->request.step > 0 && draft->checkedToolPositions > 0 &&
+                          draft->toolLengths->coversBend(playbackLengthAllowanceMm)));
+    }
     void prefetchDraftStep() {
         if (!viewingDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
             !previewDisplayError.isEmpty() || shortToolPlaybackBlocked())
             return;
         if (const auto draft = controller->routeDraft();
-            !draft || draft->toolLengths ||
+            !canChainDraft(draft) ||
             draft->request.step != static_cast<std::size_t>(routePanel->selected()))
-            return; // Explicit short-tool diagnostics are local to the selected operation.
+            return;
         const auto preview = scenePreview();
         if (!preview)
             return;
@@ -1498,33 +1506,24 @@ class MainWindow::Impl {
             result = QStringLiteral("Не удалось показать положение.\n%1").arg(previewDisplayError);
         else if (viewingDraft && controller->routeDraftError()) {
             const auto draftError = *controller->routeDraftError();
-            result =
-                draftError.operationError == BendPreviewErrorCode::NarrowDieOpening
-                    ? QStringLiteral("Раскрытие V слишком мало для толщины детали. "
-                                     "Выберите другую матрицу; ориентир — около 8t.")
-                    : QStringLiteral("Положение не проверено.\n%1").arg(text(draftError.detail));
+            result = draftError.operationError == BendPreviewErrorCode::NarrowDieOpening
+                         ? QStringLiteral("Раскрытие V слишком мало для этой толщины.")
+                         : QStringLiteral("Положение не проверено.");
         } else if (machineCollision && machineCollision->secondId == "floor")
-            result = QStringLiteral("Упор в пол.\nИзмените порядок или установку детали.");
+            result = QStringLiteral("Столкновение с полом.");
         else if (machineCollision)
             result =
-                QStringLiteral("Столкновение: %1 — %2.\nКонфликтующие тела выделены красным.")
+                QStringLiteral("Столкновение: %1 — %2.")
                     .arg(text(machineCollision->firstName), text(machineCollision->secondName));
         else if (preview && preview->unverifiedDraft()) {
-            result = collision
-                         ? QStringLiteral("Столкновение с инструментом.\nИзмените порядок или "
-                                          "установку.")
+            result = collision ? QStringLiteral("Столкновение с инструментом.")
                      : controller->routeDraft() && controller->routeDraft()->checkedToolPositions
-                         ? QStringLiteral("В этом кадре пересечений с инструментом не найдено.\n"
-                                          "Полный порядок, опора и отвод не проверены.")
-                         : QStringLiteral("Инструмент не задан.\nСтолкновения не проверены.");
-            if (controller->routeDraft() && !controller->routeDraft()->toolLengths &&
-                !controller->routeDraft()->toolNotice.empty())
-                result += QLatin1Char('\n') + text(controller->routeDraft()->toolNotice);
+                         ? QStringLiteral("Просмотр шага. В текущем кадре столкновений нет.")
+                         : QStringLiteral("Инструмент не выбран.");
         } else if (controller->bendRouteError())
             result = routePanel->statusText();
         else if (collision)
-            result = QStringLiteral("Обнаружено столкновение с инструментом.\n"
-                                    "Положение выделено красным.");
+            result = QStringLiteral("Столкновение с инструментом.");
         else if (controller->bendPreviewError())
             result = operationFailureSummary;
         else if (partial) {
@@ -1556,70 +1555,62 @@ class MainWindow::Impl {
                                       "Станок, держатели и перенос не проверены.")
                      : QString{});
         else if (preview && preview->toolSetup())
-            result = QStringLiteral("Начальная установка проверена.\n"
-                                    "Одно положение; движение не проверено.");
+            result = QStringLiteral("Проверена начальная установка.");
         else if (preview)
-            result =
-                QStringLiteral("Просмотр без инструмента.\nКонтакт и ход пресса не проверены.");
+            result = QStringLiteral("Просмотр без инструмента.");
         else if (!checkBlocker.isEmpty())
             result = checkBlocker;
         else
-            result = toolDraftChanged
-                         ? QStringLiteral("Параметры изменены. Нужна новая проверка.")
-                         : QStringLiteral("Деталь и инструмент выбраны. Можно проверить.");
-        if (preview && !preparing) {
-            if (preview->manualExtraction())
-                result += QStringLiteral("\nИзвлечение вручную: подъём пуансона и путь детали "
-                                         "не проверены.");
-            if (preview->floorChecked())
-                result += QStringLiteral(
-                    "\nДемонстрационный станок и пол · стол 900 мм. Проверка по кадрам; "
-                    "ход и перенос не проверены.");
-            else if (preview->machineModel() != core::MachineModel::None)
-                result += QStringLiteral(
-                    "\nДемонстрационный станок: проверка по кадрам. Пол не проверен; "
-                    "добавьте его на этапе «Инструмент».");
-            else if (preview->toolSetup())
-                result += QStringLiteral("\nСтанок и пол не проверены.");
-            if ((preview->machineModel() == core::MachineModel::DemoPressV2 ||
-                 preview->machineModel() == core::MachineModel::DemoPressV3) &&
-                preview->usesDrawingPunch() && !preview->seatedPunchMount())
-                result += QStringLiteral("\nХвостовик не распознан; посадка условная.");
-            if (preview->ignoresClosedCutouts())
-                result += QStringLiteral("\nПроверка по копии без вырезов.");
-            if (preview->toolSetup() &&
-                (!preview->usesDrawingPunch() || !preview->usesDrawingDie()))
-                result += QStringLiteral("\nЕсть условные профили инструмента.");
-            const auto unsupported = preview->uncoveredToolLengthMm();
-            if (unsupported[0] > 1.e-5 || unsupported[1] > 1.e-5)
-                result += QStringLiteral("\nНеполная опора по длине: матрица %1 мм, пуансон %2 мм. "
-                                         "Пригодность этой установки не подтверждена.")
-                              .arg(unsupported[0], 0, 'f', 2)
-                              .arg(unsupported[1], 0, 'f', 2);
-            else if (preview->toolSegmentGaps()[0] > 0 || preview->toolSegmentGaps()[1] > 0)
-                result += QStringLiteral("\nВлияние зазоров секций не проверено.");
-            if (viewingRoute && route && routePanel->operation() > 0) {
-                const auto *current = session.bend(route->steps[routePanel->operation()].bendIndex);
-                const auto *previous =
-                    session.bend(route->steps[routePanel->operation() - 1].bendIndex);
-                if (current && previous &&
-                    (current->tools != previous->tools ||
-                     current->catalogTools != previous->catalogTools))
-                    result += QStringLiteral("\nПереналадка не проверена.");
-            }
-        }
+            result = toolDraftChanged ? QStringLiteral("Параметры изменились. Повторите проверку.")
+                                      : QStringLiteral("Можно проверить гибку.");
         const auto primaryMessage = result;
         const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
         const bool shortTools = draft && draft->toolLengths && !preparing;
         const auto lengthPlaybackNotice =
-            shortTools
-                ? (shortToolPlaybackBlocked() ? QStringLiteral("Воспроизведение заблокировано.")
-                                              : QStringLiteral("Диагностический просмотр."))
-                : QString{};
-        // Length remains visible even when a collision/floor message takes priority.
-        if (shortTools)
-            result += QLatin1Char('\n') + ToolSelectionWidget::lengthIssue(*draft->toolLengths) +
-                      QLatin1Char('\n') + lengthPlaybackNotice;
+            shortTools ? (shortToolPlaybackBlocked() ? QStringLiteral("Выберите шаг для просмотра.")
+                          : canChainDraft(draft) ? QString{}
+                                                 : QStringLiteral("Диагностический просмотр."))
+                       : QString{};
+        const auto addSummary = [&](const QString &line) {
+            if (!line.isEmpty())
+                result += QLatin1Char('\n') + line;
+        };
+        if (shortTools) {
+            addSummary(ToolSelectionWidget::lengthIssue(*draft->toolLengths));
+            addSummary(lengthPlaybackNotice);
+        }
+        QString supportDetail;
+        if (preview && !preparing) {
+            const auto missing = preview->uncoveredToolLengthMm();
+            QStringList unsupported;
+            if (missing[1] > 1.e-5)
+                unsupported
+                    << QStringLiteral("пуансон %1 мм").arg(QLocale().toString(missing[1], 'f', 2));
+            if (missing[0] > 1.e-5)
+                unsupported
+                    << QStringLiteral("матрица %1 мм").arg(QLocale().toString(missing[0], 'f', 2));
+            if (!unsupported.isEmpty()) {
+                supportDetail = unsupported.join(QStringLiteral(" · "));
+                addSummary(QStringLiteral("Без оснастки по линии гиба: %1.").arg(supportDetail));
+            }
+            if (preview->backgauge()) {
+                const auto status = preview->backgauge()->status;
+                if (status == application::BackgaugeStatus::NoReference)
+                    addSummary(QStringLiteral("База заднего упора не найдена."));
+                else if (status == application::BackgaugeStatus::Collision && !collision)
+                    addSummary(QStringLiteral("Столкновение с задним упором."));
+            }
+            if (preview->manualExtraction())
+                addSummary(QStringLiteral("Извлечение вручную."));
+            if (preview->machineModel() != core::MachineModel::None && !preview->floorChecked())
+                addSummary(QStringLiteral("Пол не проверен."));
+            if ((preview->machineModel() == core::MachineModel::DemoPressV2 ||
+                 preview->machineModel() == core::MachineModel::DemoPressV3) &&
+                preview->usesDrawingPunch() && !preview->seatedPunchMount())
+                addSummary(QStringLiteral("Посадка пуансона условная."));
+            if (preview->ignoresClosedCutouts())
+                addSummary(QStringLiteral("Вырезы исключены из проверки."));
+        }
         if (bendMessages && !preparing) {
             std::vector<BendMessage> messages;
             const auto lengths = draft && draft->toolLengths ? draft->toolLengths
@@ -1627,11 +1618,14 @@ class MainWindow::Impl {
                                      ? controller->bendRouteError()->toolLengths
                                      : std::nullopt;
             if (collision)
-                messages.push_back({BendMessageKind::Collision, BendMessageSeverity::Error,
-                                    machineCollision && machineCollision->secondId == "floor"
-                                        ? QStringLiteral("Столкновение с полом")
-                                        : QStringLiteral("Столкновение"),
-                                    primaryMessage});
+                messages.push_back(
+                    {BendMessageKind::Collision, BendMessageSeverity::Error,
+                     machineCollision && machineCollision->secondId == "floor"
+                         ? QStringLiteral("Столкновение с полом")
+                     : machineCollision ? QStringLiteral("Столкновение")
+                                        : QStringLiteral("Столкновение с инструментом"),
+                     machineCollision && machineCollision->secondId != "floor" ? primaryMessage
+                                                                               : QString{}});
             else if (!lengths && (!stageSetupIssue.isEmpty() || !previewDisplayError.isEmpty() ||
                                   controller->routeDraftError() || controller->bendRouteError() ||
                                   controller->bendPreviewError())) {
@@ -1648,70 +1642,41 @@ class MainWindow::Impl {
                      primaryMessage});
             }
             if (lengths) {
-                const bool punchShort = lengths->punchLengthMm < lengths->bendLengthMm;
-                const bool dieShort = lengths->dieLengthMm < lengths->bendLengthMm;
-                const auto lengthTitle =
-                    punchShort && dieShort ? QStringLiteral("Короткий пуансон и матрица")
-                    : punchShort ? QStringLiteral("Пуансон короче на %1 мм")
-                                       .arg(number(lengths->bendLengthMm - lengths->punchLengthMm))
-                                 : QStringLiteral("Матрица короче на %1 мм")
-                                       .arg(number(lengths->bendLengthMm - lengths->dieLengthMm));
+                const auto lengthText = ToolSelectionWidget::lengthIssue(*lengths);
+                const bool bothShort = lengths->punchLengthMm < lengths->bendLengthMm &&
+                                       lengths->dieLengthMm < lengths->bendLengthMm;
                 messages.push_back(
                     {BendMessageKind::ToolLength,
-                     draft ? BendMessageSeverity::Warning : BendMessageSeverity::Error, lengthTitle,
-                     ToolSelectionWidget::lengthIssue(*lengths) +
-                         (lengthPlaybackNotice.isEmpty()
-                              ? QString{}
-                              : QLatin1Char('\n') + lengthPlaybackNotice)});
+                     draft ? BendMessageSeverity::Warning : BendMessageSeverity::Error,
+                     bothShort ? QStringLiteral("Не хватает длины инструмента") : lengthText,
+                     bothShort ? lengthText : QString{}});
             }
             if (partial)
                 messages.push_back({BendMessageKind::Support, BendMessageSeverity::Warning,
                                     QStringLiteral("Торцевые подрезы"),
-                                    QStringLiteral("У торца отсутствует часть опоры. Доступен "
-                                                   "геометрический просмотр; устойчивость и "
-                                                   "пригодность к изготовлению не подтверждены.")});
-            if (preview) {
-                const auto missing = preview->uncoveredToolLengthMm();
-                if (missing[0] > 1.e-5 || missing[1] > 1.e-5)
-                    messages.push_back({BendMessageKind::Support, BendMessageSeverity::Warning,
-                                        QStringLiteral("Зазор под линией гиба"),
-                                        QStringLiteral("Без инструмента по длине: матрица %1 мм, "
-                                                       "пуансон %2 мм. Доступен геометрический "
-                                                       "просмотр; местная опора и деформация "
-                                                       "не подтверждены.")
-                                            .arg(missing[0], 0, 'f', 2)
-                                            .arg(missing[1], 0, 'f', 2)});
-            }
+                                    QStringLiteral("У торцов возможна деформация.")});
+            if (!supportDetail.isEmpty())
+                messages.push_back({BendMessageKind::Support, BendMessageSeverity::Warning,
+                                    QStringLiteral("Участки без оснастки"),
+                                    supportDetail + QStringLiteral(" суммарно по линии гиба.")});
             if (preview && preview->backgauge()) {
-                const auto &g = *preview->backgauge();
-                QString gaugeTitle = QStringLiteral("База упора не найдена");
-                QString detail = QString::fromStdString(g.detail);
-                if (g.placement) {
-                    const auto &p = *g.placement;
-                    gaugeTitle = p.kind == core::GaugeReferenceKind::StraightEdge
-                                     ? QStringLiteral("Упор по прямому краю")
-                                     : QStringLiteral("Упор по стенке 90°");
-                    detail = QStringLiteral("Ступень %1 · X %2 · R %3 · Z %4 / %5 мм\n%6")
-                                 .arg(p.level)
-                                 .arg(number(p.xMm))
-                                 .arg(number(p.rMm))
-                                 .arg(number(p.zMm[0]))
-                                 .arg(number(p.zMm[1]))
-                                 .arg(detail);
-                }
-                messages.push_back({BendMessageKind::Backgauge,
-                                    g.status == application::BackgaugeStatus::Checked
-                                        ? BendMessageSeverity::Information
-                                        : BendMessageSeverity::Warning,
-                                    gaugeTitle, detail});
+                const auto status = preview->backgauge()->status;
+                if (status == application::BackgaugeStatus::NoReference)
+                    messages.push_back({BendMessageKind::Backgauge,
+                                        BendMessageSeverity::Warning,
+                                        QStringLiteral("База заднего упора не найдена"),
+                                        {}});
+                else if (status == application::BackgaugeStatus::Collision && !machineCollision)
+                    messages.push_back({BendMessageKind::Backgauge,
+                                        BendMessageSeverity::Error,
+                                        QStringLiteral("Столкновение с задним упором"),
+                                        {}});
             }
             if (preview && preview->ignoresClosedCutouts())
-                messages.push_back(
-                    {BendMessageKind::Approximation, BendMessageSeverity::Warning,
-                     QStringLiteral("Отверстия исключены из проверки"),
-                     QStringLiteral(
-                         "Отверстия видимы. Проверки относятся к отдельной "
-                         "копии с заполненными вырезами; их физическое влияние не рассчитано.")});
+                messages.push_back({BendMessageKind::Approximation,
+                                    BendMessageSeverity::Information,
+                                    QStringLiteral("Вырезы исключены из проверки"),
+                                    {}});
             if (viewingRoute && route && routePanel->selected() > 1 &&
                 routePanel->operation() < route->steps.size()) {
                 const auto *current = session.bend(route->steps[routePanel->operation()].bendIndex);
@@ -1726,11 +1691,10 @@ class MainWindow::Impl {
                            a.punchAssembly != b.punchAssembly || a.dieAssembly != b.dieAssembly;
                 };
                 if (changedAssembly())
-                    messages.push_back(
-                        {BendMessageKind::SetupChange, BendMessageSeverity::Information,
-                         QStringLiteral("Перед гибом смените сборку инструмента"),
-                         QStringLiteral("Состав показан на этапе «Инструмент». "
-                                        "Переналадка и перенос детали не проверены.")});
+                    messages.push_back({BendMessageKind::SetupChange,
+                                        BendMessageSeverity::Information,
+                                        QStringLiteral("Перед гибом смените сборку инструмента"),
+                                        {}});
             }
             if (messages.empty() && preview && preview->unverifiedDraft())
                 messages.push_back({BendMessageKind::Scope,
@@ -1740,7 +1704,7 @@ class MainWindow::Impl {
                                     draft && !draft->checkedToolPositions
                                         ? QStringLiteral("Инструмент не выбран")
                                         : QStringLiteral("Просмотр шага · порядок не проверен"),
-                                    primaryMessage});
+                                    {}});
             bendMessages->setMessages(std::move(messages));
         }
         checkSummary->setText(result);
@@ -2358,15 +2322,13 @@ class MainWindow::Impl {
         if (controller->isPreparingDraft()) {
             if (!previewReplacement)
                 setFrameText(QStringLiteral("Готовим выбранный шаг и проверяем столкновения…"));
-            previewStatus->setText(QStringLiteral(
-                "Ручной порядок: проверяется выбранный переход без поиска последовательности."));
+            previewStatus->setText(QStringLiteral("Проверяем столкновения на этом шаге…"));
         } else if (preview && preview->unverifiedDraft()) {
-            previewStatus->setText(
-                QStringLiteral("Ручной порядок. Столкновения с инструментом проверяются в каждом "
-                               "подготовленном кадре. "
-                               "Опора, непрерывная траектория между кадрами, отвод и весь порядок "
-                               "не подтверждены. "
-                               "Для полной проверки нажмите «Проверить мой порядок»."));
+            previewStatus->setText(draft && draft->checkedToolPositions
+                                       ? QStringLiteral("Столкновения проверены по кадрам. Опора и "
+                                                        "отвод требуют полной проверки порядка.")
+                                       : QStringLiteral("Просмотр без проверки столкновений."));
+            previewStatus->setToolTip({});
         } else if (controller->isPreparingPreview()) {
             if (!previewReplacement)
                 setFrameText(QStringLiteral("Подготовка просмотра…"));
@@ -2456,28 +2418,16 @@ class MainWindow::Impl {
         } else if (preview && preview->pressMotion() && preview->punchRetraction()) {
             const auto &report = *preview->punchRetraction();
             previewStatus->setText(
-                QStringLiteral("Цикл с инструментом подготовлен\nПоложений просмотра: %1\n"
-                               "Подвод → гибка на двух опорах → отвод пуансона. "
-                               "Нажмите «Воспроизвести» или используйте ползунок.\n\n"
-                               "Отвод вверх: %2 мм\nКонечный минимальный зазор до детали: %3 мм\n\n"
-                               "Подвод и гибка проверены по кадрам. Весь отвод пуансона проверен "
-                               "непрерывно по проходящему объёму. "
-                               "Усилие, пружинение и извлечение детали не рассчитываются.")
-                    .arg(preview->frameCount())
+                QStringLiteral("Подъём пуансона %1 мм. Зазор после отвода %2 мм.")
                     .arg(number(report.liftMm), number(report.finalClearanceMm)));
             previewStatus->setToolTip({});
         } else if (preview && preview->toolSetup()) {
             const auto &setup = *preview->toolSetup();
-            previewStatus->setText(
-                QStringLiteral("Начальная установка проверена\nПоказано одно неподвижное "
-                               "положение.\nПерекрытие плеч матрицы: слева %1 "
-                               "мм, справа %2 мм.\n"
-                               "Зазор до пуансона: %3 мм. Объёмных пересечений не обнаружено в "
-                               "пределах допуска.\n\n"
-                               "Проверено только это положение. Движение, рабочий контакт при "
-                               "гибке, траектории установки и извлечения ещё не проверяются.")
-                    .arg(number(setup.leftOverlapMm), number(setup.rightOverlapMm),
-                         number(setup.tools.clearanceMm)));
+            previewStatus->setText(QStringLiteral("Опора слева %1 мм, справа %2 мм. Зазор до "
+                                                  "пуансона %3 мм.")
+                                       .arg(number(setup.leftOverlapMm),
+                                            number(setup.rightOverlapMm),
+                                            number(setup.tools.clearanceMm)));
             previewStatus->setToolTip({});
         } else if (preview) {
             const auto &m = preview->model();
@@ -2511,20 +2461,6 @@ class MainWindow::Impl {
                                      "«Проверить и показать гибку»."));
             setFrameText(QStringLiteral("Исходная CAD-форма"));
         }
-        if (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
-            previewStatus->setText(
-                QStringLiteral(
-                    "ПРИБЛИЖЕНИЕ: отверстия видимы и перемещаются геометрически. "
-                    "Опоры, пересечения и зазор проверяются по копии с заполненными вырезами. "
-                    "Реальная опора у вырезов и деформация отверстий не проверены.\n\n") +
-                previewStatus->text());
-        }
-        if (entry && entry->catalogTools) {
-            previewStatus->setText(
-                previewStatus->text() +
-                QStringLiteral("\n\nИнструмент из каталога. Охват формы указан в условиях "
-                               "проверки; допустимая нагрузка не проверена."));
-        }
         singleBendSupported = supported;
         matchingBendThickness = matchingThickness;
         checkBlocker =
@@ -2554,44 +2490,9 @@ class MainWindow::Impl {
                             !previewDisplayError.isEmpty();
         refreshCheckResult();
         routePanel->reportWidget()->setVisible(multiple);
-        checkScope->setText(
-            (viewingRoute && controller->bendRoute()
-                 ? QStringLiteral("Промежуточная 3D-форма по выбранному порядку. Извлечение и "
-                                  "перенос между установками не проверены.\n")
-                 : (document && document->metadata().bendAnalysis.bends.size() > 1
-                        ? (preview
-                               ? QStringLiteral("Выбранный гиб — как последняя операция; остальные "
-                                                "гибы сохраняют форму STEP. Полный порядок не "
-                                                "проверен.\n")
-                               : QStringLiteral(
-                                     "Проверка построит порядок всех гибов из заготовки. "
-                                     "Лента станет пошаговым 3D-просмотром после "
-                                     "успешного расчёта.\n"))
-                        : QString{})) +
-            (preview && preview->usesDrawingTools()
-                 ? QStringLiteral("Пуансон: %1. Матрица: %2. ")
-                       .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
-                                                        : QStringLiteral("условный"),
-                            preview->usesDrawingDie() ? QStringLiteral("по DXF")
-                                                      : QStringLiteral("условная"))
-             : entry && entry->catalogTools && entry->catalogTools->useDrawingGeometry
-                 ? QStringLiteral("Выбрана форма DXF; результат её проверки ещё не подготовлен. ")
-                 : QStringLiteral("Упрощённые рабочие профили. ")) +
-            (preview && preview->machineModel() != core::MachineModel::None
-                 ? QStringLiteral(
-                       "Приближённые узлы учебного станка проверены по кадрам. "
-                       "Непрерывный отвод пуансона проверен только против детали и матрицы. "
-                       "Ход, усилие и пружинение не проверены.")
-                 : QStringLiteral("Станок, держатели, усилие и пружинение не проверяются.")) +
-            (preview && (preview->toolSegmentGaps()[0] > 0 || preview->toolSegmentGaps()[1] > 0)
-                 ? QStringLiteral("\nЗазоры между секциями сохранены в 3D. Местная опора и "
-                                  "качество гиба в промежутках не рассчитываются.")
-                 : QString{}) +
-            (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled
-                 ? QStringLiteral(
-                       "\nВырезы видимы; опоры и зазоры проверяются по заполненной копии. "
-                       "Физика и реальная опора у вырезов не проверены.")
-                 : QString{}));
+        checkScope->setText(preview && preview->usesDrawingTools()
+                                ? QStringLiteral("Геометрическая проверка с профилями DXF.")
+                                : QStringLiteral("Геометрическая проверка."));
         checkScope->setVisible(document != nullptr && !viewingDraft &&
                                !(viewingRoute && controller->bendRoute()));
         checkScope->setMinimumHeight(std::max(0, checkScope->heightForWidth(240)));
@@ -2633,11 +2534,13 @@ class MainWindow::Impl {
                                  (failed || !checkBlocker.isEmpty() || !stageSetupIssue.isEmpty()));
         resolveCheck->setEnabled(!controller->hasWork());
         checkSummary->setToolTip(routeFailure ? text(routeFailure->detail)
-                                              : previewStatus->toolTip());
+                                 : viewingDraft && controller->routeDraftError()
+                                     ? text(controller->routeDraftError()->detail)
+                                     : previewStatus->toolTip());
         if (draftAutoPlay && viewingDraft && preview && !controller->hasWork()) {
             draftAutoPlay = false;
             bendFrame->setValue(0);
-            if (draft && !draft->toolLengths && playBend->isEnabled()) {
+            if (canChainDraft(draft) && playBend->isEnabled()) {
                 startPlayback();
                 prefetchDraftStep();
             }
@@ -4201,7 +4104,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     return;
                 }
             const auto draft = impl_->viewingDraft ? impl_->controller->routeDraft() : nullptr;
-            if (draft && !draft->toolLengths &&
+            if (Impl::canChainDraft(draft) &&
                 impl_->routePanel->selected() <
                     static_cast<int>(impl_->controller->session().orderedBends().size())) {
                 impl_->routePanel->select(impl_->routePanel->selected() + 1);
