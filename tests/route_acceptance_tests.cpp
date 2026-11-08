@@ -106,11 +106,15 @@ class TestPreview final : public SingleBendPreview {
     std::optional<double> endSupportLimitMm() const noexcept override {
         return supportLimit;
     }
+    std::optional<std::array<double, 2>> axialToolCoreMm() const noexcept override {
+        return toolCore;
+    }
     bool tools = false, drawing = false, draft = false, reversed = false, manualExit = false;
     bool machineConflict = false, floor = false;
     std::size_t active = 1;
     std::optional<ToolCollisionPair> conflict;
     std::optional<double> supportLimit = 0;
+    std::optional<std::array<double, 2>> toolCore;
     std::vector<BendSupportInterval> support{{0, {80, 0, 80}}};
     simulation::FlatToolSetup setup{};
     simulation::PressMotion motion{};
@@ -128,8 +132,14 @@ struct Fixture {
     BendRouteRequest request;
     std::shared_ptr<BendRoute> route = std::make_shared<BendRoute>();
     std::vector<std::shared_ptr<TestPreview>> previews;
-    explicit Fixture(bool tools = false) {
+    explicit Fixture(bool tools = false, bool trimmed = false) {
         auto document = std::make_shared<TestDocument>();
+        if (trimmed) {
+            auto &bend = document->data.bendAnalysis.bends.front();
+            bend.trimmedEnds = true;
+            bend.minimumStraightLengthMm = 76;
+            bend.straightIntervalMm = std::array{2., 78.};
+        }
         require(session.complete(session.beginImport("part.step"), DocumentPtr(document)),
                 "Import failed");
         route->source = document;
@@ -172,6 +182,42 @@ struct Fixture {
         }
     }
 };
+void shortenedContinuousTool() {
+    const auto prepare = [](Fixture &f) {
+        auto assignment = tool_fixture::pair(16);
+        assignment.punch.lengthMm = assignment.die.lengthMm = 78;
+        f.request.operations.front().assignment = assignment;
+        f.request.operations.front().tools = core::toolParameters(assignment);
+        auto &p = *f.previews.back();
+        p.setup.tools = *f.request.operations.front().tools;
+        p.drawing = true;
+        p.toolCore = std::array{2., 78.};
+        p.support = {{0, {80, 1, 79}}};
+        f.request.allowPartialEndSupport = true;
+        f.request.maximumEndSupportLossMm = 3;
+        f.route->partialEndSupport = true;
+        for (auto &preview : f.previews)
+            preview->supportLimit = 3;
+    };
+    {
+        Fixture f(true, true);
+        prepare(f);
+        require(applyBendRouteResult(f.session, f.request, f.route),
+                "A shorter continuous tool covering the measured core was rejected");
+    }
+    for (int failure = 0; failure < 4; ++failure) {
+        Fixture f(true, failure != 0);
+        prepare(f);
+        auto &p = *f.previews.back();
+        if (failure == 1)
+            p.toolCore.reset();
+        if (failure == 2)
+            p.support.front().material.supportedFromMm = 0;
+        if (failure == 3)
+            p.support.front().material.supportedToMm = 77.5;
+        f.reject("A shortened tool with missing or inconsistent support evidence was accepted");
+    }
+}
 void successfulRoutes() {
     for (bool tools : {false, true}) {
         Fixture f(tools);
@@ -377,6 +423,7 @@ int main() {
         rejectedRoutes();
         requestBoundary();
         manualExtractionScope();
+        shortenedContinuousTool();
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         return 1;

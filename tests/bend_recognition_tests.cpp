@@ -85,6 +85,12 @@ void test(const std::filesystem::path &directory) {
             require(bend.trimmedEnds == trimmed, "Wrong trimmed-end classification");
             requireNear(bend.minimumStraightLengthMm, trimmed ? 74.0 : 80.0, 1.0e-4,
                         "Wrong common straight span");
+            require(bend.straightIntervalMm.has_value(), "Missing measured straight interval");
+            const auto [from, to] = *bend.straightIntervalMm;
+            requireNear(to - from, bend.minimumStraightLengthMm, 1.e-4,
+                        "The measured interval disagrees with the straight length");
+            requireNear(trimmed ? std::max(from, 80 - to) : from, trimmed ? 6.0 : 0.0, 1.e-4,
+                        "The asymmetric relief lost its axial position");
             requireNear(std::hypot(bend.axisEnd.x - bend.axisStart.x,
                                    bend.axisEnd.y - bend.axisStart.y,
                                    bend.axisEnd.z - bend.axisStart.z),

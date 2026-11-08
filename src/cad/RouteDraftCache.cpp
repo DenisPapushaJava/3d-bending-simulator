@@ -49,9 +49,10 @@ void RouteDraftCache::rememberBlank(DocumentPtr source, RouteOperation active,
                                     const BendPreviewPtr &cycle) {
     const auto p = std::dynamic_pointer_cast<const CadPreview>(cycle);
     if (!source || !p || p->draft || p->activeBends != 1 || p->otherBends != 0 ||
-        p->frames.empty() || !p->motion || !p->retraction || !p->setup || !active.tools ||
-        p->setup->tools != *active.tools || p->reversed != active.workpieceReversed ||
-        p->axialOffset != active.workpieceOffsetMm || p->states.size() != p->frames.size() ||
+        p->frames.empty() || p->toolCore || !p->motion || !p->retraction || !p->setup ||
+        !active.tools || p->setup->tools != *active.tools ||
+        p->reversed != active.workpieceReversed || p->axialOffset != active.workpieceOffsetMm ||
+        p->states.size() != p->frames.size() ||
         p->floorChecked() != (active.tools->machineModel == core::MachineModel::DemoPressV3) ||
         (active.tools->backgauge &&
          (!p->gauging || p->gauging->status != BackgaugeStatus::Checked)))

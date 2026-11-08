@@ -78,6 +78,10 @@ class SingleBendPreview {
     endSupportIntervals() const noexcept {
         return {};
     }
+    // Present only when shorter continuous tools cover the complete measured core.
+    [[nodiscard]] virtual std::optional<std::array<double, 2>> axialToolCoreMm() const noexcept {
+        return {};
+    }
     [[nodiscard]] bool hasPartialEndSupport() const noexcept {
         for (const auto &interval : endSupportIntervals())
             if (interval.material.supportedFromMm > 0 ||

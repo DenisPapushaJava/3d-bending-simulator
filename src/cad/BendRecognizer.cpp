@@ -332,8 +332,9 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     };
     const auto innerCore = coreInterval(inner);
     const auto outerCore = coreInterval(outer);
-    const double straightLength =
-        std::min(innerCore[1], outerCore[1]) - std::max(innerCore[0], outerCore[0]);
+    const double coreFrom = std::max(innerCore[0], outerCore[0]);
+    const double coreTo = std::min(innerCore[1], outerCore[1]);
+    const double straightLength = coreTo - coreFrom;
     const bool sameSpan =
         (sameEnds || reversedEnds) && std::abs(inner.length - outer.length) <= tolerance;
     if ((!sameSpan && !inner.trimmedEnds && !outer.trimmedEnds) ||
@@ -377,12 +378,18 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
             break;
         }
     }
-    return RecognizedBend{point(start),  point(end),
-                          inner.angle,   inner.cylinder.Radius(),
-                          thickness,     fullLength,
-                          inner.face,    outer.face,
-                          flanges,       inner.trimmedEnds || outer.trimmedEnds,
-                          straightLength};
+    const double startV = gp_Vec(inner.cylinder.Location(), start).Dot(axis);
+    auto straight = direction.Dot(gp_Vec(start, end)) > 0
+                        ? std::array{coreFrom - startV, coreTo - startV}
+                        : std::array{startV - coreTo, startV - coreFrom};
+    for (auto &limit : straight)
+        limit = std::clamp(limit, 0., fullLength);
+    return RecognizedBend{point(start),   point(end),
+                          inner.angle,    inner.cylinder.Radius(),
+                          thickness,      fullLength,
+                          inner.face,     outer.face,
+                          flanges,        inner.trimmedEnds || outer.trimmedEnds,
+                          straightLength, straight};
 }
 } // namespace
 

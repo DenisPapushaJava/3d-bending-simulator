@@ -6,8 +6,8 @@
 
 namespace bending::simulation {
 FlatToolSetupResult flatToolSetup(const SingleBend &model, core::PressTools tools,
-                                  double lengthToleranceMm,
-                                  std::optional<DieShoulders> shoulders) noexcept {
+                                  double lengthToleranceMm, std::optional<DieShoulders> shoulders,
+                                  std::optional<double> requiredAxialWidthMm) noexcept {
     if (!validSingleBend(model) || !core::validPressTools(tools) ||
         !std::isfinite(lengthToleranceMm) || lengthToleranceMm < 1.0e-7 ||
         lengthToleranceMm > 0.01) {
@@ -19,8 +19,11 @@ FlatToolSetupResult flatToolSetup(const SingleBend &model, core::PressTools tool
          shoulders->halfSpanMm <= 0 || shoulders->radiusMm <= 0 || shoulders->leftWidthMm <= 0 ||
          shoulders->rightWidthMm <= 0))
         return ToolSetupIssue::InvalidParameters;
-    if (tools.lengthMm + lengthToleranceMm < model.widthMm ||
-        core::punchLengthMm(tools) + lengthToleranceMm < model.widthMm) {
+    const double width = requiredAxialWidthMm.value_or(model.widthMm);
+    if (!std::isfinite(width) || width <= 0 || width > model.widthMm)
+        return ToolSetupIssue::InvalidParameters;
+    if (tools.lengthMm + lengthToleranceMm < width ||
+        core::punchLengthMm(tools) + lengthToleranceMm < width) {
         return ToolSetupIssue::ToolTooShort;
     }
     const double halfZone = bendAllowanceMm(model) / 2.0;

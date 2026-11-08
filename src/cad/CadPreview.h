@@ -48,6 +48,10 @@ class CadPreview : public SingleBendPreview {
         return uncoveredToolLength;
     }
     std::vector<BendSupportInterval> supportIntervals;
+    std::optional<std::array<double, 2>> toolCore;
+    std::optional<std::array<double, 2>> axialToolCoreMm() const noexcept override {
+        return toolCore;
+    }
     std::optional<double> supportLimit = 0;
     std::optional<double> endSupportLimitMm() const noexcept override {
         return supportLimit;

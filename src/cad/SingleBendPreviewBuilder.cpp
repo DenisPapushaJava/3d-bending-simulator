@@ -1354,8 +1354,23 @@ PreparedBendOperationResult prepareBendOperation(
                 realTools->dieAssembly ? core::maximumAssemblyGap(*realTools->dieAssembly) : 0,
                 realTools->punchAssembly ? core::maximumAssemblyGap(*realTools->punchAssembly) : 0};
         if (toolParameters) {
-            const auto placement = simulation::flatToolSetup(model, *toolParameters,
-                                                             analysis.lengthToleranceMm, shoulders);
+            const double tolerance = analysis.lengthToleranceMm;
+            std::optional<double> requiredWidth;
+            if (withMotion && !joint &&
+                allowsShortToolEndSupport(allowPartialEndSupport, maximumEndSupportLossMm) &&
+                realTools && continuousDrawingTools(*realTools) &&
+                std::min(toolParameters->lengthMm, core::punchLengthMm(*toolParameters)) +
+                        tolerance <
+                    model.widthMm) {
+                if (auto core = trimmedAxialCore(bend)) {
+                    if (sourceBasis.z.Dot(gp_Vec(point(bend.axisStart), point(bend.axisEnd))) < 0)
+                        *core = {model.widthMm - (*core)[1], model.widthMm - (*core)[0]};
+                    preview->toolCore = core;
+                    requiredWidth = (*core)[1] - (*core)[0];
+                }
+            }
+            const auto placement = simulation::flatToolSetup(model, *toolParameters, tolerance,
+                                                             shoulders, requiredWidth);
             if (const auto *issue = std::get_if<simulation::ToolSetupIssue>(&placement)) {
                 const auto code = *issue == simulation::ToolSetupIssue::ToolTooShort
                                       ? BendPreviewErrorCode::ToolTooShort
@@ -1369,7 +1384,7 @@ PreparedBendOperationResult prepareBendOperation(
             preview->setup = std::get<simulation::FlatToolSetup>(placement);
             if (withMotion) {
                 const auto prepared = simulation::preparePressMotion(
-                    model, *toolParameters, analysis.lengthToleranceMm, shoulders);
+                    model, *toolParameters, tolerance, shoulders, requiredWidth);
                 if (const auto *issue = std::get_if<simulation::PressMotionIssue>(&prepared)) {
                     const auto code = *issue == simulation::PressMotionIssue::ToolAngleConflict
                                           ? BendPreviewErrorCode::ToolAngleConflict
@@ -1630,14 +1645,31 @@ PreparedBendOperationResult prepareBendOperation(
                 (!toolParameters && workpieceOffsetMm != 0))
                 return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                         "Invalid axial workpiece placement"};
-            if (toolParameters && !toolCoversAxialPlacement(*toolParameters, model.widthMm,
-                                                            workpieceOffsetMm, tolerance))
+            if (toolParameters && !prototype->toolCore &&
+                !toolCoversAxialPlacement(*toolParameters, model.widthMm, workpieceOffsetMm,
+                                          tolerance))
                 return BendPreviewError{BendPreviewErrorCode::ToolTooShort,
                                         "Tool assemblies do not cover the axial bend placement"};
             if (prepareDiagnostic && !ensureSkin())
                 return placementCancelled();
             auto placedPreview = std::make_shared<CadPreview>(*prototype);
             placedPreview->axialOffset = workpieceOffsetMm;
+            if (const auto &core = prototype->toolCore) {
+                const auto span = commonToolSpan(*toolParameters, model.widthMm, workpieceOffsetMm);
+                auto &report = placedPreview->supportIntervals.front().material;
+                report.supportedFromMm = std::max(report.supportedFromMm, span[0]);
+                report.supportedToMm = std::min(report.supportedToMm, span[1]);
+                if (!coversAxialInterval(span, *core, tolerance))
+                    return BendPreviewError{BendPreviewErrorCode::ToolTooShort,
+                                            "Continuous tools do not cover the straight bend core"};
+                if (!coversAxialInterval({report.supportedFromMm, report.supportedToMm}, *core,
+                                         tolerance) ||
+                    !withinEndSupportLimit(report, prototype->supportLimit.value_or(model.widthMm),
+                                           tolerance))
+                    return BendPreviewError{
+                        BendPreviewErrorCode::SupportNotProven,
+                        "The straight bend core or permitted end support is not covered"};
+            }
             if (realTools && toolParameters) {
                 const double from =
                     (toolParameters->lengthMm - model.widthMm) / 2 + workpieceOffsetMm;
@@ -1646,9 +1678,13 @@ PreparedBendOperationResult prepareBendOperation(
                                               double toolStart) {
                     double missing = 0;
                     if (assembly && tool.segments)
-                        for (const auto &interval : prototype->supportIntervals) {
+                        for (const auto &interval : placedPreview->supportIntervals) {
                             double start = from + interval.fromMm - toolStart;
                             double end = start + interval.material.bendLengthMm;
+                            if (prototype->toolCore) {
+                                end = start + interval.material.supportedToMm;
+                                start += interval.material.supportedFromMm;
+                            }
                             if (tool.kind == core::ToolKind::Punch &&
                                 toolParameters->punchReversed) {
                                 const double extent = core::punchLengthMm(*toolParameters);

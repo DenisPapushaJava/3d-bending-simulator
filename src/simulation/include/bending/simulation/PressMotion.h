@@ -17,6 +17,7 @@ struct PressMotion {
     double maximumSupportDistanceMm;
     double lengthToleranceMm;
     std::optional<DieShoulders> shoulders = std::nullopt;
+    std::optional<double> requiredAxialWidthMm = std::nullopt;
 };
 using PressMotionResult = std::variant<PressMotion, PressMotionIssue>;
 enum class PressPhase { Approach, Bending, Retracting };
@@ -33,7 +34,8 @@ struct PressState {
 // This is geometric contact kinematics, not force/material/springback or a continuous CAD sweep.
 [[nodiscard]] PressMotionResult
 preparePressMotion(const SingleBend &model, core::PressTools tools, double lengthToleranceMm,
-                   std::optional<DieShoulders> shoulders = {}) noexcept;
+                   std::optional<DieShoulders> shoulders = {},
+                   std::optional<double> requiredAxialWidthMm = {}) noexcept;
 // Right contact point on the actual shoulder at the given sheet angle.
 [[nodiscard]] Point2Mm dieSupportPoint(const PressMotion &motion, double sheetAngle) noexcept;
 // First 2/3: approach (20% of that interval) and bending (80%). Last 1/3:
