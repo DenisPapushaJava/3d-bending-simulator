@@ -361,10 +361,10 @@ int main() {
         const auto index =
             static_cast<std::size_t>(active - closed->metadata().bendAnalysis.bends.begin());
         const auto longPair = original.front().assignment;
-        for (const double offset : {-60., 0., 60.}) {
+        for (const double closedEndOffset : {-60., 0., 60.}) {
             const auto blocked = builder.buildAssignedToolMotion(
                 closed, index, {active->angleRadians, active->innerRadiusMm}, *longPair, {}, 0,
-                false, offset);
+                false, closedEndOffset);
             check(std::holds_alternative<application::BendPreviewError>(blocked),
                   "A second obstructing end wall was ignored");
             const auto &failure = std::get<application::BendPreviewError>(blocked);

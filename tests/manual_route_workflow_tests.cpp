@@ -346,14 +346,15 @@ void verifyToolStageTransitions(const QString &folder) {
                 slider->isEnabled() && slider->value() == 0,
             "Automatic playback continued into a short-tool operation");
     const auto original = *c.session().bend(indices[1])->catalogTools;
-    auto near = original;
-    near.punchAssembly.reset();
+    auto nearlyFull = original;
+    nearlyFull.punchAssembly.reset();
     const auto &zone = c.session().document()->metadata().bendAnalysis.bends[indices[1]];
-    near.punch.lengthMm = zone.lengthMm - .31259934;
-    near.dieAssembly.reset();
-    near.die.segments.reset();
-    near.die.lengthMm = zone.lengthMm + 1;
-    require(c.setBendToolAssignment(indices[1], near), "Cannot install the nearly full punch");
+    nearlyFull.punch.lengthMm = zone.lengthMm - .31259934;
+    nearlyFull.dieAssembly.reset();
+    nearlyFull.die.segments.reset();
+    nearlyFull.die.lengthMm = zone.lengthMm + 1;
+    require(c.setBendToolAssignment(indices[1], nearlyFull),
+            "Cannot install the nearlyFullly full punch");
     step(2);
     require(c.routeDraft() && c.routeDraft()->toolLengths &&
                 c.routeDraft()->toolLengths->coversBend(.5) &&

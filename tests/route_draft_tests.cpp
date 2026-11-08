@@ -220,9 +220,9 @@ int main(int argc, char **argv) {
                 acceptedLeft = !left->toolLengths;
                 if (!left->toolLengths)
                     compact.operations[0].workpieceOffsetMm = -2;
-                const auto warm = compactDraft();
-                require(warm->reusedVisual && !warm->toolLengths &&
-                            warm->visual->uncoveredToolLengthMm() == std::array{0., 0.},
+                const auto warmCompact = compactDraft();
+                require(warmCompact->reusedVisual && !warmCompact->toolLengths &&
+                            warmCompact->visual->uncoveredToolLengthMm() == std::array{0., 0.},
                         "A valid compact draft lost the working strip");
                 compact.maximumEndSupportLossMm = 3;
                 require(compactDraft()->toolLengths.has_value(),

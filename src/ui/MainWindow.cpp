@@ -1602,8 +1602,11 @@ class MainWindow::Impl {
             }
             if (preview->manualExtraction())
                 addSummary(QStringLiteral("Извлечение вручную."));
-            if (preview->machineModel() != core::MachineModel::None && !preview->floorChecked())
-                addSummary(QStringLiteral("Пол не проверен."));
+            if (preview->machineModel() != core::MachineModel::None)
+                addSummary(
+                    preview->floorChecked()
+                        ? QStringLiteral("Демонстрационный станок и пол проверены по кадрам.")
+                        : QStringLiteral("Демонстрационный станок. Пол не проверен."));
             if ((preview->machineModel() == core::MachineModel::DemoPressV2 ||
                  preview->machineModel() == core::MachineModel::DemoPressV3) &&
                 preview->usesDrawingPunch() && !preview->seatedPunchMount())

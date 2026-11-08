@@ -356,7 +356,7 @@ int main() {
                                                           assignment, {}, 3)) == initial,
                     "Initial checked orientation was not retained");
             assignment.punchReversed = true;
-            const auto opposite = preview(cache.buildAssignedToolMotion(
+            const auto cachedOpposite = preview(cache.buildAssignedToolMotion(
                 source, 0, routeInput.operations.front().target, assignment, {}, 3));
             assignment.punchReversed = false;
             require(preview(cache.buildAssignedToolMotion(source, 0,
@@ -376,7 +376,7 @@ int main() {
             assignment.punchReversed = true;
             require(preview(cache.buildAssignedToolMotion(source, 0,
                                                           routeInput.operations.front().target,
-                                                          assignment, {}, 3)) == opposite,
+                                                          assignment, {}, 3)) == cachedOpposite,
                     "Warm B rebuilt its cycle");
         }
         BendRouteRequest exact = request;
