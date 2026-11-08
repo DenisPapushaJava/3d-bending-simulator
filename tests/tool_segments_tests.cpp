@@ -170,6 +170,16 @@ int main() {
               "Default gap limit was ignored");
         check(planToolSegments({{100, 2}, {835, 1}}, 210, 200000, 10).assembly.gapMm == 0,
               "A gapped station was preferred despite an available gap-free one");
+        const std::vector<ToolSegment> diagnosticStock{{100, 2}, {835, 1}};
+        const auto capped = [&](double cap, double gapLimit) {
+            return planPunchAssemblies(diagnosticStock, 207, 200000, gapLimit, {}, 1,
+                                       PunchAssemblyEnds{}, cap)
+                .best();
+        };
+        check(capped(206.999, 10).lengthMm == 200 && capped(207, 6).lengthMm == 200 &&
+                  capped(207, 7).lengthMm == 207 && capped(207, 7).assembly.gapMm == 7 &&
+                  capped(99, 10).status == SegmentPlanStatus::InsufficientStock,
+              "A diagnostic assembly exceeded the span, gap or available stock");
         check(precise.status == SegmentPlanStatus::Complete &&
                   std::abs(precise.lengthMm - 80.001) < 1.e-8,
               "Fractional length rounded below the required length");

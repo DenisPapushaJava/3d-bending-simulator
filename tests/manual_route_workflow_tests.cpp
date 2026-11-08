@@ -272,8 +272,7 @@ void verifyToolStageTransitions(const QString &folder) {
     auto *play = window.findChild<QPushButton *>("playBend");
     auto *slider = window.findChild<QSlider *>("bendFrame");
     auto *timer = window.findChild<QTimer *>("bendPlaybackTimer");
-    auto *diagnose = window.findChild<QToolButton *>("shortToolDiagnostic");
-    require(play && slider && timer && diagnose && !play->isEnabled() && !timer->isActive(),
+    require(play && slider && timer && !play->isEnabled() && !timer->isActive(),
             "A short tool can start playback from the blank");
     const auto blockedJobs = builder->drafts.load();
     play->click();
@@ -310,39 +309,26 @@ void verifyToolStageTransitions(const QString &folder) {
     window.resize(1280, 850);
     messageToggle->click();
     step(1);
-    require(c.routeDraft()->toolLengths && !play->isEnabled() && !slider->isEnabled() &&
-                slider->value() == 0 && !timer->isActive() && !diagnose->isChecked(),
-            "A short positive step started motion or inherited diagnostic permission");
-    slider->setValue(10);
-    require(slider->value() == 0, "Programmatic scrubbing bypassed the short-tool block");
-    window.findChild<QToolButton *>("checkReportToggle")->click();
-    require(diagnose->isVisible(), "The explicit diagnostic command is inaccessible");
-    const auto diagnosticJobs = builder->drafts.load();
-    const auto diagnosticEdit = c.session().editRevision();
-    diagnose->click();
-    require(diagnose->isChecked() && slider->isEnabled() && play->isEnabled() &&
-                builder->drafts == diagnosticJobs && c.session().editRevision() == diagnosticEdit &&
+    require(c.routeDraft()->toolLengths && play->isEnabled() && slider->isEnabled() &&
+                slider->value() == 0 && !timer->isActive() &&
                 c.routeDraft()->checkedToolPositions == 21 &&
                 window.findChild<QLabel *>("bendCheckSummary")->text().contains("Диагностический"),
-            "Diagnostic mode skipped checks, changed inputs or remains blocked");
-    play->click();
-    wait([&] { return slider->value() > 0; });
-    diagnose->click();
-    require(!timer->isActive() && !play->isEnabled() && !slider->isEnabled() &&
-                slider->value() == 0,
-            "Leaving diagnostics did not stop/reset short-tool playback");
-    diagnose->click();
+            "A short positive step lost its diagnostic playback, warning or checks");
+    const auto diagnosticJobs = builder->drafts.load();
+    const auto diagnosticEdit = c.session().editRevision();
     slider->setValue(10);
-    stage(1);
-    stage(2);
-    require(!diagnose->isChecked() && !play->isEnabled() && !slider->isEnabled() &&
-                slider->value() == 0 && !timer->isActive(),
-            "Returning to a ready short-tool result restored diagnostic motion");
-    diagnose->click();
+    require(slider->value() == 10 && builder->drafts == diagnosticJobs &&
+                c.session().editRevision() == diagnosticEdit,
+            "Diagnostic scrubbing recalculated CAD or changed the setup");
+    slider->setValue(slider->maximum() - 1);
+    play->click();
+    wait([&] { return !timer->isActive(); });
+    require(c.routeDraft()->request.step == 1 && slider->value() == slider->maximum(),
+            "Diagnostic playback automatically advanced into another operation");
     step(2);
-    require(!diagnose->isChecked() && !play->isEnabled() && !slider->isEnabled() &&
+    require(c.routeDraft()->toolLengths && play->isEnabled() && slider->isEnabled() &&
                 slider->value() == 0 && !timer->isActive(),
-            "Diagnostic permission leaked into another operation");
+            "Opening another short step lost diagnostic playback or started it automatically");
     step(0);
     stage(1);
     require(!messages->isVisible(), "Bend messages escaped into the tool workspace");
@@ -352,8 +338,8 @@ void verifyToolStageTransitions(const QString &folder) {
     window.findChild<QSlider *>("bendPlaybackSpeed")->setValue(8);
     play->click();
     wait([&] { return !c.hasWork() && c.routeDraft() && c.routeDraft()->request.step == 2; });
-    require(c.routeDraft()->toolLengths && !timer->isActive() && !play->isEnabled() &&
-                !slider->isEnabled() && slider->value() == 0 && !diagnose->isChecked(),
+    require(c.routeDraft()->toolLengths && !timer->isActive() && play->isEnabled() &&
+                slider->isEnabled() && slider->value() == 0,
             "Automatic playback continued into a short-tool operation");
     step(2);
     window.findChild<QToolButton *>("reversePunch")->click();
@@ -980,13 +966,8 @@ x.XCloseDisplay(d)
         auto *playback = window.findChild<QTimer *>("bendPlaybackTimer");
         auto *play = window.findChild<QPushButton *>("playBend");
         auto *speed = window.findChild<QSlider *>("bendPlaybackSpeed");
-        auto *diagnose = window.findChild<QToolButton *>("shortToolDiagnostic");
-        require(diagnostic->toolLengths && !play->isEnabled() && !slider->isEnabled(),
-                "A colliding short punch bypassed the ordinary playback block");
-        window.findChild<QToolButton *>("checkReportToggle")->setChecked(true);
-        diagnose->click();
-        require(diagnose->isChecked() && slider->isEnabled(),
-                "Explicit short-tool diagnostics cannot inspect the collision");
+        require(diagnostic->toolLengths && slider->isEnabled(),
+                "A short punch with a later collision cannot be inspected");
         const auto draftsBeforePlay = builder->drafts.load(),
                    searchesBeforePlay = builder->searches.load();
         speed->setValue(speed->maximum());

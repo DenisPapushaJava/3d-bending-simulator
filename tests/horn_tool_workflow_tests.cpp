@@ -226,10 +226,14 @@ void endEditorChecks(core::ToolPreset tool) {
     compactOwner.setChoice(core::toolParameters(narrow), narrow);
     compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
                                      1024.8);
-    require(compactOwner.fitSelectedAssemblies().contains(QStringLiteral("проёма")) &&
-                compactOwner.selectedAssembly(core::ToolKind::Punch) == narrow.punchAssembly &&
-                compactOwner.selectedAssembly(core::ToolKind::Die) == narrow.dieAssembly,
-            "A nominally compact tool did not respect the measured opening");
+    require(compactOwner.fitSelectedAssemblies().contains(QStringLiteral("Диагностический"),
+                                                          Qt::CaseInsensitive) &&
+                compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) <= 1024.8 &&
+                core::punchAssemblyEnds(*narrow.punch.segments,
+                                        *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
+                    core::PunchAssemblyEnds{2, {}},
+            "The diagnostic fallback exceeded the measured opening or replaced a horn");
     compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
                                      1026.8);
     require(compactOwner.fitSelectedAssemblies().isEmpty() &&
@@ -237,10 +241,12 @@ void endEditorChecks(core::ToolPreset tool) {
             "A tool inside the measured opening was refused");
     narrow.punchAssembly = core::ToolAssembly{{0, 1}, 0, {}};
     compactOwner.setChoice(core::toolParameters(narrow), narrow);
-    require(!compactOwner.fitSelectedAssemblies().isEmpty() &&
-                compactOwner.selectedAssembly(core::ToolKind::Punch) == narrow.punchAssembly &&
-                compactOwner.selectedAssembly(core::ToolKind::Die) == narrow.dieAssembly,
-            "An oversized straight assembly was proposed or the previous pair changed");
+    require(!compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) <= 1026.8 &&
+                core::punchAssemblyEnds(*narrow.punch.segments,
+                                        *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
+                    core::PunchAssemblyEnds{},
+            "The diagnostic fallback exceeded the measured opening or added a horn");
     narrow.punchAssembly = core::ToolAssembly{{2, 0, 1}, 0, {}};
     narrow.die.segments = std::vector<core::ToolSegment>{{835, 1}, {200, 1}};
     compactOwner.setChoice(core::toolParameters(narrow), narrow);

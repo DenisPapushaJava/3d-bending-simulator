@@ -22,6 +22,7 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -79,24 +80,33 @@ double intersectionVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, const Bn
     cancelled(stop);
     if (aBounds.IsOut(bBounds))
         return 0;
-    BRepAlgoAPI_Common common;
     TopTools_ListOfShape first, second;
     first.Append(a);
     second.Append(b);
-    common.SetArguments(first);
-    common.SetTools(second);
-    common.SetNonDestructive(true);
-    common.SetRunParallel(false);
-    common.SetFuzzyValue(tolerance);
-    common.Build();
-    cancelled(stop);
-    require(common.IsDone() && !common.HasErrors() && BRepCheck_Analyzer(common.Shape()).IsValid(),
-            "Draft collision intersection failed; position is not verified");
+    const auto intersect = [&](double fuzzy) -> TopoDS_Shape {
+        BRepAlgoAPI_Common common;
+        common.SetArguments(first);
+        common.SetTools(second);
+        common.SetNonDestructive(true);
+        common.SetFuzzyValue(fuzzy);
+        common.Build();
+        cancelled(stop);
+        if (common.IsDone() && !common.HasErrors() && !common.Shape().IsNull() &&
+            BRepCheck_Analyzer(common.Shape()).IsValid())
+            return common.Shape();
+        return {};
+    };
+    auto common = intersect(tolerance);
+    // Near-tangent faces can merge at the extra fuzzy tolerance. Retry with
+    // the native BRep tolerances before declaring the draft position unknown.
+    if (common.IsNull() && tolerance > Precision::Confusion())
+        common = intersect(0);
+    require(!common.IsNull(), "Draft collision intersection failed; position is not verified");
     GProp_GProps p;
-    BRepGProp::VolumeProperties(common.Shape(), p);
+    BRepGProp::VolumeProperties(common, p);
     require(std::isfinite(p.Mass()), "Invalid draft collision volume");
     if (overlap && std::abs(p.Mass()) > 0)
-        *overlap = common.Shape();
+        *overlap = common;
     return std::abs(p.Mass());
 }
 } // namespace

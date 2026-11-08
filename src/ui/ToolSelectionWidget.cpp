@@ -30,6 +30,8 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <numbers>
 
 namespace bending::ui {
@@ -1263,16 +1265,19 @@ QString ToolSelectionWidget::fitSelectedAssemblies() {
         }
     }
     const double length = selectionRequest_->bendLengthMm;
-    const auto lengthLabel = compact ? QStringLiteral("Для опоры нужно не менее %1 мм.")
-                                           .arg(*compactSectionMinimumMm_, 0, 'f', 2)
-                                     : QStringLiteral("Длина гиба %1 мм.").arg(length);
+    const double minimum = compactSectionMinimumMm_.value_or(length);
+    const auto lengthLabel =
+        compact ? QStringLiteral("Для опоры нужно не менее %1 мм.").arg(minimum, 0, 'f', 2)
+                : QStringLiteral("Длина гиба %1 мм.").arg(length);
     QString message;
+    QString notice;
     if (!issues.isEmpty()) {
         punchAssembly_ = previousPunch;
         dieAssembly_ = previousDie;
         updateDetails();
         message = lengthLabel + QLatin1Char(' ') + issues.join(QLatin1Char(' ')) +
                   QStringLiteral(" Прежний состав сохранён.");
+        notice = message;
     } else {
         const bool different = punchAssembly_ != previousPunch || dieAssembly_ != previousDie;
         if (different)
@@ -1286,12 +1291,32 @@ QString ToolSelectionWidget::fitSelectedAssemblies() {
                 : QStringLiteral("Состав для гиба длиной %1 мм.").arg(length);
         message += different ? QStringLiteral(" Инструмент и ручей сохранены.")
                              : QStringLiteral(" Состав уже подобран; изменений нет.");
+        if (compact) {
+            QStringList warnings;
+            for (std::size_t i = 0; i < plans.size(); ++i) {
+                const auto &plan = plans[i];
+                if (plan.lengthMm + lengthToleranceMm_ < length)
+                    warnings << names[i] + QStringLiteral(": короче линии гиба на %1 мм.")
+                                               .arg(length - plan.lengthMm, 0, 'f', 2);
+                if (plan.assembly.gapMm > 0)
+                    warnings << names[i] + QStringLiteral(": зазор %1 мм между секциями.")
+                                               .arg(plan.assembly.gapMm, 0, 'f', 3);
+            }
+            const bool diagnostic = std::any_of(plans.begin(), plans.end(), [&](const auto &p) {
+                return p.lengthMm + lengthToleranceMm_ < minimum || p.assembly.gapMm > 0;
+            });
+            if (diagnostic) {
+                notice = warnings.join(QLatin1Char(' ')) +
+                         QStringLiteral(" Доступен диагностический просмотр.");
+                message += QLatin1Char(' ') + notice;
+            }
+        }
     }
     recommendation_->setText(message);
     recommendation_->setToolTip(fitSections_->toolTip());
     recommendation_->setMinimumHeight(recommendation_->heightForWidth(240));
     recommendation_->show();
-    return issues.isEmpty() ? QString{} : message;
+    return notice;
 }
 std::array<core::SegmentPlan, 2>
 ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only, bool preservePunchEnds,
@@ -1311,14 +1336,13 @@ ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only, bool pres
                          std::optional<core::ToolAssembly> &assembly) -> core::SegmentPlan {
         if (!tool)
             return {};
-        const auto maximum =
-            compact && tool->kind == core::ToolKind::Punch ? compactPunchMaximumMm_ : std::nullopt;
+        const double unlimited = std::numeric_limits<double>::infinity();
+        const double maximum = compact && tool->kind == core::ToolKind::Punch
+                                   ? compactPunchMaximumMm_.value_or(unlimited)
+                                   : unlimited;
         const auto fits = [&](double length) {
-            return length + 1e-5 >= required &&
-                   (!maximum || length <= *maximum + lengthToleranceMm_);
+            return length + 1e-5 >= required && length <= maximum + lengthToleranceMm_;
         };
-        if (maximum && *maximum + lengthToleranceMm_ < required)
-            return {core::SegmentPlanStatus::InsufficientStock, {}, 0};
         if (!tool->segments)
             return {fits(tool->lengthMm) ? core::SegmentPlanStatus::Complete
                                          : core::SegmentPlanStatus::InsufficientStock,
@@ -1330,13 +1354,26 @@ ToolSelectionWidget::fitAssemblies(std::optional<core::ToolKind> only, bool pres
             if (!fixedEnds)
                 return {};
         }
-        auto plan = tool->kind == core::ToolKind::Punch
+        auto plan = maximum + lengthToleranceMm_ < required
+                        ? core::SegmentPlan{core::SegmentPlanStatus::InsufficientStock, {}, 0}
+                    : tool->kind == core::ToolKind::Punch
                         ? core::planPunchAssemblies(*tool->segments, required, 200000, gap, {}, 8,
                                                     fixedEnds)
                               .best()
                         : core::planToolSegments(*tool->segments, required, 200000, gap);
         if (plan.status == core::SegmentPlanStatus::Complete && compact && !fits(plan.lengthMm))
-            return {core::SegmentPlanStatus::InsufficientStock, {}, 0};
+            plan = {core::SegmentPlanStatus::InsufficientStock, {}, 0};
+        if (compact && plan.status == core::SegmentPlanStatus::InsufficientStock) {
+            const double cap = std::isfinite(maximum) ? std::min(nominal, maximum) : required;
+            if (cap >= 1) {
+                const auto diagnostic = core::planPunchAssemblies(
+                    *tool->segments, required, 200000, segmentGap_->value(), {}, 1,
+                    fixedEnds.value_or(core::PunchAssemblyEnds{}), cap);
+                plan = diagnostic.status == core::SegmentPlanStatus::Complete
+                           ? diagnostic.best()
+                           : core::SegmentPlan{diagnostic.status, {}, 0};
+            }
+        }
         if (plan.status == core::SegmentPlanStatus::Complete)
             assembly = plan.assembly;
         return plan;

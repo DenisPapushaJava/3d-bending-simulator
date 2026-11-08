@@ -1309,7 +1309,7 @@ class MainWindow::Impl {
     }
     bool shortToolPlaybackBlocked() const {
         const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
-        return draft && draft->toolLengths && shortToolDiagnosticDraft.lock() != draft;
+        return draft && draft->toolLengths && draft->request.step == 0;
     }
     static bool collisionAt(const application::BendPreviewPtr &preview, std::size_t frame) {
         return preview &&
@@ -1334,9 +1334,7 @@ class MainWindow::Impl {
         frameLabel->setText(text);
         const auto tooltip = shortToolPlaybackBlocked()
                                  ? QStringLiteral("Инструмент короче линии гиба. Подберите секции "
-                                                  "или другой инструмент. Диагностический "
-                                                  "просмотр доступен в подробностях проверки "
-                                                  "выбранного гиба.")
+                                                  "или откройте нужный шаг для просмотра.")
                                  : text;
         bendFrame->setToolTip(tooltip);
         refreshPlaybackAction();
@@ -1378,7 +1376,6 @@ class MainWindow::Impl {
     void beginPreviewReplacement(bool preserveFrame = false) {
         manualDraftWarmup.stop();
         warmDraftAfterSelection = false;
-        shortToolDiagnosticDraft.reset();
         if (!viewingSource && displayedPreview && !previewReplacement) {
             previewReplacement = PreviewReplacement{
                 controller->session().document(), controller->session().revision(),
@@ -2280,16 +2277,6 @@ class MainWindow::Impl {
         toolWorkspace->refresh();
         const auto preview = scenePreview();
         const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
-        const bool shortDraft = draft && draft->toolLengths;
-        if (!shortDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
-            controller->hasWork() || shortToolDiagnosticDraft.lock() != draft)
-            shortToolDiagnosticDraft.reset();
-        {
-            const QSignalBlocker block(shortToolDiagnostic);
-            shortToolDiagnostic->setChecked(shortDraft && shortToolDiagnosticDraft.lock() == draft);
-        }
-        shortToolDiagnostic->setVisible(shortDraft && draft->request.step > 0);
-        shortToolDiagnostic->setEnabled(shortDraft && !controller->hasWork());
         const bool diagnostic =
             preview && !preview->unverifiedDraft() &&
             (preview->collision() || preview->machineCollisionAtFrame(preview->frameCount() - 1));
@@ -2337,7 +2324,8 @@ class MainWindow::Impl {
                 }
                 bendFrame->setValue(restoreFrame   ? static_cast<int>(previewReplacement->frame)
                                     : matchedAngle ? *matchedAngle
-                                    : diagnostic   ? bendFrame->maximum()
+                                    : draft && draft->toolLengths ? 0
+                                    : diagnostic                  ? bendFrame->maximum()
                                     : (viewingDraft || viewingRoute) &&
                                             routePanel->selected() > 0 && !draftAutoPlay
                                         ? bendFrame->maximum()
@@ -2649,7 +2637,7 @@ class MainWindow::Impl {
         if (draftAutoPlay && viewingDraft && preview && !controller->hasWork()) {
             draftAutoPlay = false;
             bendFrame->setValue(0);
-            if (playBend->isEnabled()) {
+            if (draft && !draft->toolLengths && playBend->isEnabled()) {
                 startPlayback();
                 prefetchDraftStep();
             }
@@ -3104,8 +3092,6 @@ class MainWindow::Impl {
     bool viewingDraft = false, draftAutoPlay = false;
     bool warmDraftAfterSelection = false;
     QTimer manualDraftWarmup;
-    std::weak_ptr<const application::RouteDraft> shortToolDiagnosticDraft;
-    QToolButton *shortToolDiagnostic = nullptr;
     bool lastRouteAutomatic = true;
     bool checkedToolJob = false, checkedToolCancelled = false, checkedToolManualOverride = false;
     bool checkedSectionsOnly = false;
@@ -3865,28 +3851,6 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     operationLayout->removeWidget(impl_->checkScope);
     reportLayout->addWidget(impl_->checkScope);
     reportLayout->addWidget(impl_->previewStatus);
-    impl_->shortToolDiagnostic = new QToolButton(report);
-    impl_->shortToolDiagnostic->setObjectName("shortToolDiagnostic");
-    impl_->shortToolDiagnostic->setText(QStringLiteral("Диагностический просмотр"));
-    impl_->shortToolDiagnostic->setAccessibleName(
-        QStringLiteral("Диагностический просмотр с коротким инструментом"));
-    impl_->shortToolDiagnostic->setCheckable(true);
-    impl_->shortToolDiagnostic->setToolTip(QStringLiteral(
-        "Разрешить движение только для осмотра текущего гиба. Недостаточная длина остаётся "
-        "ошибкой; столкновения проверяются и останавливают воспроизведение. "
-        "При смене шага или инструмента разрешение сбрасывается."));
-    impl_->shortToolDiagnostic->hide();
-    reportLayout->addWidget(impl_->shortToolDiagnostic);
-    connect(impl_->shortToolDiagnostic, &QToolButton::toggled, this, [this](bool enabled) {
-        const auto draft = impl_->viewingDraft ? impl_->controller->routeDraft() : nullptr;
-        impl_->shortToolDiagnosticDraft.reset();
-        if (enabled && draft && draft->toolLengths && draft->request.step > 0 &&
-            !impl_->viewingSource && impl_->propertyTabs->currentIndex() == 2 &&
-            !impl_->controller->hasWork())
-            impl_->shortToolDiagnosticDraft = draft;
-        impl_->refreshPreview();
-        impl_->showPreviewFrame();
-    });
     reportLayout->addWidget(impl_->routePanel->reportWidget());
     operationLayout->addWidget(report);
     report->hide();
@@ -4236,7 +4200,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     impl_->startPlayback();
                     return;
                 }
-            if (impl_->viewingDraft &&
+            const auto draft = impl_->viewingDraft ? impl_->controller->routeDraft() : nullptr;
+            if (draft && !draft->toolLengths &&
                 impl_->routePanel->selected() <
                     static_cast<int>(impl_->controller->session().orderedBends().size())) {
                 impl_->routePanel->select(impl_->routePanel->selected() + 1);
