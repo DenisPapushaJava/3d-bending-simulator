@@ -2494,7 +2494,11 @@ class MainWindow::Impl {
         refreshCheckResult();
         routePanel->reportWidget()->setVisible(multiple);
         checkScope->setText(preview && preview->usesDrawingTools()
-                                ? QStringLiteral("Геометрическая проверка с профилями DXF.")
+                                ? QStringLiteral("Пуансон: %1. Матрица: %2.")
+                                      .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
+                                                                       : QStringLiteral("условный"),
+                                           preview->usesDrawingDie() ? QStringLiteral("по DXF")
+                                                                     : QStringLiteral("условная"))
                                 : QStringLiteral("Геометрическая проверка."));
         checkScope->setVisible(document != nullptr && !viewingDraft &&
                                !(viewingRoute && controller->bendRoute()));
