@@ -9,8 +9,13 @@ RouteDraftCache::Key RouteDraftCache::key(const RouteDraftRequest &request) {
     std::uint64_t formed = 0;
     for (std::size_t i = 0; i + 1 < request.step; ++i)
         formed |= std::uint64_t{1} << request.operations.at(i).bendIndex;
-    return {formed, request.operations.at(request.step ? request.step - 1 : 0), request.step == 0,
-            request.withTools};
+    const bool partial = request.step != 0 && request.allowPartialEndSupport;
+    return {formed,
+            request.operations.at(request.step ? request.step - 1 : 0),
+            request.step == 0,
+            request.withTools,
+            partial,
+            partial ? request.maximumEndSupportLossMm : std::nullopt};
 }
 RouteDraftPtr RouteDraftCache::find(DocumentPtr source, const RouteDraftRequest &request) {
     const auto wanted = key(request);
@@ -25,6 +30,7 @@ RouteDraftPtr RouteDraftCache::find(DocumentPtr source, const RouteDraftRequest 
     result->checkedToolPositions = found->second.checkedToolPositions;
     result->toolNotice = found->second.notice;
     result->toolLengths = found->second.lengths;
+    result->centredPunchOpeningMm = found->second.centredPunchOpeningMm;
     result->reusedBasis = result->reusedVisual = true;
     entries_.splice(entries_.begin(), entries_, found);
     return result;
@@ -42,16 +48,17 @@ void RouteDraftCache::put(Key wanted, Visual visual) {
     }
 }
 void RouteDraftCache::remember(const RouteDraftPtr &draft) {
-    put(key(draft->request),
-        {draft->visual, draft->checkedToolPositions, draft->toolNotice, draft->toolLengths});
+    put(key(draft->request), {draft->visual, draft->checkedToolPositions, draft->toolNotice,
+                              draft->toolLengths, draft->centredPunchOpeningMm});
 }
 void RouteDraftCache::rememberBlank(DocumentPtr source, RouteOperation active,
                                     const BendPreviewPtr &cycle) {
     const auto p = std::dynamic_pointer_cast<const CadPreview>(cycle);
     if (!source || !p || p->draft || p->activeBends != 1 || p->otherBends != 0 ||
-        p->frames.empty() || !p->motion || !p->retraction || !p->setup || !active.tools ||
-        p->setup->tools != *active.tools || p->reversed != active.workpieceReversed ||
-        p->axialOffset != active.workpieceOffsetMm || p->states.size() != p->frames.size() ||
+        p->frames.empty() || p->toolCore || !p->motion || !p->retraction || !p->setup ||
+        !active.tools || p->setup->tools != *active.tools ||
+        p->reversed != active.workpieceReversed || p->axialOffset != active.workpieceOffsetMm ||
+        p->states.size() != p->frames.size() ||
         p->floorChecked() != (active.tools->machineModel == core::MachineModel::DemoPressV3) ||
         (active.tools->backgauge &&
          (!p->gauging || p->gauging->status != BackgaugeStatus::Checked)))
@@ -101,6 +108,6 @@ void RouteDraftCache::rememberBlank(DocumentPtr source, RouteOperation active,
     RouteDraftRequest request;
     request.withTools = true;
     request.operations.push_back(std::move(active));
-    put(key(request), {std::move(blank), 1, {}, {}});
+    put(key(request), {std::move(blank), 1, {}, {}, {}});
 }
 } // namespace bending::cad

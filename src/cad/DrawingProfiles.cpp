@@ -131,9 +131,14 @@ std::array<double, 2> occupiedInterval(const std::vector<std::array<double, 2>> 
         throw Unmeasured{};
     return *found;
 }
-bool endsAtAnotherBend(gp_Pnt point, Wall wall, const std::vector<std::size_t> &members,
-                       const std::vector<RecognizedBend> &bends,
-                       const TopTools_IndexedMapOfShape &faces, double tolerance) {
+bool obliqueNeighbour(const RecognizedBend &a, const RecognizedBend &b) {
+    const auto first = axisOf(a), second = axisOf(b);
+    return !first.IsParallel(second, 1e-7) &&
+           std::abs(first.Dot(second)) > std::cos(std::numbers::pi / 12);
+}
+std::optional<std::size_t> endBend(gp_Pnt point, Wall wall, const std::vector<std::size_t> &members,
+                                   const std::vector<RecognizedBend> &bends,
+                                   const TopTools_IndexedMapOfShape &faces, double tolerance) {
     for (std::size_t i = 0; i < bends.size(); ++i) {
         if (std::find(members.begin(), members.end(), i) != members.end() ||
             (wallOf(bends[i], 0) != wall && wallOf(bends[i], 1) != wall))
@@ -145,10 +150,10 @@ bool endsAtAnotherBend(gp_Pnt point, Wall wall, const std::vector<std::size_t> &
                 continue;
             BRepClass_FaceClassifier at(face, point, tolerance);
             if (at.State() == TopAbs_ON || at.State() == TopAbs_IN)
-                return true;
+                return i;
         }
     }
-    return false;
+    return {};
 }
 
 bool supportedFreeCap(const std::array<gp_Pnt, 2> &end, Wall wall, gp_Dir axis,
@@ -190,7 +195,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
                             const std::vector<RecognizedBend> &bends,
                             const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference,
                             double tolerance, std::stop_token stop, double fraction = .5,
-                            DrawingProfilePose pose = {}) {
+                            DrawingProfilePose pose = {}, bool obliqueSection = false) {
     std::map<Wall, std::vector<std::size_t>> graph;
     for (auto index : members)
         for (std::size_t side = 0; side < 2; ++side)
@@ -261,6 +266,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
     profile.normal = {viewAxis.X(), viewAxis.Y(), viewAxis.Z()};
     std::vector<std::array<gp_Pnt, 2>> middleEnds;
     std::vector<std::array<std::array<gp_Pnt, 2>, 2>> contourEnds;
+    bool hasOtherBendEnd = false;
     for (std::size_t w = 0; w < walls.size(); ++w) {
         cancellation(stop);
         const auto wall = walls[w];
@@ -271,6 +277,7 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
         const gp_Dir along(gp_Vec(axis).Crossed(gp_Vec(firstPlane.Axis().Direction())));
         const auto &neighbors = graph.at(wall);
         std::array<std::array<gp_Pnt, 2>, 2> wallEnds;
+        std::array<std::optional<std::size_t>, 2> endBends;
         for (std::size_t f = 0; f < 2; ++f) {
             const auto plane = planeAt(faces, wall[f]);
             std::vector<double> tangencies;
@@ -293,24 +300,31 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
                         ? range[1]
                         : range[0];
                 const auto free = pointAt(end);
-                if (endsAtAnotherBend(free, wall, members, bends, faces, tolerance * 20))
+                endBends[f] = endBend(free, wall, members, bends, faces, tolerance * 20);
+                if (endBends[f] && !obliqueSection)
                     throw Unmeasured{};
                 const auto tangent = pointAt(tangencies[0]);
                 wallEnds[f] = w == 0 ? std::array{free, tangent} : std::array{tangent, free};
             }
         }
+        if (endBends[0] != endBends[1])
+            throw Unmeasured{};
+        const bool otherBendEnd = endBends[0].has_value();
+        hasOtherBendEnd |= otherBendEnd;
         const auto middle = [&](std::size_t end) {
             return gp_Pnt((wallEnds[0][end].XYZ() + wallEnds[1][end].XYZ()) / 2);
         };
         if (neighbors.size() == 1) {
             const std::size_t end = w == 0 ? 0 : 1;
-            if (!supportedFreeCap({wallEnds[0][end], wallEnds[1][end]}, wall, axis, faces,
-                                  tolerance * 20, stop))
+            if (!otherBendEnd && !supportedFreeCap({wallEnds[0][end], wallEnds[1][end]}, wall, axis,
+                                                   faces, tolerance * 20, stop))
                 throw Unmeasured{};
         }
         const std::array mid{middle(0), middle(1)};
         middleEnds.push_back(mid);
         contourEnds.push_back(wallEnds);
+        if (otherBendEnd)
+            continue; // The exact solid cut supplies this contour, without a false size.
         for (const auto &ends : wallEnds)
             profile.view.paths.push_back(
                 {{project(ends[0], frame), project(ends[1], frame)}, false});
@@ -340,6 +354,8 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
             w < ordered.size() ? std::optional(ordered[w]) : std::nullopt};
         profile.segments.push_back(std::move(segment));
     }
+    if (obliqueSection && (!hasOtherBendEnd || profile.segments.empty()))
+        throw Unmeasured{};
     profile.view.profileStart =
         std::pair{project(middleEnds.front()[0], frame), project(middleEnds.front()[1], frame)};
     for (std::size_t k = 0; k < ordered.size(); ++k) {
@@ -394,7 +410,8 @@ DrawingProfile buildProfile(const std::vector<std::size_t> &members,
             profile.view.paths.push_back(std::move(arc));
         }
         profile.view.bendNotes.push_back({anchor, ordered[k]});
-        profile.view.dimensionedBends.push_back(ordered[k]);
+        if (!obliqueSection)
+            profile.view.dimensionedBends.push_back(ordered[k]);
     }
     profile.view.minimum = {1e100, 1e100};
     profile.view.maximum = {-1e100, -1e100};
@@ -543,6 +560,31 @@ drawingProfileAt(const std::vector<std::size_t> &members,
     try {
         return buildProfile(members, bends, faces, reference, std::max(1e-6, tolerance), stop,
                             fraction, pose);
+    } catch (const Unmeasured &) {
+        return {};
+    } catch (const Standard_Failure &) {
+        return {};
+    }
+}
+
+bool hasObliqueSectionNeighbour(std::size_t index, const std::vector<RecognizedBend> &bends) {
+    const auto &bend = bends.at(index);
+    const std::array walls{wallOf(bend, 0), wallOf(bend, 1)};
+    return std::any_of(bends.begin(), bends.end(), [&](const auto &other) {
+        return &other != &bend && obliqueNeighbour(bend, other) &&
+               std::any_of(walls.begin(), walls.end(), [&](const auto &wall) {
+                   return wall == wallOf(other, 0) || wall == wallOf(other, 1);
+               });
+    });
+}
+std::optional<application::DrawingProfile>
+obliqueSectionProfileAt(std::size_t index, const std::vector<RecognizedBend> &bends,
+                        const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference,
+                        double tolerance, double fraction, std::stop_token stop,
+                        DrawingProfilePose pose) {
+    try {
+        return buildProfile({index}, bends, faces, reference, tolerance, stop, fraction, pose,
+                            true);
     } catch (const Unmeasured &) {
         return {};
     } catch (const Standard_Failure &) {

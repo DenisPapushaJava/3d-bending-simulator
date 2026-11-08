@@ -78,7 +78,7 @@ void BendMessagePanel::refresh() {
         const auto &m = messages_[i];
         if (i && i < 3)
             titles << m.title;
-        details << m.title + QLatin1Char('\n') + m.detail;
+        details << (m.detail.isEmpty() ? m.title : m.title + QLatin1Char('\n') + m.detail);
     }
     if (messages_.size() > 3)
         titles << QStringLiteral("Ещё сообщений: %1").arg(messages_.size() - 3);

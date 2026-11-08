@@ -332,8 +332,9 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     };
     const auto innerCore = coreInterval(inner);
     const auto outerCore = coreInterval(outer);
-    const double straightLength =
-        std::min(innerCore[1], outerCore[1]) - std::max(innerCore[0], outerCore[0]);
+    const double coreFrom = std::max(innerCore[0], outerCore[0]);
+    const double coreTo = std::min(innerCore[1], outerCore[1]);
+    const double straightLength = coreTo - coreFrom;
     const bool sameSpan =
         (sameEnds || reversedEnds) && std::abs(inner.length - outer.length) <= tolerance;
     if ((!sameSpan && !inner.trimmedEnds && !outer.trimmedEnds) ||
@@ -377,12 +378,55 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
             break;
         }
     }
-    return RecognizedBend{point(start),  point(end),
-                          inner.angle,   inner.cylinder.Radius(),
-                          thickness,     fullLength,
-                          inner.face,    outer.face,
-                          flanges,       inner.trimmedEnds || outer.trimmedEnds,
-                          straightLength};
+    const double startV = gp_Vec(inner.cylinder.Location(), start).Dot(axis);
+    auto straight = direction.Dot(gp_Vec(start, end)) > 0
+                        ? std::array{coreFrom - startV, coreTo - startV}
+                        : std::array{startV - coreTo, startV - coreFrom};
+    for (auto &limit : straight)
+        limit = std::clamp(limit, 0., fullLength);
+    return RecognizedBend{point(start),   point(end),
+                          inner.angle,    inner.cylinder.Radius(),
+                          thickness,      fullLength,
+                          inner.face,     outer.face,
+                          flanges,        inner.trimmedEnds || outer.trimmedEnds,
+                          straightLength, straight};
+}
+
+bool preferWorkpieceReversed(const RecognizedBend &bend, const Patch &inner,
+                             const TopTools_IndexedMapOfShape &faces, double tolerance) {
+    try {
+        const gp_Pnt start(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z);
+        const gp_Pnt end(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z);
+        const auto axis = gp_Vec(start, end).Normalized();
+        std::array<double, 2> reach{};
+        for (std::size_t i = 0; i < inner.rails.size(); ++i) {
+            const auto &rail = inner.rails[i];
+            // In the straight setup, the inward normal becomes +Y, the
+            // canonical axis +Z, and Y cross Z points toward the gauge (+X).
+            const auto across = axis.Crossed(gp_Vec(rail.radial)).Normalized();
+            const auto &face = TopoDS::Face(faces(static_cast<int>(rail.flange)));
+            const auto boundary = BRepTools::OuterWire(face);
+            double low = 0, high = 0;
+            std::size_t vertices = 0;
+            for (TopExp_Explorer v(boundary, TopAbs_VERTEX); v.More(); v.Next()) {
+                if (++vertices > 1024)
+                    return false;
+                const auto p = BRep_Tool::Pnt(TopoDS::Vertex(v.Current()));
+                const double x = gp_Vec(start, p).Dot(across);
+                low = std::min(low, x);
+                high = std::max(high, x);
+            }
+            if (low < -tolerance && high > tolerance)
+                return false;
+            reach[i] = high > tolerance ? high : low;
+        }
+        if (!((reach[0] < -tolerance && reach[1] > tolerance) ||
+              (reach[1] < -tolerance && reach[0] > tolerance)))
+            return false;
+        return reach[0] + reach[1] > std::max(.5, bend.thicknessMm);
+    } catch (const Standard_Failure &) {
+        return false; // An optional setup hint cannot fail recognition.
+    }
 }
 } // namespace
 
@@ -469,12 +513,17 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
             }
         }
         for (std::size_t i = 0; i < patches.size(); ++i) {
+            if (stop.stop_requested())
+                return {};
             if (patches[i].outward || partners[i].size() != 1) {
                 continue;
             }
             const auto j = partners[i].front();
             if (partners[j].size() == 1) {
                 auto candidate = *match(patches[i], patches[j], result.lengthToleranceMm);
+                if (purpose == BendRecognitionPurpose::Simulation)
+                    candidate.preferWorkpieceReversed = preferWorkpieceReversed(
+                        candidate, patches[i], faces, result.lengthToleranceMm);
                 auto boundaries = patches[i].boundaryFaces;
                 boundaries.insert(boundaries.end(), patches[j].boundaryFaces.begin(),
                                   patches[j].boundaryFaces.end());

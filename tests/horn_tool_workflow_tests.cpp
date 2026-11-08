@@ -201,6 +201,77 @@ void endEditorChecks(core::ToolPreset tool) {
     if (const auto output = qEnvironmentVariable("BENDING_HORN_INLINE_SNAPSHOT"); !output.isEmpty())
         require(window.grab().save(output), "Inline tool workspace snapshot");
     owner.onChanged = {};
+    auto narrow = tool_fixture::pair();
+    narrow.punch.segments = std::vector<core::ToolSegment>{
+        {835, 1},
+        {200, 1},
+        {100, 1, core::SegmentShape::LeftHorn, core::HornRelief{27, 27, 9}, "left"},
+        {50, 1},
+        {40, 1}};
+    narrow.die.segments =
+        std::vector<core::ToolSegment>{{835, 1}, {200, 1}, {100, 1}, {50, 1}, {40, 1}};
+    narrow.punchAssembly = core::ToolAssembly{{2, 0, 1}, 0, {}};
+    narrow.dieAssembly = core::ToolAssembly{{0, 1}, 0, {}};
+    ui::ToolSelectionWidget compactOwner({narrow.punch, narrow.die}, nullptr);
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5,
+                                     1024);
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                compactOwner.parameters()->lengthMm == 1025 &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1025 &&
+                core::punchAssemblyEnds(*narrow.punch.segments,
+                                        *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
+                    core::PunchAssemblyEnds{2, {}},
+            "Compact fitting preferred full length or lost the selected horn");
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
+                                     1024.8);
+    require(compactOwner.fitSelectedAssemblies().contains(QStringLiteral("Диагностический"),
+                                                          Qt::CaseInsensitive) &&
+                compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) <= 1024.8 &&
+                core::punchAssemblyEnds(*narrow.punch.segments,
+                                        *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
+                    core::PunchAssemblyEnds{2, {}},
+            "The diagnostic fallback exceeded the measured opening or replaced a horn");
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
+                                     1026.8);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1025,
+            "A tool inside the measured opening was refused");
+    narrow.punchAssembly = core::ToolAssembly{{0, 1}, 0, {}};
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1025 &&
+                core::punchAssemblyEnds(*narrow.punch.segments,
+                                        *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
+                    core::PunchAssemblyEnds{2, {}},
+            "The quick fit skipped a fitting horn after rejecting straight stock");
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
+                                     985.);
+    require(!compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 985 &&
+                core::punchAssemblyEnds(*narrow.punch.segments,
+                                        *compactOwner.selectedAssembly(core::ToolKind::Punch)) ==
+                    core::PunchAssemblyEnds{2, {}},
+            "The diagnostic fit missed the longest available stock inside the opening");
+    narrow.punchAssembly = core::ToolAssembly{{2, 0, 1}, 0, {}};
+    narrow.die.segments = std::vector<core::ToolSegment>{{835, 1}, {200, 1}};
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5, 1024,
+                                     1026.8);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1025 &&
+                compactOwner.parameters()->lengthMm == 1035,
+            "The punch opening also rejected a longer die");
+    compactOwner.setSelectionRequest({{2, std::numbers::pi / 2, 2, 1026.99, 3}}, false, 1.e-5,
+                                     1024);
+    narrow.punchAssembly = core::ToolAssembly{{0, 1}, 0, {}};
+    compactOwner.setChoice(core::toolParameters(narrow), narrow);
+    require(compactOwner.fitSelectedAssemblies().isEmpty() && compactOwner.parameters() &&
+                core::punchLengthMm(*compactOwner.parameters()) == 1035,
+            "An unconstrained longer punch was rejected by the nominal bend length");
     tool.segments->at(1).quantity = 0;
     tool.segments->at(2).horn.reset();
     tool.segments->at(2).variantId.clear();

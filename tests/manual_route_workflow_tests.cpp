@@ -1,5 +1,6 @@
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include "bending/project/ProjectFiles.h"
@@ -14,6 +15,7 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QLabel>
+#include <QLocale>
 #include <QPainter>
 #include <QProcess>
 #include <QPushButton>
@@ -137,6 +139,69 @@ void verifyManualExtraction(const QString &folder) {
     controller.closeDocument();
     window.close();
 }
+void verifyCompactDraftPublication(const QString &folder) {
+    const auto stepPath = folder + "/compact.step";
+    STEPControl_Writer writer;
+    require(writer.Transfer(fixtures::trimmedBend(), STEPControl_AsIs) == IFSelect_RetDone &&
+                writer.Write(stepPath.toUtf8().constData()) == IFSelect_RetDone,
+            "Cannot write the compact draft fixture");
+    auto files = std::make_shared<project::ProjectFiles>();
+    const auto source = application::resultDocument(files->load(stepPath.toStdString(), {}, {}));
+    require(source && source->metadata().bendAnalysis.bends.size() == 1,
+            "Cannot load the compact draft fixture");
+    const auto &analysis = source->metadata().bendAnalysis;
+    const auto &bend = analysis.bends.front();
+    const auto interval = application::trimmedAxialCore(bend);
+    require(interval.has_value(), "The compact draft fixture lost its straight interval");
+    const bool startsNearToolEnd = (*interval)[0] > bend.lengthMm - (*interval)[1];
+    const double offset =
+        startsNearToolEnd != application::bendAxisNeedsReversal(bend, analysis.lengthToleranceMm)
+            ? -1.5
+            : 1.5;
+    auto pair = tool_fixture::pair(16);
+    pair.punch.lengthMm = pair.die.lengthMm = 78;
+    application::DocumentSession seed;
+    require(seed.complete(seed.beginImport(stepPath.toStdString()), source) &&
+                seed.setBendToolAssignment(0, pair) && seed.setBendWorkpieceOffset(0, offset),
+            "Cannot prepare the compact draft installation");
+    const auto project = folder + "/compact.bend";
+    require(!files->save(project.toStdString(), *source, {}, seed.bends(), {}),
+            "Cannot save the compact draft installation");
+    auto builder = std::make_shared<Builder>();
+    ui::MainWindow window({"test", "test"}, files, files, builder, {pair.punch, pair.die});
+    window.setAutomaticPartInputPrompt(false);
+    window.show();
+    auto &controller = window.importController();
+    window.openStep(project);
+    wait([&] { return !controller.hasWork(); });
+    const auto &session = controller.session();
+    const auto *entry = session.bend(0);
+    const auto target = session.bendTarget(0);
+    require(entry && target, "The compact draft installation failed to open");
+    application::RouteDraftRequest request;
+    request.step = 1;
+    request.withTools = request.allowPartialEndSupport = true;
+    request.maximumEndSupportLossMm = 3;
+    request.operations.push_back({entry->id, 0, *target, entry->tools, entry->catalogTools,
+                                  entry->workpieceReversed, entry->workpieceOffsetMm});
+    require(controller.prepareRouteDraft(request, builder), "Cannot request compact playback");
+    wait([&] { return !controller.hasWork(); });
+    const auto accepted = controller.routeDraft();
+    if (const auto error = controller.routeDraftError())
+        throw std::runtime_error("Compact draft publication: " + error->detail);
+    require(accepted && !accepted->toolLengths && !controller.routeDraftError() &&
+                accepted->checkedToolPositions == accepted->visual->frameCount(),
+            "The interface rejected a compact draft with valid axial coverage");
+    auto strict = accepted->request;
+    strict.maximumEndSupportLossMm = 0;
+    require(controller.prepareRouteDraft(strict, builder), "Cannot request strict end coverage");
+    wait([&] { return !controller.hasWork(); });
+    require(controller.routeDraft() && controller.routeDraft()->toolLengths &&
+                !controller.routeDraftError(),
+            "The interface lost the length warning when end allowance was disabled");
+    controller.closeDocument();
+    window.close();
+}
 void verifyToolStageTransitions(const QString &folder) {
     auto files = std::make_shared<project::ProjectFiles>();
     auto builder = std::make_shared<Builder>();
@@ -178,6 +243,9 @@ void verifyToolStageTransitions(const QString &folder) {
             "An unchanged tool batch emitted a refresh");
     QObject::disconnect(transaction);
     require(c.setBendWorkpieceOrientation(indices[1], true), "Cannot turn the part");
+    std::vector<bool> orientations(indices.size());
+    for (const auto i : indices)
+        orientations.at(i) = c.session().bend(i)->workpieceReversed;
     auto stage = [&](int n) {
         window.findChild<QToolButton *>(QStringLiteral("processStage%1").arg(n))->click();
         wait([&] { return !c.hasWork(); });
@@ -208,8 +276,7 @@ void verifyToolStageTransitions(const QString &folder) {
     auto *play = window.findChild<QPushButton *>("playBend");
     auto *slider = window.findChild<QSlider *>("bendFrame");
     auto *timer = window.findChild<QTimer *>("bendPlaybackTimer");
-    auto *diagnose = window.findChild<QToolButton *>("shortToolDiagnostic");
-    require(play && slider && timer && diagnose && !play->isEnabled() && !timer->isActive(),
+    require(play && slider && timer && !play->isEnabled() && !timer->isActive(),
             "A short tool can start playback from the blank");
     const auto blockedJobs = builder->drafts.load();
     play->click();
@@ -246,39 +313,26 @@ void verifyToolStageTransitions(const QString &folder) {
     window.resize(1280, 850);
     messageToggle->click();
     step(1);
-    require(c.routeDraft()->toolLengths && !play->isEnabled() && !slider->isEnabled() &&
-                slider->value() == 0 && !timer->isActive() && !diagnose->isChecked(),
-            "A short positive step started motion or inherited diagnostic permission");
-    slider->setValue(10);
-    require(slider->value() == 0, "Programmatic scrubbing bypassed the short-tool block");
-    window.findChild<QToolButton *>("checkReportToggle")->click();
-    require(diagnose->isVisible(), "The explicit diagnostic command is inaccessible");
-    const auto diagnosticJobs = builder->drafts.load();
-    const auto diagnosticEdit = c.session().editRevision();
-    diagnose->click();
-    require(diagnose->isChecked() && slider->isEnabled() && play->isEnabled() &&
-                builder->drafts == diagnosticJobs && c.session().editRevision() == diagnosticEdit &&
+    require(c.routeDraft()->toolLengths && play->isEnabled() && slider->isEnabled() &&
+                slider->value() == 0 && !timer->isActive() &&
                 c.routeDraft()->checkedToolPositions == 21 &&
                 window.findChild<QLabel *>("bendCheckSummary")->text().contains("Диагностический"),
-            "Diagnostic mode skipped checks, changed inputs or remains blocked");
-    play->click();
-    wait([&] { return slider->value() > 0; });
-    diagnose->click();
-    require(!timer->isActive() && !play->isEnabled() && !slider->isEnabled() &&
-                slider->value() == 0,
-            "Leaving diagnostics did not stop/reset short-tool playback");
-    diagnose->click();
+            "A short positive step lost its diagnostic playback, warning or checks");
+    const auto diagnosticJobs = builder->drafts.load();
+    const auto diagnosticEdit = c.session().editRevision();
     slider->setValue(10);
-    stage(1);
-    stage(2);
-    require(!diagnose->isChecked() && !play->isEnabled() && !slider->isEnabled() &&
-                slider->value() == 0 && !timer->isActive(),
-            "Returning to a ready short-tool result restored diagnostic motion");
-    diagnose->click();
+    require(slider->value() == 10 && builder->drafts == diagnosticJobs &&
+                c.session().editRevision() == diagnosticEdit,
+            "Diagnostic scrubbing recalculated CAD or changed the setup");
+    slider->setValue(slider->maximum() - 1);
+    play->click();
+    wait([&] { return !timer->isActive(); });
+    require(c.routeDraft()->request.step == 1 && slider->value() == slider->maximum(),
+            "Diagnostic playback automatically advanced into another operation");
     step(2);
-    require(!diagnose->isChecked() && !play->isEnabled() && !slider->isEnabled() &&
+    require(c.routeDraft()->toolLengths && play->isEnabled() && slider->isEnabled() &&
                 slider->value() == 0 && !timer->isActive(),
-            "Diagnostic permission leaked into another operation");
+            "Opening another short step lost diagnostic playback or started it automatically");
     step(0);
     stage(1);
     require(!messages->isVisible(), "Bend messages escaped into the tool workspace");
@@ -288,9 +342,33 @@ void verifyToolStageTransitions(const QString &folder) {
     window.findChild<QSlider *>("bendPlaybackSpeed")->setValue(8);
     play->click();
     wait([&] { return !c.hasWork() && c.routeDraft() && c.routeDraft()->request.step == 2; });
-    require(c.routeDraft()->toolLengths && !timer->isActive() && !play->isEnabled() &&
-                !slider->isEnabled() && slider->value() == 0 && !diagnose->isChecked(),
+    require(c.routeDraft()->toolLengths && !timer->isActive() && play->isEnabled() &&
+                slider->isEnabled() && slider->value() == 0,
             "Automatic playback continued into a short-tool operation");
+    const auto original = *c.session().bend(indices[1])->catalogTools;
+    auto nearlyFull = original;
+    nearlyFull.punchAssembly.reset();
+    const auto &zone = c.session().document()->metadata().bendAnalysis.bends[indices[1]];
+    nearlyFull.punch.lengthMm = zone.lengthMm - .31259934;
+    nearlyFull.dieAssembly.reset();
+    nearlyFull.die.segments.reset();
+    nearlyFull.die.lengthMm = zone.lengthMm + 1;
+    require(c.setBendToolAssignment(indices[1], nearlyFull),
+            "Cannot install the nearlyFullly full punch");
+    step(2);
+    require(c.routeDraft() && c.routeDraft()->toolLengths &&
+                c.routeDraft()->toolLengths->coversBend(.5) &&
+                window.findChild<QLabel *>("bendCheckSummary")
+                    ->text()
+                    .contains(QLocale().toString(.31, 'f', 2) + QStringLiteral(" мм")),
+            "Minor shortfall disappeared or retained excessive precision");
+    step(1);
+    slider->setValue(slider->maximum() - 1);
+    play->click();
+    wait([&] { return !c.hasWork() && c.routeDraft() && c.routeDraft()->request.step == 3; });
+    if (timer->isActive())
+        play->click();
+    require(c.setBendToolAssignment(indices[1], original), "Cannot restore the short punch");
     step(2);
     window.findChild<QToolButton *>("reversePunch")->click();
     wait([&] { return !c.hasWork(); });
@@ -308,7 +386,7 @@ void verifyToolStageTransitions(const QString &folder) {
         const auto &a = *c.session().bend(i)->catalogTools;
         require(a.punch == (i == indices[1] ? hook : pair.punch) &&
                     a.die == (i == indices[1] ? specialDie : pair.die) &&
-                    c.session().bend(i)->workpieceReversed == (i == indices[1]),
+                    c.session().bend(i)->workpieceReversed == orientations.at(i),
                 "Local tool choice changed another bend, die or part orientation");
     }
     require(c.session().bend(indices[1])->catalogTools->dieAssembly == other.dieAssembly,
@@ -326,7 +404,7 @@ void verifyToolStageTransitions(const QString &folder) {
     for (const auto i : indices) {
         const auto &a = *c.session().bend(i)->catalogTools;
         require(a.punch == hook && a.die == (i == indices[1] ? specialDie : pair.die) &&
-                    c.session().bend(i)->workpieceReversed == (i == indices[1]),
+                    c.session().bend(i)->workpieceReversed == orientations.at(i),
                 "Global punch choice reset another field");
     }
     const auto ready = c.routeDraft();
@@ -624,17 +702,20 @@ int main(int argc, char **argv) {
         auto *partTurn = window.findChild<QToolButton *>("reverseWorkpiece");
         require(partTurn && partTurn->isEnabled(), "Manual workpiece turn missing");
         const auto unturned = controller.routeDraft()->visual;
+        const bool turned = !unturned->workpieceReversed();
         const auto activePart = controller.routeDraft()->request.operations[0].bendIndex;
         partTurn->click();
         wait([&] { return !controller.hasWork(); });
-        require(controller.routeDraft() && controller.routeDraft()->visual->workpieceReversed() &&
-                    controller.session().bend(activePart)->workpieceReversed &&
+        require(controller.routeDraft() &&
+                    controller.routeDraft()->visual->workpieceReversed() == turned &&
+                    controller.session().bend(activePart)->workpieceReversed == turned &&
                     builder->searches == searchesBefore && slider->value() == 10 &&
                     !controller.routeDraft()->request.operations[0].tools->punchReversed,
                 "Manual part turn changed punch, frame or started order search");
         reverse->click();
         wait([&] { return !controller.hasWork(); });
-        require(controller.routeDraft() && controller.routeDraft()->visual->workpieceReversed(),
+        require(controller.routeDraft() &&
+                    controller.routeDraft()->visual->workpieceReversed() == turned,
                 "Manual punch turn reset the workpiece installation");
         reverse->click();
         wait([&] { return !controller.hasWork(); });
@@ -916,13 +997,8 @@ x.XCloseDisplay(d)
         auto *playback = window.findChild<QTimer *>("bendPlaybackTimer");
         auto *play = window.findChild<QPushButton *>("playBend");
         auto *speed = window.findChild<QSlider *>("bendPlaybackSpeed");
-        auto *diagnose = window.findChild<QToolButton *>("shortToolDiagnostic");
-        require(diagnostic->toolLengths && !play->isEnabled() && !slider->isEnabled(),
-                "A colliding short punch bypassed the ordinary playback block");
-        window.findChild<QToolButton *>("checkReportToggle")->setChecked(true);
-        diagnose->click();
-        require(diagnose->isChecked() && slider->isEnabled(),
-                "Explicit short-tool diagnostics cannot inspect the collision");
+        require(diagnostic->toolLengths && slider->isEnabled(),
+                "A short punch with a later collision cannot be inspected");
         const auto draftsBeforePlay = builder->drafts.load(),
                    searchesBeforePlay = builder->searches.load();
         speed->setValue(speed->maximum());
@@ -1041,6 +1117,7 @@ x.XCloseDisplay(d)
         window.close();
         verifyToolStageTransitions(folder.path());
         verifyManualExtraction(folder.path());
+        verifyCompactDraftPublication(folder.path());
         std::cout << "Manual prefixes, collision scope, stable reorder, undo/redo, explicit check "
                      "and stale selection passed\n";
     } catch (const std::exception &e) {

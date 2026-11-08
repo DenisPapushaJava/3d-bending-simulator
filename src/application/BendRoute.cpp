@@ -1,10 +1,39 @@
 #include "bending/application/BendRoute.h"
 #include "bending/application/SingleBendPreview.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/ToolGeometry.h"
 #include <algorithm>
 #include <set>
 
 namespace bending::application {
+std::optional<BendEndSupport> compactDraftCoverage(const RouteDraftRequest &request,
+                                                   const BendAnalysis &analysis) noexcept {
+    if (!request.withTools || !request.step || request.step > request.operations.size() ||
+        !allowsShortToolEndSupport(request.allowPartialEndSupport, request.maximumEndSupportLossMm))
+        return {};
+    const auto &op = request.operations[request.step - 1];
+    if (op.bendIndex >= analysis.bends.size() || !op.tools || !core::validPressTools(*op.tools) ||
+        !op.assignment || !continuousDrawingTools(*op.assignment) ||
+        !validWorkpieceOffset(op.workpieceOffsetMm))
+        return {};
+    const auto &bend = analysis.bends[op.bendIndex];
+    const double tolerance = analysis.lengthToleranceMm;
+    auto interval = trimmedAxialCore(bend);
+    if (!interval ||
+        BendRouteToolLengthIssue{bend.lengthMm, core::punchLengthMm(*op.tools), op.tools->lengthMm}
+            .coversBend(tolerance))
+        return {};
+    if (bendAxisNeedsReversal(bend, tolerance) != op.workpieceReversed)
+        *interval = {bend.lengthMm - (*interval)[1], bend.lengthMm - (*interval)[0]};
+    const auto span = commonToolSpan(*op.tools, bend.lengthMm, op.workpieceOffsetMm);
+    const BendEndSupport covered{bend.lengthMm, std::max(0., span[0]),
+                                 std::min(bend.lengthMm, span[1])};
+    if (coversAxialInterval(span, *interval, tolerance) &&
+        withinEndSupportLimit(covered, request.maximumEndSupportLossMm.value_or(bend.lengthMm),
+                              tolerance))
+        return covered;
+    return {};
+}
 bool sameToolSetupExceptAssemblies(const core::ToolAssignment &a, const core::ToolAssignment &b) {
     // Compare in place: large immutable DXF contours must not be copied just to
     // remove the two small assembly fields.
@@ -19,7 +48,8 @@ bool validRouteAssemblySearch(const BendRouteRequest &request) {
     const auto &s = *request.assemblySearch;
     if (!request.automatic || !request.withTools || s.bendIndices.empty() ||
         s.bendIndices.size() > maximumSheetBends || !std::isfinite(s.maximumGapMm) ||
-        s.maximumGapMm < 0 || s.maximumGapMm > 1000)
+        s.maximumGapMm < 0 || s.maximumGapMm > 1000 ||
+        (s.compactOnly && (s.maximumGapMm != 0 || s.allowDieWindows)))
         return false;
     std::set<std::size_t> seen;
     for (const auto index : s.bendIndices) {
@@ -73,6 +103,14 @@ bool applyRouteAssemblyResult(BendRouteRequest &request, const BendRoute &route)
         if (!valid(assignment->punch, input->assignment->punchAssembly,
                    assignment->punchAssembly) ||
             !valid(assignment->die, input->assignment->dieAssembly, assignment->dieAssembly))
+            return false;
+        if (request.assemblySearch->compactOnly &&
+            (!route.source || !continuousDrawingTools(*assignment) ||
+             index >= route.source->metadata().bendAnalysis.bends.size() ||
+             !trimmedAxialCore(route.source->metadata().bendAnalysis.bends[index]) ||
+             std::min(tools->lengthMm, core::punchLengthMm(*tools)) +
+                     route.source->metadata().bendAnalysis.lengthToleranceMm >=
+                 route.source->metadata().bendAnalysis.bends[index].lengthMm))
             return false;
         updates.emplace_back(static_cast<std::size_t>(input - request.operations.begin()),
                              *assignment);

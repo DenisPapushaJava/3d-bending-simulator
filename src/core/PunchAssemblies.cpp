@@ -100,7 +100,8 @@ std::optional<ToolAssembly> withPunchEnd(const std::vector<ToolSegment> &stock,
 PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, double required,
                                        std::size_t budget, double maximumGap, std::stop_token stop,
                                        std::size_t maximumPlans,
-                                       std::optional<PunchAssemblyEnds> fixedEnds) {
+                                       std::optional<PunchAssemblyEnds> fixedEnds,
+                                       std::optional<double> diagnosticSpanCapMm) {
     PunchAssemblyPlans result;
     if (stop.stop_requested()) {
         result.status = SegmentPlanStatus::Cancelled;
@@ -108,7 +109,9 @@ PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, do
     }
     if (!validToolSegments(stock) || !std::isfinite(required) || required < 1 ||
         required > 100000 || !std::isfinite(maximumGap) || maximumGap < 0 || maximumGap > 1000 ||
-        !budget || budget > 200000 || !maximumPlans || maximumPlans > 32)
+        !budget || budget > 200000 || !maximumPlans || maximumPlans > 32 ||
+        (diagnosticSpanCapMm && (!std::isfinite(*diagnosticSpanCapMm) || *diagnosticSpanCapMm < 1 ||
+                                 *diagnosticSpanCapMm > 100000)))
         return result;
     std::vector<std::optional<std::size_t>> left{std::nullopt}, right{std::nullopt};
     if (fixedEnds) {
@@ -127,7 +130,8 @@ PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, do
             if (stock[i].quantity && stock[i].horn && usableToolSegment(stock[i]))
                 (stock[i].shape == SegmentShape::LeftHorn ? left : right).push_back(i);
     }
-    if (left.size() == 1 && !left.front() && right.size() == 1 && !right.front()) {
+    if (!diagnosticSpanCapMm && left.size() == 1 && !left.front() && right.size() == 1 &&
+        !right.front()) {
         const auto old = planToolSegments(stock, required, budget, maximumGap, stop);
         result.status = old.status;
         if (old.status == SegmentPlanStatus::Complete)
@@ -140,7 +144,9 @@ PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, do
     for (const auto &s : stock)
         if (s.shape == SegmentShape::Straight && s.quantity)
             longest = std::max<Length>(longest, std::llround(s.lengthMm * 1000));
-    const auto ceiling = std::min<Length>(100000000, target + longest - 1);
+    const auto ceiling = diagnosticSpanCapMm
+                             ? static_cast<Length>(std::floor(*diagnosticSpanCapMm * 1000 + 1.e-6))
+                             : std::min<Length>(100000000, target + longest - 1);
     const auto reserve = std::min<std::size_t>(4096, budget / 4);
     // The minimum-piece witness at each length matches the straight reference.
     std::vector<Node> nodes{{0, 0, 0, 0, 0}};
@@ -188,25 +194,40 @@ PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, do
             if (answers.contains(query))
                 continue;
             std::optional<Middle> middle;
-            for (auto at = states.lower_bound(std::max<Length>(0, target - e.length));
-                 at != states.end(); ++at) {
+            const auto first = diagnosticSpanCapMm
+                                   ? states.upper_bound(ceiling - e.length)
+                                   : states.lower_bound(std::max<Length>(0, target - e.length));
+            for (auto at = first;
+                 diagnosticSpanCapMm ? at != states.begin() : at != states.end();) {
                 if (!work.take())
                     break;
-                const auto &node = nodes[at->second];
+                const auto candidate = diagnosticSpanCapMm ? --at : at++;
+                const auto &node = nodes[candidate->second];
                 if (node.count + e.count == 0 || node.count + e.count > 512 ||
-                    at->first + e.length > 100000000)
+                    candidate->first + e.length > 100000000)
                     continue;
-                auto selected = pieces(nodes, at->second);
+                auto selected = pieces(nodes, candidate->second);
                 std::sort(selected.begin(), selected.end(), [&](auto a, auto b) {
                     return std::pair{-stock[a].lengthMm, a} < std::pair{-stock[b].lengthMm, b};
                 });
-                middle = Middle{std::move(selected), 0};
+                double gap = 0;
+                if (diagnosticSpanCapMm && node.count + e.count > 1) {
+                    const auto joints = node.count + e.count - 1;
+                    const auto missing = target - candidate->first - e.length;
+                    if (missing > 0) {
+                        const auto candidateGap = (missing + joints - 1) / joints;
+                        if (candidateGap * joints + candidate->first + e.length <= ceiling &&
+                            static_cast<double>(candidateGap) / 1000 <= maximumGap)
+                            gap = static_cast<double>(candidateGap) / 1000;
+                    }
+                }
+                middle = Middle{std::move(selected), gap};
                 break;
             }
             answers.emplace(query, std::move(middle));
         }
     // A missing gap-free family may still be filled using the allowed joints.
-    if (maximumGap > 0 &&
+    if (!diagnosticSpanCapMm && maximumGap > 0 &&
         std::any_of(answers.begin(), answers.end(), [](const auto &a) { return !a.second; })) {
         std::vector<Node> gapNodes{{0, 0, 0, 0, 0}};
         std::map<std::pair<Length, unsigned>, std::size_t> gaps{{{0, 0}, 0}};
@@ -276,7 +297,8 @@ PunchAssemblyPlans planPunchAssemblies(const std::vector<ToolSegment> &stock, do
             selected.push_back(*e.right);
         ToolAssembly assembly{std::move(selected), answer->gap, {}};
         const auto length = assemblyLength(stock, assembly);
-        if (!length || *length + 1e-6 < required)
+        if (!length || (diagnosticSpanCapMm ? *length > *diagnosticSpanCapMm + 1.e-6
+                                            : *length + 1.e-6 < required))
             continue;
         const auto group = (e.left ? 1U : 0U) + (e.right ? 2U : 0U);
         groups[group].push_back({SegmentPlanStatus::Complete, std::move(assembly), *length});

@@ -51,6 +51,7 @@ struct RouteAssemblySearch {
     std::vector<std::size_t> bendIndices;
     double maximumGapMm = 0;
     bool allowDieWindows = false; // Only after an actual sheet-die collision.
+    bool compactOnly = false;     // Ordinary order search may try only continuous end-relief fits.
 };
 struct BendRouteRequest {
     // Complete list in the requested forward order; Automatic may reorder it.
@@ -203,8 +204,14 @@ struct RouteDraftRequest {
     std::size_t step = 0;
     bool withTools = false;
     std::optional<double> manualThicknessMm;
+    bool allowPartialEndSupport = false;
+    std::optional<double> maximumEndSupportLossMm = {};
     bool operator==(const RouteDraftRequest &) const = default;
 };
+// Axial coverage for a short continuous installation in diagnostic playback.
+// This does not establish die support, collisions or return motion.
+[[nodiscard]] std::optional<BendEndSupport> compactDraftCoverage(const RouteDraftRequest &,
+                                                                 const BendAnalysis &) noexcept;
 struct RouteDraft {
     DocumentPtr source;
     RouteDraftRequest request;
@@ -213,6 +220,8 @@ struct RouteDraft {
     std::size_t checkedToolPositions = 0;
     std::string toolNotice;
     std::optional<BendRouteToolLengthIssue> toolLengths;
+    // Centred axial opening between formed adjacent walls, before allowance.
+    std::optional<double> centredPunchOpeningMm;
     // Actual reuse in this request, independent of whether the geometric basis was warm.
     bool reusedVisual = false;
 };

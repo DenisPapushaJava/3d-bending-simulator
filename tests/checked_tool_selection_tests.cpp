@@ -350,7 +350,8 @@ int main(int argc, char **argv) {
                 builder->last.toolVariants.front().assignment.punch.id == blocked.id &&
                 c.session().bend(0)->catalogTools == saved,
             "Selected-pair assembly search replaced the profile or committed an incomplete result");
-        recommend->click(); // Resume exactly the same fixed-profile search.
+        check(progress->isVisible(), "No continuation for selected-pair search");
+        action->click();
         wait([&] { return !c.hasWork(); });
         check(builder->last.toolVariants.size() == 1 &&
                   builder->last.toolVariants.front().assignment.punch.id == blocked.id,

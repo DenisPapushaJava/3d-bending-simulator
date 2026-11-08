@@ -112,7 +112,10 @@ BendBindings restoreBendPreparations(const BendAnalysis &analysis,
         } while (ids.contains(id));
         ids.insert(id);
         result.byRecognizedBend[b] = entries.size();
-        entries.push_back({std::move(id), anchorOf(analysis.bends[b]), BendReview::Automatic, {}});
+        const auto &bend = analysis.bends[b];
+        BendPreparation entry{std::move(id), anchorOf(bend), BendReview::Automatic, {}};
+        entry.workpieceReversed = bend.preferWorkpieceReversed;
+        entries.push_back(std::move(entry));
     }
     return result;
 }

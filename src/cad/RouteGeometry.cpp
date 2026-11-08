@@ -1,9 +1,34 @@
 #include "RouteGeometry.h"
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <Bnd_Box.hxx>
+#include <Standard_Failure.hxx>
 #include <cmath>
 #include <stdexcept>
 namespace bending::cad {
+std::optional<std::size_t> adjacentSheetWall(const SheetBendRegion &active,
+                                             const SheetBendRegion &other) {
+    if (active.parent == other.parent || active.child == other.parent)
+        return other.child;
+    if (active.parent == other.child || active.child == other.child)
+        return other.parent;
+    return {};
+}
+std::optional<std::array<double, 2>> projectedWallSpan(const TopoDS_Shape &wall,
+                                                       const gp_Pnt &origin, const gp_Dir &axis) {
+    try {
+        gp_Trsf local;
+        local.SetTransformation(gp_Ax3(origin, axis));
+        Bnd_Box projected;
+        BRepBndLib::AddOptimal(wall.Moved(TopLoc_Location(local)), projected, false, false);
+        if (!projected.IsVoid() && !projected.IsOpen())
+            return std::array{projected.CornerMin().Z(), projected.CornerMax().Z()};
+    } catch (const Standard_Failure &) {
+        // Optional placement hint; exact tool checks retain their own geometry.
+    }
+    return {};
+}
 unsigned skinBoundaryMembership(const gp_Pnt &point, const std::array<TopoDS_Shape, 3> &bodies,
                                 double tolerance, std::stop_token stop) {
     if (stop.stop_requested())

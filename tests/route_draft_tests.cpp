@@ -174,6 +174,67 @@ int main(int argc, char **argv) {
                     "A short diagnostic tool was accepted as a checked route");
         }
         if (!sample) {
+            const auto trimmedFile = folder / "trimmed.step";
+            STEPControl_Writer trimmedWriter;
+            require(trimmedWriter.Transfer(fixtures::trimmedBend(), STEPControl_AsIs) ==
+                            IFSelect_RetDone &&
+                        trimmedWriter.Write(trimmedFile.string().c_str()) == IFSelect_RetDone,
+                    "Write asymmetric end fixture");
+            const auto trimmed = resultDocument(cad::StepImporter{}.load(trimmedFile, {}, {}));
+            require(trimmed && trimmed->metadata().bendAnalysis.bends.size() == 1,
+                    "Load asymmetric end fixture");
+            const auto &trimmedBend = trimmed->metadata().bendAnalysis.bends.front();
+            auto pair = tool_fixture::pair(16);
+            pair.punch.lengthMm = pair.die.lengthMm = 77;
+            RouteDraftRequest compact;
+            compact.withTools = compact.allowPartialEndSupport = true;
+            compact.maximumEndSupportLossMm = 4;
+            compact.step = 1;
+            compact.operations.push_back({"B1",
+                                          0,
+                                          {trimmedBend.angleRadians, trimmedBend.innerRadiusMm},
+                                          core::toolParameters(pair),
+                                          pair});
+            cad::SingleBendPreviewBuilder compactBuilder;
+            const auto compactDraft = [&] {
+                auto result = compactBuilder.buildRouteDraft(trimmed, compact, {});
+                if (const auto *error = std::get_if<BendRouteError>(&result))
+                    throw std::runtime_error(error->detail);
+                const auto draft = std::get<RouteDraftPtr>(result);
+                require(draft->visual->unverifiedDraft() &&
+                            draft->checkedToolPositions == draft->visual->frameCount() &&
+                            !draft->visual->pressMotion() && !draft->visual->punchRetraction(),
+                        "Compact draft lost checks or acquired a route certificate");
+                return draft;
+            };
+            std::optional<bool> acceptedLeft;
+            for (const bool reversed : {false, true}) {
+                compact.operations[0].workpieceReversed = reversed;
+                compact.operations[0].workpieceOffsetMm = -2;
+                const auto left = compactDraft();
+                compact.operations[0].workpieceOffsetMm = 2;
+                const auto right = compactDraft();
+                require(bool(left->toolLengths) != bool(right->toolLengths) &&
+                            (!acceptedLeft || *acceptedLeft != !left->toolLengths),
+                        "A compact setup ignored the asymmetric straight interval");
+                acceptedLeft = !left->toolLengths;
+                if (!left->toolLengths)
+                    compact.operations[0].workpieceOffsetMm = -2;
+                const auto warmCompact = compactDraft();
+                require(warmCompact->reusedVisual && !warmCompact->toolLengths &&
+                            warmCompact->visual->uncoveredToolLengthMm() == std::array{0., 0.},
+                        "A valid compact draft lost the working strip");
+                compact.maximumEndSupportLossMm = 3;
+                require(compactDraft()->toolLengths.has_value(),
+                        "A cached compact draft bypassed the stricter end limit");
+                compact.maximumEndSupportLossMm = 4;
+            }
+            pair.punch.segments = std::vector<core::ToolSegment>{{38, 2}};
+            pair.punchAssembly = core::ToolAssembly{{0, 0}, 1};
+            compact.operations[0].assignment = pair;
+            compact.operations[0].tools = core::toolParameters(pair);
+            require(compactDraft()->toolLengths.has_value(),
+                    "An internal gap was treated as trimmed-end allowance");
             const auto thickFile = folder / "six-mm.step";
             STEPControl_Writer writer;
             require(writer.Transfer(fixtures::bentStrip(8, 6), STEPControl_AsIs) ==

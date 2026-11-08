@@ -7,6 +7,10 @@ struct RoutePlacement {
     std::vector<std::function<gp_Pnt(gp_Pnt)>> bends;
 };
 RoutePlacement routePlacement(const SheetLayout &, const std::vector<double> &progress);
+[[nodiscard]] std::optional<std::size_t> adjacentSheetWall(const SheetBendRegion &active,
+                                                           const SheetBendRegion &other);
+[[nodiscard]] std::optional<std::array<double, 2>>
+projectedWallSpan(const TopoDS_Shape &, const gp_Pnt &origin, const gp_Dir &axis);
 TopoDS_Shape makeRouteSector(const simulation::SingleBend &, const gp_Ax3 &, double);
 // Fallback for unclassified display nodes, after the complete solid proof.
 // Retain every matching component, including shared bend rails. No meshing/Boolean.

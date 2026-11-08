@@ -276,6 +276,19 @@ int main() {
                 "Excessive tolerance accepted");
         const SingleBend pressModel{6, 8, std::numbers::pi / 2, 80, 30, 35};
         const auto motion = std::get<PressMotion>(preparePressMotion(pressModel, tools, 1e-5));
+        auto shorter = tools;
+        shorter.lengthMm = pressModel.widthMm - 1;
+        require(std::get<ToolSetupIssue>(flatToolSetup(pressModel, shorter, 1.e-5)) ==
+                    ToolSetupIssue::ToolTooShort,
+                "Default motion accepted a short tool");
+        const auto coreMotion = std::get<PressMotion>(
+            preparePressMotion(pressModel, shorter, 1.e-5, {}, shorter.lengthMm));
+        require(coreMotion.initial.tools == shorter &&
+                    pressMotionState(pressModel, coreMotion, 1).has_value(),
+                "An explicit axial core lost the real tools or the return state");
+        require(std::holds_alternative<PressMotionIssue>(
+                    preparePressMotion(pressModel, shorter, 1.e-5, {}, pressModel.widthMm + 1)),
+                "A core wider than the real bend was accepted");
         close(pressMotionState(pressModel, motion, 0)->punchTipYmm, 16,
               "Wrong initial tip clearance");
         close(pressMotionState(pressModel, motion, 0.2 * pressBendingEndProgress)->punchTipYmm, 6,

@@ -1,5 +1,6 @@
 #include "BendFixtures.h"
 #include "ToolFixtures.h"
+#include "bending/application/BendPreparation.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/PreviewAccess.h"
@@ -152,6 +153,38 @@ int main() {
         auto simpleTool = tool_fixture::pair(16);
         outside.operations.push_back(
             {"bend", 0, target, core::toolParameters(simpleTool), simpleTool});
+        gp_Trsf rotateSource;
+        rotateSource.SetRotation(gp_Ax1(gp_Pnt(), gp_Dir(0, 1, 0)), std::numbers::pi);
+        const auto opposite =
+            load(BRepBuilderAPI_Transform(shape, rotateSource, true).Shape(), "opposite.step");
+        std::array<bool, 2> defaults{};
+        std::size_t variant = 0;
+        for (const auto &source : {doc, opposite}) {
+            const auto &analysis = source->metadata().bendAnalysis;
+            require(analysis.bends.size() == 1, "Missing bend for initial setup");
+            std::vector<BendPreparation> entries;
+            (void)restoreBendPreparations(analysis, entries);
+            require(entries.size() == 1, "Missing new bend preparation");
+            defaults[variant++] = entries.front().workpieceReversed;
+            RouteDraftRequest initial;
+            initial.withTools = true;
+            initial.operations = outside.operations;
+            initial.operations.front().workpieceReversed = entries.front().workpieceReversed;
+            const auto result = builder.buildRouteDraft(source, initial, {});
+            require(std::holds_alternative<RouteDraftPtr>(result), "Initial draft unavailable");
+            Bnd_Box bounds;
+            BRepBndLib::AddOptimal(material(cad::OcctPreviewAccess::frame(
+                                       *std::get<RouteDraftPtr>(result)->visual, 0)),
+                                   bounds, false, false);
+            require(-bounds.CornerMin().X() > bounds.CornerMax().X() + 5,
+                    "Initial draft did not put the long side toward the operator");
+            entries.front().workpieceReversed = !entries.front().workpieceReversed;
+            const auto bindings = restoreBendPreparations(analysis, entries);
+            require(bindings.byRecognizedBend.front() == 0 &&
+                        entries.front().workpieceReversed != defaults[variant - 1],
+                    "Restoring an explicit orientation overwrote it with the default");
+        }
+        require(defaults[0] != defaults[1], "Opposite STEP directions used the same default");
         auto outsideResult = builder.buildRoute(doc, outside, {});
         require(std::holds_alternative<BendRoutePtr>(outsideResult),
                 "Outside preference lost a valid route");
@@ -323,7 +356,7 @@ int main() {
                                                           assignment, {}, 3)) == initial,
                     "Initial checked orientation was not retained");
             assignment.punchReversed = true;
-            const auto opposite = preview(cache.buildAssignedToolMotion(
+            const auto cachedOpposite = preview(cache.buildAssignedToolMotion(
                 source, 0, routeInput.operations.front().target, assignment, {}, 3));
             assignment.punchReversed = false;
             require(preview(cache.buildAssignedToolMotion(source, 0,
@@ -343,7 +376,7 @@ int main() {
             assignment.punchReversed = true;
             require(preview(cache.buildAssignedToolMotion(source, 0,
                                                           routeInput.operations.front().target,
-                                                          assignment, {}, 3)) == opposite,
+                                                          assignment, {}, 3)) == cachedOpposite,
                     "Warm B rebuilt its cycle");
         }
         BendRouteRequest exact = request;

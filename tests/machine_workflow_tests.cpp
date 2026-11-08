@@ -383,7 +383,7 @@ int main(int argc, char **argv) {
         auto *timer = window.findChild<QTimer *>("bendPlaybackTimer");
         auto *floorSummary = window.findChild<QLabel *>("bendCheckSummary");
         require(play && timer && floorSummary &&
-                    floorSummary->text().contains(QStringLiteral("Упор в пол")) &&
+                    floorSummary->text().contains(QStringLiteral("Столкновение с полом")) &&
                     !play->isEnabled() && !timer->isActive(),
                 "Floor collision did not stop playback or lost its explanation");
         if (viewer->isReady()) {

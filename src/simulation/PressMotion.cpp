@@ -16,8 +16,9 @@ double cosc(double a) noexcept {
 }
 } // namespace
 PressMotionResult preparePressMotion(const SingleBend &m, core::PressTools tools, double tolerance,
-                                     std::optional<DieShoulders> shoulders) noexcept {
-    const auto initial = flatToolSetup(m, tools, tolerance, shoulders);
+                                     std::optional<DieShoulders> shoulders,
+                                     std::optional<double> requiredAxialWidthMm) noexcept {
+    const auto initial = flatToolSetup(m, tools, tolerance, shoulders, requiredAxialWidthMm);
     if (!std::holds_alternative<FlatToolSetup>(initial)) {
         return PressMotionIssue::InvalidParameters;
     }
@@ -52,7 +53,8 @@ PressMotionResult preparePressMotion(const SingleBend &m, core::PressTools tools
         maximumQ >= std::min(m.fixedFlangeMm, m.movingFlangeMm) - tolerance) {
         return PressMotionIssue::SupportNotProven;
     }
-    return PressMotion{std::get<FlatToolSetup>(initial), maximumQ, tolerance, shoulders};
+    return PressMotion{std::get<FlatToolSetup>(initial), maximumQ, tolerance, shoulders,
+                       requiredAxialWidthMm};
 }
 Point2Mm dieSupportPoint(const PressMotion &motion, double angle) noexcept {
     const double a =
@@ -117,8 +119,9 @@ static std::optional<PressState> calculateState(const SingleBend &m, const Press
 std::optional<PressState> pressMotionState(const SingleBend &m, const PressMotion &motion,
                                            double progress) noexcept {
     if (!std::isfinite(progress) || progress < 0 || progress > 1 ||
-        !std::holds_alternative<PressMotion>(preparePressMotion(
-            m, motion.initial.tools, motion.lengthToleranceMm, motion.shoulders)))
+        !std::holds_alternative<PressMotion>(
+            preparePressMotion(m, motion.initial.tools, motion.lengthToleranceMm, motion.shoulders,
+                               motion.requiredAxialWidthMm)))
         return {};
     return calculateState(m, motion, progress);
 }

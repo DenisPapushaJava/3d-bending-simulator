@@ -113,11 +113,43 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                 (request.withTools ? p->pressMotion() != nullptr : !p->toolSetup());
             if (p && found != request.operations.end()) {
                 partialEndSupport |= p->hasPartialEndSupport();
-                if (request.withTools && found->tools)
-                    valid &= toolCoversAxialPlacement(
-                        *found->tools, p->model().widthMm, p->workpieceOffsetMm(),
-                        document->metadata().bendAnalysis.lengthToleranceMm);
-                else
+                if (request.withTools && found->tools) {
+                    const auto &analysis = document->metadata().bendAnalysis;
+                    const double tolerance = analysis.lengthToleranceMm;
+                    const auto usedCore = p->axialToolCoreMm();
+                    if (usedCore && step.bendIndex < analysis.bends.size()) {
+                        const auto &bend = analysis.bends[step.bendIndex];
+                        const auto core = trimmedAxialCore(bend);
+                        const auto intervals = p->endSupportIntervals();
+                        const auto span =
+                            commonToolSpan(*found->tools, bend.lengthMm, p->workpieceOffsetMm());
+                        const auto close = [tolerance](const auto &a, const auto &b) {
+                            return std::abs(a[0] - b[0]) <= tolerance &&
+                                   std::abs(a[1] - b[1]) <= tolerance;
+                        };
+                        valid &= allowsShortToolEndSupport(request.allowPartialEndSupport,
+                                                           request.maximumEndSupportLossMm) &&
+                                 step.additionalBends.empty() && found->assignment &&
+                                 continuousDrawingTools(*found->assignment) && core &&
+                                 std::abs(p->model().widthMm - bend.lengthMm) <= tolerance &&
+                                 (close(*usedCore, *core) ||
+                                  close(*usedCore, std::array{bend.lengthMm - (*core)[1],
+                                                              bend.lengthMm - (*core)[0]})) &&
+                                 intervals.size() == 1 && p->hasPartialEndSupport() &&
+                                 coversAxialInterval(span, *usedCore, tolerance) &&
+                                 coversAxialInterval(span,
+                                                     {intervals.front().material.supportedFromMm,
+                                                      intervals.front().material.supportedToMm},
+                                                     tolerance) &&
+                                 coversAxialInterval({intervals.front().material.supportedFromMm,
+                                                      intervals.front().material.supportedToMm},
+                                                     *usedCore, tolerance);
+                    } else {
+                        valid &= !usedCore &&
+                                 toolCoversAxialPlacement(*found->tools, p->model().widthMm,
+                                                          p->workpieceOffsetMm(), tolerance);
+                    }
+                } else
                     valid &= p->workpieceOffsetMm() == 0;
                 valid &= validEndSupportIntervals(
                     *p,
@@ -150,14 +182,7 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                               p->backgauge()->status == BackgaugeStatus::Checked);
                     const auto *ret = p->punchRetraction();
                     valid &= p->frameCount() >= 2 && p->toolSetup() &&
-                             p->toolSetup()->tools == *found->tools &&
-                             core::punchLengthMm(*found->tools) +
-                                     document->metadata().bendAnalysis.lengthToleranceMm >=
-                                 p->model().widthMm &&
-                             found->tools->lengthMm +
-                                     document->metadata().bendAnalysis.lengthToleranceMm >=
-                                 p->model().widthMm &&
-                             p->pressState(0) &&
+                             p->toolSetup()->tools == *found->tools && p->pressState(0) &&
                              p->pressState(0)->phase == simulation::PressPhase::Approach;
                     const auto *last = p->pressState(p->frameCount() - 1);
                     if (request.manualExtraction)

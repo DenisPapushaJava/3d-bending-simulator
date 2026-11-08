@@ -317,6 +317,34 @@ void backgaugeCache(const std::filesystem::path &folder, bool measureOnly) {
                 cached->statistics.backgauge.collisionChecks == 0 &&
                 cached->statistics.backgauge.reusedNoReferenceTransitions == 1,
             "Cached success reported historical contact/collision work");
+    variants.allowWorkpieceRotation = true;
+    variants.maximumChecks = 2;
+    const auto afterLimit = success(builder.buildRoute(doc, variants, {}));
+    require(afterLimit->selectedToolVariant == 1 && afterLimit->evaluatedOperations == 2 &&
+                afterLimit->statistics.testedToolVariants == 2,
+            "The first pair used the check budget reserved for an alternative");
+    auto withMirror = variants;
+    auto mirrored = pair;
+    mirrored.punchReversed = !mirrored.punchReversed;
+    validPair.punch.id += "-alternate";
+    withMirror.toolVariants = {{pair, {}}, {mirrored, {}}, {validPair, {}}};
+    withMirror.maximumChecks = 3;
+    const auto differentFirst = success(builder.buildRoute(doc, withMirror, {}));
+    require(differentFirst->selectedToolVariant == 2 &&
+                differentFirst->statistics.testedToolVariants == 2,
+            "A mirrored incomplete pair held up a different profile");
+    validPair.punch.id = pair.punch.id;
+    auto blockedAlternative = pair;
+    blockedAlternative.backgauge->rMaxMm += .5;
+    variants.toolVariants.back().assignment = blockedAlternative;
+    variants.maximumChecks = 3;
+    const auto mixed = builder.buildRoute(doc, variants, {});
+    const auto *mixedError = std::get_if<BendRouteError>(&mixed);
+    require(mixedError && mixedError->code == BendRouteErrorCode::SearchLimit &&
+                mixedError->evaluatedOperations == 3 &&
+                mixedError->statistics.testedToolVariants == 2 &&
+                mixedError->operationError == BendPreviewErrorCode::BackgaugeUnavailable,
+            "A rejected alternative hid the earlier incomplete trial or its diagnostic");
     auto referenceRequest = request;
     referenceRequest.operations[0].assignment = validPair;
     referenceRequest.operations[0].tools = core::toolParameters(validPair);

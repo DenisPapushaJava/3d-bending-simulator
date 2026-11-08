@@ -62,6 +62,7 @@ jointBendEnvelope(const application::BendAnalysis &analysis, std::span<const std
     result.lengthMm = intervals.back().second - intervals.front().first;
     result.trimmedEnds = true;
     result.minimumStraightLengthMm = 0;
+    result.straightIntervalMm.reset();
     return result;
 }
 } // namespace bending::cad

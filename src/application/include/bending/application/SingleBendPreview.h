@@ -78,6 +78,10 @@ class SingleBendPreview {
     endSupportIntervals() const noexcept {
         return {};
     }
+    // Present only when shorter continuous tools cover the complete measured core.
+    [[nodiscard]] virtual std::optional<std::array<double, 2>> axialToolCoreMm() const noexcept {
+        return {};
+    }
     [[nodiscard]] bool hasPartialEndSupport() const noexcept {
         for (const auto &interval : endSupportIntervals())
             if (interval.material.supportedFromMm > 0 ||
@@ -202,7 +206,7 @@ struct BendPreviewError {
     std::optional<std::size_t> frameIndex = std::nullopt;
     BendPreviewPtr diagnostic = {}; // Safe prefix + failed state, never a successful ToolMotion.
     std::optional<BendEndSupport> endSupport = std::nullopt;
-    // This exact tool-gap refusal may change with workpiece Z; source-strip failures do not.
+    // Tool coverage of the support strip may change with workpiece Z.
     bool axialSupportGap = false;
     std::optional<ToolCollisionPair> toolCollision = std::nullopt;
     // Proposal from the actual Common at this exact pose; never a clearance certificate.

@@ -45,6 +45,10 @@ struct RecognizedBend {
     bool trimmedEnds = false;
     // Conservative common axial span present at every angle on both cylinders.
     double minimumStraightLengthMm = 0.0;
+    // Offsets from axisStart along the canonical axis, on both cylindrical skins.
+    std::optional<std::array<double, 2>> straightIntervalMm = std::nullopt;
+    // Initial setup hint in the canonical bend-axis convention. Saved choices take precedence.
+    bool preferWorkpieceReversed = false;
 };
 // A paired cylindrical sector interrupted by enclosed contours (hole or pocket).
 // Candidate measurements describe its outer boundary, not a supported bend.

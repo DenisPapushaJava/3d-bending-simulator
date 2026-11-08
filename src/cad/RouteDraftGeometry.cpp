@@ -3,6 +3,8 @@
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
+#include "CollisionReuse.h"
+#include "FlatPatternDisplay.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -20,6 +22,7 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -52,6 +55,8 @@ struct Face {
     std::vector<Node> nodes;
     std::size_t region;
     SheetSide side = SheetSide::Neutral;
+    TopoDS_Face source; // Retained while nodes can still require an exact owner.
+    std::optional<std::size_t> owner;
 };
 TopoDS_Compound compound() {
     TopoDS_Compound c;
@@ -63,33 +68,45 @@ Bnd_Box box(const TopoDS_Shape &s) {
     BRepBndLib::AddOptimal(s, b, false, false);
     return b;
 }
+Bnd_Box collisionBox(const TopoDS_Shape &shape, double tolerance) {
+    auto bounds = box(shape);
+    bounds.Enlarge(tolerance);
+    return bounds;
+}
 // Conservative broad phase followed by exact occupied-volume intersection.
-double intersectionVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
-                          std::stop_token stop, TopoDS_Shape *overlap = nullptr) {
+double intersectionVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, const Bnd_Box &aBounds,
+                          const Bnd_Box &bBounds, double tolerance, std::stop_token stop,
+                          TopoDS_Shape *overlap) {
     cancelled(stop);
-    auto ba = box(a), bb = box(b);
-    ba.Enlarge(tolerance);
-    bb.Enlarge(tolerance);
-    if (ba.IsOut(bb))
+    if (aBounds.IsOut(bBounds))
         return 0;
-    BRepAlgoAPI_Common common;
     TopTools_ListOfShape first, second;
     first.Append(a);
     second.Append(b);
-    common.SetArguments(first);
-    common.SetTools(second);
-    common.SetNonDestructive(true);
-    common.SetRunParallel(false);
-    common.SetFuzzyValue(tolerance);
-    common.Build();
-    cancelled(stop);
-    require(common.IsDone() && !common.HasErrors() && BRepCheck_Analyzer(common.Shape()).IsValid(),
-            "Draft collision intersection failed; position is not verified");
+    const auto intersect = [&](double fuzzy) -> TopoDS_Shape {
+        BRepAlgoAPI_Common common;
+        common.SetArguments(first);
+        common.SetTools(second);
+        common.SetNonDestructive(true);
+        common.SetFuzzyValue(fuzzy);
+        common.Build();
+        cancelled(stop);
+        if (common.IsDone() && !common.HasErrors() && !common.Shape().IsNull() &&
+            BRepCheck_Analyzer(common.Shape()).IsValid())
+            return common.Shape();
+        return {};
+    };
+    auto common = intersect(tolerance);
+    // Near-tangent faces can merge at the extra fuzzy tolerance. Retry with
+    // the native BRep tolerances before declaring the draft position unknown.
+    if (common.IsNull() && tolerance > Precision::Confusion())
+        common = intersect(0);
+    require(!common.IsNull(), "Draft collision intersection failed; position is not verified");
     GProp_GProps p;
-    BRepGProp::VolumeProperties(common.Shape(), p);
+    BRepGProp::VolumeProperties(common, p);
     require(std::isfinite(p.Mass()), "Invalid draft collision volume");
     if (overlap && std::abs(p.Mass()) > 0)
-        *overlap = common.Shape();
+        *overlap = common;
     return std::abs(p.Mass());
 }
 } // namespace
@@ -98,6 +115,8 @@ struct RouteDraftBasis::Impl {
     application::FlatPatternPtr flat;
     std::vector<Face> faces;
     std::vector<std::uint32_t> nodeRegions;
+    std::vector<TopoDS_Shape> regionSolids;
+    std::vector<Bnd_Box> regionBoxes;
     std::vector<bool> referenceReversed;
     std::optional<std::size_t> referenceWall;
 };
@@ -115,9 +134,10 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         impl_->referenceReversed[b.bendIndex] =
             normalBendAxis(native, b.bendIndex).Dot(b.sectionAxes.Direction()) < 0;
     std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> classifiers;
-    std::vector<Bnd_Box> boxes;
+    auto &boxes = impl_->regionBoxes;
     const auto add = [&](const TopoDS_Shape &s) {
         classifiers.push_back(std::make_unique<BRepClass3d_SolidClassifier>(s));
+        impl_->regionSolids.push_back(s);
         auto b = box(s);
         b.Enlarge(tolerance * 10);
         boxes.push_back(b);
@@ -155,8 +175,7 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         TopLoc_Location loc;
         const auto mesh = BRep_Tool::Triangulation(face, loc);
         require(!mesh.IsNull(), "Missing draft mesh");
-        Face skin{mesh, face.Orientation(), {}, 0};
-        skin.side = sideLabels[copiedFaces.FindIndex(face)];
+        Face skin{mesh, face.Orientation(), {}, 0, sideLabels[copiedFaces.FindIndex(face)], {}, {}};
         std::vector<std::size_t> votes(classifiers.size());
         for (int i = 1; i <= mesh->NbNodes(); ++i) {
             if ((i & 255) == 0)
@@ -174,6 +193,8 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
             }
             const auto count = impl_->nodeRegions.size() - first;
             require(count != 0, "Original surface is outside the draft decomposition");
+            if (count > 1 && skin.source.IsNull())
+                skin.source = face;
             require(impl_->nodeRegions.size() <= std::numeric_limits<std::uint32_t>::max(),
                     "Draft membership storage limit reached");
             skin.nodes.push_back(
@@ -197,6 +218,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     const auto link = std::find_if(layout.bends.begin(), layout.bends.end(),
                                    [&](const auto &b) { return b.bendIndex == active.bendIndex; });
     require(link != layout.bends.end(), "Draft bend has no layout link");
+    const bool flipped = active.workpieceReversed != impl_->referenceReversed[active.bendIndex];
     auto visual = std::make_shared<CadPreview>();
     visual->draft = true;
     visual->reversed = active.workpieceReversed;
@@ -219,6 +241,28 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     result->source = impl_->source;
     result->request = request;
     result->reusedBasis = reused;
+    if (request.step > 1 && trimmedAxialCore(bend)) {
+        const gp_Pnt start(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z);
+        const gp_Pnt end(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z);
+        const gp_Dir axis(gp_Vec(start, end));
+        const double middle = bend.lengthMm / 2;
+        std::optional<double> left, right;
+        for (const auto &other : layout.bends) {
+            cancelled(stop);
+            if (progress[other.bendIndex] != 1 ||
+                axis.IsParallel(other.sectionAxes.Direction(), analysis.angleToleranceRadians))
+                continue;
+            if (const auto wall = adjacentSheetWall(*link, other))
+                if (const auto span = projectedWallSpan(layout.walls[*wall].solid, start, axis)) {
+                    if ((*span)[1] < middle)
+                        left = std::max(left.value_or((*span)[1]), (*span)[1]);
+                    else if ((*span)[0] > middle)
+                        right = std::min(right.value_or((*span)[0]), (*span)[0]);
+                }
+        }
+        if (left && right)
+            result->centredPunchOpeningMm = 2 * std::min(middle - *left, *right - middle);
+    }
     std::array<TopoDS_Shape, 2> tools;
     std::array<std::vector<ToolDisplaySegment>, 2> segments;
     std::optional<simulation::DieShoulders> shoulders;
@@ -231,16 +275,23 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     if (withTools) {
         const BendRouteToolLengthIssue lengths{bend.lengthMm, core::punchLengthMm(*active.tools),
                                                active.tools->lengthMm};
-        if (!lengths.coversBend(analysis.lengthToleranceMm)) {
-            result->toolLengths = lengths;
-            result->toolNotice = "Инструмент короче линии гиба; полная длина не обеспечена.";
+        const double tolerance = analysis.lengthToleranceMm;
+        require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
+                "Inconsistent draft tool assignment");
+        const auto axialCoverage = compactDraftCoverage(request, analysis);
+        if (!lengths.coversBend(tolerance)) {
+            if (axialCoverage)
+                result->toolNotice = "Оснастка перекрывает прямой участок гиба. Опора у торцов "
+                                     "и отвод оцениваются при полной проверке.";
+            else {
+                result->toolLengths = lengths;
+                result->toolNotice = "Инструмент короче линии гиба; рабочая длина не обеспечена.";
+            }
         } else if (!toolCoversAxialPlacement(*active.tools, bend.lengthMm, active.workpieceOffsetMm,
-                                             analysis.lengthToleranceMm))
+                                             tolerance))
             throw BendRouteError{BendRouteErrorCode::InvalidInput,
                                  "Положение детали выходит за пределы инструмента",
                                  active.bendIndex, 0, BendPreviewErrorCode::ToolTooShort};
-        require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
-                "Inconsistent draft tool assignment");
         if (active.assignment) {
             const double start =
                 (active.tools->lengthMm - bend.lengthMm) / 2 + active.workpieceOffsetMm;
@@ -249,7 +300,9 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                                           double origin) {
                 if (!assembly || !tool.segments)
                     return 0.;
-                double from = start - origin, to = from + bend.lengthMm;
+                double from = start - origin + (axialCoverage ? axialCoverage->supportedFromMm : 0);
+                double to =
+                    start - origin + (axialCoverage ? axialCoverage->supportedToMm : bend.lengthMm);
                 if (tool.kind == core::ToolKind::Punch && active.tools->punchReversed) {
                     const double extent = core::punchLengthMm(*active.tools);
                     const double oldFrom = from;
@@ -280,6 +333,13 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         visual->seatedMount = machineAssembly && machineAssembly->seatedPunchMount();
     }
     Bnd_Box envelope;
+    const double tolerance = analysis.lengthToleranceMm;
+    const auto dieBounds = withTools ? collisionBox(tools[0], tolerance) : Bnd_Box{};
+    std::vector<Bnd_Box> materialBounds;
+    if (withTools)
+        materialBounds.reserve(layout.walls.size() + layout.bends.size());
+    RigidClearanceCache rigidClearances;
+    std::size_t ownerQueries = 0;
     const std::size_t count = request.step ? 21 : 1;
     for (std::size_t f = 0; f < count; ++f) {
         cancelled(stop);
@@ -299,7 +359,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             machine.SetDisplacement(
                 axes, gp_Ax3(gp_Pnt(a.x, a.y, (active.tools->lengthMm - bend.lengthMm) / 2),
                              gp_Dir(0, 0, 1), gp_Dir(a.x - b.x, a.y - b.y, 0)));
-            if (active.workpieceReversed != impl_->referenceReversed[active.bendIndex]) {
+            if (flipped) {
                 gp_Trsf turn;
                 turn.SetRotation(gp_Ax1(gp_Pnt(0, 0, active.tools->lengthMm / 2), gp_Dir(0, 1, 0)),
                                  std::numbers::pi);
@@ -345,15 +405,20 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         std::optional<ToolCollisionPair> collision;
         std::vector<CollisionEvidence> evidence;
         if (withTools) {
-            const double budget =
-                std::max(1.e-6, bend.lengthMm * bend.thicknessMm * analysis.lengthToleranceMm * 2);
+            const double budget = std::max(1.e-6, bend.lengthMm * bend.thicknessMm * tolerance * 2);
+            const std::array toolBounds{dieBounds, collisionBox(frame.tools[1], tolerance)};
+            materialBounds.clear();
+            for (const auto &solid : material) {
+                cancelled(stop);
+                materialBounds.push_back(collisionBox(solid, tolerance));
+            }
             for (std::size_t t = 0; t < 2; ++t) {
                 double overlap = 0;
                 auto occupied = compound();
-                for (const auto &s : material) {
+                for (std::size_t i = 0; i < material.size(); ++i) {
                     TopoDS_Shape common;
-                    overlap += intersectionVolume(s, frame.tools[t], analysis.lengthToleranceMm,
-                                                  stop, &common);
+                    overlap += intersectionVolume(material[i], frame.tools[t], materialBounds[i],
+                                                  toolBounds[t], tolerance, stop, &common);
                     if (!common.IsNull())
                         builder.Add(occupied, common);
                 }
@@ -365,8 +430,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                 }
             }
             TopoDS_Shape toolOverlap;
-            if (intersectionVolume(frame.tools[0], frame.tools[1], analysis.lengthToleranceMm, stop,
-                                   &toolOverlap) > budget) {
+            if (intersectionVolume(frame.tools[0], frame.tools[1], toolBounds[0], toolBounds[1],
+                                   tolerance, stop, &toolOverlap) > budget) {
                 collision = ToolCollisionPair::DiePunch;
                 evidence.push_back({"die", "punch", toolOverlap});
             }
@@ -374,7 +439,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         }
         visual->frameConflicts.push_back(collision);
         const auto machineHits =
-            MachineAssembly::collisions(frame, analysis.lengthToleranceMm, stop);
+            MachineAssembly::collisions(frame, tolerance, stop, &rigidClearances);
         const auto machineCollision = machineHits.empty() ? std::optional<MachineCollision>{}
                                                           : std::optional{machineHits.front().pair};
         visual->machineConflicts.push_back(machineCollision);
@@ -388,22 +453,58 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         std::array<TopoDS_Compound, 3> regions{compound(), compound(), compound()};
         for (std::size_t i = 0; i < n; ++i)
             frame.bendZones.push_back(compound());
-        for (const auto &face : impl_->faces) {
+        for (auto &face : impl_->faces) {
             cancelled(stop);
             Handle(Poly_Triangulation) mesh =
                 new Poly_Triangulation(face.mesh->NbNodes(), face.mesh->NbTriangles(), false);
-            for (std::size_t i = 0; i < face.nodes.size(); ++i) {
-                const auto &node = face.nodes[i];
-                std::optional<gp_Pnt> mapped;
-                for (const auto r :
-                     std::span(impl_->nodeRegions).subspan(node.firstRegion, node.regionCount)) {
-                    const auto next = maps[r](node.point).Transformed(machine);
-                    require(!mapped || mapped->Distance(next) <= .02,
-                            "Inconsistent draft boundary mapping");
-                    mapped = next;
+            const auto setNode = [&](std::size_t i, const gp_Pnt &point) {
+                mesh->SetNode(static_cast<int>(i + 1), point);
+                envelope.Add(point);
+            };
+            if (!face.source.IsNull()) {
+                const auto envelopeBeforeFace = envelope;
+                bool conflict = false;
+                for (std::size_t i = 0; i < face.nodes.size() && !conflict; ++i) {
+                    const auto &node = face.nodes[i];
+                    std::optional<gp_Pnt> mapped;
+                    for (const auto r : std::span(impl_->nodeRegions)
+                                            .subspan(node.firstRegion, node.regionCount)) {
+                        const auto next = maps[r](node.point).Transformed(machine);
+                        if (mapped && mapped->Distance(next) > .02) {
+                            conflict = true;
+                            break;
+                        }
+                        mapped = next;
+                    }
+                    if (mapped)
+                        setNode(i, *mapped);
                 }
-                mesh->SetNode(static_cast<int>(i + 1), *mapped);
-                envelope.Add(*mapped);
+                if (conflict) {
+                    envelope = envelopeBeforeFace;
+                    const auto owner =
+                        sourceFaceRegionOwner(face.source, impl_->regionSolids, impl_->regionBoxes,
+                                              tolerance, ownerQueries, stop);
+                    cancelled(stop);
+                    require(owner.has_value(), "Inconsistent draft boundary mapping");
+                    for (const auto &node : face.nodes) {
+                        const auto candidates = std::span(impl_->nodeRegions)
+                                                    .subspan(node.firstRegion, node.regionCount);
+                        require(std::find(candidates.begin(), candidates.end(), *owner) !=
+                                    candidates.end(),
+                                "Source face owner disagrees with the draft boundary");
+                    }
+                    face.owner = owner;
+                    face.source.Nullify();
+                }
+            }
+            // With one candidate per vertex there is no ambiguity to resolve. Most of a
+            // perforated sheet's faces use this direct path at every frame.
+            if (face.source.IsNull()) {
+                for (std::size_t i = 0; i < face.nodes.size(); ++i) {
+                    const auto &node = face.nodes[i];
+                    const auto region = face.owner.value_or(impl_->nodeRegions[node.firstRegion]);
+                    setNode(i, maps[region](node.point).Transformed(machine));
+                }
             }
             for (int i = 1; i <= face.mesh->NbTriangles(); ++i)
                 mesh->SetTriangle(i, face.mesh->Triangle(i));
@@ -411,17 +512,16 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             TopoDS_Face skin;
             builder.MakeFace(skin, mesh);
             skin.Orientation(face.orientation);
+            const auto region = face.owner.value_or(face.region);
             const bool selected =
-                request.step &&
-                face.region ==
-                    layout.walls.size() + static_cast<std::size_t>(link - layout.bends.begin());
+                request.step && region == layout.walls.size() +
+                                              static_cast<std::size_t>(link - layout.bends.begin());
             builder.Add(regions[selected ? 1 : 0], skin);
             if (face.side != SheetSide::Neutral)
                 frame.orientation.sides[face.side == SheetSide::A ? 0 : 1].push_back(skin);
-            if (face.region >= layout.walls.size())
-                builder.Add(
-                    frame.bendZones[layout.bends[face.region - layout.walls.size()].bendIndex],
-                    skin);
+            if (region >= layout.walls.size())
+                builder.Add(frame.bendZones[layout.bends[region - layout.walls.size()].bendIndex],
+                            skin);
         }
         auto display = compound();
         for (std::size_t i = 0; i < 3; ++i) {

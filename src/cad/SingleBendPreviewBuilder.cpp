@@ -5,6 +5,7 @@
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
 #include "CollisionReuse.h"
+#include "FlatPatternDisplay.h"
 #include "FlatWallRegions.h"
 #include "GeometryCacheInternal.h"
 #include "JointBends.h"
@@ -52,6 +53,7 @@
 #include <gp_Lin.hxx>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <numbers>
 #include <optional>
@@ -379,10 +381,23 @@ splitAtBend(const TopoDS_Shape &source, const PreviewFrame &seed,
         return {};
     return std::array<TopoDS_Shape, 2>{compound(parts[0]), compound(parts[1])};
 }
+std::optional<gp_Pnt> mapWholePartRegion(gp_Pnt point, std::size_t region,
+                                         const std::array<gp_Trsf, 2> &maps,
+                                         const simulation::SingleBend &model,
+                                         const FrameBasis &from, const FrameBasis &to,
+                                         const simulation::BendSection &section) {
+    if (region != 1)
+        return point.Transformed(maps[region / 2]);
+    const gp_Vec v(from.origin, point);
+    if (const auto local = simulation::mapBendPoint(model, {v.Dot(from.x), v.Dot(from.y)}, section))
+        return sectionPoint(to, *local).Translated(to.z * v.Dot(from.z));
+    return {};
+}
 WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
                                    const std::array<TopoDS_Shape, 2> &flanges,
                                    const TopoDS_Shape &sector, double tolerance,
-                                   std::stop_token stop, const std::vector<SheetSide> &sides) {
+                                   std::stop_token stop, const std::vector<SheetSide> &sides,
+                                   const simulation::SingleBend &model, const FrameBasis &basis) {
     // Membership is in immutable SOURCE components and does not depend on the
     // displayed angle. Preserve all rail memberships; never cache across operations.
     WholePartSkin result;
@@ -397,6 +412,13 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
             classifiers[r].push_back(std::make_unique<BRepClass3d_SolidClassifier>(solids(i)));
     }
     std::size_t boundaryFallbacks = 0;
+    std::size_t ownerQueries = 0;
+    std::optional<std::array<Bnd_Box, 3>> ownerBoxes;
+    const auto flat = *simulation::singleBendSection(model, 0.);
+    const auto final = *simulation::singleBendSection(model, 1.);
+    std::array<gp_Trsf, 2> maps;
+    for (std::size_t s = 0; s < maps.size(); ++s)
+        maps[s].SetDisplacement(flangeAxes(basis, final, s == 1), flangeAxes(basis, flat, s == 1));
     TopTools_IndexedMapOfShape sourceFaces;
     TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
     for (TopExp_Explorer f(source, TopAbs_FACE); f.More(); f.Next()) {
@@ -455,6 +477,43 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
         }
         skin.region =
             static_cast<std::size_t>(std::max_element(votes.begin(), votes.end()) - votes.begin());
+        const bool conflict = std::any_of(skin.nodes.begin(), skin.nodes.end(), [&](const auto &n) {
+            if (std::has_single_bit(n.regions))
+                return false;
+            std::optional<gp_Pnt> mapped;
+            for (std::size_t r = 0; r < bodies.size(); ++r) {
+                if (!(n.regions & (1u << r)))
+                    continue;
+                const auto next = mapWholePartRegion(n.point, r, maps, model, basis, basis, flat);
+                if (!next || (mapped && mapped->Distance(*next) > .02))
+                    return true;
+                mapped = next;
+            }
+            return false;
+        });
+        if (conflict) {
+            if (!ownerBoxes) {
+                ownerBoxes.emplace();
+                for (std::size_t r = 0; r < bodies.size(); ++r) {
+                    BRepBndLib::AddOptimal(bodies[r], (*ownerBoxes)[r], false, false);
+                    (*ownerBoxes)[r].Enlarge(tolerance * 10);
+                }
+            }
+            const auto owner =
+                sourceFaceRegionOwner(face, bodies, *ownerBoxes, tolerance, ownerQueries, stop);
+            if (stop.stop_requested())
+                return {};
+            if (!owner)
+                throw std::runtime_error("Inconsistent surface mapping at the active bend rail");
+            const unsigned membership = 1u << *owner;
+            for (auto &node : skin.nodes) {
+                if (!(node.regions & membership))
+                    throw std::runtime_error(
+                        "Source face owner disagrees with the active bend rail");
+                node.regions = membership;
+            }
+            skin.region = *owner;
+        }
         result.push_back(std::move(skin));
     }
     return result;
@@ -485,17 +544,10 @@ void makeWholePartDisplay(PreviewFrame &frame, const WholePartSkin &source,
             for (std::size_t r = 0; r < 3; ++r) {
                 if (!(regions & (1u << r)))
                     continue;
-                gp_Pnt next;
-                if (r == 1) {
-                    const gp_Vec v(from.origin, point);
-                    const auto local =
-                        simulation::mapBendPoint(model, {v.Dot(from.x), v.Dot(from.y)}, section);
-                    if (!local)
-                        throw std::runtime_error("Cannot map active zone surface");
-                    next = sectionPoint(to, *local).Translated(to.z * v.Dot(from.z));
-                } else
-                    next = point.Transformed(maps[r / 2]);
-                if (mapped && mapped->Distance(next) > .02)
+                const auto next = mapWholePartRegion(point, r, maps, model, from, to, section);
+                if (!next)
+                    throw std::runtime_error("Cannot map active zone surface");
+                if (mapped && mapped->Distance(*next) > .02)
                     throw std::runtime_error(
                         "Inconsistent surface mapping at the active bend rail");
                 mapped = next;
@@ -836,13 +888,8 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
     auto axis = gp_Vec(point(bend.axisStart), point(bend.axisEnd));
     // Geometric convention, independent of transient flange/face ordering.
     // Ignore numerical near-zero components before choosing the positive direction.
-    const double tolerance = analysis.lengthToleranceMm;
-    for (const double component : {axis.X(), axis.Y(), axis.Z()})
-        if (std::abs(component) > tolerance) {
-            if (component < 0)
-                axis.Reverse();
-            break;
-        }
+    if (bendAxisNeedsReversal(bend, analysis.lengthToleranceMm))
+        axis.Reverse();
     return gp_Dir(axis);
 }
 PreparedBendOperationResult prepareBendOperation(
@@ -1302,8 +1349,23 @@ PreparedBendOperationResult prepareBendOperation(
                 realTools->dieAssembly ? core::maximumAssemblyGap(*realTools->dieAssembly) : 0,
                 realTools->punchAssembly ? core::maximumAssemblyGap(*realTools->punchAssembly) : 0};
         if (toolParameters) {
-            const auto placement = simulation::flatToolSetup(model, *toolParameters,
-                                                             analysis.lengthToleranceMm, shoulders);
+            const double tolerance = analysis.lengthToleranceMm;
+            std::optional<double> requiredWidth;
+            if (withMotion && !joint &&
+                allowsShortToolEndSupport(allowPartialEndSupport, maximumEndSupportLossMm) &&
+                realTools && continuousDrawingTools(*realTools) &&
+                std::min(toolParameters->lengthMm, core::punchLengthMm(*toolParameters)) +
+                        tolerance <
+                    model.widthMm) {
+                if (auto core = trimmedAxialCore(bend)) {
+                    if (sourceBasis.z.Dot(gp_Vec(point(bend.axisStart), point(bend.axisEnd))) < 0)
+                        *core = {model.widthMm - (*core)[1], model.widthMm - (*core)[0]};
+                    preview->toolCore = core;
+                    requiredWidth = (*core)[1] - (*core)[0];
+                }
+            }
+            const auto placement = simulation::flatToolSetup(model, *toolParameters, tolerance,
+                                                             shoulders, requiredWidth);
             if (const auto *issue = std::get_if<simulation::ToolSetupIssue>(&placement)) {
                 const auto code = *issue == simulation::ToolSetupIssue::ToolTooShort
                                       ? BendPreviewErrorCode::ToolTooShort
@@ -1317,7 +1379,7 @@ PreparedBendOperationResult prepareBendOperation(
             preview->setup = std::get<simulation::FlatToolSetup>(placement);
             if (withMotion) {
                 const auto prepared = simulation::preparePressMotion(
-                    model, *toolParameters, analysis.lengthToleranceMm, shoulders);
+                    model, *toolParameters, tolerance, shoulders, requiredWidth);
                 if (const auto *issue = std::get_if<simulation::PressMotionIssue>(&prepared)) {
                     const auto code = *issue == simulation::PressMotionIssue::ToolAngleConflict
                                           ? BendPreviewErrorCode::ToolAngleConflict
@@ -1557,10 +1619,11 @@ PreparedBendOperationResult prepareBendOperation(
                 BackgaugeSearchStatistics *gaugeStatistics) -> BendPreviewResult {
             const auto ensureSkin = [&]() -> bool {
                 if (!workpiece->display->skin) {
-                    auto skin = partitionedWalls && !displaySource.IsNull()
-                                    ? prepareWholePartSkin(displaySource, flanges, sourceSector,
-                                                           tolerance, placementStop, displaySides)
-                                    : WholePartSkin{};
+                    auto skin =
+                        partitionedWalls && !displaySource.IsNull()
+                            ? prepareWholePartSkin(displaySource, flanges, sourceSector, tolerance,
+                                                   placementStop, displaySides, model, sourceBasis)
+                            : WholePartSkin{};
                     if (placementStop.stop_requested())
                         return false;
                     workpiece->display->skin =
@@ -1577,14 +1640,35 @@ PreparedBendOperationResult prepareBendOperation(
                 (!toolParameters && workpieceOffsetMm != 0))
                 return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                         "Invalid axial workpiece placement"};
-            if (toolParameters && !toolCoversAxialPlacement(*toolParameters, model.widthMm,
-                                                            workpieceOffsetMm, tolerance))
+            if (toolParameters && !prototype->toolCore &&
+                !toolCoversAxialPlacement(*toolParameters, model.widthMm, workpieceOffsetMm,
+                                          tolerance))
                 return BendPreviewError{BendPreviewErrorCode::ToolTooShort,
                                         "Tool assemblies do not cover the axial bend placement"};
             if (prepareDiagnostic && !ensureSkin())
                 return placementCancelled();
             auto placedPreview = std::make_shared<CadPreview>(*prototype);
             placedPreview->axialOffset = workpieceOffsetMm;
+            if (const auto &core = prototype->toolCore) {
+                const auto span = commonToolSpan(*toolParameters, model.widthMm, workpieceOffsetMm);
+                auto &report = placedPreview->supportIntervals.front().material;
+                report.supportedFromMm = std::max(report.supportedFromMm, span[0]);
+                report.supportedToMm = std::min(report.supportedToMm, span[1]);
+                const bool covered = coversAxialInterval(span, *core, tolerance);
+                if (!covered ||
+                    !coversAxialInterval({report.supportedFromMm, report.supportedToMm}, *core,
+                                         tolerance) ||
+                    !withinEndSupportLimit(report, prototype->supportLimit.value_or(model.widthMm),
+                                           tolerance)) {
+                    BendPreviewError failure{
+                        covered ? BendPreviewErrorCode::SupportNotProven
+                                : BendPreviewErrorCode::ToolTooShort,
+                        covered ? "The straight bend core or permitted end support is not covered"
+                                : "Continuous tools do not cover the straight bend core"};
+                    failure.axialSupportGap = true;
+                    return failure;
+                }
+            }
             if (realTools && toolParameters) {
                 const double from =
                     (toolParameters->lengthMm - model.widthMm) / 2 + workpieceOffsetMm;
@@ -1593,9 +1677,13 @@ PreparedBendOperationResult prepareBendOperation(
                                               double toolStart) {
                     double missing = 0;
                     if (assembly && tool.segments)
-                        for (const auto &interval : prototype->supportIntervals) {
+                        for (const auto &interval : placedPreview->supportIntervals) {
                             double start = from + interval.fromMm - toolStart;
                             double end = start + interval.material.bendLengthMm;
+                            if (prototype->toolCore) {
+                                end = start + interval.material.supportedToMm;
+                                start += interval.material.supportedFromMm;
+                            }
                             if (tool.kind == core::ToolKind::Punch &&
                                 toolParameters->punchReversed) {
                                 const double extent = core::punchLengthMm(*toolParameters);

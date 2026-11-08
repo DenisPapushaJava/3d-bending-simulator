@@ -72,9 +72,13 @@ class ToolSelectionWidget final : public QWidget {
     [[nodiscard]] std::optional<double> requiredAssemblyLength() const {
         return selectionRequest_ ? std::optional{selectionRequest_->bendLengthMm} : std::nullopt;
     }
+    [[nodiscard]] std::optional<double> compactSectionMinimumMm() const;
+    [[nodiscard]] std::optional<double> compactPunchMaximumMm() const;
     bool chooseTool(const core::ToolPreset &, std::size_t groove);
     void setSelectionRequest(std::optional<core::ToolSelectionRequest> request,
-                             bool allBends = false, double lengthToleranceMm = 1.e-5);
+                             bool allBends = false, double lengthToleranceMm = 1.e-5,
+                             std::optional<double> compactSectionMinimumMm = {},
+                             std::optional<double> compactPunchMaximumMm = {});
     [[nodiscard]] std::vector<core::ToolAssignment> checkedCandidates() const;
     void suggestForNewPart();
     void setCheckedSearchState(bool busy, const QString &status = {}, bool resumable = false);
@@ -110,7 +114,8 @@ class ToolSelectionWidget final : public QWidget {
     void refreshFavorites();
     void recommend();
     std::array<core::SegmentPlan, 2> fitAssemblies(std::optional<core::ToolKind> only = {},
-                                                   bool preservePunchEnds = false);
+                                                   bool preservePunchEnds = false,
+                                                   bool compact = false);
     void importCatalog();
     void importDxf(std::optional<core::ToolKind> initialKind = {});
     void showLibrary(std::optional<core::ToolKind> kind = {}, bool add = false);
@@ -144,6 +149,8 @@ class ToolSelectionWidget final : public QWidget {
     QLabel *recommendation_;
     std::optional<core::ToolSelectionRequest> selectionRequest_;
     bool allBends_ = false;
+    std::optional<double> compactSectionMinimumMm_;
+    std::optional<double> compactPunchMaximumMm_;
     double lengthToleranceMm_ = 1.e-5;
     QDoubleSpinBox *clearance_;
     QDoubleSpinBox *endSupportLimit_;

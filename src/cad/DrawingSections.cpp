@@ -291,6 +291,20 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
         std::sort(result.begin(), result.end());
         return result;
     };
+    std::vector<std::size_t> obliqueBends;
+    constexpr std::size_t obliqueSectionCandidateLimit = 8;
+    if (bends.size() <= 128)
+        for (std::size_t i = 0;
+             i < bends.size() && obliqueBends.size() < obliqueSectionCandidateLimit; ++i) {
+            cancelled(stop);
+            if (std::none_of(drawing.profiles.begin(), drawing.profiles.end(),
+                             [&](const auto &p) {
+                                 return std::find(p.bends.begin(), p.bends.end(), i) !=
+                                        p.bends.end();
+                             }) &&
+                hasObliqueSectionNeighbour(i, bends))
+                obliqueBends.push_back(i);
+        }
     std::vector<bool> applied(edits.size());
     for (std::size_t i = 0; i < edits.size(); ++i) {
         const auto &edit = edits[i];
@@ -300,16 +314,18 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
              (!std::isfinite(*edit.fraction) || *edit.fraction < 0 || *edit.fraction > 1)) ||
             std::any_of(edits.begin(), edits.begin() + i,
                         [&](const auto &e) { return e.bends == edit.bends; }) ||
-            std::none_of(drawing.profiles.begin(), drawing.profiles.end(),
-                         [&](const auto &p) { return key(p.bends) == edit.bends; }))
+            (std::none_of(drawing.profiles.begin(), drawing.profiles.end(),
+                          [&](const auto &p) { return key(p.bends) == edit.bends; }) &&
+             !(edit.bends.size() == 1 && std::find(obliqueBends.begin(), obliqueBends.end(),
+                                                   edit.bends.front()) != obliqueBends.end())))
             throw DrawingError{"Не удалось сопоставить настройки с исходным сечением"};
     }
-    for (const auto &original : drawing.profiles) {
+    const auto prepare = [&](const DrawingProfile &original, bool oblique) {
         cancelled(stop);
         try {
             const auto initialLocation = location(original, frames, *drawing.classicalViews);
             if (!initialLocation)
-                continue;
+                return;
             const auto &reference = frames[initialLocation->sourceView];
             const auto edit = std::find_if(edits.begin(), edits.end(), [&](const auto &e) {
                 return e.bends == key(original.bends);
@@ -320,19 +336,31 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             std::optional<ActualSection> best;
             DrawingProfile measured = original;
             const auto fractions = manual ? std::vector<double>{*edit->fraction}
-                                          : std::vector<double>{.5, .382, .618, .25, .75};
+                                   : oblique
+                                       ? std::vector<double>{.5, .04, .96, .025, .975, .25, .75}
+                                       : std::vector<double>{.5, .382, .618, .25, .75};
             for (double fraction : fractions) {
-                auto candidate = drawingProfileAt(
-                    original.bends, bends, faces, reference, tolerance, fraction, stop,
-                    {edit != edits.end() ? std::optional(positionAxis) : std::nullopt, reversed});
-                if (!candidate || candidate->segments.size() != original.segments.size())
+                const DrawingProfilePose pose{
+                    edit != edits.end() || oblique ? std::optional(positionAxis) : std::nullopt,
+                    reversed};
+                auto candidate =
+                    oblique ? obliqueSectionProfileAt(original.bends.front(), bends, faces,
+                                                      reference, tolerance, fraction, stop, pose)
+                            : drawingProfileAt(original.bends, bends, faces, reference, tolerance,
+                                               fraction, stop, pose);
+                if (!candidate)
                     continue;
-                bool same = true;
-                for (std::size_t i = 0; i < original.segments.size(); ++i)
-                    same = same && std::abs(candidate->segments[i].dimension.valueMm -
-                                            original.segments[i].dimension.valueMm) <= tolerance;
-                if (!same && !manual)
-                    continue; // Moving a section must not silently shorten a rounded flange.
+                if (!oblique) {
+                    if (candidate->segments.size() != original.segments.size())
+                        continue;
+                    bool same = true;
+                    for (std::size_t i = 0; i < original.segments.size(); ++i)
+                        same =
+                            same && std::abs(candidate->segments[i].dimension.valueMm -
+                                             original.segments[i].dimension.valueMm) <= tolerance;
+                    if (!same && !manual)
+                        continue; // Moving a section must not silently shorten a rounded flange.
+                }
                 std::optional<ActualSection> actual;
                 try {
                     actual = intersect(shape, sectionFrame(*candidate, reference), budget, stop);
@@ -348,13 +376,13 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                     break;
             }
             if (!best)
-                continue;
+                return;
             auto at = location(measured, frames, *drawing.classicalViews);
             if (!at || at->sourceView != initialLocation->sourceView)
-                continue;
+                return;
             const auto basis = sectionFrame(measured, reference);
             if (!aligned(basis, reference, at->marker, tolerance))
-                continue; // Never publish an ordinary section with an unproved orientation.
+                return; // Never publish a section with an unproved orientation.
             double low = -1e100, high = 1e100;
             for (auto index : original.bends) {
                 const auto &bend = bends[index];
@@ -371,7 +399,7 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                               (high - low),
                           0., 1.);
             at->reversed = reversed;
-            std::size_t index = 0;
+            std::size_t index = oblique ? geometries.size() : 0;
             for (; index < geometries.size(); ++index)
                 if (drawing.sections[index].basis &&
                     drawing.sections[index].basis->sourceView == at->sourceView &&
@@ -387,7 +415,7 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
                         throw DrawingError{"Настройки сечения не применены: поддерживается не "
                                            "более 16 различных сечений. Верните «Авто» или "
                                            "измените настройки."};
-                    continue; // Local detail fallback retains the remaining zones.
+                    return; // Local detail fallback retains the remaining zones.
                 }
                 section.designation = names[index];
                 section.normal = measured.normal;
@@ -415,19 +443,44 @@ void prepareClassicalDrawing(const TopoDS_Shape &shape, const TopTools_IndexedMa
             }
             auto &section = drawing.sections[index];
             at->marker.designation = section.designation;
-            section.view.dimensionedBends.insert(section.view.dimensionedBends.end(),
-                                                 measured.bends.begin(), measured.bends.end());
+            if (!oblique)
+                section.view.dimensionedBends.insert(section.view.dimensionedBends.end(),
+                                                     measured.bends.begin(), measured.bends.end());
             section.locations.push_back(std::move(*at));
             if (edit != edits.end())
                 applied[static_cast<std::size_t>(edit - edits.begin())] = true;
         } catch (const Standard_Failure &) {
             // Optional real sections cannot discard the source views or simulation analysis.
         }
+    };
+    for (const auto &profile : drawing.profiles)
+        prepare(profile, false);
+    for (auto index : obliqueBends) {
+        cancelled(stop);
+        if (geometries.size() >= 16)
+            break;
+        const auto &b = bends[index];
+        const auto start = point(b.axisStart), end = point(b.axisEnd);
+        auto axis = gp_Dir(gp_Vec(start, end));
+        for (const auto direction :
+             {frames[0].Direction(), frames[0].YDirection(), frames[0].XDirection()})
+            if (std::abs(axis.Dot(direction)) > 1e-5) {
+                if (axis.Dot(direction) < 0)
+                    axis.Reverse();
+                break;
+            }
+        const auto mid = start.Translated(gp_Vec(start, end) * .5);
+        DrawingProfile seed;
+        seed.bends = {index};
+        seed.station = {mid.X(), mid.Y(), mid.Z()};
+        seed.normal = {axis.X(), axis.Y(), axis.Z()};
+        prepare(seed, true);
     }
     if (std::find(applied.begin(), applied.end(), false) != applied.end())
         throw DrawingError{"В выбранном положении сечение построить не удалось. Измените положение "
                            "или верните «Авто»."};
-    if (drawing.profiles.size() == 1 && drawing.sections.size() == 1 && geometries.size() == 1) {
+    if (drawing.profiles.size() == 1 && drawing.sections.size() == 1 && geometries.size() == 1 &&
+        !drawing.sections.front().view.dimensionedBends.empty()) {
         std::optional<RepeatedDrawingSection> repeat;
         try {
             repeat = repeatedDrawingSection(geometries[0].flat, geometries[0].view,
