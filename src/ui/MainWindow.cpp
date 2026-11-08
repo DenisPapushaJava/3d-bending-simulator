@@ -1555,7 +1555,7 @@ class MainWindow::Impl {
                                       "Станок, держатели и перенос не проверены.")
                      : QString{});
         else if (preview && preview->toolSetup())
-            result = QStringLiteral("Проверена начальная установка.");
+            result = QStringLiteral("Начальная установка проверена.");
         else if (preview)
             result = QStringLiteral("Просмотр без инструмента.");
         else if (!checkBlocker.isEmpty())
@@ -2421,7 +2421,7 @@ class MainWindow::Impl {
         } else if (preview && preview->pressMotion() && preview->punchRetraction()) {
             const auto &report = *preview->punchRetraction();
             previewStatus->setText(
-                QStringLiteral("Подъём пуансона %1 мм. Зазор после отвода %2 мм.")
+                QStringLiteral("Отвод проверен непрерывно. Подъём %1 мм, зазор %2 мм.")
                     .arg(number(report.liftMm), number(report.finalClearanceMm)));
             previewStatus->setToolTip({});
         } else if (preview && preview->toolSetup()) {
@@ -2493,6 +2493,9 @@ class MainWindow::Impl {
                             !previewDisplayError.isEmpty();
         refreshCheckResult();
         routePanel->reportWidget()->setVisible(multiple);
+        if (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled)
+            previewStatus->setText(QStringLiteral("ПРИБЛИЖЕНИЕ: вырезы исключены из проверки.\n") +
+                                   previewStatus->text());
         checkScope->setText(preview && preview->usesDrawingTools()
                                 ? QStringLiteral("Пуансон: %1. Матрица: %2.")
                                       .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
