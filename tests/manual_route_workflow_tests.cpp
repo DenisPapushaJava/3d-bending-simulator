@@ -1,5 +1,6 @@
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include "bending/project/ProjectFiles.h"
@@ -134,6 +135,69 @@ void verifyManualExtraction(const QString &folder) {
     wait([&] { return !controller.hasWork(); });
     require(!controller.bendRoute() && builder->searches == searches,
             "Changing return scope retained an old certificate or searched implicitly");
+    controller.closeDocument();
+    window.close();
+}
+void verifyCompactDraftPublication(const QString &folder) {
+    const auto stepPath = folder + "/compact.step";
+    STEPControl_Writer writer;
+    require(writer.Transfer(fixtures::trimmedBend(), STEPControl_AsIs) == IFSelect_RetDone &&
+                writer.Write(stepPath.toUtf8().constData()) == IFSelect_RetDone,
+            "Cannot write the compact draft fixture");
+    auto files = std::make_shared<project::ProjectFiles>();
+    const auto source = application::resultDocument(files->load(stepPath.toStdString(), {}, {}));
+    require(source && source->metadata().bendAnalysis.bends.size() == 1,
+            "Cannot load the compact draft fixture");
+    const auto &analysis = source->metadata().bendAnalysis;
+    const auto &bend = analysis.bends.front();
+    const auto interval = application::trimmedAxialCore(bend);
+    require(interval.has_value(), "The compact draft fixture lost its straight interval");
+    const bool startsNearToolEnd = (*interval)[0] > bend.lengthMm - (*interval)[1];
+    const double offset =
+        startsNearToolEnd != application::bendAxisNeedsReversal(bend, analysis.lengthToleranceMm)
+            ? -1.5
+            : 1.5;
+    auto pair = tool_fixture::pair(16);
+    pair.punch.lengthMm = pair.die.lengthMm = 78;
+    application::DocumentSession seed;
+    require(seed.complete(seed.beginImport(stepPath.toStdString()), source) &&
+                seed.setBendToolAssignment(0, pair) && seed.setBendWorkpieceOffset(0, offset),
+            "Cannot prepare the compact draft installation");
+    const auto project = folder + "/compact.bend";
+    require(!files->save(project.toStdString(), *source, {}, seed.bends(), {}),
+            "Cannot save the compact draft installation");
+    auto builder = std::make_shared<Builder>();
+    ui::MainWindow window({"test", "test"}, files, files, builder, {pair.punch, pair.die});
+    window.setAutomaticPartInputPrompt(false);
+    window.show();
+    auto &controller = window.importController();
+    window.openStep(project);
+    wait([&] { return !controller.hasWork(); });
+    const auto &session = controller.session();
+    const auto *entry = session.bend(0);
+    const auto target = session.bendTarget(0);
+    require(entry && target, "The compact draft installation failed to open");
+    application::RouteDraftRequest request;
+    request.step = 1;
+    request.withTools = request.allowPartialEndSupport = true;
+    request.maximumEndSupportLossMm = 3;
+    request.operations.push_back({entry->id, 0, *target, entry->tools, entry->catalogTools,
+                                  entry->workpieceReversed, entry->workpieceOffsetMm});
+    require(controller.prepareRouteDraft(request, builder), "Cannot request compact playback");
+    wait([&] { return !controller.hasWork(); });
+    const auto accepted = controller.routeDraft();
+    if (const auto error = controller.routeDraftError())
+        throw std::runtime_error("Compact draft publication: " + error->detail);
+    require(accepted && !accepted->toolLengths && !controller.routeDraftError() &&
+                accepted->checkedToolPositions == accepted->visual->frameCount(),
+            "The interface rejected a compact draft with valid axial coverage");
+    auto strict = accepted->request;
+    strict.maximumEndSupportLossMm = 0;
+    require(controller.prepareRouteDraft(strict, builder), "Cannot request strict end coverage");
+    wait([&] { return !controller.hasWork(); });
+    require(controller.routeDraft() && controller.routeDraft()->toolLengths &&
+                !controller.routeDraftError(),
+            "The interface lost the length warning when end allowance was disabled");
     controller.closeDocument();
     window.close();
 }
@@ -1041,6 +1105,7 @@ x.XCloseDisplay(d)
         window.close();
         verifyToolStageTransitions(folder.path());
         verifyManualExtraction(folder.path());
+        verifyCompactDraftPublication(folder.path());
         std::cout << "Manual prefixes, collision scope, stable reorder, undo/redo, explicit check "
                      "and stale selection passed\n";
     } catch (const std::exception &e) {

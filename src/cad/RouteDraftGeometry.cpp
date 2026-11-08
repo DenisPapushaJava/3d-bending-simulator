@@ -268,29 +268,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         const double tolerance = analysis.lengthToleranceMm;
         require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
                 "Inconsistent draft tool assignment");
-        std::optional<BendEndSupport> axialCoverage;
+        const auto axialCoverage = compactDraftCoverage(request, analysis);
         if (!lengths.coversBend(tolerance)) {
-            if (request.step &&
-                allowsShortToolEndSupport(request.allowPartialEndSupport,
-                                          request.maximumEndSupportLossMm) &&
-                active.assignment && continuousDrawingTools(*active.assignment)) {
-                if (auto core = trimmedAxialCore(bend)) {
-                    const gp_Vec axis(bend.axisEnd.x - bend.axisStart.x,
-                                      bend.axisEnd.y - bend.axisStart.y,
-                                      bend.axisEnd.z - bend.axisStart.z);
-                    if ((axis.Dot(gp_Vec(link->sectionAxes.Direction())) < 0) != flipped)
-                        *core = {bend.lengthMm - (*core)[1], bend.lengthMm - (*core)[0]};
-                    const auto span =
-                        commonToolSpan(*active.tools, bend.lengthMm, active.workpieceOffsetMm);
-                    const BendEndSupport covered{bend.lengthMm, std::max(0., span[0]),
-                                                 std::min(bend.lengthMm, span[1])};
-                    if (coversAxialInterval(span, *core, tolerance) &&
-                        withinEndSupportLimit(
-                            covered, request.maximumEndSupportLossMm.value_or(bend.lengthMm),
-                            tolerance))
-                        axialCoverage = covered;
-                }
-            }
             if (axialCoverage)
                 result->toolNotice = "Оснастка перекрывает прямой участок гиба. Опора у торцов "
                                      "и отвод оцениваются при полной проверке.";

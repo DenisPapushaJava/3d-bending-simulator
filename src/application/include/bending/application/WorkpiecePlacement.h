@@ -57,6 +57,16 @@ trimmedAxialCore(const RecognizedBend &bend) noexcept {
                                                     std::optional<double> limit) noexcept {
     return partial && (!limit || *limit > 0);
 }
+// The first component outside the geometric tolerance fixes the positive axis.
+[[nodiscard]] inline bool bendAxisNeedsReversal(const RecognizedBend &bend,
+                                                double tolerance) noexcept {
+    for (const double component :
+         {bend.axisEnd.x - bend.axisStart.x, bend.axisEnd.y - bend.axisStart.y,
+          bend.axisEnd.z - bend.axisStart.z})
+        if (std::abs(component) > tolerance)
+            return component < 0;
+    return false;
+}
 // Offsets that cover the required material with both working edges. A shorter
 // continuous pair can have an off-centre range even when the nominal range is zero.
 [[nodiscard]] inline std::array<double, 2>

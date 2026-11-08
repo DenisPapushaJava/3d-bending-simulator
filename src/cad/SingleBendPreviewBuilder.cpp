@@ -888,13 +888,8 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
     auto axis = gp_Vec(point(bend.axisStart), point(bend.axisEnd));
     // Geometric convention, independent of transient flange/face ordering.
     // Ignore numerical near-zero components before choosing the positive direction.
-    const double tolerance = analysis.lengthToleranceMm;
-    for (const double component : {axis.X(), axis.Y(), axis.Z()})
-        if (std::abs(component) > tolerance) {
-            if (component < 0)
-                axis.Reverse();
-            break;
-        }
+    if (bendAxisNeedsReversal(bend, analysis.lengthToleranceMm))
+        axis.Reverse();
     return gp_Dir(axis);
 }
 PreparedBendOperationResult prepareBendOperation(

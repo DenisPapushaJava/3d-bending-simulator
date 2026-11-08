@@ -375,7 +375,8 @@ void ImportController::Impl::dispatchDraft() {
                                     const BendRouteToolLengthIssue lengths{
                                         analysis.bends[op.bendIndex].lengthMm,
                                         core::punchLengthMm(*op.tools), op.tools->lengthMm};
-                                    if (!lengths.coversBend(analysis.lengthToleranceMm))
+                                    if (!lengths.coversBend(analysis.lengthToleranceMm) &&
+                                        !compactDraftCoverage(job.request, analysis))
                                         expectedLengths = lengths;
                                 }
                                 valid &= (*value)->toolLengths == expectedLengths;

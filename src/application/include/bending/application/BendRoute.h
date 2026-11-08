@@ -208,6 +208,10 @@ struct RouteDraftRequest {
     std::optional<double> maximumEndSupportLossMm = {};
     bool operator==(const RouteDraftRequest &) const = default;
 };
+// Axial coverage for a short continuous installation in diagnostic playback.
+// This does not establish die support, collisions or return motion.
+[[nodiscard]] std::optional<BendEndSupport> compactDraftCoverage(const RouteDraftRequest &,
+                                                                 const BendAnalysis &) noexcept;
 struct RouteDraft {
     DocumentPtr source;
     RouteDraftRequest request;
