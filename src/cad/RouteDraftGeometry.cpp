@@ -3,6 +3,7 @@
 #include "BendOperation.h"
 #include "CadPreview.h"
 #include "CollisionHighlight.h"
+#include "CollisionReuse.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -63,14 +64,17 @@ Bnd_Box box(const TopoDS_Shape &s) {
     BRepBndLib::AddOptimal(s, b, false, false);
     return b;
 }
+Bnd_Box collisionBox(const TopoDS_Shape &shape, double tolerance) {
+    auto bounds = box(shape);
+    bounds.Enlarge(tolerance);
+    return bounds;
+}
 // Conservative broad phase followed by exact occupied-volume intersection.
-double intersectionVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
-                          std::stop_token stop, TopoDS_Shape *overlap = nullptr) {
+double intersectionVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, const Bnd_Box &aBounds,
+                          const Bnd_Box &bBounds, double tolerance, std::stop_token stop,
+                          TopoDS_Shape *overlap) {
     cancelled(stop);
-    auto ba = box(a), bb = box(b);
-    ba.Enlarge(tolerance);
-    bb.Enlarge(tolerance);
-    if (ba.IsOut(bb))
+    if (aBounds.IsOut(bBounds))
         return 0;
     BRepAlgoAPI_Common common;
     TopTools_ListOfShape first, second;
@@ -280,6 +284,12 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         visual->seatedMount = machineAssembly && machineAssembly->seatedPunchMount();
     }
     Bnd_Box envelope;
+    const double tolerance = analysis.lengthToleranceMm;
+    const auto dieBounds = withTools ? collisionBox(tools[0], tolerance) : Bnd_Box{};
+    std::vector<Bnd_Box> materialBounds;
+    if (withTools)
+        materialBounds.reserve(layout.walls.size() + layout.bends.size());
+    RigidClearanceCache rigidClearances;
     const std::size_t count = request.step ? 21 : 1;
     for (std::size_t f = 0; f < count; ++f) {
         cancelled(stop);
@@ -345,15 +355,20 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         std::optional<ToolCollisionPair> collision;
         std::vector<CollisionEvidence> evidence;
         if (withTools) {
-            const double budget =
-                std::max(1.e-6, bend.lengthMm * bend.thicknessMm * analysis.lengthToleranceMm * 2);
+            const double budget = std::max(1.e-6, bend.lengthMm * bend.thicknessMm * tolerance * 2);
+            const std::array toolBounds{dieBounds, collisionBox(frame.tools[1], tolerance)};
+            materialBounds.clear();
+            for (const auto &solid : material) {
+                cancelled(stop);
+                materialBounds.push_back(collisionBox(solid, tolerance));
+            }
             for (std::size_t t = 0; t < 2; ++t) {
                 double overlap = 0;
                 auto occupied = compound();
-                for (const auto &s : material) {
+                for (std::size_t i = 0; i < material.size(); ++i) {
                     TopoDS_Shape common;
-                    overlap += intersectionVolume(s, frame.tools[t], analysis.lengthToleranceMm,
-                                                  stop, &common);
+                    overlap += intersectionVolume(material[i], frame.tools[t], materialBounds[i],
+                                                  toolBounds[t], tolerance, stop, &common);
                     if (!common.IsNull())
                         builder.Add(occupied, common);
                 }
@@ -365,8 +380,8 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                 }
             }
             TopoDS_Shape toolOverlap;
-            if (intersectionVolume(frame.tools[0], frame.tools[1], analysis.lengthToleranceMm, stop,
-                                   &toolOverlap) > budget) {
+            if (intersectionVolume(frame.tools[0], frame.tools[1], toolBounds[0], toolBounds[1],
+                                   tolerance, stop, &toolOverlap) > budget) {
                 collision = ToolCollisionPair::DiePunch;
                 evidence.push_back({"die", "punch", toolOverlap});
             }
@@ -374,7 +389,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
         }
         visual->frameConflicts.push_back(collision);
         const auto machineHits =
-            MachineAssembly::collisions(frame, analysis.lengthToleranceMm, stop);
+            MachineAssembly::collisions(frame, tolerance, stop, &rigidClearances);
         const auto machineCollision = machineHits.empty() ? std::optional<MachineCollision>{}
                                                           : std::optional{machineHits.front().pair};
         visual->machineConflicts.push_back(machineCollision);
