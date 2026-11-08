@@ -9,8 +9,13 @@ RouteDraftCache::Key RouteDraftCache::key(const RouteDraftRequest &request) {
     std::uint64_t formed = 0;
     for (std::size_t i = 0; i + 1 < request.step; ++i)
         formed |= std::uint64_t{1} << request.operations.at(i).bendIndex;
-    return {formed, request.operations.at(request.step ? request.step - 1 : 0), request.step == 0,
-            request.withTools};
+    const bool partial = request.step != 0 && request.allowPartialEndSupport;
+    return {formed,
+            request.operations.at(request.step ? request.step - 1 : 0),
+            request.step == 0,
+            request.withTools,
+            partial,
+            partial ? request.maximumEndSupportLossMm : std::nullopt};
 }
 RouteDraftPtr RouteDraftCache::find(DocumentPtr source, const RouteDraftRequest &request) {
     const auto wanted = key(request);

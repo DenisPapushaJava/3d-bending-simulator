@@ -531,7 +531,8 @@ class RouteSearch {
     }
     bool tryCommonAssembly(Mask full) {
         if (!request.preferCommonAssembly || !request.automatic || !request.withTools ||
-            !request.assemblySearch || accessObstacles.empty() || request.operations.size() < 2)
+            !request.assemblySearch || request.assemblySearch->compactOnly ||
+            accessObstacles.empty() || request.operations.size() < 2)
             return false;
         const auto &first = request.operations.front();
         if (!first.assignment || !first.assignment->punchAssembly ||
@@ -582,7 +583,8 @@ class RouteSearch {
     }
     bool tryCommonHornAssemblies(Mask full) {
         if (!request.preferCommonAssembly || !request.automatic || !request.withTools ||
-            !request.assemblySearch || request.operations.size() < 2)
+            !request.assemblySearch || request.assemblySearch->compactOnly ||
+            request.operations.size() < 2)
             return false;
         const auto &first = request.operations.front();
         if (!first.assignment || !first.assignment->punch.segments ||
@@ -1347,6 +1349,7 @@ class RouteSearch {
         }
         const bool planning =
             !commonAssemblyPhase && mayPlan(op.bendIndex) && op.assignment &&
+            (!request.assemblySearch->compactOnly || additional.empty()) &&
             std::all_of(additional.begin(), additional.end(), [&](const auto &m) {
                 return mayPlan(m.bendIndex) && m.assignment &&
                        sameToolSetupExceptAssemblies(*op.assignment, *m.assignment);
@@ -1364,6 +1367,9 @@ class RouteSearch {
             candidate.assignment->punchAssembly = assemblies.first;
             candidate.assignment->dieAssembly = assemblies.second;
             candidate.tools = core::toolParameters(*candidate.assignment);
+            if (request.assemblySearch->compactOnly && candidate.assignment != op.assignment &&
+                !continuousDrawingTools(*candidate.assignment))
+                return false;
             auto members = additional;
             for (auto &member : members) {
                 member.assignment->punchAssembly = assemblies.first;
@@ -1394,7 +1400,11 @@ class RouteSearch {
             if (tryAssembly(assemblies))
                 return true;
         bool triedAfterCollision = !compact.empty();
-        for (const auto &assemblies : assemblyAlternatives(op, required)) {
+        const auto ordinary = request.assemblySearch->compactOnly
+                                  ? std::vector<AssemblyPair>{{op.assignment->punchAssembly,
+                                                               op.assignment->dieAssembly}}
+                                  : assemblyAlternatives(op, required);
+        for (const auto &assemblies : ordinary) {
             if (std::find(compact.begin(), compact.end(), assemblies) == compact.end() &&
                 tryAssembly(assemblies))
                 return true;
@@ -1713,8 +1723,8 @@ class RouteSearch {
                     std::abs(member.target.innerRadiusMm - op.target.innerRadiusMm) > tolerance ||
                     (request.withTools &&
                      (member.tools != op.tools || member.assignment != op.assignment) &&
-                     !(mayPlan(op.bendIndex) && mayPlan(member.bendIndex) && op.assignment &&
-                       member.assignment &&
+                     !(mayPlan(op.bendIndex) && mayPlan(member.bendIndex) &&
+                       !request.assemblySearch->compactOnly && op.assignment && member.assignment &&
                        sameToolSetupExceptAssemblies(*op.assignment, *member.assignment))))
                     continue;
                 if (!request.automatic &&
@@ -1878,6 +1888,12 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
         if (!n || n > maximumSheetBends || request.operations.size() != n || request.step > n)
             return BendRouteError{BendRouteErrorCode::InvalidInput,
                                   "Requires every bend, up to 32 zones"};
+        if ((request.allowPartialEndSupport && !request.withTools) ||
+            (request.maximumEndSupportLossMm &&
+             (!request.allowPartialEndSupport ||
+              !validEndSupportLimitMm(*request.maximumEndSupportLossMm))))
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "Partial end support requires explicit tool preview"};
         std::set<std::size_t> indices;
         std::set<std::string> ids;
         for (const auto &op : request.operations) {

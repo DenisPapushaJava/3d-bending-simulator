@@ -694,6 +694,21 @@ class MainWindow::Impl {
                                                          operation.bendIndex))
                     scope.bendIndices.push_back(operation.bendIndex);
             request.assemblySearch = std::move(scope);
+        } else if (automatic && withTools &&
+                   allowsShortToolEndSupport(request.allowPartialEndSupport,
+                                             request.maximumEndSupportLossMm)) {
+            application::RouteAssemblySearch scope;
+            scope.maximumGapMm = 0;
+            scope.compactOnly = true;
+            const auto &bends = session.document()->metadata().bendAnalysis.bends;
+            for (const auto &operation : request.operations)
+                if (operation.bendIndex < bends.size() &&
+                    trimmedAxialCore(bends[operation.bendIndex]) && operation.assignment &&
+                    (operation.assignment->punch.segments || operation.assignment->die.segments) &&
+                    core::hasCompleteDrawingToolGeometry(*operation.assignment))
+                    scope.bendIndices.push_back(operation.bendIndex);
+            if (!scope.bendIndices.empty())
+                request.assemblySearch = std::move(scope);
         }
         if (!checkedTooling) {
             beginPreviewReplacement();
@@ -1856,6 +1871,8 @@ class MainWindow::Impl {
         request.step = static_cast<std::size_t>(routePanel->selected());
         // Manual preview never offers a switch that suppresses tool intersections.
         request.withTools = true;
+        request.allowPartialEndSupport = true;
+        request.maximumEndSupportLossMm = toolSelection->maximumEndSupportLossMm();
         if (toolDraftChanged && !commitStageTools())
             return;
         if (const auto index = routePanel->selectedBend()) {

@@ -205,6 +205,25 @@ void shortenedContinuousTool() {
         require(applyBendRouteResult(f.session, f.request, f.route),
                 "A shorter continuous tool covering the measured core was rejected");
     }
+    {
+        Fixture f(true, true);
+        prepare(f);
+        auto &input = f.request.operations.front();
+        input.assignment->punch.segments = input.assignment->die.segments =
+            std::vector<core::ToolSegment>{{80, 1}, {78, 1}};
+        input.assignment->punchAssembly = input.assignment->dieAssembly = core::ToolAssembly{{0}};
+        input.tools = core::toolParameters(*input.assignment);
+        auto compact = *input.assignment;
+        compact.punchAssembly = compact.dieAssembly = core::ToolAssembly{{1}};
+        f.request.automatic = true;
+        f.request.assemblySearch = RouteAssemblySearch{{0}, 0, false, true};
+        f.route->steps.back().assemblyAssignment =
+            std::make_shared<const core::ToolAssignment>(compact);
+        f.previews.back()->setup.tools = *core::toolParameters(compact);
+        require(applyBendRouteResult(f.session, f.request, f.route) &&
+                    f.session.bend(0)->catalogTools == compact,
+                "Ordinary search could not publish a fully checked compact assembly");
+    }
     for (int failure = 0; failure < 4; ++failure) {
         Fixture f(true, failure != 0);
         prepare(f);

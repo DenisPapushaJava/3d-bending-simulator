@@ -1,5 +1,6 @@
 #include "bending/application/BendRoute.h"
 #include "bending/application/SingleBendPreview.h"
+#include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/ToolGeometry.h"
 #include <algorithm>
 #include <set>
@@ -19,7 +20,8 @@ bool validRouteAssemblySearch(const BendRouteRequest &request) {
     const auto &s = *request.assemblySearch;
     if (!request.automatic || !request.withTools || s.bendIndices.empty() ||
         s.bendIndices.size() > maximumSheetBends || !std::isfinite(s.maximumGapMm) ||
-        s.maximumGapMm < 0 || s.maximumGapMm > 1000)
+        s.maximumGapMm < 0 || s.maximumGapMm > 1000 ||
+        (s.compactOnly && (s.maximumGapMm != 0 || s.allowDieWindows)))
         return false;
     std::set<std::size_t> seen;
     for (const auto index : s.bendIndices) {
@@ -73,6 +75,14 @@ bool applyRouteAssemblyResult(BendRouteRequest &request, const BendRoute &route)
         if (!valid(assignment->punch, input->assignment->punchAssembly,
                    assignment->punchAssembly) ||
             !valid(assignment->die, input->assignment->dieAssembly, assignment->dieAssembly))
+            return false;
+        if (request.assemblySearch->compactOnly &&
+            (!route.source || !continuousDrawingTools(*assignment) ||
+             index >= route.source->metadata().bendAnalysis.bends.size() ||
+             !trimmedAxialCore(route.source->metadata().bendAnalysis.bends[index]) ||
+             std::min(tools->lengthMm, core::punchLengthMm(*tools)) +
+                     route.source->metadata().bendAnalysis.lengthToleranceMm >=
+                 route.source->metadata().bendAnalysis.bends[index].lengthMm))
             return false;
         updates.emplace_back(static_cast<std::size_t>(input - request.operations.begin()),
                              *assignment);

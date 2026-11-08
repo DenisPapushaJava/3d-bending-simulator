@@ -24,6 +24,8 @@ class RouteDraftCache final {
         std::uint64_t formed;
         application::RouteOperation active;
         bool blank, withTools;
+        bool allowPartialEndSupport;
+        std::optional<double> maximumEndSupportLossMm;
         bool operator==(const Key &) const = default;
     };
     struct Visual {

@@ -208,6 +208,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     const auto link = std::find_if(layout.bends.begin(), layout.bends.end(),
                                    [&](const auto &b) { return b.bendIndex == active.bendIndex; });
     require(link != layout.bends.end(), "Draft bend has no layout link");
+    const bool flipped = active.workpieceReversed != impl_->referenceReversed[active.bendIndex];
     auto visual = std::make_shared<CadPreview>();
     visual->draft = true;
     visual->reversed = active.workpieceReversed;
@@ -264,16 +265,44 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
     if (withTools) {
         const BendRouteToolLengthIssue lengths{bend.lengthMm, core::punchLengthMm(*active.tools),
                                                active.tools->lengthMm};
-        if (!lengths.coversBend(analysis.lengthToleranceMm)) {
-            result->toolLengths = lengths;
-            result->toolNotice = "Инструмент короче линии гиба; полная длина не обеспечена.";
+        const double tolerance = analysis.lengthToleranceMm;
+        require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
+                "Inconsistent draft tool assignment");
+        std::optional<BendEndSupport> axialCoverage;
+        if (!lengths.coversBend(tolerance)) {
+            if (request.step &&
+                allowsShortToolEndSupport(request.allowPartialEndSupport,
+                                          request.maximumEndSupportLossMm) &&
+                active.assignment && continuousDrawingTools(*active.assignment)) {
+                if (auto core = trimmedAxialCore(bend)) {
+                    const gp_Vec axis(bend.axisEnd.x - bend.axisStart.x,
+                                      bend.axisEnd.y - bend.axisStart.y,
+                                      bend.axisEnd.z - bend.axisStart.z);
+                    if ((axis.Dot(gp_Vec(link->sectionAxes.Direction())) < 0) != flipped)
+                        *core = {bend.lengthMm - (*core)[1], bend.lengthMm - (*core)[0]};
+                    const auto span =
+                        commonToolSpan(*active.tools, bend.lengthMm, active.workpieceOffsetMm);
+                    const BendEndSupport covered{bend.lengthMm, std::max(0., span[0]),
+                                                 std::min(bend.lengthMm, span[1])};
+                    if (coversAxialInterval(span, *core, tolerance) &&
+                        withinEndSupportLimit(
+                            covered, request.maximumEndSupportLossMm.value_or(bend.lengthMm),
+                            tolerance))
+                        axialCoverage = covered;
+                }
+            }
+            if (axialCoverage)
+                result->toolNotice = "Оснастка перекрывает прямой участок гиба. Опора у торцов "
+                                     "и отвод оцениваются при полной проверке.";
+            else {
+                result->toolLengths = lengths;
+                result->toolNotice = "Инструмент короче линии гиба; рабочая длина не обеспечена.";
+            }
         } else if (!toolCoversAxialPlacement(*active.tools, bend.lengthMm, active.workpieceOffsetMm,
-                                             analysis.lengthToleranceMm))
+                                             tolerance))
             throw BendRouteError{BendRouteErrorCode::InvalidInput,
                                  "Положение детали выходит за пределы инструмента",
                                  active.bendIndex, 0, BendPreviewErrorCode::ToolTooShort};
-        require(!active.assignment || core::toolParameters(*active.assignment) == active.tools,
-                "Inconsistent draft tool assignment");
         if (active.assignment) {
             const double start =
                 (active.tools->lengthMm - bend.lengthMm) / 2 + active.workpieceOffsetMm;
@@ -282,7 +311,9 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                                           double origin) {
                 if (!assembly || !tool.segments)
                     return 0.;
-                double from = start - origin, to = from + bend.lengthMm;
+                double from = start - origin + (axialCoverage ? axialCoverage->supportedFromMm : 0);
+                double to =
+                    start - origin + (axialCoverage ? axialCoverage->supportedToMm : bend.lengthMm);
                 if (tool.kind == core::ToolKind::Punch && active.tools->punchReversed) {
                     const double extent = core::punchLengthMm(*active.tools);
                     const double oldFrom = from;
@@ -339,7 +370,7 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             machine.SetDisplacement(
                 axes, gp_Ax3(gp_Pnt(a.x, a.y, (active.tools->lengthMm - bend.lengthMm) / 2),
                              gp_Dir(0, 0, 1), gp_Dir(a.x - b.x, a.y - b.y, 0)));
-            if (active.workpieceReversed != impl_->referenceReversed[active.bendIndex]) {
+            if (flipped) {
                 gp_Trsf turn;
                 turn.SetRotation(gp_Ax1(gp_Pnt(0, 0, active.tools->lengthMm / 2), gp_Dir(0, 1, 0)),
                                  std::numbers::pi);
