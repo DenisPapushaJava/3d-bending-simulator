@@ -1,10 +1,12 @@
 #include "FlatPatternDisplay.h"
+#include "bending/application/FlatPattern.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/DocumentAccess.h"
 #include "bending/cad/occt/PreviewAccess.h"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -94,6 +96,34 @@ void sourceFaceOwnership() {
     require(!mesh.IsNull() && mesh->NbNodes() >= 4, "Missing remapped face mesh");
     for (int i = 1; i <= mesh->NbNodes(); ++i)
         require(mesh->Node(i).X() <= 1. + 1.e-7, "The adjacent transform moved a cap vertex");
+
+    // A source boundary vertex just inside the second region is classified by
+    // both in the fast path. Only the true shared edge maps continuously.
+    BRepBuilderAPI_MakePolygon polygon;
+    for (const auto &p :
+         {gp_Pnt(0, 0, 0), gp_Pnt(1.005, 0, 0), gp_Pnt(2, 0, 0), gp_Pnt(2, 1, 0), gp_Pnt(0, 1, 0)})
+        polygon.Add(p);
+    polygon.Close();
+    const auto cap = BRepBuilderAPI_MakeFace(polygon.Wire()).Face();
+    const auto regions = [&](double gap) {
+        return std::vector<FlatDisplayRegion>{{solids[0], [](gp_Pnt p) { return p; }},
+                                              {solids[1], [gap](gp_Pnt p) {
+                                                   p.SetY(p.Y() + 8 * (p.X() - 1) + gap);
+                                                   return p;
+                                               }}};
+    };
+    const auto split = flatCutoutDisplay(cap, regions(0), {}, .001, {});
+    TopTools_IndexedMapOfShape fragments;
+    TopExp::MapShapes(split.surface, TopAbs_FACE, fragments);
+    require(fragments.Extent() == 2 && split.faceSides.size() == 3 && split.contours.empty(),
+            "The split cap lost a piece or turned a generated seam into a cutout");
+    bool rejected = false;
+    try {
+        (void)flatCutoutDisplay(cap, regions(.03), {}, .001, {});
+    } catch (const bending::application::FlatPatternError &error) {
+        rejected = error.detail == "Split source surface has an open seam after unfolding";
+    }
+    require(rejected, "Disagreeing maps were accepted at a split source seam");
 }
 } // namespace
 int main() {

@@ -1,6 +1,8 @@
 #include "FlatPatternDisplay.h"
 #include "bending/application/FlatPattern.h"
+#include <BOPAlgo_Splitter.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -17,6 +19,7 @@
 #include <Poly_Triangulation.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
@@ -27,6 +30,7 @@
 namespace bending::cad {
 namespace {
 struct RetryWithFaceOwner {};
+struct SplitSourceFace {};
 void check(bool ok, const char *message) {
     if (!ok)
         throw application::FlatPatternError{application::FlatPatternErrorCode::UnsupportedGeometry,
@@ -38,6 +42,11 @@ double segmentDistance(gp_Pnt p, gp_Pnt a, gp_Pnt b) {
                          ? std::clamp(gp_Vec(a, p).Dot(ab) / ab.SquareMagnitude(), 0., 1.)
                          : 0;
     return p.Distance(a.Translated(ab * f));
+}
+double surfaceArea(const TopoDS_Shape &shape) {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
 }
 struct Outline {
     std::vector<gp_Pnt> points;
@@ -61,15 +70,10 @@ std::optional<std::size_t> sourceFaceRegionOwner(const TopoDS_Face &face,
                                                  std::span<const TopoDS_Shape> regions,
                                                  std::span<const Bnd_Box> boxes, double tolerance,
                                                  std::size_t &queries, std::stop_token stop) {
-    const auto area = [](const TopoDS_Shape &shape) {
-        GProp_GProps props;
-        BRepGProp::SurfaceProperties(shape, props);
-        return props.Mass();
-    };
     try {
         Bnd_Box faceBox;
         BRepBndLib::AddOptimal(face, faceBox, false, false);
-        const auto total = area(face);
+        const auto total = surfaceArea(face);
         if (!std::isfinite(total) || total <= 1.e-8)
             return {};
         const double areaTolerance = std::max(1.e-8, total * 1.e-7);
@@ -94,7 +98,7 @@ std::optional<std::size_t> sourceFaceRegionOwner(const TopoDS_Face &face,
             if (stop.stop_requested() || !common.IsDone() || common.HasErrors() ||
                 common.Shape().IsNull())
                 return {};
-            const auto covered = area(common.Shape());
+            const auto covered = surfaceArea(common.Shape());
             if (!std::isfinite(covered) || covered < 0)
                 return {};
             if (covered <= areaTolerance)
@@ -109,6 +113,104 @@ std::optional<std::size_t> sourceFaceRegionOwner(const TopoDS_Face &face,
         return {};
     }
 }
+namespace {
+// Split just the source display face. The verified calculation solid is unchanged.
+std::vector<std::pair<TopoDS_Face, std::size_t>>
+splitDisplayFace(const TopoDS_Face &face, std::span<const FlatDisplayRegion> regions,
+                 std::span<const TopoDS_Shape> solids, std::span<const Bnd_Box> boxes,
+                 double tolerance, std::size_t &queries, std::stop_token stop) {
+    constexpr auto error = "Cannot prove the split source surface at an unfolded boundary";
+    const auto cancelled = [&] {
+        if (stop.stop_requested())
+            throw application::FlatPatternError{application::FlatPatternErrorCode::Cancelled,
+                                                "Cancelled"};
+    };
+    TopExp_Explorer wires(face, TopAbs_WIRE);
+    check(wires.More(), error);
+    wires.Next();
+    // Keep the original cutout-wire path. A conflicting perforated face needs
+    // separate proof that its original wires survive the split.
+    check(!wires.More() && BRepAdaptor_Surface(face, false).GetType() == GeomAbs_Plane, error);
+    Bnd_Box bounds;
+    BRepBndLib::AddOptimal(face, bounds, false, false);
+    BOPAlgo_Splitter splitter;
+    splitter.SetNonDestructive(true);
+    splitter.SetFuzzyValue(tolerance);
+    splitter.AddArgument(face);
+    std::size_t candidates = 0;
+    for (std::size_t i = 0; i < solids.size(); ++i)
+        if (!boxes[i].IsOut(bounds)) {
+            check(++candidates <= 8, error);
+            splitter.AddTool(solids[i]);
+        }
+    check(candidates >= 2 && queries < sourceFaceRegionQueryLimit, error);
+    ++queries;
+    cancelled();
+    splitter.Perform();
+    cancelled();
+    check(!splitter.HasErrors() && !splitter.Shape().IsNull() &&
+              BRepCheck_Analyzer(splitter.Shape()).IsValid(),
+          error);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(splitter.Shape(), TopAbs_FACE, faces);
+    check(faces.Extent() >= 2 && faces.Extent() <= 16, error);
+    const double area = surfaceArea(face);
+    const double areaTolerance = std::max(1.e-8, area * 1.e-7);
+    std::vector<std::size_t> owners;
+    double covered = 0;
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const auto part = TopoDS::Face(faces(i));
+        const auto owner = sourceFaceRegionOwner(part, solids, boxes, tolerance, queries, stop);
+        cancelled();
+        const double amount = surfaceArea(part);
+        check(owner.has_value() && std::isfinite(amount) && amount > areaTolerance, error);
+        owners.push_back(*owner);
+        covered += amount;
+    }
+    check(std::isfinite(area) && std::abs(covered - area) <= areaTolerance &&
+              std::any_of(owners.begin(), owners.end(),
+                          [&](auto owner) { return owner != owners.front(); }),
+          error);
+    TopTools_IndexedMapOfShape boundary;
+    for (TopExp_Explorer e(face, TopAbs_EDGE); e.More(); e.Next()) {
+        boundary.Add(e.Current());
+        for (const auto &modified : splitter.Modified(e.Current()))
+            boundary.Add(modified);
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape adjacent;
+    TopExp::MapShapesAndAncestors(splitter.Shape(), TopAbs_EDGE, TopAbs_FACE, adjacent);
+    for (int i = 1; i <= adjacent.Extent(); ++i) {
+        cancelled();
+        const auto &edge = adjacent.FindKey(i);
+        const auto &parts = adjacent.FindFromIndex(i);
+        if (boundary.Contains(edge)) {
+            check(parts.Extent() == 1, error);
+            continue;
+        }
+        check(parts.Extent() == 2 && !parts.First().IsSame(parts.Last()), error);
+        const auto a = owners.at(faces.FindIndex(parts.First()) - 1);
+        const auto b = owners.at(faces.FindIndex(parts.Last()) - 1);
+        if (a == b)
+            continue;
+        BRepAdaptor_Curve curve(TopoDS::Edge(edge));
+        const auto first = curve.FirstParameter(), last = curve.LastParameter();
+        check(std::isfinite(first) && std::isfinite(last), error);
+        for (int sample = 0; sample <= 8; ++sample) {
+            const auto p = curve.Value(first + (last - first) * sample / 8);
+            check(regions[a].map(p).Distance(regions[b].map(p)) <= .02,
+                  "Split source surface has an open seam after unfolding");
+        }
+    }
+    BRepBuilderAPI_Copy copy(splitter.Shape(), true, false);
+    BRepMesh_IncrementalMesh mesh(copy.Shape(), .02, false, .1, false);
+    cancelled();
+    check(mesh.IsDone(), "Cannot mesh the split source surface");
+    std::vector<std::pair<TopoDS_Face, std::size_t>> result;
+    for (int i = 1; i <= faces.Extent(); ++i)
+        result.emplace_back(TopoDS::Face(copy.ModifiedShape(faces(i))), owners[i - 1]);
+    return result;
+}
+} // namespace
 FlatCutoutDisplay flatCutoutDisplay(const TopoDS_Shape &source,
                                     const std::vector<FlatDisplayRegion> &regions, gp_Vec shift,
                                     double tolerance, std::stop_token stop,
@@ -146,8 +248,8 @@ FlatCutoutDisplay flatCutoutDisplay(const TopoDS_Shape &source,
                 owner =
                     sourceFaceRegionOwner(face, regionSolids, boxes, tolerance, ownerQueries, stop);
                 cancelled();
-                check(owner.has_value(),
-                      "Ambiguous source surface mapping at an unfolded boundary");
+                if (!owner)
+                    throw SplitSourceFace{};
                 throw RetryWithFaceOwner{};
             }
             mapped = next;
@@ -176,11 +278,23 @@ FlatCutoutDisplay flatCutoutDisplay(const TopoDS_Shape &source,
     TopoDS_Compound skin;
     BRep_Builder builder;
     builder.MakeCompound(skin);
+    const auto publishMesh = [&](const TopoDS_Face &face, const Handle(Poly_Triangulation) & mesh,
+                                 const Handle(Poly_Triangulation) & sourceMesh, SheetSide side) {
+        for (int t = 1; t <= sourceMesh->NbTriangles(); ++t)
+            mesh->SetTriangle(t, sourceMesh->Triangle(t));
+        mesh->Deflection(.02);
+        TopoDS_Face display;
+        builder.MakeFace(display, mesh);
+        display.Orientation(face.Orientation());
+        builder.Add(skin, display);
+        result.faceSides.push_back(side);
+    };
     std::vector<Outline> outlines;
     std::size_t pointCount = 0;
     for (TopExp_Explorer f(copy, TopAbs_FACE); f.More(); f.Next()) {
         cancelled();
         const auto face = TopoDS::Face(f.Current());
+        const auto side = sides[copiedFaces.FindIndex(face)];
         TopLoc_Location location;
         const auto original = BRep_Tool::Triangulation(face, location);
         check(!original.IsNull(), "Missing original surface triangulation");
@@ -252,15 +366,25 @@ FlatCutoutDisplay flatCutoutDisplay(const TopoDS_Shape &source,
             faceOutlines.clear();
             pointCount = previousPointCount;
             mapFace();
+        } catch (const SplitSourceFace &) {
+            pointCount = previousPointCount;
+            for (const auto &[part, index] : splitDisplayFace(face, regions, regionSolids, boxes,
+                                                              tolerance, ownerQueries, stop)) {
+                TopLoc_Location partLocation;
+                const auto nodes = BRep_Tool::Triangulation(part, partLocation);
+                check(!nodes.IsNull(), "Missing split source surface triangulation");
+                Handle(Poly_Triangulation) patch =
+                    new Poly_Triangulation(nodes->NbNodes(), nodes->NbTriangles(), false);
+                for (int n = 1; n <= nodes->NbNodes(); ++n)
+                    patch->SetNode(
+                        n, regions[index]
+                               .map(nodes->Node(n).Transformed(partLocation.Transformation()))
+                               .Translated(shift));
+                publishMesh(part, patch, nodes, side);
+            }
+            continue;
         }
-        for (int t = 1; t <= original->NbTriangles(); ++t)
-            mesh->SetTriangle(t, original->Triangle(t));
-        mesh->Deflection(.02);
-        TopoDS_Face display;
-        builder.MakeFace(display, mesh);
-        display.Orientation(face.Orientation());
-        builder.Add(skin, display);
-        result.faceSides.push_back(sides[copiedFaces.FindIndex(face)]);
+        publishMesh(face, mesh, original, side);
         for (auto &contour : faceOutlines) {
             Bnd_Box bounds;
             for (const auto &point : contour)
