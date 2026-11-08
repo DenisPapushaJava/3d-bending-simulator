@@ -31,4 +31,14 @@ drawingProfileAt(const std::vector<std::size_t> &members,
                  const std::vector<application::RecognizedBend> &bends,
                  const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference, double tolerance,
                  double fraction, std::stop_token stop, DrawingProfilePose pose = {});
+
+// Partial dimensions are only for annotating the actual CAD intersection.
+[[nodiscard]] bool
+hasObliqueSectionNeighbour(std::size_t index,
+                           const std::vector<application::RecognizedBend> &bends);
+[[nodiscard]] std::optional<application::DrawingProfile>
+obliqueSectionProfileAt(std::size_t index, const std::vector<application::RecognizedBend> &bends,
+                        const TopTools_IndexedMapOfShape &faces, const gp_Ax2 &reference,
+                        double tolerance, double fraction, std::stop_token stop,
+                        DrawingProfilePose pose = {});
 } // namespace bending::cad

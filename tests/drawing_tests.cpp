@@ -346,7 +346,7 @@ void ovalVisibility(const QString &folder) {
             "An arbitrary bounding-box midpoint was called an oval axis");
 }
 
-TopoDS_Shape taperedChannel() {
+TopoDS_Shape taperedChannel(bool returnLip = true) {
     const double pi = std::numbers::pi, angle = pi / 60, extent = 400;
     const auto part = [&](bool right) {
         BRepBuilderAPI_MakeWire wire;
@@ -361,11 +361,15 @@ TopoDS_Shape taperedChannel() {
         if (right) {
             arc(80, 6, 6, 1.5 * pi, 2 * pi);
             line({86, 6, 0}, {86, 40, 0});
-            arc(80, 40, 6, 0, pi / 2);
-            line({80, 46, 0}, {60, 46, 0});
-            line({60, 46, 0}, {60, 44, 0});
-            line({60, 44, 0}, {80, 44, 0});
-            arc(80, 40, 4, pi / 2, 0);
+            if (returnLip) {
+                arc(80, 40, 6, 0, pi / 2);
+                line({80, 46, 0}, {60, 46, 0});
+                line({60, 46, 0}, {60, 44, 0});
+                line({60, 44, 0}, {80, 44, 0});
+                arc(80, 40, 4, pi / 2, 0);
+            } else {
+                line({86, 40, 0}, {84, 40, 0});
+            }
             line({84, 40, 0}, {84, 6, 0});
             arc(80, 6, 4, 0, -pi / 2);
             line({80, 2, 0}, {80, 0, 0});
@@ -478,6 +482,35 @@ void variableProfile(const QString &folder) {
     require(std::abs(movedSeparation - separation) < 1e-4,
             "World rotation changed the measured interval");
     require(moved->views[1].visibleOpeningCount == 2, "World rotation hid oval centers");
+}
+
+void obliqueSectionFallback(const QString &folder) {
+    const auto document = load(taperedChannel(false), folder + "/oblique-sections.step");
+    const auto drawing = build(document);
+    require(drawing->bends.size() == 2 && drawing->profiles.empty() &&
+                drawing->sections.size() == 2,
+            "Two nonparallel bends lost their exact sections or produced false schematics");
+    for (const auto &section : drawing->sections) {
+        require(section.basis && section.locations.size() == 1 &&
+                    section.locations.front().bends.size() == 1 &&
+                    section.view.sectionLoops.size() == 1 && section.view.angles.size() == 1 &&
+                    section.view.groupedBendNotes.size() == 1 &&
+                    section.view.dimensionedBends.empty() && section.view.dimensions.size() == 1 &&
+                    std::abs(section.view.dimensions.front().valueMm - 40) < 1e-5,
+                "Oblique cut lost the true flange size or dimensioned its slanted neighbor");
+    }
+    const auto &first = drawing->sections.front();
+    application::DrawingRequest request;
+    request.sectionEdits.push_back({first.locations.front().bends, .2, true});
+    const auto edited = build(document, request);
+    const auto &changed = edited->sections.front();
+    require(changed.locations.front().reversed &&
+                std::abs(changed.locations.front().fraction - .2) < 1e-10 &&
+                std::abs(first.normal.x + changed.normal.x) < 1e-8 &&
+                std::abs(first.normal.y + changed.normal.y) < 1e-8 &&
+                std::abs(first.normal.z + changed.normal.z) < 1e-8 &&
+                ui::DrawingSheet::writePdf(folder + "/oblique-sections.pdf", *edited, {}).isEmpty(),
+            "Oblique section could not be moved, reversed or exported");
 }
 
 void basicProjectionDimensions(const QString &folder) {
@@ -3171,6 +3204,7 @@ int main(int argc, char **argv) {
         composition(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());
+        obliqueSectionFallback(temp.path());
         holePositions(temp.path());
         ovalVisibility(temp.path());
         geometry(temp.path());
