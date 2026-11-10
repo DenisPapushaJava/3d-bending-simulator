@@ -101,9 +101,9 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
             selected = material_->count() - 1;
     }
     if (!selected && !settings_.customMaterialName.empty()) {
-        const auto name = materialName(settings_);
-        presets.push_back({name, settings_.material, settings_.manualK, {}});
-        material_->addItem(name);
+        const auto categoryName = materialName(settings_);
+        presets.push_back({categoryName, settings_.material, settings_.manualK, {}});
+        material_->addItem(categoryName);
         selected = material_->count() - 1;
     }
     if (!selected && settings_.manualK)
