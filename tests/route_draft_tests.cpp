@@ -298,12 +298,12 @@ int main(int argc, char **argv) {
             for (const auto &draft : {sections, mirrored}) {
                 for (const auto index : {0u, 10u, 20u}) {
                     const auto &colored = cad::OcctPreviewAccess::frame(*draft->visual, index);
-                    for (std::size_t tool = 0; tool < colored.tools.size(); ++tool) {
-                        require(colored.toolSegments[tool].size() == 2,
+                    for (std::size_t toolIndex = 0; toolIndex < colored.tools.size(); ++toolIndex) {
+                        require(colored.toolSegments[toolIndex].size() == 2,
                                 "Tool movement lost the color sections");
                         TopTools_IndexedMapOfShape faces;
-                        TopExp::MapShapes(colored.tools[tool], TopAbs_FACE, faces);
-                        for (const auto &segment : colored.toolSegments[tool]) {
+                        TopExp::MapShapes(colored.tools[toolIndex], TopAbs_FACE, faces);
+                        for (const auto &segment : colored.toolSegments[toolIndex]) {
                             TopTools_IndexedMapOfShape segmentFaces;
                             TopExp::MapShapes(segment.shape, TopAbs_FACE, segmentFaces);
                             for (int face = 1; face <= segmentFaces.Extent(); ++face)

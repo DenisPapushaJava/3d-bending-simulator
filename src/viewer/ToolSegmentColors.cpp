@@ -31,6 +31,6 @@ QColor toolSegmentColor(double lengthMm, const ToolSegmentColors &overrides) {
     constexpr std::int64_t goldenAngle = 137508;
     const auto phase = (*key * goldenAngle) % turn;
     const double hue = 30. + 300. * static_cast<double>(phase) / turn;
-    return QColor::fromHsvF(hue / 360., .32, .70);
+    return QColor::fromHsvF(static_cast<float>(hue / 360.), .32f, .70f);
 }
 } // namespace bending::viewer
