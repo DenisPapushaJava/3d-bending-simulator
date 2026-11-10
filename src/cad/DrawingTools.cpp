@@ -33,17 +33,20 @@
 #include <stdexcept>
 #include <vector>
 namespace bending::cad {
-TopoDS_Shape orientPunch(const TopoDS_Shape &shape, const core::PressTools &tools) {
+TopoDS_Shape orientPunch(const TopoDS_Shape &shape, const core::PressTools &tools,
+                         std::vector<ToolDisplaySegment> *segments) {
     if (!tools.punchReversed || shape.IsNull())
         return shape;
     gp_Trsf rotation;
     rotation.SetRotation(gp_Ax1(gp_Pnt(0, 0, tools.lengthMm / 2), gp_Dir(0, 1, 0)),
                          std::numbers::pi);
-    return shape.Moved(TopLoc_Location(rotation));
-}
-void orientPunchSegments(std::vector<ToolDisplaySegment> &segments, const core::PressTools &tools) {
-    for (auto &segment : segments)
-        segment.shape = orientPunch(segment.shape, tools);
+    // The viewer binds colors to exact subshapes. Equal transforms with distinct
+    // location identities do not identify the same OCCT face.
+    const TopLoc_Location location(rotation);
+    if (segments)
+        for (auto &segment : *segments)
+            segment.shape = segment.shape.Moved(location);
+    return shape.Moved(location);
 }
 namespace {
 using namespace core;

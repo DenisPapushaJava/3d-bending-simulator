@@ -240,6 +240,21 @@ void testPartInputs() {
     auto current = s.editRevision();
     require(s.setPartInputs(rev, current, {}, steel) && s.editRevision() == current,
             "Unchanged form invalidates caches");
+    ProjectDrawingSettings drawing;
+    drawing.material = "St3";
+    drawing.quantity = 7;
+    require(s.setDrawingSettings(rev, drawing), "Cannot save drawing material");
+    const auto drawingRevision = s.drawingRevision();
+    steel.manualK = .43;
+    require(s.setUnfoldSettings(steel) && s.drawingSettings()->material == "St3" &&
+                s.drawingRevision() == drawingRevision,
+            "Changing only K cleared the drawing grade");
+    const core::UnfoldSettings stainless{core::SheetMaterial::StainlessSteel, {}, 1};
+    require(s.setPartInputs(rev, s.editRevision(), {}, stainless) &&
+                s.drawingSettings()->material.empty() && s.drawingSettings()->quantity == 7 &&
+                s.drawingRevision() == drawingRevision + 1,
+            "Changing material category retained its previous drawing grade");
+    current = s.editRevision();
     const auto pending = s.beginImport("other.step");
     require(!s.setPartInputs(rev, current, 6., steel), "Edited during import");
     s.cancel();

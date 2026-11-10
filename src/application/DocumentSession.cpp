@@ -307,11 +307,20 @@ bool DocumentSession::markSaved(std::uint64_t editRevision, std::filesystem::pat
     modified_ = false;
     return true;
 }
+void DocumentSession::applyUnfoldSettings(core::UnfoldSettings settings) {
+    const bool categoryChanged = unfold_.material != settings.material ||
+                                 unfold_.customMaterialName != settings.customMaterialName;
+    if (categoryChanged && drawing_ && !drawing_->material.empty()) {
+        drawing_->material.clear();
+        ++drawingRevision_;
+    }
+    unfold_ = std::move(settings);
+}
 bool DocumentSession::setUnfoldSettings(core::UnfoldSettings settings) {
     if (!document_ || active_ || !core::validUnfoldSettings(settings))
         return false;
     if (unfold_ != settings) {
-        unfold_ = settings;
+        applyUnfoldSettings(std::move(settings));
         ++editRevision_;
         modified_ = true;
     }
@@ -348,7 +357,7 @@ bool DocumentSession::setPartInputs(std::uint64_t revision, std::uint64_t editRe
         return false;
     if (manualThickness_ != manualThicknessMm || unfold_ != settings) {
         manualThickness_ = manualThicknessMm;
-        unfold_ = settings;
+        applyUnfoldSettings(std::move(settings));
         modified_ = true;
         ++editRevision_;
     }

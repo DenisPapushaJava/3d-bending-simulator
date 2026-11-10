@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QSemaphore>
 #include <QThread>
 #include <QTimer>
 
@@ -566,6 +567,75 @@ void testPreviewLifecycle(BendPreviewMode mode = BendPreviewMode::Kinematic) {
             "Late preview resurrected closed model");
 }
 
+class GatedDrawingBuilder final : public BendingDrawingBuilder {
+  public:
+    DrawingResult build(DocumentPtr document, DrawingRequest request,
+                        std::stop_token) const override {
+        // The first SDK call completes successfully even if its input was superseded.
+        if (first) {
+            first = false;
+            entered.release();
+            if (!finish.tryAcquire(1, 5000))
+                return DrawingError{"Test drawing gate timed out"};
+        }
+        auto drawing = std::make_shared<BendingDrawing>();
+        drawing->sourceName = document->metadata().sourcePath.string();
+        drawing->declaredThicknessMm = request.manualThicknessMm;
+        for (auto &view : drawing->views) {
+            view.maximum = {20, 10};
+            view.paths.push_back({{{0, 0}, view.maximum}});
+        }
+        return BendingDrawingPtr(drawing);
+    }
+
+    mutable QSemaphore entered, finish;
+
+  private:
+    mutable bool first = true; // Accessed only by the CAD worker.
+};
+
+void testDrawingLifecycle(bool replaceDocument) {
+    bool stalePublished = false;
+    bool superseded = false;
+    auto builder = std::make_shared<GatedDrawingBuilder>();
+    ImportController controller(std::make_shared<GatedImporter>(),
+                                [](DocumentPtr, std::uint64_t) { return QString{}; });
+    const auto idle = [&] { return !controller.hasWork(); };
+    controller.open("original.step");
+    waitUntil(idle);
+
+    QObject::connect(&controller, &ImportController::stateChanged, &controller, [&] {
+        if (superseded && (controller.drawing() || controller.drawingError()))
+            stalePublished = true;
+    });
+    require(controller.prepareDrawing(builder, {}), "Could not start initial drawing");
+    bool entered = false;
+    waitUntil([&] {
+        if (!entered)
+            entered = builder->entered.tryAcquire();
+        return entered;
+    });
+    superseded = true;
+    if (replaceDocument)
+        controller.open("replacement.step");
+    else
+        controller.setManualThickness(3.);
+    builder->finish.release();
+    waitUntil(idle);
+    require(!stalePublished && !controller.drawing() && !controller.drawingError(),
+            "Superseded drawing was published");
+    superseded = false;
+
+    require(controller.prepareDrawing(builder, {}), "Could not rebuild drawing");
+    waitUntil(idle);
+    const auto drawing = controller.drawing();
+    require(drawing &&
+                drawing->sourceName == (replaceDocument ? "replacement.step" : "original.step") &&
+                drawing->declaredThicknessMm ==
+                    (replaceDocument ? std::nullopt : std::optional<double>(3.)),
+            "Rebuild did not use the current drawing inputs");
+}
+
 } // namespace
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
@@ -573,6 +643,8 @@ int main(int argc, char *argv[]) {
         testController();
         testShutdown();
         testSaveRace();
+        testDrawingLifecycle(true);
+        testDrawingLifecycle(false);
         testPreviewLifecycle();
         testPreviewLifecycle(BendPreviewMode::ToolSetup);
         testPreviewLifecycle(BendPreviewMode::ToolMotion);
