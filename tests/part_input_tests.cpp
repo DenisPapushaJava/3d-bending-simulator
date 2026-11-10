@@ -104,17 +104,17 @@ void materialNameChecks() {
                                                    {"k", .5},
                                                    {"grades", QStringList{}},
                                                    {"tensileStrengthMpa", 400}},
-                                          QVariantMap{{"name", "Нержавеющая сталь"},
-                                                      {"k", .5},
-                                                      {"grades", QStringList{}},
-                                                      {"tensileStrengthMpa", 600}},
-                                          QVariantMap{{"name", "Алюминий"},
-                                                      {"k", .5},
-                                                      {"grades", QStringList{}},
-                                                      {"tensileStrengthMpa", 100}},
-                                          QVariantMap{{"name", "Цеховая сталь"},
-                                                      {"k", .4},
-                                                      {"grades", QStringList{"Ст20"}}}});
+                                       QVariantMap{{"name", "Нержавеющая сталь"},
+                                                   {"k", .5},
+                                                   {"grades", QStringList{}},
+                                                   {"tensileStrengthMpa", 600}},
+                                       QVariantMap{{"name", "Алюминий"},
+                                                   {"k", .5},
+                                                   {"grades", QStringList{}},
+                                                   {"tensileStrengthMpa", 100}},
+                                       QVariantMap{{"name", "Цеховая сталь"},
+                                                   {"k", .4},
+                                                   {"grades", QStringList{"Ст20"}}}});
         settings.sync();
     }
     check(ui::materialName({core::SheetMaterial::Unknown, .4, 1, ""}).isEmpty(),
