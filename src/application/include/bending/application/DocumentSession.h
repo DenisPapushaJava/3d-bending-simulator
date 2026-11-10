@@ -95,6 +95,7 @@ class DocumentSession final {
     }
 
   private:
+    void applyUnfoldSettings(core::UnfoldSettings settings);
     std::uint64_t nextRequest_ = 0;
     std::uint64_t revision_ = 0;
     DocumentPtr document_;

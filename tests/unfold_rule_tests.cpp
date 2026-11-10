@@ -28,7 +28,13 @@ int main() {
     s.manualK = std::numeric_limits<double>::quiet_NaN();
     check(!validUnfoldSettings(s));
     s.manualK = .6;
-    check(!validUnfoldSettings(s));
+    check(unfoldK(s, 2, 2) == .6);
+    const auto calibrated = bendAllowance(2, 2, std::numbers::pi / 2, .6);
+    check(calibrated && std::abs(*calibrated - 1.6 * std::numbers::pi) < 1e-12);
+    s.manualK = 1.;
+    check(validUnfoldSettings(s) && bendAllowance(2, 2, 1, 1.) == 4.);
+    s.manualK = 1.01;
+    check(!validUnfoldSettings(s) && !bendAllowance(2, 2, 1, 1.01));
     s.manualK = .4;
     s.referenceVersion = 2;
     check(!validUnfoldSettings(s));

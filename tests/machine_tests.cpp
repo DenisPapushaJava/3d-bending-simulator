@@ -61,7 +61,7 @@ void test(const std::filesystem::path &path) {
         std::vector<cad::ToolDisplaySegment> segments;
         bodies[1] = cad::segmentToolBody(bodies[1], assignment.punch, assignment.punchAssembly, 0,
                                          {}, &segments);
-        bodies[1] = cad::orientPunch(bodies[1], parameters);
+        bodies[1] = cad::orientPunch(bodies[1], parameters, &segments);
         const auto probeBody = BRepPrimAPI_MakeBox(gp_Pnt(20, 47, 40), 1, 1, 1).Shape();
         BRepAlgoAPI_Common overlap(bodies[1], probeBody);
         require(overlap.IsDone(), "Orientation probe Boolean failed");
@@ -70,7 +70,6 @@ void test(const std::filesystem::path &path) {
         require(reversed ? std::abs(overlapVolume.Mass()) < 1.e-6
                          : std::abs(overlapVolume.Mass()) > .9,
                 "Orientation did not change collision occupancy");
-        cad::orientPunchSegments(segments, parameters);
         require(std::abs(box(segments[0].shape).CornerMin().Z() - (reversed ? 50 : 0)) < 1.e-6,
                 "Half-turn did not reverse longitudinal segment positions");
         cad::MachineAssembly installed(parameters, bodies, {}, assignment);

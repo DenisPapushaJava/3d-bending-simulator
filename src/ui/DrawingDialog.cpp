@@ -1,5 +1,6 @@
 #include "DrawingDialog.h"
 #include "DrawingLayoutController.h"
+#include "MaterialPresets.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/Preferences.h"
@@ -71,19 +72,21 @@ QString scaleLabel(double scale) {
     return scale >= 1 ? QStringLiteral("%1:1").arg(scale, 0, 'g', 4)
                       : QStringLiteral("1:%1").arg(1 / scale, 0, 'g', 4);
 }
-QString drawingFailureReason(const QString &detail) {
+QString drawingFailureReason(const application::DrawingError &error) {
+    if (const auto limits = error.complexityLimits)
+        return QStringLiteral("Модель слишком сложная для автоматического чертежа. "
+                              "Предел: %1 граней и %2 рёбер.")
+            .arg(limits->faces)
+            .arg(limits->edges);
+    if (error.baseError == application::DrawingBaseError::RequiresPlanarFace)
+        return QStringLiteral("Для главного вида нужна плоская грань. Выберите другую базу.");
+    if (error.baseError == application::DrawingBaseError::InvalidFaceIndex)
+        return QStringLiteral("Выберите базовую грань заново: прежняя недоступна в этой модели.");
+    const auto detail = QString::fromStdString(error.detail);
     if (detail == QLatin1String("Drawing requires a loaded STEP solid"))
         return QStringLiteral("Откройте STEP с объёмной моделью детали.");
-    if (detail == QLatin1String("First drawing version supports up to 500 faces / 2000 edges"))
-        return QStringLiteral(
-            "Модель слишком сложная для автоматического чертежа: более 500 граней или 2000 рёбер.");
-    if (detail == QLatin1String("Choose a planar base face for the drawing") ||
-        detail == QLatin1String("The drawing base must be planar"))
-        return QStringLiteral("Для главного вида нужна плоская грань. Выберите другую базу.");
     if (detail == QLatin1String("Invalid drawing settings"))
         return QStringLiteral("Параметры вида недопустимы. Попробуйте автоматическую ориентацию.");
-    if (detail == QLatin1String("Selected face belongs to another document"))
-        return QStringLiteral("Выберите базовую грань заново: прежняя относится к другой модели.");
     if (detail == QLatin1String("The part does not fit the supported A3 / standard scale range"))
         return QStringLiteral("Деталь не помещается на A3 в поддерживаемом диапазоне масштабов.");
     if (detail == QLatin1String("Drawing projection exceeds 200000 points"))
@@ -489,7 +492,9 @@ class DrawingDialog::Impl {
     DrawingTitle title() const {
         return {name->text(),
                 designation->text(),
-                material->text(),
+                material->text().trimmed().isEmpty()
+                    ? materialName(controller.session().unfoldSettings())
+                    : material->text(),
                 execution->text(),
                 quantity->value() ? std::optional<int>{quantity->value()} : std::nullopt,
                 DrawingLayout::Classical,
@@ -560,7 +565,10 @@ class DrawingDialog::Impl {
             controller.session().drawingSettings().value_or(application::ProjectDrawingSettings{});
         saved.name = name->text().toStdString();
         saved.designation = designation->text().toStdString();
-        saved.material = material->text().toStdString();
+        const auto enteredMaterial = material->text().trimmed();
+        saved.material = enteredMaterial == materialName(controller.session().unfoldSettings())
+                             ? std::string{}
+                             : enteredMaterial.toStdString();
         saved.execution = execution->text().toStdString();
         saved.quantity = quantity->value();
         if (geometry) {
@@ -990,8 +998,8 @@ class DrawingDialog::Impl {
         } else if (const auto error = controller.drawingError()) {
             image->clear();
             preview->showState(QStringLiteral("Чертёж не сформирован"),
-                               drawingFailureReason(QString::fromStdString(error->detail)), false,
-                               QStringLiteral("Повторить"), [this] { build(); });
+                               drawingFailureReason(*error), false, QStringLiteral("Повторить"),
+                               [this] { build(); });
             status->setText(QStringLiteral("Чертёж не сформирован"));
             status->setToolTip(QString::fromStdString(error->detail));
         } else if (drawing && !settingsChanged) {
@@ -1254,7 +1262,6 @@ DrawingDialog::DrawingDialog(ImportController &c,
     impl_->name = field(QStringLiteral("Наименование"), "drawingName", 60);
     impl_->designation =
         field(QStringLiteral("Обозначение (если задано)"), "drawingDesignation", 48);
-    impl_->material = field(QStringLiteral("Материал (если известен)"), "drawingMaterial", 60);
     impl_->execution = field(QStringLiteral("Исполнение / ориентир"), "drawingExecution", 60);
     auto *geometryOptions =
         section(QStringLiteral("Ориентация и разрывы"), "drawingGeometryOptions");
@@ -1292,6 +1299,34 @@ DrawingDialog::DrawingDialog(ImportController &c,
     optionLayout->addStretch();
     auto *quantityForm = new QFormLayout;
     quantityForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    auto *materials = new QComboBox(panel);
+    materials->setObjectName(QStringLiteral("drawingMaterialChoices"));
+    materials->setAccessibleName(QStringLiteral("Материал"));
+    materials->setEditable(true);
+    materials->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    materials->setMinimumContentsLength(12);
+    materials->setInsertPolicy(QComboBox::NoInsert);
+    impl_->material = materials->lineEdit();
+    impl_->material->setObjectName(QStringLiteral("drawingMaterial"));
+    impl_->material->setMaxLength(60);
+    impl_->material->setPlaceholderText(QStringLiteral("Не указан"));
+    const auto refreshMaterials = [this, materials] {
+        const QSignalBlocker block(impl_->material);
+        const auto &session = impl_->controller.session();
+        const auto &unfold = session.unfoldSettings();
+        const auto category = materialName(unfold);
+        materials->clear();
+        materials->addItem(category);
+        for (const auto &preset : materialPresets())
+            if (preset.material == unfold.material && preset.name == category)
+                for (const auto &grade : preset.grades)
+                    if (materials->findText(grade) < 0)
+                        materials->addItem(grade);
+        if (const auto &saved = session.drawingSettings(); saved && !saved->material.empty())
+            materials->setEditText(QString::fromStdString(saved->material));
+    };
+    refreshMaterials();
+    quantityForm->addRow(QStringLiteral("Материал"), materials);
     impl_->quantity = new QSpinBox(panel);
     impl_->quantity->setObjectName(QStringLiteral("drawingQuantity"));
     impl_->quantity->setRange(0, 1000000);
@@ -1371,7 +1406,6 @@ DrawingDialog::DrawingDialog(ImportController &c,
         if (saved->name)
             impl_->name->setText(QString::fromStdString(*saved->name));
         impl_->designation->setText(QString::fromStdString(saved->designation));
-        impl_->material->setText(QString::fromStdString(saved->material));
         impl_->execution->setText(QString::fromStdString(saved->execution));
         impl_->quantity->setValue(saved->quantity);
         impl_->base->setCurrentIndex(saved->baseFace ? 1 : 0);
@@ -1458,12 +1492,14 @@ DrawingDialog::DrawingDialog(ImportController &c,
     for (auto *check : {impl_->reverse, impl_->breaks})
         connect(check, &QCheckBox::toggled, this, [this] { impl_->invalidate(); });
     connect(impl_->prepare, &QPushButton::clicked, this, [this] { impl_->build(); });
-    connect(&c, &ImportController::stateChanged, this, [this] {
+    connect(&c, &ImportController::stateChanged, this, [this, materials, refreshMaterials] {
         if (!impl_->controller.session().document() ||
             impl_->revision != impl_->controller.session().revision()) {
             reject();
             return;
         }
+        if (materials->itemText(0) != materialName(impl_->controller.session().unfoldSettings()))
+            refreshMaterials();
         impl_->refresh();
     });
     connect(impl_->exportPdf, &QPushButton::clicked, this, [this] {

@@ -40,8 +40,7 @@ std::array<TopoDS_Shape, 2> prepareAssets(core::ToolAssignment a, double tip = 3
     bodies[1] = cad::segmentToolBody(bodies[1], a.punch, a.punchAssembly, 0, {}, &display[1]);
     if (display[0].size() != 6 || display[1].size() != 6)
         throw std::runtime_error("Cached section metadata lost its ordered children");
-    bodies[1] = cad::orientPunch(bodies[1], parameters);
-    cad::orientPunchSegments(display[1], parameters);
+    bodies[1] = cad::orientPunch(bodies[1], parameters, &display[1]);
     cad::MachineAssembly machine(parameters, bodies, {}, a);
     if (machine.at(0).empty())
         throw std::runtime_error("Missing machine");

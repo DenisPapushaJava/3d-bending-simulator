@@ -1070,23 +1070,31 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         TopTools_IndexedMapOfShape faces, edges;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
         TopExp::MapShapes(shape, TopAbs_EDGE, edges);
-        if (faces.Extent() > 4096 || edges.Extent() > 16384)
-            return DrawingError{"Drawing supports up to 4096 faces / 16384 edges"};
+        constexpr DrawingComplexityLimits limits{4096, 16384};
+        if (faces.Extent() > limits.faces || edges.Extent() > limits.edges)
+            return DrawingError{"Drawing topology exceeds the supported complexity", false, limits};
         if (request.quarterTurns < -1 || request.quarterTurns > 3 ||
             (request.manualThicknessMm &&
              (!std::isfinite(*request.manualThicknessMm) || *request.manualThicknessMm <= 0)))
             return DrawingError{"Invalid drawing settings"};
         std::size_t base = request.baseFace.value_or(0);
         if (base > static_cast<std::size_t>(faces.Extent()))
-            return DrawingError{"Selected face belongs to another document"};
+            return DrawingError{"Selected face belongs to another document",
+                                false,
+                                {},
+                                DrawingBaseError::InvalidFaceIndex};
         if (!base)
             base = automaticBaseFace(faces, stop);
         if (!base)
-            return DrawingError{"Choose a planar base face for the drawing"};
+            return DrawingError{"Choose a planar base face for the drawing",
+                                false,
+                                {},
+                                DrawingBaseError::RequiresPlanarFace};
         const auto face = TopoDS::Face(faces(static_cast<int>(base)));
         BRepAdaptor_Surface surface(face);
         if (surface.GetType() != GeomAbs_Plane)
-            return DrawingError{"The drawing base must be planar"};
+            return DrawingError{
+                "The drawing base must be planar", false, {}, DrawingBaseError::RequiresPlanarFace};
         gp_Dir side = surface.Plane().Axis().Direction();
         if (face.Orientation() == TopAbs_REVERSED)
             side.Reverse();

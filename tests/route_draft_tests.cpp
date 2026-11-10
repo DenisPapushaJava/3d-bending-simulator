@@ -11,6 +11,8 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <STEPControl_Writer.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -288,6 +290,29 @@ int main(int argc, char **argv) {
                 require(std::abs(b.CornerMin().Z() - a.CornerMax().Z() - (i == 0 ? 1 : 2)) < 1.e-5,
                         "Draft tool pieces have the wrong placement");
             }
+            auto mirroredRequest = request;
+            mirroredRequest.operations[0].assignment->punchReversed = true;
+            mirroredRequest.operations[0].tools =
+                core::toolParameters(*mirroredRequest.operations[0].assignment);
+            const auto mirrored = run(builder, doc, mirroredRequest);
+            for (const auto &draft : {sections, mirrored}) {
+                for (const auto index : {0u, 10u, 20u}) {
+                    const auto &colored = cad::OcctPreviewAccess::frame(*draft->visual, index);
+                    for (std::size_t toolIndex = 0; toolIndex < colored.tools.size(); ++toolIndex) {
+                        require(colored.toolSegments[toolIndex].size() == 2,
+                                "Tool movement lost the color sections");
+                        TopTools_IndexedMapOfShape faces;
+                        TopExp::MapShapes(colored.tools[toolIndex], TopAbs_FACE, faces);
+                        for (const auto &segment : colored.toolSegments[toolIndex]) {
+                            TopTools_IndexedMapOfShape segmentFaces;
+                            TopExp::MapShapes(segment.shape, TopAbs_FACE, segmentFaces);
+                            for (int face = 1; face <= segmentFaces.Extent(); ++face)
+                                require(faces.Contains(segmentFaces(face)),
+                                        "Tool movement lost the color face identity");
+                        }
+                    }
+                }
+            }
             request.operations[0].assignment = tool_fixture::pair(16, .8, 100);
             request.operations[0].tools = core::toolParameters(*request.operations[0].assignment);
             const auto collision = run(builder, doc, request);
@@ -299,6 +324,14 @@ int main(int argc, char **argv) {
                         "Draft collision lost its localized marker");
             }
             require(seen, "Known DXF collision was missed");
+            auto changedTool = request;
+            changedTool.operations[0].assignment = segmented;
+            changedTool.operations[0].tools = core::toolParameters(segmented);
+            const auto restoredSections = run(builder, doc, changedTool);
+            require(restoredSections->request == changedTool &&
+                        restoredSections->visual == sections->visual &&
+                        restoredSections->visual != collision->visual,
+                    "Active tool change kept the collision result from the previous setup");
             if (request.operations.size() > 1) {
                 auto future = request;
                 future.operations.back().workpieceReversed =

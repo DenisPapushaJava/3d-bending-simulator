@@ -372,9 +372,10 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
             frame.toolSegments = segments;
             gp_Trsf lift;
             lift.SetTranslation(gp_Vec(0, state->punchTipYmm - active.tools->clearanceMm, 0));
-            frame.tools[1] = tools[1].Moved(TopLoc_Location(lift));
-            for (auto &s : frame.toolSegments[1])
-                s.shape = s.shape.Moved(TopLoc_Location(lift));
+            const TopLoc_Location location(lift);
+            frame.tools[1] = tools[1].Moved(location);
+            for (auto &segment : frame.toolSegments[1])
+                segment.shape = segment.shape.Moved(location);
             if (machineAssembly) {
                 frame.machine = machineAssembly->at(state->punchTipYmm - active.tools->clearanceMm);
                 frame.floor = machineAssembly->floor();
