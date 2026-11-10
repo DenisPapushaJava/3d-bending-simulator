@@ -1,5 +1,20 @@
 # Версии и выпуск релизов
 
+## Выпуск 2026.1.0-alpha.7 — 2026-11-10
+
+Опубликован предварительный Windows x64 portable с тремя согласованными пунктами из CHANGELOG: редактор материалов и свои категории, диапазон K 0–1.0, марка в чертеже без пересчёта геометрии. [Релиз](https://github.com/DenisPapushaJava/3d-bending-simulator/releases/tag/v2026.1.0-alpha.7) — prerelease.
+
+[PR №29](https://github.com/DenisPapushaJava/3d-bending-simulator/pull/29) слит после зелёного CI. Тег `v2026.1.0-alpha.7` указывает на `8df5b6d`. [CI main](https://github.com/DenisPapushaJava/3d-bending-simulator/actions/runs/42786022466) и [CI тега](https://github.com/DenisPapushaJava/3d-bending-simulator/actions/runs/42789245512) выполнили полный набор Windows и Linux; Draft GitHub Release создан workflow после успеха.
+
+Перед публикацией черновика оба ZIP скачаны из релиза: SHA-256 и CRC совпали с `SHA256SUMS.txt`. В Windows ZIP проверены корневой launcher x64, `runtime/2026.1.0-alpha.7` с `.ready`/`portable-format`/`current`, Qt6 Core/Gui/Widgets/Network, `platforms/qwindows.dll`, `tls/qschannelbackend.dll`, OCCT/FreeType DLL, пять учебных STEP, VERSION `2026.1.0-alpha.7`, LICENSE, OFL шрифта и THIRD_PARTY_NOTICES. Архив зависимостей содержит qtbase 6.8.3, OCCT 7.9.3 и FreeType 2.14.3 с патчами, рецепты vcpkg и triplets. Упаковочные пробы шрифтов/запуска/STEP в CI прошли. Windows ZIP — 30 103 379 байт; исходники зависимостей — 122 871 851 байт. Контрольные суммы:
+
+```text
+2b2354ad126e48dc36508798090e436c10de4a136de0e6b4b08fb9eb14ed601c  3d-bending-simulator-2026.1.0-alpha.7-dependency-sources.zip
+7cdbc938446874b540c694920984b0096d2880faff505c271e25b543efb3441b  3d-bending-simulator-2026.1.0-alpha.7-windows-x86_64.zip
+```
+
+Интерактивный Windows/OpenGL и установка обновления на рабочем ПК отдельно не проверялись. После выпуска действует локальный режим D051.
+
 ## Выпуск 2026.1.0-alpha.5 — 2026-11-07
 
 Опубликован предварительный Windows x64 portable с пятью согласованными пунктами из CHANGELOG. [Релиз](https://github.com/DenisPapushaJava/3d-bending-simulator/releases/tag/v2026.1.0-alpha.5).
