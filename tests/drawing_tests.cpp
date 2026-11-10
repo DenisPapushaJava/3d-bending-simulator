@@ -26,6 +26,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
@@ -43,6 +44,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
@@ -52,6 +54,7 @@
 #include <QScrollBar>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
@@ -699,9 +702,22 @@ void geometry(const QString &folder) {
             "Hidden contours were not classified");
     application::DrawingRequest bad;
     bad.baseFace = 100000;
-    require(std::holds_alternative<application::DrawingError>(
-                cad::BendingDrawingBuilder{}.build(document, bad, {})),
-            "Foreign face accepted");
+    const auto invalidBase = cad::BendingDrawingBuilder{}.build(document, bad, {});
+    const auto *invalidBaseError = std::get_if<application::DrawingError>(&invalidBase);
+    require(invalidBaseError &&
+                invalidBaseError->baseError == application::DrawingBaseError::InvalidFaceIndex,
+            "Out-of-range base did not return a typed error");
+    const auto curved =
+        std::find_if(document->faces().begin(), document->faces().end(), [](const auto &face) {
+            return face.surface == application::SurfaceKind::Cylinder;
+        });
+    require(curved != document->faces().end(), "Missing curved base fixture");
+    bad.baseFace = curved->index;
+    const auto curvedBase = cad::BendingDrawingBuilder{}.build(document, bad, {});
+    const auto *curvedBaseError = std::get_if<application::DrawingError>(&curvedBase);
+    require(curvedBaseError &&
+                curvedBaseError->baseError == application::DrawingBaseError::RequiresPlanarFace,
+            "Curved base did not return a typed error");
     std::stop_source stop;
     stop.request_stop();
     const auto cancelled = cad::BendingDrawingBuilder{}.build(document, {}, stop.get_token());
@@ -2079,7 +2095,7 @@ void pdfDestinations(const QString &folder) {
 }
 class ControlledDrawingBuilder final : public application::BendingDrawingBuilder {
   public:
-    std::atomic_bool hold{true}, fail{true};
+    std::atomic_bool hold{true}, fail{true}, tooComplex{false};
     mutable std::atomic<int> calls{0}, cancelled{0};
     application::DrawingResult build(application::DocumentPtr doc,
                                      application::DrawingRequest request,
@@ -2091,8 +2107,14 @@ class ControlledDrawingBuilder final : public application::BendingDrawingBuilder
             ++cancelled;
             return application::DrawingError{"Cancelled", true};
         }
+        if (tooComplex.load())
+            return application::DrawingError{"Topology budget exceeded", false,
+                                             application::DrawingComplexityLimits{4096, 16384}};
         if (fail.load())
-            return application::DrawingError{"Choose a planar base face for the drawing"};
+            return application::DrawingError{"Fixture rejected the base",
+                                             false,
+                                             {},
+                                             application::DrawingBaseError::RequiresPlanarFace};
         return cad::BendingDrawingBuilder{}.build(std::move(doc), std::move(request), stop);
     }
 };
@@ -2211,6 +2233,16 @@ void previewStates() {
             "Preview failure text is clipped");
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".failed.png"), "Cannot save failure state");
+    builder->tooComplex = true;
+    retry->click();
+    wait([&] { return !c.hasWork(); });
+    require(state->isVisible() && !progress->isVisible() && retry->isVisible() &&
+                reason->text().contains(QStringLiteral("4096 граней")) &&
+                reason->text().contains(QStringLiteral("16384 рёбер")) &&
+                reason->height() >= reason->heightForWidth(reason->width()) &&
+                image->pixmap().isNull() && !exportPdf->isEnabled(),
+            "Topology limit was not explained in the preview");
+    builder->tooComplex = false;
     builder->fail = false;
     retry->click();
     wait([&] { return !c.hasWork() && exportPdf->isEnabled(); });
@@ -2518,6 +2550,49 @@ void workflow(const QString &folder) {
             : std::optional<double>{};
     require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, manualK, 1}),
             "Cannot select drawing material");
+    bool presetsEdited = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *settings = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!settings)
+            return;
+        auto *table = settings->findChild<QTableWidget *>("materialPresets");
+        auto *buttons = settings->findChild<QDialogButtonBox *>();
+        if (table && buttons && table->rowCount() >= 3) {
+            const auto enterGrades = [&](int row, const QString &list) {
+                auto *edit = qobject_cast<QPushButton *>(table->cellWidget(row, 2));
+                if (!edit)
+                    return false;
+                bool accepted = false;
+                QTimer::singleShot(0, settings, [&] {
+                    auto *editor = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    if (!editor || editor == settings)
+                        return;
+                    auto *text = editor->findChild<QPlainTextEdit *>("materialGradeList");
+                    auto *actions = editor->findChild<QDialogButtonBox *>();
+                    if (text && actions) {
+                        text->setPlainText(list);
+                        actions->button(QDialogButtonBox::Ok)->click();
+                        accepted = editor->result() == QDialog::Accepted;
+                    }
+                    if (!accepted)
+                        editor->reject();
+                });
+                edit->click();
+                return accepted;
+            };
+            if (enterGrades(0, QStringLiteral("Ст3\n09Г2С\nСталь 20")) &&
+                enterGrades(1, QStringLiteral("AISI 304"))) {
+                buttons->button(QDialogButtonBox::Save)->click();
+                presetsEdited = settings->result() == QDialog::Accepted;
+            }
+        }
+        if (!presetsEdited)
+            settings->reject();
+    });
+    auto *materialSettings = window.findChild<QAction *>("materialPresetsAction");
+    require(materialSettings, "Material settings action is missing");
+    materialSettings->trigger();
+    require(presetsEdited, "Material grades did not save through settings");
     const auto revision = c.session().editRevision();
     auto *action = window.findChild<QAction *>("bendingDrawingAction");
     require(action && action->isEnabled(), "Drawing action missing");
@@ -2622,6 +2697,22 @@ void workflow(const QString &folder) {
     dialog->showNormal();
     dialog->resize(1200, 720);
     QApplication::processEvents();
+    auto *material = dialog->findChild<QComboBox *>("drawingMaterialChoices");
+    require(material && material->isVisible() &&
+                material->currentText() == QStringLiteral("Низкоуглеродистая сталь") &&
+                material->findText(QStringLiteral("Ст3")) > 0 &&
+                material->findText(QStringLiteral("09Г2С")) > 0 &&
+                material->findText(QStringLiteral("AISI 304")) < 0,
+            "The drawing did not default to the selected material category");
+    const auto beforeMaterialEdit = c.drawing();
+    material->setCurrentIndex(material->findText(QStringLiteral("Ст3")));
+    require(c.session().drawingSettings() &&
+                c.session().drawingSettings()->material == QStringLiteral("Ст3").toStdString() &&
+                c.drawing() == beforeMaterialEdit && !c.hasWork(),
+            "A drawing designation did not persist or restarted CAD");
+    material->setCurrentIndex(0);
+    require(c.session().drawingSettings()->material.empty(),
+            "Returning to the material category retained an explicit designation");
     auto *qty = dialog->findChild<QSpinBox *>("drawingQuantity");
     qty->setValue(37);
     const auto oldDrawing = c.drawing();

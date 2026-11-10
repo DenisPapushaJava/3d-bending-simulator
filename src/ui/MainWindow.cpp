@@ -1,6 +1,7 @@
 #include "bending/ui/MainWindow.h"
 #include "BendMessagePanel.h"
 #include "DrawingDialog.h"
+#include "MaterialPresets.h"
 #include "PartInputDialog.h"
 #include "ProcessNavigationBar.h"
 #include "ToolSearchDialog.h"
@@ -4347,6 +4348,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                 }
             });
 
+    auto *settingsMenu = menuBar()->addMenu(QStringLiteral("Настройки"));
+    auto *materials = settingsMenu->addAction(QStringLiteral("Материалы…"));
+    materials->setObjectName(QStringLiteral("materialPresetsAction"));
+    connect(materials, &QAction::triggered, this, [this] { editMaterialPresets(this); });
     auto *help = menuBar()->addMenu(QStringLiteral("Справка"));
     auto *navigationHelp = help->addAction(QStringLiteral("Управление сценой"));
     navigationHelp->setShortcut(QKeySequence::HelpContents);

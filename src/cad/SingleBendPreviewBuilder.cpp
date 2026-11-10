@@ -866,8 +866,7 @@ makeRouteDraftTools(const core::PressTools &tools,
         segments[0].push_back({result[0], tools.lengthMm});
         segments[1].push_back({result[1], core::punchLengthMm(tools)});
     }
-    result[1] = orientPunch(result[1], tools);
-    orientPunchSegments(segments[1], tools);
+    result[1] = orientPunch(result[1], tools, &segments[1]);
     return result;
 }
 const PreviewFrame &OcctPreviewAccess::frame(const application::SingleBendPreview &preview,
@@ -1566,8 +1565,7 @@ PreparedBendOperationResult prepareBendOperation(
                 initialSegments[1].push_back(
                     {initialTools[1], core::punchLengthMm(*toolParameters)});
             }
-            initialTools[1] = orientPunch(initialTools[1], *toolParameters);
-            orientPunchSegments(initialSegments[1], *toolParameters);
+            initialTools[1] = orientPunch(initialTools[1], *toolParameters, &initialSegments[1]);
         }
         if (!workpiece->display) {
             TopTools_IndexedMapOfShape faces;

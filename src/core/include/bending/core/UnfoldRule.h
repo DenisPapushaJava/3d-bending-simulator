@@ -1,5 +1,6 @@
 #pragma once
 #include <optional>
+#include <string>
 
 namespace bending::core {
 enum class SheetMaterial { Unknown, MildSteel, StainlessSteel, Aluminium };
@@ -8,6 +9,7 @@ struct UnfoldSettings {
     SheetMaterial material = SheetMaterial::Unknown;
     std::optional<double> manualK;
     int referenceVersion = 1;
+    std::string customMaterialName = {};
     bool operator==(const UnfoldSettings &) const = default;
 };
 [[nodiscard]] bool validUnfoldSettings(const UnfoldSettings &) noexcept;

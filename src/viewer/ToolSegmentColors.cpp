@@ -21,14 +21,16 @@ QColor toolSegmentColor(double lengthMm, const ToolSegmentColors &overrides) {
     static constexpr std::array<std::int64_t, 12> lengths{
         10000, 15000, 20000, 40000, 50000, 100000, 200000, 270000, 370000, 415000, 525000, 835000};
     static constexpr std::array<const char *, 12> colors{
-        "#8CA2B6", "#A698B3", "#91A58F", "#BEA58C", "#7F9FA0", "#AD94A4",
-        "#93A0C0", "#B2AB85", "#8BAA9A", "#BA9C8F", "#9998B0", "#829BB8"};
+        "#E3A8CA", "#519C53", "#474687", "#66A7C4", "#9C5185", "#C49766",
+        "#8FDCE3", "#B87CC4", "#E3E28F", "#6670C4", "#8FC466", "#876F46"};
     for (std::size_t i = 0; i < lengths.size(); ++i)
         if (*key == lengths[i])
             return QColor(colors[i]);
-    const auto hash = static_cast<std::uint64_t>(*key) * 11400714819323198485ULL;
-    return QColor::fromHsvF(static_cast<double>(hash % 3600) / 3600.,
-                            .18 + static_cast<double>((hash >> 16) % 17) / 100.,
-                            .62 + static_cast<double>((hash >> 32) % 16) / 100.);
+    // Spread length keys around the hue circle, leaving the red band for collisions.
+    constexpr std::int64_t turn = 360000;
+    constexpr std::int64_t goldenAngle = 137508;
+    const auto phase = (*key * goldenAngle) % turn;
+    const double hue = 30. + 300. * static_cast<double>(phase) / turn;
+    return QColor::fromHsvF(static_cast<float>(hue / 360.), .32f, .70f);
 }
 } // namespace bending::viewer

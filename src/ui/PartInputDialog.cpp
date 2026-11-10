@@ -1,6 +1,6 @@
 #include "PartInputDialog.h"
+#include "MaterialPresets.h"
 #include "bending/ui/ImportController.h"
-#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -18,7 +18,6 @@
 
 namespace bending::ui {
 namespace {
-constexpr double defaultPartK = .45;
 class ThicknessInput final : public QDoubleSpinBox {
   public:
     using QDoubleSpinBox::QDoubleSpinBox;
@@ -33,18 +32,6 @@ class ThicknessInput final : public QDoubleSpinBox {
         return result;
     }
 };
-QString materialName(core::SheetMaterial material) {
-    switch (material) {
-    case core::SheetMaterial::MildSteel:
-        return QStringLiteral("Низкоуглеродистая сталь");
-    case core::SheetMaterial::StainlessSteel:
-        return QStringLiteral("Нержавеющая сталь");
-    case core::SheetMaterial::Aluminium:
-        return QStringLiteral("Алюминий");
-    default:
-        return QStringLiteral("Материал не указан");
-    }
-}
 QString mm(double v) {
     return QLocale().toString(v, 'f', 2);
 }
@@ -66,7 +53,10 @@ QString partInputsSummary(const application::DocumentSession &session) {
             ? session.manualThicknessMm()
             : application::suggestThickness(session.document()->metadata().thickness);
     return QStringLiteral("%1 · t %2\n%3")
-        .arg(materialName(settings.material),
+        .arg(settings.material == core::SheetMaterial::Unknown &&
+                     settings.customMaterialName.empty()
+                 ? QStringLiteral("Материал не указан")
+                 : materialName(settings),
              thickness ? mm(*thickness) + QStringLiteral(" мм") : QStringLiteral("не определена"),
              settings.manualK ? QStringLiteral("Постоянный K = %1")
                                     .arg(QLocale().toString(*settings.manualK, 'g', 4))
@@ -80,12 +70,6 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
       manual_(controller.session().manualThicknessMm()),
       automatic_(application::suggestThickness(document_->metadata().thickness)),
       settings_(controller.session().unfoldSettings()) {
-    const bool newDefault = controller.session().projectPath().empty() &&
-                            settings_.material == core::SheetMaterial::Unknown &&
-                            !settings_.manualK;
-    if (newDefault)
-        settings_.manualK = defaultPartK;
-    requireMaterial_ = newDefault;
     setObjectName(QStringLiteral("partInputDialog"));
     setWindowTitle(QStringLiteral("Исходные данные детали"));
     setWindowModality(Qt::WindowModal);
@@ -97,24 +81,38 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
     name->setTextFormat(Qt::PlainText);
     name->setWordWrap(true);
     layout->addWidget(name);
-    auto *intro = new QLabel(
-        newDefault ? QStringLiteral("Выберите материал и проверьте толщину.\n"
-                                    "K по умолчанию — 0,45; изменить можно в «Дополнительно».")
-                   : QStringLiteral("Выберите материал и проверьте толщину.\n"
-                                    "Теоретический расчёт развёртки."),
-        this);
+    auto *intro = new QLabel(QStringLiteral("Выберите материал и проверьте толщину. "
+                                            "Правило развёртки задаётся в настройках материалов."),
+                             this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
     auto *form = new QFormLayout;
     material_ = new QComboBox(this);
     material_->setObjectName(QStringLiteral("sheetMaterial"));
     material_->setAccessibleName(QStringLiteral("Материал листа"));
-    material_->addItems({QStringLiteral("Выберите материал…"),
-                         materialName(core::SheetMaterial::MildSteel),
-                         materialName(core::SheetMaterial::StainlessSteel),
-                         materialName(core::SheetMaterial::Aluminium)});
-    material_->setCurrentIndex(static_cast<int>(settings_.material));
+    auto presets = materialPresets();
+    material_->addItem(QStringLiteral("Выберите материал…"));
+    int selected = 0;
+    for (const auto &preset : presets) {
+        material_->addItem(preset.name);
+        if (preset.material == settings_.material &&
+            (preset.material != core::SheetMaterial::Unknown ||
+             preset.name.toStdString() == settings_.customMaterialName))
+            selected = material_->count() - 1;
+    }
+    if (!selected && !settings_.customMaterialName.empty()) {
+        const auto categoryName = materialName(settings_);
+        presets.push_back({categoryName, settings_.material, settings_.manualK, {}});
+        material_->addItem(categoryName);
+        selected = material_->count() - 1;
+    }
+    if (!selected && settings_.manualK)
+        material_->setItemText(0, QStringLiteral("Без категории (из проекта)"));
+    material_->setCurrentIndex(selected);
     form->addRow(QStringLiteral("Материал"), material_);
+    rule_ = new QLabel(this);
+    rule_->setWordWrap(true);
+    form->addRow(QStringLiteral("Развёртка"), rule_);
     thickness_ = new ThicknessInput(this);
     thickness_->setObjectName(QStringLiteral("partThickness"));
     thickness_->setAccessibleName(QStringLiteral("Толщина листа в миллиметрах"));
@@ -157,27 +155,6 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
     auto *advanced = new QWidget(this);
     auto *advancedLayout = new QVBoxLayout(advanced);
     advancedLayout->setContentsMargins(0, 0, 0, 0);
-    auto *rule = new QLabel(
-        QStringLiteral("BA = β · (Ri + K · t). Постоянный K заменяет справочный пресет.\n"
-                       "Без постоянного K — таблица материала по Ri/t: Wiz Parts (2024), v1.\n"
-                       "Это теоретический расчёт; поправки по образцам пока не заданы."),
-        advanced);
-    rule->setWordWrap(true);
-    advancedLayout->addWidget(rule);
-    auto *kForm = new QFormLayout;
-    customK_ = new QCheckBox(QStringLiteral("Использовать постоянный K"), advanced);
-    customK_->setToolTip(QStringLiteral("Выключите для расчёта по справочной таблице материала."));
-    customK_->setObjectName(QStringLiteral("customUnfoldK"));
-    customK_->setChecked(settings_.manualK.has_value());
-    k_ = new QDoubleSpinBox(advanced);
-    k_->setObjectName(QStringLiteral("unfoldK"));
-    k_->setAccessibleName(QStringLiteral("Ручной коэффициент K"));
-    k_->setRange(0., .5);
-    k_->setDecimals(4);
-    k_->setSingleStep(.01);
-    k_->setValue(settings_.manualK.value_or(defaultPartK));
-    kForm->addRow(customK_, k_);
-    advancedLayout->addLayout(kForm);
     if (!bends.empty()) {
         auto *details = new QPlainTextEdit(advanced);
         details->setObjectName(QStringLiteral("partBendMeasurements"));
@@ -195,8 +172,8 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
         advancedLayout->addWidget(details);
     }
     layout->addWidget(advanced);
-    advanced->setVisible(settings_.manualK.has_value() && !newDefault);
-    toggle->setChecked(settings_.manualK.has_value() && !newDefault);
+    advanced->hide();
+    toggle->setVisible(!bends.empty());
     connect(toggle, &QToolButton::toggled, advanced, &QWidget::setVisible);
     error_ = new QLabel(this);
     error_->setObjectName(QStringLiteral("partInputError"));
@@ -222,10 +199,7 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
         else
             reject(); // Replaced document or changed inputs; never apply a stale draft.
     });
-    connect(material_, &QComboBox::currentIndexChanged, this, [this](int index) {
-        settings_.material = static_cast<core::SheetMaterial>(index);
-        refreshDraft();
-    });
+    connect(material_, &QComboBox::currentIndexChanged, this, [this](int) { applyMaterialRule(); });
     connect(thickness_, &QDoubleSpinBox::valueChanged, this, [this](double v) {
         manual_ = v;
         refreshDraft();
@@ -236,13 +210,6 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
         thickness_->setValue(automatic_.value_or(0.));
         refreshDraft();
     });
-    const auto updateK = [this] {
-        requireMaterial_ = false; // Explicit custom K retains the expert Unknown-material mode.
-        settings_.manualK = customK_->isChecked() ? std::optional{k_->value()} : std::nullopt;
-        refreshDraft();
-    };
-    connect(customK_, &QCheckBox::toggled, this, updateK);
-    connect(k_, &QDoubleSpinBox::valueChanged, this, updateK);
     connect(&controller_, &ImportController::stateChanged, this, [this] {
         if (!applying_ && (controller_.hasWork() || controller_.session().revision() != revision_ ||
                            controller_.session().editRevision() != editRevision_))
@@ -251,6 +218,27 @@ PartInputDialog::PartInputDialog(ImportController &controller, QWidget *parent)
     refreshDraft();
     material_->setFocus();
 }
+void PartInputDialog::applyMaterialRule() {
+    const auto name = material_->currentText();
+    const auto presets = materialPresets();
+    const auto row = material_->currentIndex() - 1;
+    if (row >= 0 && static_cast<std::size_t>(row) < presets.size() &&
+        presets[static_cast<std::size_t>(row)].name == name) {
+        const auto &preset = presets[static_cast<std::size_t>(row)];
+        settings_ = {preset.material, preset.k, 1,
+                     preset.material == core::SheetMaterial::Unknown ? name.toStdString() : ""};
+    } else if (name == materialName(controller_.session().unfoldSettings())) {
+        settings_ = controller_.session().unfoldSettings();
+    } else if (material_->currentIndex() == 0) {
+        const auto &saved = controller_.session().unfoldSettings();
+        settings_ =
+            saved.material == core::SheetMaterial::Unknown && saved.customMaterialName.empty()
+                ? saved
+                : core::UnfoldSettings{};
+    }
+    refreshDraft();
+}
+
 void PartInputDialog::refreshDraft() {
     using namespace application;
     const auto &analysis = document_->metadata().thickness;
@@ -281,7 +269,11 @@ void PartInputDialog::refreshDraft() {
         origin_->setText(QStringLiteral("Ручное значение отличается от предварительного измерения "
                                         "(%1 мм). CAD-геометрия не изменяется.")
                              .arg(mm(*automatic_)));
-    k_->setEnabled(customK_->isChecked());
+    rule_->setText(settings_.manualK ? QStringLiteral("Постоянный K = %1")
+                                           .arg(QLocale().toString(*settings_.manualK, 'g', 4))
+                   : settings_.material != core::SheetMaterial::Unknown
+                       ? QStringLiteral("По справочной таблице")
+                       : QStringLiteral("—"));
     automaticButton_->setEnabled(manual_.has_value());
     QString error;
     if (validation == ThicknessValidation::ConflictsWithGeometry)
@@ -291,8 +283,7 @@ void PartInputDialog::refreshDraft() {
                 .arg(mm(*analysis.thicknessMm));
     else if (validation == ThicknessValidation::Invalid)
         error = QStringLiteral("Укажите толщину больше нуля, чтобы продолжить.");
-    else if (settings_.material == core::SheetMaterial::Unknown &&
-             (requireMaterial_ || !settings_.manualK))
+    else if (settings_.material == core::SheetMaterial::Unknown && !settings_.manualK)
         error = QStringLiteral("Выберите материал, чтобы продолжить.");
     error_->setStyleSheet(validation == ThicknessValidation::ConflictsWithGeometry
                               ? QStringLiteral("color:#9D2828;")

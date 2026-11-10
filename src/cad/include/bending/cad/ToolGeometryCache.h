@@ -6,6 +6,8 @@
 
 namespace bending::cad {
 class GeometryCacheScope;
+// CAD jobs normally access this cache sequentially. Cache bookkeeping is synchronized,
+// but concurrent misses for the same key may independently read or build geometry.
 class ToolGeometryCache {
   public:
     struct Statistics {

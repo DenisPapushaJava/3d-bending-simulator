@@ -6,10 +6,13 @@
 namespace bending::core {
 bool validUnfoldSettings(const UnfoldSettings &s) noexcept {
     return s.referenceVersion == 1 &&
+           (s.customMaterialName.empty() ||
+            (s.customMaterialName.size() <= 240 && s.material == SheetMaterial::Unknown &&
+             s.manualK.has_value())) &&
            (s.material == SheetMaterial::Unknown || s.material == SheetMaterial::MildSteel ||
             s.material == SheetMaterial::StainlessSteel ||
             s.material == SheetMaterial::Aluminium) &&
-           (!s.manualK || (std::isfinite(*s.manualK) && *s.manualK >= 0 && *s.manualK <= .5));
+           (!s.manualK || (std::isfinite(*s.manualK) && *s.manualK >= 0 && *s.manualK <= 1.));
 }
 std::optional<double> unfoldK(const UnfoldSettings &s, double r, double t) noexcept {
     if (!validUnfoldSettings(s) || !std::isfinite(r) || !std::isfinite(t) || r <= 0 || t <= 0)
@@ -35,7 +38,7 @@ std::optional<double> unfoldK(const UnfoldSettings &s, double r, double t) noexc
 }
 std::optional<double> bendAllowance(double r, double t, double turn, double k) noexcept {
     if (!std::isfinite(r) || !std::isfinite(t) || !std::isfinite(turn) || !std::isfinite(k) ||
-        r <= 0 || t <= 0 || turn <= 0 || turn >= std::numbers::pi || k < 0 || k > .5)
+        r <= 0 || t <= 0 || turn <= 0 || turn >= std::numbers::pi || k < 0 || k > 1.)
         return {};
     const double value = turn * (r + k * t);
     return std::isfinite(value) ? std::optional{value} : std::nullopt;

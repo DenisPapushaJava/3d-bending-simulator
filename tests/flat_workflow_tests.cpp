@@ -6,6 +6,7 @@
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
 #include <QApplication>
 #include <QCheckBox>
@@ -192,6 +193,14 @@ int main(int argc, char **argv) {
     try {
         const bool graphics = app.arguments().contains(QStringLiteral("--graphics"));
         auto files = std::make_shared<project::ProjectFiles>();
+        QTemporaryDir preferencesDir;
+        check(preferencesDir.isValid(), "No temporary settings directory");
+        ui::setPreferencesFile(preferencesDir.filePath("settings.ini"));
+        const auto setSteelK = [](double factor) {
+            auto settings = ui::preferences();
+            settings->setValue("materials/presets", QVariantList{QVariantMap{{"k", factor}}});
+            settings->sync();
+        };
         auto builder = std::make_shared<cad::FlatPatternBuilder>();
         ui::MainWindow window({"test", "test"}, files, files,
                               std::make_shared<cad::SingleBendPreviewBuilder>());
@@ -210,20 +219,16 @@ int main(int argc, char **argv) {
         wait([&] { return window.findChild<QDialog *>("partInputDialog") != nullptr; });
         auto *material = window.findChild<QComboBox *>("sheetMaterial");
         auto *button = window.findChild<QPushButton *>("showFlatPattern");
-        auto *custom = window.findChild<QCheckBox *>("customUnfoldK");
-        auto *k = window.findChild<QDoubleSpinBox *>("unfoldK");
-        check(material && button && custom && k && material->currentIndex() == 0,
-              "Missing material controls or silently selected material");
-        check(custom->isChecked() && k->value() == .45 && !c.session().unfoldSettings().manualK &&
-                  !c.session().modified() &&
+        check(material && button && material->currentIndex() == 0 &&
+                  !c.session().unfoldSettings().manualK && !c.session().modified() &&
                   !window.findChild<QPushButton *>("partInputContinue")->isEnabled(),
-              "New-part K default was not a pending 0.45 or skipped material confirmation");
+              "New part silently selected a material or modified the session");
         material->setCurrentIndex(1);
         window.findChild<QPushButton *>("partInputContinue")->click();
         QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         check(c.session().modified() &&
                   c.session().unfoldSettings().material == core::SheetMaterial::MildSteel &&
-                  c.session().unfoldSettings().manualK == .45,
+                  c.session().unfoldSettings().manualK == .50,
               "Material not edited in project");
         button->click();
         wait([&] { return !c.hasWork(); });
@@ -233,8 +238,8 @@ int main(int argc, char **argv) {
         const auto first = c.flatPattern();
         check(!first->info().bends.empty() &&
                   std::all_of(first->info().bends.begin(), first->info().bends.end(),
-                              [](const auto &bend) { return bend.k == .45; }),
-              "Default 0.45 did not reach the actual flat-pattern calculation");
+                              [](const auto &bend) { return bend.k == .50; }),
+              "Default 0.50 did not reach the actual flat-pattern calculation");
         const auto edit = c.session().editRevision();
         button->click();
         check(c.flatPattern() == first && !c.hasWork() && edit == c.session().editRevision(),
@@ -475,11 +480,15 @@ int main(int argc, char **argv) {
             viewer->setDimensionsVisible(false);
             viewer->setDimensionsVisible(true);
         }
+        setSteelK(.42);
         window.findChild<QPushButton *>("editPartInputs")->click();
-        custom = window.findChild<QCheckBox *>("customUnfoldK");
-        k = window.findChild<QDoubleSpinBox *>("unfoldK");
-        custom->setChecked(true);
-        k->setValue(.42);
+        auto *materialChoice = window.findChild<QComboBox *>("sheetMaterial");
+        check(materialChoice && c.session().unfoldSettings().manualK == .50 &&
+                  c.flatPattern() == first,
+              "A catalog change implicitly replaced the applied rule");
+        const auto savedMaterialIndex = materialChoice->currentIndex();
+        materialChoice->setCurrentIndex(0);
+        materialChoice->setCurrentIndex(savedMaterialIndex);
         window.findChild<QPushButton *>("partInputContinue")->click();
         QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         check(!c.flatPattern() && c.session().unfoldSettings().manualK == .42,
@@ -517,9 +526,8 @@ int main(int argc, char **argv) {
         c.open(tablePath);
         wait([&] { return !c.hasWork(); });
         window.findChild<QPushButton *>("editPartInputs")->click();
-        check(!window.findChild<QCheckBox *>("customUnfoldK")->isChecked() &&
-                  !c.session().unfoldSettings().manualK && !c.session().modified(),
-              "Saved table mode was silently replaced by K 0.45");
+        check(!c.session().unfoldSettings().manualK && !c.session().modified(),
+              "Saved table mode was silently replaced by a constant");
         window.findChild<QPushButton *>("partInputViewOnly")->click();
         QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         c.open(path);
@@ -575,8 +583,15 @@ int main(int argc, char **argv) {
                   !c.session().unfoldSettings().manualK,
               "Material leaked to another STEP");
         window.findChild<QPushButton *>("editPartInputs")->click();
-        check(window.findChild<QDoubleSpinBox *>("unfoldK")->value() == .45,
-              "A fresh STEP did not offer the constant default");
+        window.findChild<QComboBox *>("sheetMaterial")->setCurrentIndex(1);
+        window.findChild<QPushButton *>("partInputContinue")->click();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        check(c.session().unfoldSettings().manualK == .42,
+              "A fresh STEP did not pick up the latest material preset");
+        c.closeDocument();
+        c.open(std::filesystem::path(BENDING_EXAMPLE_DIR) / "bend-90-6mm.step");
+        wait([&] { return !c.hasWork(); });
+        window.findChild<QPushButton *>("editPartInputs")->click();
         window.findChild<QPushButton *>("partInputViewOnly")->click();
         QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         check(!c.session().unfoldSettings().manualK && !c.session().modified() &&

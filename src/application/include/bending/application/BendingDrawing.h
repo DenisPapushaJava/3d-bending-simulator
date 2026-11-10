@@ -218,9 +218,16 @@ struct BendingDrawing {
     FlatPatternPtr preparedFlatPattern = {}; // Original stock snapshot, before paper orientation.
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
+struct DrawingComplexityLimits {
+    int faces;
+    int edges;
+};
+enum class DrawingBaseError { RequiresPlanarFace, InvalidFaceIndex };
 struct DrawingError {
     std::string detail;
     bool cancelled = false;
+    std::optional<DrawingComplexityLimits> complexityLimits = {};
+    std::optional<DrawingBaseError> baseError = {};
 };
 using DrawingResult = std::variant<BendingDrawingPtr, DrawingError>;
 class BendingDrawingBuilder {

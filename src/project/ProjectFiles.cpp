@@ -436,6 +436,10 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
             unfold.manualK = k.toDouble();
         else if (!k.isNull())
             return invalid("Invalid K factor");
+        const auto custom = obj.value(QStringLiteral("customMaterialName"));
+        if (!custom.isUndefined() && !custom.isString())
+            return invalid("Invalid custom material name");
+        unfold.customMaterialName = custom.toString().toStdString();
         const auto rule = obj.value(QStringLiteral("referenceVersion"));
         if (!rule.isDouble() || rule.toDouble() != 1)
             return invalid("Unknown unfold reference version");
@@ -506,11 +510,14 @@ ProjectFiles::save(const std::filesystem::path &path, const Document &document,
                           : unfold.material == core::SheetMaterial::StainlessSteel ? "stainless"
                           : unfold.material == core::SheetMaterial::Aluminium      ? "aluminium"
                                                                                    : "unknown";
-    const QJsonObject unfoldJson{{QStringLiteral("material"), QLatin1String(material)},
-                                 {QStringLiteral("manualK"), unfold.manualK
-                                                                 ? QJsonValue(*unfold.manualK)
-                                                                 : QJsonValue(QJsonValue::Null)},
-                                 {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
+    QJsonObject unfoldJson{{QStringLiteral("material"), QLatin1String(material)},
+                           {QStringLiteral("manualK"), unfold.manualK
+                                                           ? QJsonValue(*unfold.manualK)
+                                                           : QJsonValue(QJsonValue::Null)},
+                           {QStringLiteral("referenceVersion"), unfold.referenceVersion}};
+    if (!unfold.customMaterialName.empty())
+        unfoldJson.insert(QStringLiteral("customMaterialName"),
+                          QString::fromStdString(unfold.customMaterialName));
     QJsonArray assignments;
     const auto prepared = bendsJson(bends, assignments);
     const QJsonObject root{

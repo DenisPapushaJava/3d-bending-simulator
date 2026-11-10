@@ -1,9 +1,11 @@
+#include "MaterialPresets.h"
 #include "PartInputDialog.h"
 #include "ProjectFormatFixtures.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -17,9 +19,12 @@
 #include <QLabel>
 #include <QPointer>
 #include <QPushButton>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QToolButton>
+#include <QVariantList>
+#include <QVariantMap>
 #include <cmath>
 #include <iostream>
 #include <source_location>
@@ -86,6 +91,41 @@ QPushButton *button(QWidget *dialog, const char *name) {
     auto *found = dialog->findChild<QPushButton *>(name);
     check(found, "Missing button");
     return found;
+}
+void materialNameChecks() {
+    QTemporaryDir dir;
+    check(dir.isValid(), "No material preset test folder");
+    const auto file = dir.path() + QStringLiteral("/settings.ini");
+    ui::setPreferencesFile(file);
+    {
+        QSettings settings(file, QSettings::IniFormat);
+        settings.setValue(QStringLiteral("materials/presets"),
+                          QVariantList{QVariantMap{{"name", "Низкоуглеродистая сталь"},
+                                                   {"k", .5},
+                                                   {"grades", QStringList{}},
+                                                   {"tensileStrengthMpa", 400}},
+                                       QVariantMap{{"name", "Нержавеющая сталь"},
+                                                   {"k", .5},
+                                                   {"grades", QStringList{}},
+                                                   {"tensileStrengthMpa", 600}},
+                                       QVariantMap{{"name", "Алюминий"},
+                                                   {"k", .5},
+                                                   {"grades", QStringList{}},
+                                                   {"tensileStrengthMpa", 100}},
+                                       QVariantMap{{"name", "Цеховая сталь"},
+                                                   {"k", .4},
+                                                   {"grades", QStringList{"Ст20"}}}});
+        settings.sync();
+    }
+    check(ui::materialName({core::SheetMaterial::Unknown, .4, 1, ""}).isEmpty(),
+          "Custom preset was reported as a material without a category");
+    check(ui::materialName({core::SheetMaterial::Unknown, .4, 1, "Цеховая сталь"}) ==
+              QStringLiteral("Цеховая сталь"),
+          "Custom material name was lost");
+    check(ui::materialName({core::SheetMaterial::MildSteel, {}}) ==
+              QStringLiteral("Низкоуглеродистая сталь"),
+          "Built-in material name missing");
+    ui::setPreferencesFile({});
 }
 void draftTests() {
     ui::ImportController c(std::make_shared<Importer>(), [](auto, auto) { return QString{}; });
@@ -166,11 +206,10 @@ void draftTests() {
         check(c.session().document() && !c.session().modified(),
               "View-only lost model or edited settings");
     }
+    check(c.setUnfoldSettings({core::SheetMaterial::Unknown, .42, 1}), "Cannot restore legacy K");
     d = new ui::PartInputDialog(c, &owner);
     d->show();
     d->findChild<QDoubleSpinBox *>("partThickness")->setValue(2.);
-    d->findChild<QCheckBox *>("customUnfoldK")->setChecked(true);
-    d->findChild<QDoubleSpinBox *>("unfoldK")->setValue(.42);
     check(button(d, "partInputContinue")->isEnabled(),
           "Expert mode requires a fictitious material");
     button(d, "partInputContinue")->click();
@@ -246,6 +285,16 @@ void workflowTests(const QString &snapshot) {
               c.session().unfoldSettings().material == core::SheetMaterial::Unknown &&
               c.session().unfoldSettings().manualK == .42,
           "Complete expert project was forced to choose a material");
+    const core::UnfoldSettings custom{core::SheetMaterial::Unknown, .41, 1, "Shop steel"};
+    check(c.setUnfoldSettings(custom), "Cannot apply the custom material");
+    c.saveProject(path, files);
+    wait([&] { return !c.hasWork(); });
+    check(c.saveError().isEmpty(), "Cannot save the custom material");
+    c.closeDocument();
+    c.open(path);
+    wait([&] { return !c.hasWork(); });
+    check(!dialog() && c.session().unfoldSettings() == custom,
+          "The project lost the custom material name or coefficient");
     // Legacy projects must request their missing material.
     QFile file(dir.path() + "/part.bend");
     check(file.open(QIODevice::ReadOnly), "Cannot read project");
@@ -326,6 +375,7 @@ void workflowTests(const QString &snapshot) {
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
+        materialNameChecks();
         draftTests();
         workflowTests(app.arguments().size() > 1 ? app.arguments().at(1) : QString{});
     } catch (const std::exception &e) {
