@@ -128,6 +128,7 @@ class ImportController::Impl {
     bool preparingRoute = false;
     RouteDraftPtr draft;
     std::optional<BendRouteError> draftError;
+    std::optional<RouteDraftPose> draftPose;
     std::uint64_t draftId = 0;
     bool runningDraft = false;
     struct DraftJob {
@@ -140,6 +141,8 @@ class ImportController::Impl {
     struct DraftPrefetch {
         DraftJob job;
         std::stop_source stop;
+        std::optional<RouteDraftPose> pose = {};
+        std::optional<std::uint64_t> promotedId = {};
     };
     std::shared_ptr<DraftPrefetch> activePrefetch;
     std::optional<DraftJob> pendingPrefetch;
@@ -162,12 +165,19 @@ class ImportController::Impl {
     }
     void dispatchPrefetch();
     void dispatchDraft();
+    bool currentDraftPose(std::uint64_t id, std::uint64_t revision, std::uint64_t edit,
+                          std::stop_token token) const {
+        return !stopping && runningDraft && id == draftId && revision == session.revision() &&
+               edit == session.editRevision() && !session.activeRequest() &&
+               !token.stop_requested();
+    }
     void invalidateDraft(bool keepPrefetch = false) {
         if (!keepPrefetch)
             cancelPrefetch();
         ++draftId;
         draft.reset();
         draftError.reset();
+        draftPose.reset();
         pendingDraft.reset();
         if (runningDraft)
             stop.request_stop();
@@ -275,8 +285,25 @@ void ImportController::Impl::dispatchPrefetch() {
             // dispatchDraft's validation, and even a failed speculation stays invisible.
             try {
                 if (!token.stop_requested())
-                    (void)work->job.builder->buildRouteDraft(work->job.document, work->job.request,
-                                                             token);
+                    (void)work->job.builder->buildRouteDraftWithPose(
+                        work->job.document, work->job.request, token,
+                        [this, work, token](RouteDraftPose pose) {
+                            QMetaObject::invokeMethod(
+                                owner,
+                                [this, work, token, pose = std::move(pose)]() mutable {
+                                    if (stopping || activePrefetch != work ||
+                                        token.stop_requested())
+                                        return;
+                                    work->pose = std::move(pose);
+                                    if (work->promotedId &&
+                                        currentDraftPose(*work->promotedId, work->job.revision,
+                                                         work->job.edit, token)) {
+                                        draftPose = work->pose;
+                                        emit owner->routeDraftPoseChanged();
+                                    }
+                                },
+                                Qt::QueuedConnection);
+                        });
             } catch (...) {
                 // An explicit request will report its own preparation failure normally.
             }
@@ -306,13 +333,32 @@ void ImportController::Impl::dispatchDraft() {
     beginForeground(&job);
     const auto token = stop.get_token();
     running = runningDraft = true;
+    if (activePrefetch && sameDraft(activePrefetch->job, job) &&
+        !activePrefetch->stop.stop_requested()) {
+        activePrefetch->promotedId = job.id;
+        draftPose = activePrefetch->pose;
+    }
     QMetaObject::invokeMethod(
         worker,
         [this, job = std::move(job), token]() mutable {
             RouteDraftResult result = BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
             try {
                 if (!token.stop_requested())
-                    result = job.builder->buildRouteDraft(job.document, job.request, token);
+                    result = job.builder->buildRouteDraftWithPose(
+                        job.document, job.request, token,
+                        [this, id = job.id, revision = job.revision, edit = job.edit,
+                         token](RouteDraftPose pose) {
+                            QMetaObject::invokeMethod(
+                                owner,
+                                [this, id, revision, edit, token,
+                                 pose = std::move(pose)]() mutable {
+                                    if (!currentDraftPose(id, revision, edit, token) || draftPose)
+                                        return;
+                                    draftPose = std::move(pose);
+                                    emit owner->routeDraftPoseChanged();
+                                },
+                                Qt::QueuedConnection);
+                        });
             } catch (const std::exception &e) {
                 result = BendRouteError{BendRouteErrorCode::Failed, e.what()};
             } catch (...) {
@@ -327,6 +373,7 @@ void ImportController::Impl::dispatchDraft() {
                     if (job.id == draftId && job.revision == session.revision() &&
                         job.edit == session.editRevision() && job.document == session.document() &&
                         !session.activeRequest() && !token.stop_requested()) {
+                        draftPose.reset();
                         if (const auto *value = std::get_if<RouteDraftPtr>(&result)) {
                             const auto p = *value ? (*value)->visual : nullptr;
                             bool valid =
@@ -992,6 +1039,9 @@ std::optional<BendRouteProgress> ImportController::bendRouteProgress() const {
 }
 bool ImportController::isPreparingDraft() const {
     return impl_->runningDraft || impl_->pendingDraft.has_value();
+}
+const std::optional<RouteDraftPose> &ImportController::routeDraftPose() const {
+    return impl_->draftPose;
 }
 RouteDraftPtr ImportController::routeDraft() const {
     return impl_->draft;

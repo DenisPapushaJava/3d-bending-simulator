@@ -267,7 +267,71 @@ repeatedDrawingSection(const TopoDS_Shape &flat, const DrawingView &actual,
     }
     return {};
 }
+std::vector<std::array<PointMm, 2>> flatDimensionLines(DrawingFlatPattern &flat, double tolerance) {
+    const auto &bends = flat.info.bends;
+    std::vector<std::array<PointMm, 2>> lines;
+    for (const auto &bend : bends)
+        lines.push_back(bend.centreLine());
+    std::vector<bool> used(bends.size());
+    std::vector<std::array<PointMm, 2>> result;
+    std::vector<std::vector<std::size_t>> groups;
+    bool hasRun = false;
+    for (std::size_t i = 0; i < bends.size(); ++i) {
+        if (used[i])
+            continue;
+        const auto [a, b] = lines[i];
+        const double length = bends[i].lengthMm();
+        if (length <= tolerance) {
+            result.push_back(lines[i]);
+            groups.push_back({bends[i].bendIndex});
+            continue;
+        }
+        const double x = (b.x - a.x) / length, y = (b.y - a.y) / length;
+        const auto axial = [&](PointMm p) { return (p.x - a.x) * x + (p.y - a.y) * y; };
+        const auto cross = [&](PointMm p) { return (p.y - a.y) * x - (p.x - a.x) * y; };
+        std::vector<std::pair<double, std::size_t>> spans;
+        for (std::size_t j = i; j < bends.size(); ++j) {
+            const auto &bend = bends[j];
+            const auto [c, d] = lines[j];
+            if (!used[j] && std::abs(cross(c)) <= tolerance && std::abs(cross(d)) <= tolerance &&
+                std::abs(bend.lengthMm() - length) <= tolerance &&
+                bend.direction == bends[i].direction &&
+                std::abs(bend.turnRadians - bends[i].turnRadians) <= 1e-7 &&
+                std::abs(bend.radiusMm - bends[i].radiusMm) <= tolerance &&
+                std::abs(bend.k - bends[i].k) <= 1e-7)
+                spans.emplace_back(std::min(axial(c), axial(d)), j);
+        }
+        std::sort(spans.begin(), spans.end());
+        const double pitch = spans.size() < 2 ? 0 : spans[1].first - spans[0].first;
+        bool periodic = spans.size() >= 4 && pitch > length + tolerance;
+        for (std::size_t n = 2; n < spans.size() && periodic; ++n)
+            periodic = std::abs(spans[n].first - spans[0].first - n * pitch) <= tolerance;
+        if (!periodic) {
+            result.push_back(lines[i]);
+            groups.push_back({bends[i].bendIndex});
+            continue;
+        }
+        const auto first = lines[spans.front().second], last = lines[spans.back().second];
+        std::vector<std::size_t> group;
+        for (const auto &[offset, j] : spans) {
+            (void)offset;
+            used[j] = true;
+            group.push_back(bends[j].bendIndex);
+        }
+        // Two end references locate the common line; preserve each segment
+        // and identify every bend in the shared callout.
+        result.push_back({axial(first[0]) < axial(first[1]) ? first[0] : first[1],
+                          axial(last[0]) > axial(last[1]) ? last[0] : last[1]});
+        groups.push_back(std::move(group));
+        hasRun = true;
+    }
+    if (hasRun)
+        flat.repeatedBendGroups = std::move(groups);
+    return result;
+}
 void compactRepeatedFlat(DrawingFlatPattern &flat, double tolerance) {
+    if (!flat.repeatedBendGroups.empty())
+        return;
     const auto &bends = flat.info.bends;
     if (bends.size() < 4)
         return;

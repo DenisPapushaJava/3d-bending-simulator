@@ -17,6 +17,7 @@
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
@@ -145,11 +146,21 @@ void draftTests() {
     check(material->currentIndex() == 0 && thickness->value() == 6. &&
               !button(d, "partInputContinue")->isEnabled(),
           "Initial data defaults were invented");
-    check(d->findChild<QLabel *>("partThicknessOrigin")
-              ->text()
-              .contains(QStringLiteral("подтверждена")),
+    check(d->findChild<QLabel *>("partThicknessOrigin")->text() == QStringLiteral("Из модели"),
           "Detected origin missing");
     material->setCurrentIndex(1);
+    auto *factor = d->findChild<QLineEdit *>("partUnfoldK");
+    check(factor && !factor->text().isEmpty(), "Material did not fill the part coefficient");
+    const auto defaultFactor = factor->text();
+    factor->setText(QStringLiteral("1,1"));
+    check(!button(d, "partInputContinue")->isEnabled(), "Out-of-range coefficient accepted");
+    factor->setText(QStringLiteral("0,375"));
+    check(button(d, "partInputContinue")->isEnabled() &&
+              button(d, "partUseCategoryK")->isEnabled() && !c.session().modified(),
+          "Local coefficient was not a valid, unapplied draft");
+    button(d, "partUseCategoryK")->click();
+    check(factor->text() == defaultFactor && !button(d, "partUseCategoryK")->isEnabled(),
+          "Reset did not restore the category coefficient");
     thickness->setValue(3.);
     check(
         !button(d, "partInputContinue")->isEnabled() &&
@@ -179,15 +190,14 @@ void draftTests() {
               c.session().unfoldSettings().material == core::SheetMaterial::MildSteel,
           "Cancel leaked draft values");
     d = open("local.step");
-    check(d->findChild<QLabel *>("partThicknessOrigin")
-              ->text()
-              .contains(QStringLiteral("Предварительное")),
-          "Local origin claimed constant thickness");
+    check(d->findChild<QLabel *>("partThicknessOrigin")->text() ==
+              QStringLiteral("По измерениям в модели"),
+          "Local measurement source missing");
     d->findChild<QComboBox *>("sheetMaterial")->setCurrentIndex(1);
     d->findChild<QDoubleSpinBox *>("partThickness")->setValue(3.);
     check(d->findChild<QLabel *>("partThicknessOrigin")
               ->text()
-              .contains(QStringLiteral("отличается")),
+              .contains(QStringLiteral("в модели измерено")),
           "Local discrepancy was hidden");
     button(d, "partAutomaticThickness")->click();
     button(d, "partInputContinue")->click();
@@ -325,11 +335,12 @@ void workflowTests(const QString &snapshot) {
     wait([&] { return !c.hasWork(); });
     check(!dialog() && c.session().document() == previous && c.session().error(),
           "Failed import prompted or replaced model");
-    // Replacing an in-flight import produces one prompt for the latest accepted STEP.
+    // Replacing a bent part with planar stock must not show the cancelled part's prompt.
     c.open(sample);
     c.open(std::filesystem::path(BENDING_EXAMPLE_DIR) / "plate-mm.step");
-    wait([&] { return !c.hasWork() && dialog(); });
-    check(window.findChildren<QDialog *>("partInputDialog").size() == 1 &&
+    wait([&] { return !c.hasWork(); });
+    pump();
+    check(!dialog() && c.session().document() &&
               c.session().document()->metadata().sourcePath.filename() == "plate-mm.step",
           "Replaced imports queued stale prompts");
     c.closeDocument();
@@ -343,10 +354,8 @@ void workflowTests(const QString &snapshot) {
     wait([&] { return !c.hasWork() && dialog(); });
     check(std::abs(dialog()->findChild<QDoubleSpinBox *>("partThickness")->value() - 1.5) < 1e-6 &&
               !c.session().manualThicknessMm() &&
-              dialog()
-                  ->findChild<QLabel *>("partThicknessOrigin")
-                  ->text()
-                  .contains(QStringLiteral("радиусам гибов")),
+              dialog()->findChild<QLabel *>("partThicknessOrigin")->text() ==
+                  QStringLiteral("По измерениям в модели"),
           "Sixteen-bend panel did not receive an automatic local thickness proposal");
     if (!snapshot.isEmpty())
         check(dialog()->grab().save(snapshot + "-panel.png"), "Cannot save panel form");
@@ -376,6 +385,9 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     try {
         materialNameChecks();
+        QTemporaryDir settings;
+        check(settings.isValid(), "No part input settings folder");
+        ui::setPreferencesFile(settings.filePath("settings.ini"));
         draftTests();
         workflowTests(app.arguments().size() > 1 ? app.arguments().at(1) : QString{});
     } catch (const std::exception &e) {

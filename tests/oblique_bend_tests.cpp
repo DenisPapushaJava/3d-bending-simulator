@@ -122,6 +122,10 @@ void sheetCheck(const std::filesystem::path &path, bool compound, const gp_Trsf 
     require(flat->info().bends.size() == 1 &&
                 BRepCheck_Analyzer(cad::OcctFlatPatternAccess::geometry(*flat)).IsValid(),
             "Oblique sheet lost its flat pattern");
+    const auto &cuts = flat->info().cutProfile;
+    require(cuts && cuts->midThickness && cuts->loops.size() == 1 &&
+                cuts->loops.front().vertices.size() >= 4,
+            "The oblique stock did not produce one marked mid-thickness cutting outline");
     const auto &layout = cad::OcctFlatPatternAccess::layout(*flat);
     require(layout.walls.size() == 2 && layout.bends.size() == 1, "Oblique layout is incomplete");
     if (!compound) {

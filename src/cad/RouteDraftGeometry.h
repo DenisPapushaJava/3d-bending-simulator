@@ -8,8 +8,8 @@ class RouteDraftBasis {
   public:
     RouteDraftBasis(application::DocumentPtr, application::FlatPatternPtr, std::stop_token);
     ~RouteDraftBasis();
-    application::RouteDraftPtr build(application::RouteDraftRequest, bool reused,
-                                     std::stop_token) const;
+    application::RouteDraftPtr build(application::RouteDraftRequest, bool reused, std::stop_token,
+                                     const application::RouteDraftPoseObserver &) const;
 
   private:
     struct Impl;

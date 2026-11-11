@@ -205,8 +205,9 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
         impl_->faces.push_back(std::move(skin));
     }
 }
-application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest request,
-                                                  bool reused, std::stop_token stop) const {
+application::RouteDraftPtr
+RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std::stop_token stop,
+                       const application::RouteDraftPoseObserver &onPose) const {
     using namespace application;
     cancelled(stop);
     const auto &layout = OcctFlatPatternAccess::layout(*impl_->flat);
@@ -381,6 +382,24 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                 frame.floor = machineAssembly->floor();
             }
         }
+        if (impl_->referenceWall) {
+            const auto &reference = OcctDocumentAccess::sheetOrientation(
+                                        dynamic_cast<const CadDocument &>(*impl_->source))
+                                        .reference;
+            frame.orientation.edges =
+                movedSheetReference(reference, machine * placement.walls[*impl_->referenceWall])
+                    .edges;
+            if (f == 0 && request.step > 0 && onPose && !frame.orientation.edges.empty()) {
+                cancelled(stop);
+                RouteDraftPose pose;
+                for (const auto &edge : frame.orientation.edges) {
+                    const auto point = [](const auto &p) { return PointMm{p.X(), p.Y(), p.Z()}; };
+                    pose.edges.push_back(
+                        {point(edge.points[0]), point(edge.points[1]), point(edge.normal)});
+                }
+                onPose(std::move(pose));
+            }
+        }
         std::vector<TopoDS_Shape> material;
         for (std::size_t w = 0; w < layout.walls.size(); ++w)
             material.push_back(
@@ -535,14 +554,6 @@ application::RouteDraftPtr RouteDraftBasis::build(application::RouteDraftRequest
                 envelope.Add(box(t));
             }
         frame.displayShape = display;
-        if (impl_->referenceWall) {
-            const auto &reference = OcctDocumentAccess::sheetOrientation(
-                                        dynamic_cast<const CadDocument &>(*impl_->source))
-                                        .reference;
-            frame.orientation.edges =
-                movedSheetReference(reference, machine * placement.walls[*impl_->referenceWall])
-                    .edges;
-        }
         buildCollisionHighlights(frame, evidence, bend.thicknessMm, stop);
         cancelled(stop);
         visual->frames.push_back(std::move(frame));

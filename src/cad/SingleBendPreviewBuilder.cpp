@@ -10,6 +10,7 @@
 #include "GeometryCacheInternal.h"
 #include "JointBends.h"
 #include "RouteGeometry.h"
+#include "ShapeVolumeDifference.h"
 #include "SheetGeometry.h"
 #include "SheetOrientation.h"
 #include "TrimmedBend.h"
@@ -55,6 +56,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <map>
 #include <numbers>
 #include <optional>
 #include <stdexcept>
@@ -397,7 +399,8 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
                                    const std::array<TopoDS_Shape, 2> &flanges,
                                    const TopoDS_Shape &sector, double tolerance,
                                    std::stop_token stop, const std::vector<SheetSide> &sides,
-                                   const simulation::SingleBend &model, const FrameBasis &basis) {
+                                   const simulation::SingleBend &model, const FrameBasis &basis,
+                                   bool remappedRouteSkin) {
     // Membership is in immutable SOURCE components and does not depend on the
     // displayed angle. Preserve all rail memberships; never cache across operations.
     WholePartSkin result;
@@ -411,7 +414,11 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
         for (int i = 1; i <= solids.Extent(); ++i)
             classifiers[r].push_back(std::make_unique<BRepClass3d_SolidClassifier>(solids(i)));
     }
-    std::size_t boundaryFallbacks = 0;
+    std::map<std::array<double, 3>, unsigned> boundaryMemberships;
+    std::optional<SkinBoundaryLookup> boundaryLookup;
+    // The intermediate mesh may contain seams from several remapped bend zones.
+    // The exact distance criterion and the imported-skin budget stay unchanged.
+    const std::size_t maximumBoundaryQueries = remappedRouteSkin ? 4096 : 256;
     std::size_t ownerQueries = 0;
     std::optional<std::array<Bnd_Box, 3>> ownerBoxes;
     const auto flat = *simulation::singleBendSection(model, 0.);
@@ -460,9 +467,21 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
                 // distance query proves ON without increasing the tolerance.
                 // The complete solid reconstruction was checked before this
                 // display-skin mapping; this never replaces collision checks.
-                if (++boundaryFallbacks > 256)
-                    throw std::runtime_error("Source skin boundary-query budget exceeded");
-                regions = skinBoundaryMembership(point, bodies, tolerance, stop);
+                const std::array coordinates{point.X(), point.Y(), point.Z()};
+                if (std::any_of(coordinates.begin(), coordinates.end(),
+                                [](double value) { return !std::isfinite(value); }))
+                    throw std::runtime_error("Non-finite source skin node");
+                if (const auto found = boundaryMemberships.find(coordinates);
+                    found != boundaryMemberships.end()) {
+                    regions = found->second;
+                } else {
+                    if (boundaryMemberships.size() >= maximumBoundaryQueries)
+                        throw std::runtime_error("Source skin boundary-query budget exceeded");
+                    if (!boundaryLookup)
+                        boundaryLookup.emplace(bodies, tolerance);
+                    regions = boundaryLookup->membership(point, stop);
+                    boundaryMemberships.emplace(coordinates, regions);
+                }
                 if (stop.stop_requested())
                     return {};
                 for (std::size_t r = 0; r < bodies.size(); ++r) {
@@ -806,31 +825,6 @@ bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolera
         *overlap = common.Shape();
     return valid && amount <= budget;
 }
-bool sameVolume(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance, double budget,
-                std::stop_token stop) {
-    for (const bool reverse : {false, true}) {
-        if (stop.stop_requested()) {
-            return false;
-        }
-        BRepAlgoAPI_Cut cut;
-        TopTools_ListOfShape arguments, tools;
-        arguments.Append(reverse ? b : a);
-        tools.Append(reverse ? a : b);
-        cut.SetArguments(arguments);
-        cut.SetTools(tools);
-        cut.SetNonDestructive(true);
-        cut.SetFuzzyValue(tolerance);
-        cut.Build();
-        if (!cut.IsDone() || cut.HasErrors() || !BRepCheck_Analyzer(cut.Shape()).IsValid()) {
-            return false;
-        }
-        const double residual = volume(cut.Shape());
-        if (!std::isfinite(residual) || residual > budget) {
-            return false;
-        }
-    }
-    return true;
-}
 } // namespace
 TopoDS_Shape makeRouteSector(const simulation::SingleBend &m, const gp_Ax3 &axes, double p) {
     return makeFrame(m,
@@ -891,13 +885,15 @@ gp_Dir normalBendAxis(const CadDocument &document, std::size_t index) {
         axis.Reverse();
     return gp_Dir(axis);
 }
-PreparedBendOperationResult prepareBendOperation(
-    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
-    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
-    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis,
-    std::span<const std::size_t> jointBends, BendWorkpieceReuse *workpieceReuse,
-    const FlatPatternPtr &verifiedFlat, bool manualExtraction) {
+PreparedBendOperationResult
+prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
+                     bool fixedSecond, std::stop_token stop,
+                     std::optional<core::PressTools> toolParameters, bool withMotion,
+                     std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+                     std::optional<double> maximumEndSupportLossMm,
+                     std::optional<gp_Dir> referenceAxis, std::span<const std::size_t> jointBends,
+                     BendWorkpieceReuse *workpieceReuse, const FlatPatternPtr &verifiedFlat,
+                     bool manualExtraction, const TopoDS_Shape &verifiedRouteSector) {
     if (manualExtraction && (!withMotion || !toolParameters))
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Manual extraction requires a forming cycle with tools"};
@@ -1073,11 +1069,18 @@ PreparedBendOperationResult prepareBendOperation(
                                                 &ambiguous);
                     if (sector || !ambiguous || stop.stop_requested())
                         return sector;
+                    // The route carries the exact original partition through its state
+                    // placement. The current radial, split and reconstruction checks still follow.
+                    if (!joint && !verifiedRouteSector.IsNull())
+                        return std::optional<TopoDS_Shape>{
+                            BRepBuilderAPI_Copy(verifiedRouteSector, true, false).Shape()};
                     // A neighbour's corner may be inside this envelope. Reuse the full
                     // D201 partition proof; selecting one component alone is insufficient.
                     if (!sheetGeometry) {
                         if (verifiedFlat &&
-                            OcctFlatPatternAccess::belongsTo(*verifiedFlat, *document))
+                            OcctFlatPatternAccess::belongsTo(*verifiedFlat, *document) &&
+                            !OcctFlatPatternAccess::layout(*verifiedFlat).usesJoinedWallFaces &&
+                            !OcctFlatPatternAccess::layout(*verifiedFlat).hasPresentationOnlyBends)
                             sheetGeometry = VerifiedSheetGeometry{
                                 document,
                                 std::shared_ptr<const SheetLayout>(
@@ -1128,8 +1131,8 @@ PreparedBendOperationResult prepareBendOperation(
                                       analysis.lengthToleranceMm, nullptr, stop, &nonRadial)
                                 : envelope.regions[1];
                         nonRadialEnds |= nonRadial;
-                        if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
-                                        std::max(1e-4, volume(source) * 1e-7), stop))
+                        if (!sameVolumeWithin(*region, radial, analysis.lengthToleranceMm,
+                                              std::max(1e-4, volume(source) * 1e-7), stop))
                             return unsupported("A joint sector is not a supported radial surface");
                         sectors.push_back(*region);
                         jointSectors.push_back(*region);
@@ -1146,8 +1149,8 @@ PreparedBendOperationResult prepareBendOperation(
                     const auto radial = mapTrimmedBend(
                         *region, [](gp_Pnt p) { return p; }, 1, analysis.lengthToleranceMm, nullptr,
                         stop, &nonRadialEnds);
-                    if (!sameVolume(*region, radial, analysis.lengthToleranceMm,
-                                    std::max(1e-4, volume(source) * 1e-7), stop))
+                    if (!sameVolumeWithin(*region, radial, analysis.lengthToleranceMm,
+                                          std::max(1e-4, volume(source) * 1e-7), stop))
                         return unsupported(
                             "The trimmed end is not a supported radial ruled surface");
                 }
@@ -1205,8 +1208,8 @@ PreparedBendOperationResult prepareBendOperation(
                     assemble(finalFrame);
                     reconstructedVolume = volume(finalFrame.shape);
                     return std::abs(reconstructedVolume - expectedVolume) <= budget &&
-                           sameVolume(source, finalFrame.shape, analysis.lengthToleranceMm, budget,
-                                      stop);
+                           sameVolumeWithin(source, finalFrame.shape, analysis.lengthToleranceMm,
+                                            budget, stop);
                 };
                 bool partitionedWalls = multi;
                 bool reconstructed = reconstructsSource();
@@ -1620,7 +1623,8 @@ PreparedBendOperationResult prepareBendOperation(
                     auto skin =
                         partitionedWalls && !displaySource.IsNull()
                             ? prepareWholePartSkin(displaySource, flanges, sourceSector, tolerance,
-                                                   placementStop, displaySides, model, sourceBasis)
+                                                   placementStop, displaySides, model, sourceBasis,
+                                                   !OcctDocumentAccess::routeSkin(*native).IsNull())
                             : WholePartSkin{};
                     if (placementStop.stop_requested())
                         return false;
@@ -1850,7 +1854,8 @@ PreparedBendOperationResult prepareBendOperation(
                         gp_Ax3(sourceBasis.origin, gp_Dir(sourceBasis.z), gp_Dir(sourceBasis.x)),
                         gp_Ax3(endpoint.origin, gp_Dir(endpoint.z), gp_Dir(endpoint.x)));
                     const auto expected = BRepBuilderAPI_Transform(source, placement, true).Shape();
-                    if (!sameVolume(expected, frame.shape, tolerance, budget, placementStop)) {
+                    if (!sameVolumeWithin(expected, frame.shape, tolerance, budget,
+                                          placementStop)) {
                         if (placementStop.stop_requested()) {
                             return placementCancelled();
                         }
@@ -2293,20 +2298,22 @@ PreparedBendOperation::at(double offsetMm, std::stop_token stop, bool prepareDia
         return BendPreviewError{BendPreviewErrorCode::Failed, error.what()};
     }
 }
-application::BendPreviewResult buildBendOperation(
-    DocumentPtr document, std::size_t bendIndex, core::BendTarget target, bool fixedSecond,
-    std::stop_token stop, std::optional<core::PressTools> toolParameters, bool withMotion,
-    std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
-    std::optional<double> maximumEndSupportLossMm, std::optional<gp_Dir> referenceAxis,
-    bool prepareDiagnostic, BackgaugeSearchStatistics *statistics,
-    std::span<const std::size_t> jointBends, double workpieceOffsetMm) {
+application::BendPreviewResult
+buildBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarget target,
+                   bool fixedSecond, std::stop_token stop,
+                   std::optional<core::PressTools> toolParameters, bool withMotion,
+                   std::optional<core::ToolAssignment> realTools, bool allowPartialEndSupport,
+                   std::optional<double> maximumEndSupportLossMm,
+                   std::optional<gp_Dir> referenceAxis, bool prepareDiagnostic,
+                   BackgaugeSearchStatistics *statistics, std::span<const std::size_t> jointBends,
+                   double workpieceOffsetMm, BendWorkpieceReuse *workpieceReuse) {
     if (!validWorkpieceOffset(workpieceOffsetMm) || (!toolParameters && workpieceOffsetMm != 0))
         return BendPreviewError{BendPreviewErrorCode::UnsupportedParameters,
                                 "Invalid axial workpiece placement"};
     auto prepared = prepareBendOperation(std::move(document), bendIndex, target, fixedSecond, stop,
                                          toolParameters, withMotion, std::move(realTools),
                                          allowPartialEndSupport, maximumEndSupportLossMm,
-                                         referenceAxis, jointBends);
+                                         referenceAxis, jointBends, workpieceReuse);
     if (const auto *error = std::get_if<BendPreviewError>(&prepared))
         return *error;
     return std::get<PreparedBendOperationPtr>(prepared)->at(workpieceOffsetMm, stop,

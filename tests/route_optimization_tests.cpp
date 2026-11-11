@@ -301,6 +301,24 @@ void backgaugeCache(const std::filesystem::path &folder, bool measureOnly) {
     auto validPair = pair;
     validPair.backgauge = core::BackgaugeSetup{};
     auto variants = request;
+    auto shortPair = validPair;
+    shortPair.punch.lengthMm = shortPair.die.lengthMm = 10;
+    auto shortFirst = variants;
+    shortFirst.maximumChecks = 1;
+    shortFirst.toolVariants = {{shortPair, {}}, {validPair, {}}};
+    {
+        cad::SingleBendPreviewBuilder coverage;
+        const auto route = success(coverage.buildRoute(doc, shortFirst, {}));
+        require(route->selectedToolVariant == 1 && route->evaluatedOperations == 1 &&
+                    route->statistics.testedToolVariants == 1,
+                "A provably short fixed assembly stopped or consumed checks from the next pair");
+        shortFirst.toolVariants.pop_back();
+        const auto rejected = coverage.buildRoute(doc, shortFirst, {});
+        const auto *error = std::get_if<BendRouteError>(&rejected);
+        require(error && error->operationError == BendPreviewErrorCode::ToolTooShort &&
+                    error->evaluatedOperations == 0 && error->toolLengths,
+                "The axial precheck lost the short assembly diagnostic");
+    }
     variants.toolVariants = {{pair, {}}, {validPair, {}}};
     const auto checked = success(builder.buildRoute(doc, variants, {}));
     require(checked->selectedToolVariant == 1 && checked->statistics.testedToolVariants == 2 &&

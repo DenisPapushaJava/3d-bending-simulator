@@ -15,6 +15,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
+#include <QEnterEvent>
 #include <QEvent>
 #include <QLabel>
 #include <QListView>
@@ -23,6 +24,7 @@
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <STEPControl_Writer.hxx>
 #include <algorithm>
@@ -293,6 +295,32 @@ int main(int argc, char **argv) {
                     .contains(QStringLiteral("заготовка")),
                 "Blank stage is ambiguous");
         auto *frame = window.findChild<QSlider *>("bendFrame");
+        if (viewerWidget->isReady()) {
+            auto *step = window.findChild<QPushButton *>("routeStep1");
+            window.findChild<QPushButton *>("routeStep0")->click();
+            viewerWidget->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+            const auto baseline = viewerWidget->captureImage();
+            QEnterEvent enter(QPointF(5, 5), QPointF(5, 5), step->mapToGlobal(QPoint(5, 5)));
+            QApplication::sendEvent(step, &enter);
+            const auto highlighted = viewerWidget->captureImage();
+            require(!baseline.isNull() && highlighted.size() == baseline.size(),
+                    "Missing checked route render");
+            int fuchsia = 0;
+            for (int y = 0; y < highlighted.height(); ++y)
+                for (int x = 0; x < highlighted.width(); ++x) {
+                    const auto pixel = highlighted.pixel(x, y);
+                    fuchsia += pixel != baseline.pixel(x, y) && qRed(pixel) > 200 &&
+                               qBlue(pixel) > 185 && qGreen(pixel) < 175;
+                }
+            require(fuchsia > 10 && window.findChild<QPushButton *>("routeStep0")->isChecked() &&
+                        frame->value() == 0 && controller.bendRoute() == route &&
+                        !controller.hasWork(),
+                    "Hover did not highlight the first checked bend on the blank in fuchsia");
+            QEvent leave(QEvent::Leave);
+            QApplication::sendEvent(step, &leave);
+            require(viewerWidget->captureImage() == baseline,
+                    "Leaving the checked step did not clear the hover highlight");
+        }
         std::vector<QImage> images;
         for (int index = 0; index <= count; ++index) {
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(index))->click();
@@ -318,6 +346,70 @@ int main(int argc, char **argv) {
             require(controller.bendRoute() == route && !controller.hasWork() &&
                         frame->value() == (index ? frame->maximum() : 0),
                     "Arbitrary navigation recalculated or showed the end of another step");
+        }
+        if (viewerWidget->isReady()) {
+            auto *play = window.findChild<QPushButton *>("playBend");
+            auto *timer = window.findChild<QTimer *>("bendPlaybackTimer");
+            window.findChild<QPushButton *>("routeStep0")->click();
+            require(play && play->isEnabled() && timer && frame->value() == 0,
+                    "Cannot start playback from the blank");
+            int frameChanges = 0;
+            const auto connection = QObject::connect(frame, &QSlider::valueChanged, frame,
+                                                     [&](int) { ++frameChanges; });
+            play->click();
+            QObject::disconnect(connection);
+            require(window.findChild<QPushButton *>("routeStep1")->isChecked() &&
+                        frame->maximum() > 0 && frame->value() == 0 && timer->isActive() &&
+                        frameChanges == 0 && controller.bendRoute() == route &&
+                        !controller.hasWork(),
+                    "Play from the blank presented the end of the first bend before its start");
+            play->click();
+        }
+        if (withTools && !sample && viewerWidget->isReady()) {
+            auto *play = window.findChild<QPushButton *>("playBend");
+            auto *label = window.findChild<QLabel *>("sheetRepositionLabel");
+            const auto revision = controller.session().editRevision();
+            window.findChild<QPushButton *>("routeStep1")->click();
+            frame->setValue(frame->maximum() - 1);
+            require(play && label && play->isEnabled(), "Cannot start inter-bend playback");
+            play->click();
+            QElapsedTimer transition;
+            transition.start();
+            wait([&] { return viewerWidget->isRepositioning() || transition.elapsed() > 4000; });
+            require(viewerWidget->isRepositioning() && label->isVisible() && frame->value() == 0 &&
+                        controller.bendRoute() == route && !controller.hasWork(),
+                    "The next bend advanced before the visual reposition or launched CAD");
+            auto *next = window.findChild<QPushButton *>("routeStep2");
+            QEnterEvent enter(QPointF(5, 5), QPointF(5, 5), next->mapToGlobal(QPoint(5, 5)));
+            QApplication::sendEvent(next, &enter);
+            require(viewerWidget->isRepositioning() && frame->value() == 0,
+                    "Hover interrupted the inter-bend reposition");
+            QEvent leave(QEvent::Leave);
+            QApplication::sendEvent(next, &leave);
+            if (const auto output = qEnvironmentVariable("BENDING_REPOSITION_SNAPSHOT");
+                !output.isEmpty()) {
+                auto shot = window.grab().toImage();
+                QPainter painter(&shot);
+                painter.drawImage(viewerWidget->mapTo(&window, QPoint()),
+                                  viewerWidget->captureImage(true));
+                painter.end();
+                require(shot.save(output), "Reposition snapshot failed");
+            }
+            transition.restart();
+            wait([&] { return frame->value() > 0 || transition.elapsed() > 3000; });
+            require(!viewerWidget->isRepositioning() && !label->isVisible() && frame->value() > 0 &&
+                        controller.session().editRevision() == revision,
+                    "Playback did not resume at the checked installation");
+            play->click();
+            window.findChild<QPushButton *>("routeStep1")->click();
+            frame->setValue(frame->maximum() - 1);
+            play->click();
+            transition.restart();
+            wait([&] { return viewerWidget->isRepositioning() || transition.elapsed() > 4000; });
+            require(viewerWidget->isRepositioning(), "The reposition could not be replayed");
+            play->click();
+            require(!viewerWidget->isRepositioning() && !label->isVisible() && frame->value() == 0,
+                    "Pause left a temporary placement on the screen");
         }
         if (sample) {
             if (route->partialEndSupport)

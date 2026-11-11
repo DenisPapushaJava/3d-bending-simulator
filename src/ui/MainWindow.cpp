@@ -1,6 +1,7 @@
 #include "bending/ui/MainWindow.h"
 #include "BendMessagePanel.h"
 #include "DrawingDialog.h"
+#include "FlatDxfDialog.h"
 #include "MaterialPresets.h"
 #include "PartInputDialog.h"
 #include "ProcessNavigationBar.h"
@@ -48,6 +49,7 @@
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -412,26 +414,14 @@ class MainWindow::Impl {
             const auto &analysis = document->metadata().thickness;
             QString description;
             if (session.manualThicknessMm()) {
-                description = QStringLiteral("Толщина: %1 мм · задана вручную\n")
+                description = QStringLiteral("Толщина: %1 мм · задана вручную")
                                   .arg(number(*session.manualThicknessMm()));
-                const auto validation = validateThickness(*session.manualThicknessMm(), analysis);
-                description +=
-                    validation == ThicknessValidation::Verified
-                        ? QStringLiteral("Подтверждена геометрией плоской детали.")
-                    : validation == ThicknessValidation::LocalMatch
-                        ? QStringLiteral("Совпадает с локальным расстоянием. Постоянство толщины "
-                                         "всей детали не проверено.")
-                        : QStringLiteral(
-                              "Геометрией не подтверждена. Постоянство толщины не проверено.");
             } else if (analysis.status == ThicknessStatus::Detected && analysis.thicknessMm) {
-                description = QStringLiteral("Толщина: %1 мм · определена по геометрии\nПлоская "
-                                             "деталь постоянной толщины.")
+                description = QStringLiteral("Толщина: %1 мм · определена по геометрии")
                                   .arg(number(*analysis.thicknessMm));
             } else if (const auto suggestion = suggestThickness(analysis)) {
-                description =
-                    QStringLiteral("Предполагаемая толщина: %1 мм · по локальным "
-                                   "измерениям\nПостоянство толщины всей детали не подтверждено.")
-                        .arg(number(*suggestion));
+                description = QStringLiteral("Толщина: %1 мм · по измерениям в модели")
+                                  .arg(number(*suggestion));
             } else {
                 description =
                     analysis.status == ThicknessStatus::LimitReached
@@ -442,8 +432,7 @@ class MainWindow::Impl {
                     : analysis.status == ThicknessStatus::Ambiguous
                         ? QStringLiteral("Толщина определена неоднозначно.")
                         : QStringLiteral("Согласованная толщина по стенкам и гибам не найдена.");
-                description += QStringLiteral("\nМожно задать толщину вручную; это не подтверждает "
-                                              "пригодность детали для гибки.");
+                description += QStringLiteral("\nУкажите толщину вручную.");
             }
             thickness->setText(description);
             const auto name = session.projectPath().empty()
@@ -631,7 +620,7 @@ class MainWindow::Impl {
         request.allowWorkpieceRotation = automatic;
         request.allowAxialPlacement = automatic && withTools;
         request.withTools = withTools;
-        request.manualExtraction = withTools && routePanel->manualExtraction();
+        request.manualExtraction = withTools;
         request.toolVariants = std::move(variants);
         const bool checkedTooling = !request.toolVariants.empty();
         request.allowPartialEndSupport = withTools;
@@ -1026,10 +1015,14 @@ class MainWindow::Impl {
             return;
         partInputDialog = new PartInputDialog(*controller, window);
         auto *dialog = partInputDialog.data();
-        QObject::connect(dialog, &QDialog::finished, window, [this, dialog] {
-            if (partInputDialog == dialog)
-                partInputDialog.clear();
-        });
+        const bool restoreFlatView = static_cast<bool>(displayedFlat);
+        QObject::connect(
+            dialog, &QDialog::finished, window, [this, dialog, restoreFlatView](int result) {
+                if (partInputDialog == dialog)
+                    partInputDialog.clear();
+                if (result == QDialog::Accepted && restoreFlatView && !controller->flatPattern())
+                    showFlat();
+            });
         dialog->show();
     }
     void promptPartInputs(bool newGeometry) {
@@ -1039,6 +1032,8 @@ class MainWindow::Impl {
         if (!newGeometry || !automaticInputPrompt || !controller->session().document())
             return;
         const auto &session = controller->session();
+        if (isPlanarCutCandidate(session.document()->metadata().bendAnalysis))
+            return;
         if (!session.projectPath().empty() && session.hasPartInputs())
             return;
         const auto serial = ++inputPromptSerial;
@@ -1098,10 +1093,12 @@ class MainWindow::Impl {
     void refreshFlat() {
         const auto &s = controller->session();
         const auto settings = s.unfoldSettings();
+        const auto document = s.document();
+        const bool planar = document && isPlanarCutCandidate(document->metadata().bendAnalysis);
         const bool editable = s.document() && !controller->hasWork();
         partInputs->setText(partInputsSummary(s));
         editInputs->setEnabled(editable);
-        flatAction->setEnabled(flatBuilder && controller->canPrepareFlatPattern() &&
+        flatAction->setEnabled(!planar && flatBuilder && controller->canPrepareFlatPattern() &&
                                !controller->isPreparingFlatPattern());
         flatAction->setText(controller->isPreparingFlatPattern()
                                 ? QStringLiteral("Готовим развёртку…")
@@ -1114,6 +1111,27 @@ class MainWindow::Impl {
                 button->setEnabled(flatAction->isEnabled());
             }
         const auto flat = controller->flatPattern();
+        if (flatDxfAction) {
+            const bool ready = flat && flat->info().cutProfile;
+            const bool bent = document && !document->metadata().bendAnalysis.bends.empty();
+            const bool failed = (flat && !ready) || controller->flatPatternError().has_value();
+            const bool canExport = controller->canPrepareFlatPattern();
+            flatDxfAction->setEnabled(
+                flatDxfDialog || (canExport && (planar ? flatBuilder && !failed &&
+                                                             !controller->isPreparingFlatPattern()
+                                                       : ready && s.hasPartInputs())));
+            flatDxfAction->setStatusTip(
+                !document ? QStringLiteral("Откройте деталь")
+                : failed  ? QStringLiteral("Контуры резки недоступны")
+                : planar && controller->isPreparingFlatPattern()
+                    ? QStringLiteral("Проверяем контур резки…")
+                : planar ? QStringLiteral("Деталь без гибов")
+                : !bent  ? QStringLiteral("Контуры резки недоступны")
+                : !s.hasPartInputs() ? QStringLiteral("Задайте материал и толщину")
+                : ready ? QStringLiteral("Контуры для резки")
+                : controller->isPreparingFlatPattern() ? QStringLiteral("Готовим развёртку…")
+                                                       : QStringLiteral("Нужна готовая развёртка"));
+        }
         if (!flat && !controller->isPreparingFlatPattern())
             wantFlat = false;
         if (displayedFlat && displayedFlat != flat) {
@@ -1121,16 +1139,16 @@ class MainWindow::Impl {
             displayedFlat.reset();
         }
         QString status;
-        if (controller->isPreparingFlatPattern())
+        if (!planar && controller->isPreparingFlatPattern())
             status = QStringLiteral("Раскладываем стенки и проверяем полный контур…");
-        else if (const auto flatError = controller->flatPatternError()) {
+        else if (const auto flatError = controller->flatPatternError(); !planar && flatError) {
             status = flatError->code == FlatPatternErrorCode::ThicknessConflict
                          ? QStringLiteral("Толщина отличается от CAD.")
                      : flatError->code == FlatPatternErrorCode::MissingMaterial
                          ? QStringLiteral("Выберите материал или свой K.")
                          : QStringLiteral("Развёртка этой формы пока не поддерживается.");
             flatStatus->setToolTip(text(flatError->detail));
-        } else if (flat) {
+        } else if (!planar && flat) {
             const auto &info = flat->info();
             status = QStringLiteral(
                          "Расчётная развёртка %1 × %2 мм · t %3 · гибов %4\nСвободная гибка · %5")
@@ -1230,9 +1248,6 @@ class MainWindow::Impl {
             : controller->isPreparingRoute() ? QStringLiteral("Подбираем порядок…")
             : controller->bendRoute() && controller->bendRoute()->partialEndSupport
                 ? QStringLiteral("Торцевые подрезы")
-            : controller->bendRoute() && controller->bendRoute()->manualExtraction
-                ? QStringLiteral("Извлечение вручную · %1 шагов")
-                      .arg(controller->bendRoute()->steps.size())
             : scenePreview() && scenePreview()->hasPartialEndSupport()
                 ? QStringLiteral("Торцевые подрезы")
             : controller->bendRoute()
@@ -1270,7 +1285,8 @@ class MainWindow::Impl {
         operationOverlay->show();
     }
     void refreshPlaybackAction() {
-        const bool playing = playback->isActive();
+        const bool playing =
+            playback->isActive() || (draftAutoPlay && controller->isPreparingDraft());
         viewer->setAnimationRunning(playing);
         const auto action = playing ? QStringLiteral("Пауза") : QStringLiteral("Воспроизвести");
         const auto &icon = playbackIcons[playing ? 1 : 0];
@@ -1289,7 +1305,20 @@ class MainWindow::Impl {
     }
     void stopPlayback() {
         playback->stop();
+        viewer->finishReposition();
         refreshPlaybackAction();
+    }
+    void advancePlaybackStep() {
+        const QScopedValueRollback advancing(advancingPlayback, true);
+        routePanel->select(routePanel->selected() + 1);
+    }
+    void startDraftReposition() {
+        if (!draftAutoPlay || !viewingDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
+            !previewReplacement || !previewReplacement->reposition || !previewReplacement->frame ||
+            previewReplacement->editRevision != controller->session().editRevision())
+            return;
+        if (const auto &pose = controller->routeDraftPose())
+            viewer->startDraftReposition(*pose, controller->session().revision());
     }
     static bool canChainDraft(const application::RouteDraftPtr &draft) {
         // A small nominal deficit affects only playback continuity. It does
@@ -1333,10 +1362,11 @@ class MainWindow::Impl {
         }
         const bool animated =
             preview && (preview->frameCount() > 1 || preview->unverifiedDraft() || viewingRoute);
-        playBend->setEnabled(animated && !lengthBlocked && !viewingSource &&
-                             !controller->hasWork() && previewDisplayError.isEmpty() &&
-                             stageSetupIssue.isEmpty() &&
-                             !collisionAt(preview, static_cast<std::size_t>(bendFrame->value())));
+        const bool awaiting = draftAutoPlay && viewingDraft && controller->isPreparingDraft();
+        playBend->setEnabled(
+            awaiting || (animated && !lengthBlocked && !viewingSource && !controller->hasWork() &&
+                         previewDisplayError.isEmpty() && stageSetupIssue.isEmpty() &&
+                         !collisionAt(preview, static_cast<std::size_t>(bendFrame->value()))));
         playbackSpeedControls->setEnabled(playBend->isEnabled());
     }
     void setFrameText(const QString &text) {
@@ -1385,10 +1415,16 @@ class MainWindow::Impl {
     void beginPreviewReplacement(bool preserveFrame = false) {
         manualDraftWarmup.stop();
         warmDraftAfterSelection = false;
+        if (previewReplacement && !advancingPlayback)
+            previewReplacement->reposition = false;
         if (!viewingSource && displayedPreview && !previewReplacement) {
-            previewReplacement = PreviewReplacement{
-                controller->session().document(), controller->session().revision(),
-                displayedPreview, static_cast<std::size_t>(bendFrame->value()), preserveFrame};
+            previewReplacement = PreviewReplacement{controller->session().document(),
+                                                    controller->session().revision(),
+                                                    controller->session().editRevision(),
+                                                    displayedPreview,
+                                                    displayedPreviewFrame,
+                                                    preserveFrame,
+                                                    advancingPlayback};
             stopPlayback();
             setFrameText({});
         }
@@ -1601,8 +1637,6 @@ class MainWindow::Impl {
                 else if (status == application::BackgaugeStatus::Collision && !collision)
                     addSummary(QStringLiteral("Столкновение с задним упором."));
             }
-            if (preview->manualExtraction())
-                addSummary(QStringLiteral("Извлечение вручную."));
             if (preview->machineModel() != core::MachineModel::None)
                 addSummary(
                     preview->floorChecked()
@@ -1888,10 +1922,15 @@ class MainWindow::Impl {
             routePanel->select(index == 0 ? 0 : 1, false);
         if (displayedPreview != preview || displayedPreviewFrame != index ||
             displayedPreviewRevision != controller->session().revision()) {
-            const auto failure =
-                viewer->presentBendPreview(preview, index, controller->session().revision());
+            const bool reposition =
+                previewReplacement && previewReplacement->reposition &&
+                previewReplacement->editRevision == controller->session().editRevision() &&
+                index == 0 && (!viewingDraft || draftAutoPlay) && !collisionAt(preview, index);
+            const auto failure = viewer->presentBendPreview(
+                preview, index, controller->session().revision(), reposition);
             if (!failure.isEmpty()) {
                 previewDisplayError = failure;
+                controller->cancelRouteDraftPrefetch();
                 stopPlayback();
                 previewStatus->setText(
                     QStringLiteral("Не удалось показать состояние: %1").arg(failure));
@@ -1940,8 +1979,7 @@ class MainWindow::Impl {
             return;
         }
         if (preview->manualExtraction() && index + 1 == preview->frameCount()) {
-            setFrameText(approximation + segmented +
-                         QStringLiteral("Гибка завершена · извлечение вручную не проверено"));
+            setFrameText(approximation + segmented + QStringLiteral("Заданный угол достигнут"));
             return;
         }
         if (const auto *state = preview->pressState(index)) {
@@ -2201,8 +2239,7 @@ class MainWindow::Impl {
                 checkedToolVariants.clear();
                 toolSelection->rememberChoice();
                 status =
-                    route->manualExtraction ? QStringLiteral("Гибка проверена · извлечение вручную")
-                    : route->partialEndSupport
+                    route->partialEndSupport
                         ? QStringLiteral("Маршрут найден · торцевые подрезы")
                         : QStringLiteral("Проверенный порядок · %1 гибов").arg(route->steps.size());
             } else {
@@ -2245,6 +2282,8 @@ class MainWindow::Impl {
         toolWorkspace->refresh();
         const auto preview = scenePreview();
         const auto draft = viewingDraft ? controller->routeDraft() : nullptr;
+        if (draftAutoPlay && draft && !controller->hasWork())
+            prefetchDraftStep();
         const bool diagnostic =
             preview && !preview->unverifiedDraft() &&
             (preview->collision() || preview->machineCollisionAtFrame(preview->frameCount() - 1));
@@ -2292,10 +2331,12 @@ class MainWindow::Impl {
                 }
                 bendFrame->setValue(restoreFrame   ? static_cast<int>(previewReplacement->frame)
                                     : matchedAngle ? *matchedAngle
+                                    : advancingPlayback           ? 0
                                     : draft && draft->toolLengths ? 0
                                     : diagnostic                  ? bendFrame->maximum()
                                     : (viewingDraft || viewingRoute) &&
-                                            routePanel->selected() > 0 && !draftAutoPlay
+                                            routePanel->selected() > 0 && !draftAutoPlay &&
+                                            !(previewReplacement && previewReplacement->reposition)
                                         ? bendFrame->maximum()
                                         : 0);
                 positionedPreview = preview;
@@ -2320,10 +2361,15 @@ class MainWindow::Impl {
         refreshPlaybackAvailability(preview);
         returnToCad->setEnabled(preview || previewReplacement || controller->isPreparingPreview() ||
                                 controller->isPreparingDraft());
-        if (!preview || viewingSource || staticSetup || controller->hasWork()) {
+        if (!preview && !controller->isPreparingDraft())
+            draftAutoPlay = false;
+        if ((!preview || viewingSource || staticSetup || controller->hasWork()) &&
+            !(draftAutoPlay && viewingDraft && controller->isPreparingDraft() && !viewingSource)) {
             stopPlayback();
         }
+        startDraftReposition();
         if (controller->isPreparingDraft()) {
+            refreshPlaybackAction();
             if (!previewReplacement)
                 setFrameText(QStringLiteral("Готовим выбранный шаг и проверяем столкновения…"));
             previewStatus->setText(QStringLiteral("Проверяем столкновения на этом шаге…"));
@@ -2553,7 +2599,6 @@ class MainWindow::Impl {
             bendFrame->setValue(0);
             if (canChainDraft(draft) && playBend->isEnabled()) {
                 startPlayback();
-                prefetchDraftStep();
             }
         }
         if (warmDraftAfterSelection && !controller->isPreparingDraft()) {
@@ -3003,7 +3048,7 @@ class MainWindow::Impl {
     std::vector<std::string> toolContextMembers;
     double toolContextSpan = 0;
     bool viewingRoute = false;
-    bool viewingDraft = false, draftAutoPlay = false;
+    bool viewingDraft = false, draftAutoPlay = false, advancingPlayback = false;
     bool warmDraftAfterSelection = false;
     QTimer manualDraftWarmup;
     bool lastRouteAutomatic = true;
@@ -3050,7 +3095,9 @@ class MainWindow::Impl {
                 *checkFlatSource = nullptr;
     QLabel *flatStatus = nullptr, *checkFlatStatus = nullptr;
     QAction *drawingAction = nullptr;
+    QAction *flatDxfAction = nullptr;
     QPointer<DrawingDialog> drawingDialog;
+    QPointer<FlatDxfDialog> flatDxfDialog;
     QPointer<update::UpdateClient> updates;
     QPointer<UpdateDialog> updateDialog;
     QAction *updatesAction = nullptr;
@@ -3092,10 +3139,10 @@ class MainWindow::Impl {
     application::BendPreviewPtr positionedPreview;
     struct PreviewReplacement {
         application::DocumentPtr document;
-        std::uint64_t revision;
+        std::uint64_t revision, editRevision;
         application::BendPreviewPtr previous;
         std::size_t frame;
-        bool preserveFrame;
+        bool preserveFrame, reposition;
     };
     std::optional<PreviewReplacement> previewReplacement;
     QWidget *measurements = nullptr;
@@ -3260,6 +3307,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->drawingAction->setObjectName(QStringLiteral("bendingDrawingAction"));
     impl_->drawingAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
     impl_->drawingAction->setEnabled(false);
+    impl_->drawingAction->setStatusTip(QStringLiteral("Виды и развёртка"));
     connect(impl_->drawingAction, &QAction::triggered, this, [this] {
         if (impl_->drawingDialog) {
             impl_->drawingDialog->showAtParent();
@@ -3281,6 +3329,43 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->refresh();
         });
         dialog->showAtParent();
+    });
+    impl_->flatDxfAction = fileMenu->addAction(QStringLiteral("Развёртка / DXF…"));
+    impl_->flatDxfAction->setObjectName(QStringLiteral("flatDxfAction"));
+    impl_->flatDxfAction->setEnabled(false);
+    connect(impl_->flatDxfAction, &QAction::triggered, this, [this] {
+        if (auto *dialog = impl_->flatDxfDialog.data()) {
+            if (dialog->isMinimized())
+                dialog->setWindowState(dialog->windowState() & ~Qt::WindowMinimized);
+            dialog->show();
+            dialog->raise();
+            dialog->activateWindow();
+            return;
+        }
+        auto &controller = *impl_->controller;
+        const auto flat = controller.flatPattern();
+        const auto &session = controller.session();
+        if (!session.document() || !controller.canPrepareFlatPattern())
+            return;
+        const bool planar = isPlanarCutCandidate(session.document()->metadata().bendAnalysis);
+        if (planar) {
+            if (!flat && !controller.prepareFlatPattern(impl_->flatBuilder))
+                return;
+        } else if (!flat || !flat->info().cutProfile || !session.hasPartInputs()) {
+            return;
+        }
+        impl_->stopPlayback();
+        auto *dialog =
+            new FlatDxfDialog(controller, impl_->flatBuilder,
+                              displayPath(session.document()->metadata().sourcePath), this);
+        impl_->flatDxfDialog = dialog;
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        connect(dialog, &QDialog::finished, this, [this, dialog] {
+            if (impl_->flatDxfDialog == dialog)
+                impl_->flatDxfDialog.clear();
+            impl_->refreshFlat();
+        });
+        dialog->show();
     });
     fileMenu->addSeparator();
     auto *exit = fileMenu->addAction(QStringLiteral("Выход"));
@@ -4104,22 +4189,23 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->stopPlayback();
             return;
         }
+        if (impl_->viewer->isRepositioning())
+            return;
         if (impl_->bendFrame->value() >= impl_->bendFrame->maximum()) {
             if (impl_->viewingRoute)
                 if (const auto route = impl_->controller->bendRoute();
                     route &&
                     impl_->routePanel->selected() < static_cast<int>(route->steps.size())) {
-                    impl_->routePanel->select(impl_->routePanel->selected() + 1);
-                    impl_->bendFrame->setValue(0);
-                    impl_->startPlayback();
+                    impl_->advancePlaybackStep();
+                    if (impl_->playBend->isEnabled())
+                        impl_->startPlayback();
                     return;
                 }
             const auto draft = impl_->viewingDraft ? impl_->controller->routeDraft() : nullptr;
             if (Impl::canChainDraft(draft) &&
                 impl_->routePanel->selected() <
                     static_cast<int>(impl_->controller->session().orderedBends().size())) {
-                impl_->routePanel->select(impl_->routePanel->selected() + 1);
-                impl_->draftAutoPlay = true;
+                impl_->advancePlaybackStep();
                 return;
             }
             impl_->stopPlayback();
@@ -4129,7 +4215,9 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     });
     connect(impl_->playBend, &QPushButton::clicked, this, [this] {
         impl_->manualDraftWarmup.stop();
-        if (impl_->playback->isActive()) {
+        if (impl_->playback->isActive() ||
+            (impl_->draftAutoPlay && impl_->controller->isPreparingDraft())) {
+            impl_->draftAutoPlay = false;
             impl_->controller->cancelRouteDraftPrefetch();
             impl_->stopPlayback();
             return;
@@ -4137,10 +4225,9 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         if (!impl_->playBend->isEnabled() || impl_->shortToolPlaybackBlocked())
             return;
         if (impl_->viewingRoute && impl_->routePanel->selected() == 0)
-            impl_->routePanel->select(1);
+            impl_->advancePlaybackStep();
         if (impl_->viewingDraft && impl_->routePanel->selected() == 0) {
-            impl_->routePanel->select(1);
-            impl_->draftAutoPlay = true;
+            impl_->advancePlaybackStep();
             return;
         }
         if (impl_->bendFrame->value() == impl_->bendFrame->maximum()) {
@@ -4214,6 +4301,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->wantFlat = false;
             impl_->positionedPreview.reset();
         } else {
+            impl_->draftAutoPlay = impl_->advancingPlayback;
             impl_->prepareManualDraft(manualAdvance);
             return;
         }
@@ -4222,7 +4310,22 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->showPlaybackPanel();
     };
     impl_->routePanel->onHover = [this](std::optional<std::size_t> i) {
-        impl_->viewer->highlightPreviewBend(i);
+        bool activeZone = false;
+        if (i) {
+            const auto route = impl_->controller->bendRoute();
+            const auto draft = impl_->controller->routeDraft();
+            const auto document = impl_->controller->session().document();
+            if (impl_->viewingRoute && route &&
+                impl_->routePanel->operation() < route->steps.size())
+                activeZone = *i == route->steps[impl_->routePanel->operation()].bendIndex;
+            else if (impl_->viewingDraft && draft) {
+                const auto operation = draft->request.step ? draft->request.step - 1 : 0;
+                activeZone = operation < draft->request.operations.size() &&
+                             *i == draft->request.operations[operation].bendIndex;
+            } else if (document)
+                activeZone = *i == 0 && document->metadata().bendAnalysis.bends.size() == 1;
+        }
+        impl_->viewer->highlightPreviewBend(i, activeZone);
     };
     impl_->routePanel->onModeChanged = [this] {
         impl_->controller->discardBendRoute();
@@ -4259,7 +4362,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->routePanel->onPrepare = [this](bool automatic, bool withTools) {
         impl_->prepareRoute(automatic, withTools);
     };
-    impl_->processNavigation = new ProcessNavigationBar(*impl_->drawingAction, this);
+    impl_->processNavigation =
+        new ProcessNavigationBar(*impl_->drawingAction, *impl_->flatDxfAction, this);
     addToolBar(Qt::BottomToolBarArea, impl_->processNavigation);
     connect(impl_->processNavigation, &ProcessNavigationBar::stageRequested, this,
             [this](int stage) {
@@ -4281,6 +4385,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             impl_->manualDraftWarmup.stop();
             impl_->warmDraftAfterSelection = false;
             impl_->controller->cancelRouteDraftPrefetch();
+            impl_->draftAutoPlay = false;
             impl_->stopPlayback();
             impl_->pendingBendStage.reset();
         }
@@ -4307,6 +4412,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->refresh();
         impl_->advanceUpdate();
     });
+    connect(impl_->controller, &ImportController::routeDraftPoseChanged, this,
+            [this] { impl_->startDraftReposition(); });
     connect(impl_->viewer, &viewer::ViewerWidget::renderingChanged, this,
             [this](bool) { impl_->refresh(); });
     connect(impl_->viewer, &viewer::ViewerWidget::bendSelectionChanged, this,
@@ -4408,6 +4515,7 @@ MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
     delete impl_->partInputDialog.data();
     delete impl_->drawingDialog.data();
+    delete impl_->flatDxfDialog.data();
     delete impl_->updateDialog.data();
     impl_->controller->shutdown();
 }

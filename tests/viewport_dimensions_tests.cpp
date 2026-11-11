@@ -114,9 +114,9 @@ int main(int argc, char **argv) {
         check(viewer::flatPatternDimensions(info, 14, layout, 7, 0).labels.size() == 2,
               "Edge-on flat retained ambiguous detailed dimensions");
         layout.project = [](const gp_Pnt &p) { return QPointF(p.X(), p.Y()); };
-        check(viewer::flatBendAt(info, layout, {500, 302}, 8) == 7 &&
-                  !viewer::flatBendAt(info, layout, {1020, 302}, 8) &&
-                  !viewer::flatBendAt(info, layout, {500, 319}, 8),
+        check(viewer::flatBendAt(info, layout, {500, 302}, 8, 1) == 7 &&
+                  !viewer::flatBendAt(info, layout, {1020, 302}, 8, 1) &&
+                  !viewer::flatBendAt(info, layout, {500, 319}, 8, 1),
               "Flat picking lost the prepared source ID or extended a line beyond its endpoint");
         info.bends[7].end.y += 50;
         check(dimensions(viewer::flatPatternDimensions(info, 14, layout, 7, 1)).size() == 2,

@@ -76,16 +76,16 @@ void checkBoundaryMembership() {
         BRepPrimAPI_MakeBox(gp_Pnt(-10, 0, 0), 10, 2, 4).Shape(),
         BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 2, 2, 4).Shape(),
         BRepPrimAPI_MakeBox(gp_Pnt(2, 0, 0), 10, 2, 4).Shape()};
-    require(cad::skinBoundaryMembership({0, 1, 2}, bodies, .001, {}) == 3 &&
-                cad::skinBoundaryMembership({2, 1, 2}, bodies, .001, {}) == 6,
+    cad::SkinBoundaryLookup lookup(bodies, .001);
+    require(lookup.membership({0, 1, 2}, {}) == 3 && lookup.membership({2, 1, 2}, {}) == 6,
             "Boundary fallback dropped a shared rail membership");
-    require(cad::skinBoundaryMembership({0, -.0005, 2}, bodies, .001, {}) == 3 &&
-                cad::skinBoundaryMembership({0, -.002, 2}, bodies, .001, {}) == 0 &&
-                cad::skinBoundaryMembership({100, 100, 100}, bodies, .001, {}) == 0,
+    require(lookup.membership({0, -.0005, 2}, {}) == 3 &&
+                lookup.membership({0, -.002, 2}, {}) == 0 &&
+                lookup.membership({100, 100, 100}, {}) == 0,
             "Boundary fallback exceeded its prepared tolerance");
     std::stop_source stop;
     stop.request_stop();
-    require(cad::skinBoundaryMembership({0, 1, 2}, bodies, .001, stop.get_token()) == 0,
+    require(lookup.membership({0, 1, 2}, stop.get_token()) == 0,
             "Cancelled boundary fallback returned partial memberships");
 }
 // An open cut-out in one flange contains a rigid return attached to the other

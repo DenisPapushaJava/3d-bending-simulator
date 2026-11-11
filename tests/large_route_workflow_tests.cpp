@@ -8,6 +8,7 @@
 #include "bending/viewer/ViewerWidget.h"
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QLabel>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
@@ -44,6 +45,7 @@ class Builder final : public application::SingleBendPreviewBuilder {
     mutable std::atomic<unsigned> searches = 0;
     mutable std::atomic<unsigned> cancelledDrafts = 0;
     mutable std::atomic<qint64> lastDraftNs = 0;
+    mutable std::atomic<unsigned long> delayAfterPoseMs = 0;
     application::BendRouteResult buildRoute(application::DocumentPtr d,
                                             application::BendRouteRequest r,
                                             std::stop_token s) const override {
@@ -53,9 +55,23 @@ class Builder final : public application::SingleBendPreviewBuilder {
     application::RouteDraftResult buildRouteDraft(application::DocumentPtr d,
                                                   application::RouteDraftRequest r,
                                                   std::stop_token s) const override {
+        return buildRouteDraftWithPose(std::move(d), std::move(r), s, {});
+    }
+    application::RouteDraftResult
+    buildRouteDraftWithPose(application::DocumentPtr d, application::RouteDraftRequest r,
+                            std::stop_token s,
+                            const application::RouteDraftPoseObserver &onPose) const override {
         QElapsedTimer timer;
         timer.start();
-        auto result = impl.buildRouteDraft(std::move(d), std::move(r), s);
+        const bool second = r.step == 2;
+        auto result = impl.buildRouteDraftWithPose(
+            std::move(d), std::move(r), s, [&](application::RouteDraftPose pose) {
+                if (onPose)
+                    onPose(std::move(pose));
+                if (second)
+                    if (const auto delay = delayAfterPoseMs.exchange(0))
+                        QThread::msleep(delay);
+            });
         if (s.stop_requested())
             ++cancelledDrafts;
         lastDraftNs = timer.nsecsElapsed();
@@ -261,6 +277,98 @@ int main(int argc, char **argv) {
                 check(c.routeDraft()->request.step == 3 && builder->searches == 0,
                       "Pause applied speculative geometry or started a route search");
                 std::cout << "playback advanced 1 -> 2 -> 3 with read-ahead and paused safely\n";
+            }
+        }
+        const bool auditPause = app.arguments().contains("--audit-reposition-pause");
+        if (app.arguments().contains("--audit-playback-gap") || auditPause) {
+            auto *slider = window.findChild<QSlider *>("bendFrame");
+            auto *play = window.findChild<QPushButton *>("playBend");
+            auto *speed = window.findChild<QSlider *>("bendPlaybackSpeed");
+            auto *timer = window.findChild<QTimer *>("bendPlaybackTimer");
+            auto *viewer = window.findChild<viewer::ViewerWidget *>();
+            check(slider && play && speed && timer && viewer, "Playback controls missing");
+            for (const int multiplier :
+                 auditPause ? std::vector<int>{10} : std::vector<int>{1, 3, 10, 10, 10}) {
+                const bool headStart =
+                    multiplier == 10 && app.arguments().contains("--audit-playback-head-start");
+                c.cancelRouteDraftPrefetch();
+                builder->impl.discardRouteCache();
+                panel->select(0);
+                wait([&] { return !c.hasWork(); });
+                panel->select(1);
+                wait([&] { return !c.hasWork(); });
+                slider->setValue(0);
+                speed->setValue((multiplier - 1) * 4);
+                check(play->isEnabled(), "Playback fixture is blocked");
+                if (headStart) {
+                    check(c.prefetchNextRouteDraft(builder), "Cannot prepare before playback");
+                    QTimer dwell;
+                    dwell.setSingleShot(true);
+                    dwell.start(500);
+                    wait([&] { return !dwell.isActive(); });
+                }
+                QElapsedTimer gap;
+                std::size_t next = 2;
+                bool motionObserved = false;
+                QObject observation;
+                const auto reportMotion = [&] {
+                    if (!gap.isValid() || motionObserved || !viewer->isRepositioning())
+                        return;
+                    motionObserved = true;
+                    std::cout << "motion speed=" << multiplier << " step=" << next
+                              << " ms=" << gap.nsecsElapsed() / 1.e6
+                              << " worker=" << c.isPreparingDraft() << '\n';
+                };
+                QObject::connect(&c, &ui::ImportController::routeDraftPoseChanged, &observation,
+                                 reportMotion);
+                QObject::connect(slider, &QSlider::valueChanged, &observation, [&](int frame) {
+                    const auto draft = c.routeDraft();
+                    if (draft && draft->request.step + 1 == next && frame == slider->maximum()) {
+                        gap.start();
+                        motionObserved = false;
+                    }
+                });
+                QObject::connect(&c, &ui::ImportController::stateChanged, &observation, [&] {
+                    reportMotion();
+                    const auto draft = c.routeDraft();
+                    if (!gap.isValid() || c.hasWork() || !draft || draft->request.step != next)
+                        return;
+                    std::cout << "playback speed=" << multiplier << " lead=" << headStart
+                              << " step=" << next << " gapMs=" << gap.nsecsElapsed() / 1.e6
+                              << " moving=" << viewer->isRepositioning()
+                              << " warmingFollowing=" << c.isPrefetchingRouteDraft() << '\n';
+                    gap.invalidate();
+                    ++next;
+                });
+                if (auditPause)
+                    builder->delayAfterPoseMs = 850;
+                play->click();
+                if (auditPause) {
+                    auto *label = viewer->findChild<QLabel *>("sheetRepositionLabel");
+                    check(label, "Reposition label missing");
+                    QElapsedTimer timeout;
+                    timeout.start();
+                    wait([&] {
+                        return (label->isVisible() &&
+                                label->text() == QStringLiteral("Проверяем гиб…")) ||
+                               timeout.elapsed() > 4000;
+                    });
+                    check(motionObserved && label->isVisible() && c.isPreparingDraft() &&
+                              viewer->isRepositioning() && play->isEnabled(),
+                          "Slow draft did not wait in the target pose");
+                    play->click();
+                    check(c.isPreparingDraft() && !viewer->isRepositioning() && !label->isVisible(),
+                          "Pause cancelled requested CAD or retained a temporary pose");
+                    wait([&] { return !c.hasWork(); });
+                    check(c.routeDraft() && c.routeDraft()->request.step == 2 &&
+                              !timer->isActive() && slider->value() == 0,
+                          "Paused draft did not publish its first checked position");
+                    std::cout << "Slow check continued through pause; checked frame ready\n";
+                    break;
+                }
+                wait([&] { return next == 4 && timer->isActive(); });
+                play->click();
+                wait([&] { return !c.isPrefetchingRouteDraft(); });
             }
         }
         c.shutdown();

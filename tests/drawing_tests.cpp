@@ -1,6 +1,7 @@
 #include "BendFixtures.h"
 #include "DrawingLayoutChecks.h"
 #include "DrawingPaginationChecks.h"
+#include "DrawingRepeats.h"
 #include "DrawingSectionOrientationChecks.h"
 #include "ProfileFixtures.h"
 #include "TrayFixtures.h"
@@ -1372,6 +1373,29 @@ void automaticDrawingOrientation(const QString &folder) {
                     gp_Dir(0, 1, 0).Transformed(transform), "orientation-mirrored", false));
 }
 void repeatedWaveDrawing(const QString &folder) {
+    // A periodic interrupted axis may be slanted on the stock sheet.
+    // Keep a different end segment and reject a run whose last pitch drifts.
+    application::DrawingFlatPattern interrupted;
+    for (std::size_t i = 0; i < 5; ++i) {
+        const double start = 20. * i;
+        const double end = start + (i == 4 ? 4. : 10.);
+        interrupted.info.bends.push_back(
+            {i, {start, start, 0}, {end, end, 0}, {}, 1.2, 1, 2, .5, 4});
+    }
+    auto irregular = interrupted;
+    irregular.info.bends[3].start.x += .2;
+    irregular.info.bends[3].start.y += .2;
+    irregular.info.bends[3].end.x += .2;
+    irregular.info.bends[3].end.y += .2;
+    const auto periodicLines = cad::flatDimensionLines(interrupted, 1e-5);
+    require(periodicLines.size() == 2 &&
+                interrupted.repeatedBendGroups ==
+                    std::vector<std::vector<std::size_t>>{{0, 1, 2, 3}, {4}},
+            "A periodic axis lost its distinct end or the original bend IDs");
+    require(cad::flatDimensionLines(irregular, 1e-5).size() == 5 &&
+                irregular.repeatedBendGroups.empty(),
+            "Different pitch was hidden inside a periodic callout");
+
     const auto shape = fixtures::foldedProfile(12, 83, .43, false, true);
     const auto repeated = [&](const TopoDS_Shape &source, const QString &name) {
         auto document = load(source, folder + "/" + name + ".step");
@@ -1914,7 +1938,10 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
             require(valid && core::validUnfoldSettings(*request.unfoldSettings),
                     "Invalid audit K factor");
         }
+        QElapsedTimer buildTimer;
+        buildTimer.start();
         const auto result = cad::BendingDrawingBuilder{}.build(doc, request, {});
+        report.insert("buildMs", buildTimer.nsecsElapsed() / 1.e6);
         if (const auto *error = std::get_if<application::DrawingError>(&result)) {
             report.insert("drawingOk", false);
             report.insert("drawingError", QString::fromStdString(error->detail));
@@ -1977,9 +2004,13 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
                     report.insert("compositionError", QString::fromUtf8(e.what()));
                 }
             }
-            const auto exportError = report.contains("compositionError")
-                                         ? report.value("compositionError").toString()
-                                         : ui::DrawingSheet::writePdf(pdfPath, d, title);
+            auto exportError = report.value("compositionError").toString();
+            if (!report.contains("compositionError")) {
+                QElapsedTimer pdfTimer;
+                pdfTimer.start();
+                exportError = ui::DrawingSheet::writePdf(pdfPath, d, title);
+                report.insert("pdfWriteMs", pdfTimer.nsecsElapsed() / 1.e6);
+            }
             report.insert("pdfOk", exportError.isEmpty());
             if (!exportError.isEmpty())
                 report.insert("pdfError", exportError);
@@ -3065,11 +3096,10 @@ void workflow(const QString &folder) {
     const auto oldFolder = ui::preferences()->value("drawing/lastPdfDirectory");
     bool cancelledSave = false;
     QTimer::singleShot(30, dialog, [&] {
-        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+        auto *file = dialog->findChild<QFileDialog *>("drawingPdfFileDialog");
         require(file && file->acceptMode() == QFileDialog::AcceptSave &&
-                    file->defaultSuffix() == "pdf" &&
-                    !file->testOption(QFileDialog::DontConfirmOverwrite),
-                "PDF dialog lost its save mode, suffix or overwrite confirmation");
+                    file->defaultSuffix() == "pdf" && !file->isModal(),
+                "PDF file picker lost its save mode, suffix or independence");
         const auto source =
             c.session().document()->metadata().sourcePath.filename().stem().u8string();
         const auto expectedName = QString::fromUtf8(reinterpret_cast<const char *>(source.data()),
@@ -3084,11 +3114,10 @@ void workflow(const QString &folder) {
     wait([&] { return cancelledSave; });
     require(ui::preferences()->value("drawing/lastPdfDirectory") == oldFolder,
             "Cancelling save changed the export folder");
-    QTimer::singleShot(30, dialog, [target] {
-        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+    QTimer::singleShot(30, dialog, [dialog, target] {
+        auto *file = dialog->findChild<QFileDialog *>("drawingPdfFileDialog");
         if (!file)
             return;
-        file->setOption(QFileDialog::DontConfirmOverwrite, true);
         file->selectFile(target.chopped(4)); // Let the dialog add .pdf before its overwrite check.
         if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
             input->setText(target.chopped(4));
@@ -3110,14 +3139,15 @@ void workflow(const QString &folder) {
     existing.close();
     bool declined = false;
     QTimer::singleShot(30, dialog, [&] {
-        auto *file = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+        auto *file = dialog->findChild<QFileDialog *>("drawingPdfFileDialog");
         require(file, "Missing save dialog for overwrite check");
         file->selectFile(typed);
         if (auto *input = file->findChild<QLineEdit *>("fileNameEdit"))
             input->setText(typed);
         QTimer::singleShot(0, dialog, [&] {
-            auto *question = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
-            require(question, "Normalized PDF filename bypassed overwrite confirmation");
+            auto *question = dialog->findChild<QMessageBox *>("drawingPdfFileDialog");
+            require(question && !question->isModal(),
+                    "Normalized PDF filename bypassed independent overwrite confirmation");
             question->done(QMessageBox::No);
             declined = true;
         });

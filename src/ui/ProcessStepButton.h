@@ -41,8 +41,9 @@ class ProcessStepButton final : public QToolButton {
         status_->setText(status);
         setAccessibleName(name_ + QStringLiteral(" · ") + status);
         setToolTip(name_ + QStringLiteral(" · ") + status +
-                   (stage_ < 3 ? QStringLiteral(" · Alt+%1").arg(stage_ + 1)
-                               : QStringLiteral(" · Ctrl+Shift+E")));
+                   (stage_ < 3    ? QStringLiteral(" · Alt+%1").arg(stage_ + 1)
+                    : stage_ == 3 ? QStringLiteral(" · Ctrl+Shift+E")
+                                  : QString{}));
     }
 
   protected:
@@ -66,6 +67,10 @@ class ProcessStepButton final : public QToolButton {
         } else if (stage_ == 2) {
             painter.drawEllipse(QRectF(2, 2, 28, 28));
             painter.drawPolygon(QPolygonF{{13, 9}, {23, 16}, {13, 23}});
+        } else if (stage_ == 4) {
+            painter.drawPolygon(QPolygonF{{2, 8}, {9, 3}, {30, 3}, {30, 29}, {2, 29}});
+            painter.setPen(QPen(painter.pen().color(), 1.5, Qt::DashLine));
+            painter.drawLine(QPointF(16, 4), QPointF(16, 28));
         } else {
             painter.drawPolygon(QPolygonF{{5, 2}, {22, 2}, {29, 9}, {29, 31}, {5, 31}});
             painter.drawPolyline(QPolygonF{{22, 2}, {22, 9}, {29, 9}});

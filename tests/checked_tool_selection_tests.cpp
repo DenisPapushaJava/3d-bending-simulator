@@ -186,7 +186,8 @@ int main(int argc, char **argv) {
             check(entry->catalogTools && entry->catalogTools->punch.id == pass.punch.id &&
                       entry->catalogTools->die.id == pass.die.id &&
                       entry->catalogTools->punchAssembly && entry->catalogTools->dieAssembly &&
-                      step.preview->frameCount() == 61 && step.preview->punchRetraction() &&
+                      route->manualExtraction && step.preview->manualExtraction() &&
+                      step.preview->frameCount() == 41 && !step.preview->punchRetraction() &&
                       !step.preview->collision(),
                   "Accepted assignment, sections or checked cycle differ");
         }

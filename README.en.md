@@ -15,6 +15,7 @@ The project is in **alpha**. Prebuilt releases are available for **Windows x64**
 - Tooling and bend sequence selection, with manual selection and reordering of operations.
 - Step-by-step 3D playback with collision highlighting for the part, tooling, demonstration press brake, and backgauge.
 - A theoretical flat pattern and a reference drawing with dimensions and PDF export.
+- DXF export of cutting contours, with preview, measurements, and a separate layer for bend lines.
 
 ## Download and run
 
@@ -32,6 +33,7 @@ Sample STEP models are included in the package. See the [examples directory](exa
 2. **Tooling (Инструмент):** select a punch and die, specify the available segments, or use automatic selection.
 3. **Bending (Гибка):** find a bend sequence or arrange it manually, run the checks, and review the operations.
 4. **Drawing / PDF (Чертёж / PDF):** prepare a reference sheet for the finished part and, where the geometry is supported, a theoretical flat pattern.
+5. **Flat pattern / DXF (Развёртка / DXF):** check the contour and save the flat pattern or flat part for laser cutting.
 
 A `.bend` project stores the source model and parameters so you can resume your work.
 
@@ -47,6 +49,10 @@ The [four-bend box, 2 mm sheet](examples/tray-four-bends-2mm.step), using [real 
 | **Theoretical flat pattern** | **Drawing and PDF** |
 | [![Box flat pattern with bend lines and dimensions](docs/screenshots/05-flat-pattern.png)](docs/screenshots/05-flat-pattern.png) | [![Box drawing preview with views and dimensions](docs/screenshots/06-drawing.png)](docs/screenshots/06-drawing.png) |
 
+**Flat pattern DXF export.** The preview shows the cutting contours and the bend lines on a separate `BENDING` layer.
+
+[![DXF export preview with the box contour, bend lines, and layer settings](docs/screenshots/08-dxf-export.png)](docs/screenshots/08-dxf-export.png)
+
 **Collision checking.** Collisions are highlighted in red and stop playback. This example shows the box colliding with the ST1701S punch during the fourth bend.
 
 [![Collision with the ST1701S punch: red highlighting, an error message, and stopped playback](docs/screenshots/07-collision.png)](docs/screenshots/07-collision.png)
@@ -57,7 +63,7 @@ The [four-bend box, 2 mm sheet](examples/tray-four-bends-2mm.step), using [real 
 - The press brake and backgauge are simplified demonstration models.
 - Motion checks have limited coverage. Part removal and transfer between setups are not checked.
 - Bending force, springback, and physical deformation of holes are not calculated. Some checks use a separate copy with enclosed cutouts filled in.
-- Flat patterns are theoretical and are not calibrated against test bends. Flat-pattern DXF export and CNC program generation are not yet available.
+- Flat patterns are theoretical and are not calibrated against test bends. CNC program generation is not yet available.
 
 The result is a preliminary geometric assessment. A specialist makes the final manufacturing decision, taking the equipment, tooling, and material into account.
 
