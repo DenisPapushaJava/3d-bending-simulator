@@ -204,6 +204,9 @@ FilledCutouts fillClosedCutouts(const TopoDS_Shape &source, double tolerance, st
         BOPAlgo_PaveFiller filler;
         filler.SetArguments(operands);
         filler.SetNonDestructive(true);
+        // Large perforated bodies spend most of the import in this shared
+        // intersection pass. Keep small models on the serial path.
+        filler.SetRunParallel(faces.Extent() >= 256 && removed.size() >= 32);
         filler.SetFuzzyValue(tolerance);
         filler.Perform();
         if (stop.stop_requested())

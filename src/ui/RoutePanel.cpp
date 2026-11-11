@@ -2,7 +2,6 @@
 #include "bending/application/SingleBendPreview.h"
 #include "bending/core/BendSequence.h"
 #include <QApplication>
-#include <QCheckBox>
 #include <QComboBox>
 #include <QDrag>
 #include <QDragEnterEvent>
@@ -264,17 +263,7 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
                                              "до 120 секунд и 512 попыток на запуск. "
                                              "Это не обещание найти маршрут."));
     expandSearch_->hide();
-    manualExtraction_ = new QCheckBox(QStringLiteral("Извлечение вручную"), this);
-    manualExtraction_->setObjectName("routeManualExtraction");
-    manualExtraction_->setToolTip(
-        QStringLiteral("Проверять гибку без расчёта подъёма пуансона. Извлечение и перенос детали "
-                       "оператором не проверяются. Только для текущей открытой детали."));
-    connect(manualExtraction_, &QCheckBox::toggled, this, [this] {
-        if (onModeChanged)
-            onModeChanged();
-    });
     layout->addWidget(automatic_);
-    layout->addWidget(manualExtraction_);
     layout->addWidget(expandSearch_);
     advancedLayout->addLayout(actions);
     stepStrip_ = new QWidget(this);
@@ -288,7 +277,7 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     // Reserve the scrollbar band even when all steps fit; no vertical jump.
     scroll->setFixedHeight(40 + scroll->horizontalScrollBar()->sizeHint().height());
     auto *strip = new StepCanvas(scroll);
-    strip->moved = [this](int from, int to) { moveTo(from, to); };
+    strip->moved = [this](int from, int to) { moveTo(from, to, false); };
     strip_ = new QHBoxLayout(strip);
     strip_->setContentsMargins(0, 0, 0, 0);
     strip_->setSpacing(4);
@@ -408,9 +397,9 @@ QWidget *RoutePanel::reportWidget() const {
     return status_;
 }
 void RoutePanel::move(int delta) {
-    moveTo(selected_ - 1, selected_ - 1 + delta);
+    moveTo(selected_ - 1, selected_ - 1 + delta, true);
 }
-void RoutePanel::moveTo(int from, int to) {
+void RoutePanel::moveTo(int from, int to, bool selectMovedStep) {
     if (from < 0 || to < 0 || to >= static_cast<int>(ids_.size()) || !onReorder)
         return;
     core::BendSequence sequence(ids_);
@@ -418,7 +407,8 @@ void RoutePanel::moveTo(int from, int to) {
         return;
     const auto before = ids_;
     const auto selected = ids_[static_cast<std::size_t>(from)];
-    selected_ = to + 1;
+    if (selectMovedStep)
+        selected_ = to + 1;
     if (route_ && std::any_of(route_->steps.begin(), route_->steps.end(),
                               [](const auto &step) { return !step.additionalBends.empty(); })) {
         std::vector<std::string> expanded;
@@ -434,12 +424,15 @@ void RoutePanel::moveTo(int from, int to) {
         // A group moved to another state must be checked there again. Keep all
         // source IDs; a rejected grouping may legitimately split into single steps.
         const auto beforeSources = sourceIds_;
+        if (!selectMovedStep)
+            groupedDragOrder_ = expanded;
         if (onReorder(expanded, true)) {
             undo_.push_back({beforeSources, expanded, selected, true});
             redo_.clear();
             if (undo_.size() > 50)
                 undo_.erase(undo_.begin());
-        }
+        } else
+            groupedDragOrder_.reset();
         return;
     }
     if (onReorder(sequence.bendIds(), false)) {
@@ -485,16 +478,10 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                          bool preparing, bool toolsAvailable, application::RouteDraftPtr draft,
                          std::optional<application::BendRouteError> draftError,
                          bool preparingDraft) {
-    if (extractionDocument_ != session.document()) {
-        extractionDocument_ = session.document();
-        const QSignalBlocker blocker(manualExtraction_);
-        manualExtraction_->setChecked(false);
-    }
-    manualExtraction_->setVisible(withTools());
-    manualExtraction_->setEnabled(session.document() && !busy && !preparing && !preparingDraft);
     if (documentRevision_ != session.revision()) {
         documentRevision_ = session.revision();
         selected_ = 0;
+        groupedDragOrder_.reset();
         undo_.clear();
         redo_.clear();
     }
@@ -524,8 +511,12 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     ids_ = std::move(ids);
     indices_ = indices;
     route_ = std::move(route);
-    selected_ =
-        newRoute || leavingJointRoute ? 0 : std::clamp(selected_, 0, static_cast<int>(ids_.size()));
+    const bool preserveGroupedStep = groupedDragOrder_ && *groupedDragOrder_ == sourceIds_;
+    if (newRoute || error || !preserveGroupedStep)
+        groupedDragOrder_.reset();
+    selected_ = (newRoute || leavingJointRoute) && !preserveGroupedStep
+                    ? 0
+                    : std::clamp(selected_, 0, static_cast<int>(ids_.size()));
     if (changed && steps_.size() != ids_.size() + 1) {
         while (auto *item = strip_->takeAt(0)) {
             delete item->widget();
@@ -653,11 +644,10 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         }
         message += route_->partialEndSupport
                        ? QStringLiteral("Маршрут найден. Торцевые подрезы: возможна деформация. ")
-                   : route_->manualExtraction ? QString{}
+                   : route_->manualExtraction
+                       ? QStringLiteral("Гибка проверена до заданного угла. ")
                    : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
                                        : QStringLiteral("Движение без инструмента. ");
-        if (route_->manualExtraction)
-            message += QStringLiteral("Гибка проверена. Извлечение вручную — не рассчитано. ");
         if (selected_ > 0)
             for (const auto &interval : route_->steps[operation()].preview->endSupportIntervals()) {
                 const auto &support = interval.material;
@@ -728,8 +718,5 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         error ? QString::fromStdString(error->detail)
               : QStringLiteral("Геометрическая заготовка сохраняет среднюю поверхность. "
                                "Материальная развёртка для раскроя рассчитывается отдельно."));
-}
-bool RoutePanel::manualExtraction() const {
-    return withTools() && manualExtraction_->isChecked();
 }
 } // namespace bending::ui

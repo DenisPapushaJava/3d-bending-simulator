@@ -2,12 +2,9 @@
 #include "DrawingOpenings.h"
 #include "DrawingProfiles.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
-#include <BRepAlgoAPI_Common.hxx>
-#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Tool.hxx>
-#include <Bnd_Box.hxx>
 #include <map>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -344,91 +341,11 @@ prepareModelMeasurements(const TopoDS_Shape &original,
 }
 
 std::shared_ptr<const application::ModelMeasurements>
-flatModelMeasurements(const application::ModelMeasurements &data, const TopoDS_Shape &original,
-                      const TopoDS_Shape &calculation, const TopoDS_Shape &stock,
+flatModelMeasurements(const application::ModelMeasurements &data, const TopoDS_Shape &stock,
                       std::span<const SheetWallRegion> walls, const gp_Trsf &origin,
-                      bool differentTopology, double tolerance, std::stop_token stop,
-                      std::map<std::size_t, std::size_t> &sourceWallOwners) {
+                      const std::map<std::size_t, std::size_t> &owners, std::stop_token stop) {
     using namespace application;
     auto result = std::make_shared<ModelMeasurements>();
-    TopTools_IndexedMapOfShape sourceFaces, targetFaces;
-    TopExp::MapShapes(original, TopAbs_FACE, sourceFaces);
-    TopExp::MapShapes(calculation, TopAbs_FACE, targetFaces);
-    std::map<std::size_t, std::size_t> owners;
-    std::size_t comparisons = 0;
-    for (const auto &face : data.faces) {
-        if (stop.stop_requested())
-            return result;
-        if (!face.planar || face.id == 0 ||
-            face.id > static_cast<std::size_t>(sourceFaces.Extent()))
-            continue;
-        const auto sourceFace = TopoDS::Face(sourceFaces(static_cast<int>(face.id)));
-        const auto plane = BRepAdaptor_Surface(sourceFace).Plane();
-        Bnd_Box sourceBox;
-        BRepBndLib::Add(sourceFace, sourceBox);
-        std::optional<std::size_t> owner;
-        bool ambiguous = false;
-        for (std::size_t w = 0; w < walls.size() && !ambiguous; ++w)
-            for (auto index : walls[w].faces) {
-                if (stop.stop_requested())
-                    return result;
-                if (!differentTopology) {
-                    if (index == face.id) {
-                        if (owner && *owner != w) {
-                            ambiguous = true;
-                            break;
-                        }
-                        owner = w;
-                    }
-                    continue;
-                }
-                const auto targetFace = TopoDS::Face(targetFaces(static_cast<int>(index)));
-                BRepAdaptor_Surface surface(targetFace);
-                if (surface.GetType() != GeomAbs_Plane ||
-                    !plane.Axis().Direction().IsParallel(surface.Plane().Axis().Direction(),
-                                                         1.e-7) ||
-                    plane.Distance(surface.Plane().Location()) > tolerance * 4)
-                    continue;
-                Bnd_Box box;
-                BRepBndLib::Add(targetFace, box);
-                if (sourceBox.IsOut(box))
-                    continue;
-                if (comparisons >= 2048) {
-                    ambiguous = true; // An untested candidate cannot prove unique ownership.
-                    break;
-                }
-                ++comparisons;
-                try {
-                    // IDs of the filled solid are not IDs of the imported skin.
-                    // Require complete area ownership, not a centroid or a few samples.
-                    BRepAlgoAPI_Common common;
-                    TopTools_ListOfShape arguments, tools;
-                    arguments.Append(sourceFace);
-                    tools.Append(targetFace);
-                    common.SetArguments(arguments);
-                    common.SetTools(tools);
-                    common.SetNonDestructive(true);
-                    common.Build();
-                    if (!common.IsDone())
-                        continue;
-                    GProp_GProps props;
-                    BRepGProp::SurfaceProperties(common.Shape(), props);
-                    if (props.Mass() <= 0 || face.areaMm2 < 1.e-8 ||
-                        std::abs(props.Mass() - face.areaMm2) >
-                            std::max(1.e-9, std::min(face.areaMm2 * 1.e-7,
-                                                     tolerance * std::sqrt(face.areaMm2) * 8)))
-                        continue;
-                    if (owner && *owner != w) {
-                        ambiguous = true;
-                        break;
-                    }
-                    owner = w;
-                } catch (const Standard_Failure &) {
-                }
-            }
-        if (owner && !ambiguous)
-            owners[face.id] = *owner;
-    }
     const auto ownerOf = [&](const auto &ids) -> std::optional<std::size_t> {
         std::optional<std::size_t> owner;
         for (auto id : ids)
@@ -528,7 +445,6 @@ flatModelMeasurements(const application::ModelMeasurements &data, const TopoDS_S
                 break;
         }
     }
-    sourceWallOwners = std::move(owners);
     return result;
 }
 

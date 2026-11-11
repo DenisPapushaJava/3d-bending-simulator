@@ -16,6 +16,7 @@ class Document;
 struct RecognizedBend;
 struct BendInteriorContourDiagnostic;
 class SingleBendPreview;
+struct RouteDraftPose;
 class FlatPattern;
 } // namespace bending::application
 namespace bending::viewer {
@@ -48,6 +49,9 @@ class ViewerWidget final : public QWidget {
     void setDimensionsVisible(bool visible);
     // Presentation hint only: animation keeps the active angle and hides detailed dimensions.
     void setAnimationRunning(bool running);
+    [[nodiscard]] bool isRepositioning() const;
+    void startDraftReposition(const application::RouteDraftPose &, quint64 documentRevision);
+    void finishReposition();
     [[nodiscard]] bool dimensionsVisible() const;
     void setOrientation(Orientation orientation);
     // Empty result means accepted. Geometry is prepared by the importer before publication.
@@ -57,12 +61,12 @@ class ViewerWidget final : public QWidget {
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
     // Distinguishes the bend zone from its adjacent planar flanges.
     void highlightBend(const application::RecognizedBend &bend, quint64 revision);
-    void highlightPreviewBend(std::optional<std::size_t>);
+    void highlightPreviewBend(std::optional<std::size_t>, bool activeZone = false);
     void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
                                  quint64 revision);
     [[nodiscard]] QString
     presentBendPreview(std::shared_ptr<const application::SingleBendPreview> preview,
-                       std::size_t frameIndex, quint64 documentRevision);
+                       std::size_t frameIndex, quint64 documentRevision, bool reposition = false);
     [[nodiscard]] QString endBendPreview();
     [[nodiscard]] QString presentFlatPattern(std::shared_ptr<const application::FlatPattern>,
                                              quint64 documentRevision);

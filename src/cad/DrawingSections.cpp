@@ -260,12 +260,46 @@ void axialDimensions(const std::vector<RecognizedBend> &bends, const gp_Ax2 &fra
                           coordinates.end());
         if (coordinates.size() < 3)
             continue; // Overall size and L already explain a single full-width zone.
-        for (std::size_t i = 1; i < coordinates.size(); ++i) {
-            const auto a = horizontal ? DrawingPoint{coordinates[i - 1], view.minimum.y}
-                                      : DrawingPoint{view.minimum.x, coordinates[i - 1]};
-            const auto b = horizontal ? DrawingPoint{coordinates[i], view.minimum.y}
-                                      : DrawingPoint{view.minimum.x, coordinates[i]};
-            view.axialDimensions.push_back({a, b, coordinates[i] - coordinates[i - 1], {}});
+        const auto at = [&](double coordinate) {
+            return horizontal ? DrawingPoint{coordinate, view.minimum.y}
+                              : DrawingPoint{view.minimum.x, coordinate};
+        };
+        const auto dimension = [&](std::size_t from, std::size_t to) {
+            return DrawingDimension{at(coordinates[from]),
+                                    at(coordinates[to]),
+                                    coordinates[to] - coordinates[from],
+                                    {}};
+        };
+        for (std::size_t i = 0; i + 1 < coordinates.size();) {
+            // Keep one dimensioned pair, then give the rest as a pitch.
+            // Verify every boundary against the same starting point so
+            // a drift or a single different interval does not disappear.
+            std::size_t end = i;
+            double pitch = 0;
+            if (coordinates.size() - i >= 9) {
+                const double first = coordinates[i + 1] - coordinates[i];
+                pitch = coordinates[i + 2] - coordinates[i];
+                if (std::abs(first * 2 - pitch) > 1e-5)
+                    while (end + 2 < coordinates.size()) {
+                        const double offset = coordinates[i] + (end - i) / 2 * pitch;
+                        if (std::abs(coordinates[end + 1] - (offset + first)) > 1e-5 ||
+                            std::abs(coordinates[end + 2] - (offset + pitch)) > 1e-5)
+                            break;
+                        end += 2;
+                    }
+            }
+            if (end - i < 8) {
+                view.axialDimensions.push_back(dimension(i, i + 1));
+                ++i;
+                continue;
+            }
+            view.axialDimensions.push_back(dimension(i, i + 1));
+            view.axialDimensions.push_back(dimension(i + 1, i + 2));
+            auto run = dimension(i + 2, end);
+            run.pitchIntervals = (end - i) / 2 - 1;
+            run.pitchMm = pitch;
+            view.axialDimensions.push_back(std::move(run));
+            i = end;
         }
     }
 }

@@ -297,7 +297,8 @@ void selectedMeasurements(DimensionAnnotations &result, const application::Model
 // Perpendicular to an actual finite external stock edge. Bounds are only
 // paper/viewport extents; their empty corners are not measurement datums.
 std::optional<std::array<gp_Pnt, 2>> flatBendEdgeSpan(const application::FlatPatternInfo &info,
-                                                      const application::FlatBend &bend) {
+                                                      const application::FlatBend &bend,
+                                                      double surfaceZ) {
     if (!info.measurements)
         return {};
     const auto line = bend.centreLine();
@@ -334,8 +335,8 @@ std::optional<std::array<gp_Pnt, 2>> flatBendEdgeSpan(const application::FlatPat
         if (foot < -1.e-8 || foot > 1. + 1.e-8)
             continue;
         auto atEdge = a.Translated(edgeDirection * std::clamp(foot, 0., 1.));
-        atEdge.SetZ(info.bounds.maximum.z);
-        atBend.SetZ(info.bounds.maximum.z);
+        atEdge.SetZ(surfaceZ);
+        atBend.SetZ(surfaceZ);
         const double distance = atEdge.Distance(atBend);
         if (distance <= 1.e-7)
             continue;
@@ -452,15 +453,16 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
 
 std::optional<std::size_t> flatBendAt(const application::FlatPatternInfo &info,
                                       const DimensionLayout &layout, QPointF position,
-                                      double tolerancePixels) {
+                                      double tolerancePixels, double facing) {
     if (!layout.project)
         return std::nullopt;
     std::optional<std::size_t> result;
     double best = tolerancePixels * tolerancePixels;
+    const double surfaceZ = facing < 0 ? info.bounds.minimum.z : info.bounds.maximum.z;
     for (const auto &bend : info.bends) {
         const auto line = bend.centreLine();
-        const auto a = layout.project({line[0].x, line[0].y, info.bounds.maximum.z});
-        const auto b = layout.project({line[1].x, line[1].y, info.bounds.maximum.z});
+        const auto a = layout.project({line[0].x, line[0].y, surfaceZ});
+        const auto b = layout.project({line[1].x, line[1].y, surfaceZ});
         const auto ab = b - a;
         const auto length2 = QPointF::dotProduct(ab, ab);
         if (length2 < 1.)
@@ -519,10 +521,11 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
                                            MeasurementSelection selection) {
     DimensionAnnotations result;
     const auto &hi = info.bounds.maximum;
+    const double surfaceZ = facing < 0 ? info.bounds.minimum.z : hi.z;
     const auto gap = std::max(hi.x, hi.y) * .12;
-    length(result, {0, 0, hi.z}, {hi.x, 0, hi.z}, {0, -gap, 0},
+    length(result, {0, 0, surfaceZ}, {hi.x, 0, surfaceZ}, {0, -gap, 0},
            QStringLiteral("Ширина %1 мм").arg(number(hi.x)), height, dimensionColor, &layout);
-    length(result, {0, 0, hi.z}, {0, hi.y, hi.z}, {-gap, 0, 0},
+    length(result, {0, 0, surfaceZ}, {0, hi.y, surfaceZ}, {-gap, 0, 0},
            QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), height, dimensionColor, &layout);
     // Directions are relative to the physical flat side facing the viewer. Do not
     // pretend that a nearly edge-on sheet has readable bend annotations.
@@ -538,9 +541,9 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
     });
     if (active != info.bends.end()) {
         const auto line = active->centreLine();
-        const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z);
+        const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, surfaceZ);
         const auto direction = active->direction * (facing > 0 ? 1 : -1);
-        if (const auto span = flatBendEdgeSpan(info, *active)) {
+        if (const auto span = flatBendEdgeSpan(info, *active, surfaceZ)) {
             gp_Vec along(point(line[0]), point(line[1]));
             if (along.X() < -1.e-8 || (std::abs(along.X()) <= 1.e-8 && along.Y() < 0))
                 along.Reverse();
@@ -581,7 +584,7 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
             markers.push_back(
                 {axis,
                  coordinate,
-                 gp_Pnt((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, hi.z),
+                 gp_Pnt((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, surfaceZ),
                  {bendId(bend.bendIndex)}});
     }
     QFont font(QStringLiteral("sans-serif"));

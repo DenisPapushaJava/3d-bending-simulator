@@ -14,6 +14,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QElapsedTimer>
+#include <QEnterEvent>
 #include <QLabel>
 #include <QLocale>
 #include <QPainter>
@@ -87,7 +88,7 @@ std::vector<std::string> order(const ui::ImportController &c) {
         ids.push_back(c.session().bend(i)->id);
     return ids;
 }
-void verifyManualExtraction(const QString &folder) {
+void verifyFormingCheck(const QString &folder) {
     const auto path = folder + "/single.step";
     STEPControl_Writer writer;
     require(writer.Transfer(fixtures::bentStrip(), STEPControl_AsIs) == IFSelect_RetDone &&
@@ -106,19 +107,17 @@ void verifyManualExtraction(const QString &folder) {
     require(controller.setBendToolAssignment(0, tools), "Cannot set manual extraction tools");
     window.findChild<QToolButton *>("processStage2")->click();
     wait([&] { return !controller.hasWork(); });
-    auto *scope = window.findChild<QCheckBox *>("routeManualExtraction");
-    require(scope && !scope->isChecked() && scope->isEnabled(), "Incorrect default return scope");
-    scope->click();
-    wait([&] { return !controller.hasWork(); });
+    require(!window.findChild<QCheckBox *>("routeManualExtraction"),
+            "Forming check still requires a separate extraction control");
     window.findChild<QPushButton *>("checkBendRoute")->click();
     wait([&] { return !controller.hasWork(); });
     const auto route = controller.bendRoute();
     if (!route && controller.bendRouteError())
-        throw std::runtime_error("UI manual extraction: " + controller.bendRouteError()->detail);
+        throw std::runtime_error("UI forming check: " + controller.bendRouteError()->detail);
     require(route && route->manualExtraction && builder->lastManualExtraction &&
                 route->steps.size() == 1 && route->steps.front().preview->manualExtraction() &&
                 !route->steps.front().preview->punchRetraction(),
-            "UI dropped the explicit forming-only request");
+            "UI dropped the default forming-only request");
     window.findChild<QPushButton *>("routeStep1")->click();
     if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
         auto *viewer = window.findChild<viewer::ViewerWidget *>();
@@ -131,11 +130,6 @@ void verifyManualExtraction(const QString &folder) {
         require(image.save(output + "-forming-checked.png"),
                 "Cannot capture checked forming scope");
     }
-    const auto searches = builder->searches.load();
-    scope->click();
-    wait([&] { return !controller.hasWork(); });
-    require(!controller.bendRoute() && builder->searches == searches,
-            "Changing return scope retained an old certificate or searched implicitly");
     controller.closeDocument();
     window.close();
 }
@@ -581,6 +575,27 @@ int main(int argc, char **argv) {
         require(controller.routeDraft() && controller.routeDraft()->request.step == 0 &&
                     controller.routeDraft()->checkedToolPositions == 1 && builder->searches == 0,
                 "Zero launched a search or skipped tool checks");
+        if (viewer->isReady()) {
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+            const auto baseline = viewer->captureImage();
+            const auto drafts = builder->drafts.load();
+            const auto hover = [&](int n) {
+                auto *button = step(n);
+                QEnterEvent enter(QPointF(5, 5), QPointF(5, 5), button->mapToGlobal(QPoint(5, 5)));
+                QApplication::sendEvent(button, &enter);
+                const auto highlighted = viewer->captureImage();
+                QEvent leave(QEvent::Leave);
+                QApplication::sendEvent(button, &leave);
+                require(viewer->captureImage() == baseline,
+                        "Leaving the manual step did not clear the hover highlight");
+                return highlighted;
+            };
+            const auto first = hover(1);
+            const auto second = hover(2);
+            require(first != baseline && second != baseline && first != second &&
+                        step(0)->isChecked() && builder->drafts == drafts && !controller.hasWork(),
+                    "Manual step hover lost its bend identity or changed the selected step");
+        }
         auto *reverse = window.findChild<QToolButton *>("reversePunch");
         require(reverse && reverse->isEnabled() && reverse->toolTip().contains("для всех гибов"),
                 "Blank setup does not offer global punch orientation");
@@ -756,7 +771,10 @@ int main(int argc, char **argv) {
         const auto id = expected.back();
         expected.pop_back();
         expected.insert(expected.begin() + 1, id);
-        if (qEnvironmentVariableIsSet("BENDING_NATIVE_DRAG")) {
+        const bool nativeDrag = qEnvironmentVariableIsSet("BENDING_NATIVE_DRAG");
+        if (nativeDrag) {
+            step(0)->click();
+            wait([&] { return !controller.hasWork(); });
             window.raise();
             window.activateWindow();
             QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
@@ -803,11 +821,22 @@ x.XCloseDisplay(d)
             std::cerr << "Native reorder unchanged: step "
                       << (controller.routeDraft() ? controller.routeDraft()->request.step : 99)
                       << ", searches " << builder->searches << '\n';
-        require(order(controller) == expected && step(2)->isChecked() && step(2)->text() == "2" &&
+        const int selectedAfterReorder = nativeDrag ? 0 : 2;
+        require(order(controller) == expected && step(selectedAfterReorder)->isChecked() &&
+                    step(2)->text() == "2" &&
                     step(2)->property("routeId").toString().toStdString() == id &&
-                    controller.routeDraft() && controller.routeDraft()->request.step == 2 &&
+                    controller.routeDraft() &&
+                    controller.routeDraft()->request.step ==
+                        static_cast<std::size_t>(selectedAfterReorder) &&
                     builder->searches == 0,
                 "Reorder lost insertion, selected bend, numbering or invoked search");
+        if (nativeDrag) {
+            step(2)->click();
+            wait([&] { return !controller.hasWork(); });
+            require(step(2)->isChecked() && controller.routeDraft() &&
+                        controller.routeDraft()->request.step == 2,
+                    "Explicit click did not select the moved bend");
+        }
         for (auto i : controller.session().orderedBends())
             require(controller.session().bend(i)->catalogTools == (i == indices[2]   ? third
                                                                    : i == indices[1] ? other
@@ -1075,20 +1104,6 @@ x.XCloseDisplay(d)
                           << '\n';
             }
         }
-        auto *manualExtraction = window.findChild<QCheckBox *>("routeManualExtraction");
-        require(manualExtraction && manualExtraction->isVisible() &&
-                    manualExtraction->isEnabled() && !manualExtraction->isChecked(),
-                "Manual extraction was implicit or hidden");
-        const auto searches = builder->searches.load();
-        const auto editRevision = controller.session().editRevision();
-        manualExtraction->click();
-        wait([&] { return !controller.hasWork(); });
-        require(manualExtraction->isChecked() && builder->searches == searches &&
-                    controller.session().editRevision() == editRevision,
-                "Changing extraction scope started a search or edited the project");
-        if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty())
-            require(window.grab().save(output + "-manual-extraction.png"),
-                    "Cannot capture manual extraction control");
         require(controller.session().document()->sourceStep() == bytes, "Source was modified");
         const auto oldSource = controller.session().document();
         const auto oldRequest = controller.routeDraft()->request;
@@ -1105,7 +1120,6 @@ x.XCloseDisplay(d)
         require(controller.session().document() && controller.session().document() != oldSource &&
                     !controller.routeDraft(),
                 "An old draft survived a new import or stranded the worker queue");
-        require(!manualExtraction->isChecked(), "Manual extraction leaked into another document");
         builder->delay = true;
         builder->entered = false;
         step(1)->click();
@@ -1116,7 +1130,7 @@ x.XCloseDisplay(d)
                 "Closed document accepted a late draft");
         window.close();
         verifyToolStageTransitions(folder.path());
-        verifyManualExtraction(folder.path());
+        verifyFormingCheck(folder.path());
         verifyCompactDraftPublication(folder.path());
         std::cout << "Manual prefixes, collision scope, stable reorder, undo/redo, explicit check "
                      "and stale selection passed\n";

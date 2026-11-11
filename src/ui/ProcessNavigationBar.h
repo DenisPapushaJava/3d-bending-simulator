@@ -8,11 +8,11 @@ namespace bending::ui {
 class ProcessStepButton;
 
 // Passive navigation: the window decides whether/how to enter each stage.
-// Stage IDs are 0: part, 1: tools, 2: bending. Drawing remains a separate action.
+// Stage IDs are 0: part, 1: tools, 2: bending. Exports are separate actions.
 class ProcessNavigationBar final : public QToolBar {
     Q_OBJECT
   public:
-    explicit ProcessNavigationBar(QAction &drawing, QWidget *parent = nullptr);
+    explicit ProcessNavigationBar(QAction &drawing, QAction &dxf, QWidget *parent = nullptr);
     void setCurrentStage(int stage);
     void setStageStatus(int stage, const QString &status);
 

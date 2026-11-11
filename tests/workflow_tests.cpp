@@ -102,7 +102,7 @@ int cutoutPixels(const QImage &image) {
         for (int x = 0; x < image.width(); ++x) {
             const auto pixel = image.pixel(x, y);
             count += qRed(pixel) > 220 && qGreen(pixel) < 120 && qBlue(pixel) > 80 &&
-                             qBlue(pixel) > qGreen(pixel)
+                             qBlue(pixel) > qGreen(pixel) && qBlue(pixel) < 170
                          ? 1
                          : 0;
         }
@@ -113,22 +113,25 @@ bool warmPixel(QRgb pixel) {
     return qRed(pixel) > 180 && qRed(pixel) > qBlue(pixel) * 1.4 &&
            qRed(pixel) > qGreen(pixel) * 1.04;
 }
-int warmPixels(const QImage &image) {
+bool fuchsiaPixel(QRgb pixel) {
+    return qRed(pixel) > 200 && qBlue(pixel) > 185 && qGreen(pixel) < 175;
+}
+int contrastPixels(const QImage &image, bool (*matches)(QRgb) = fuchsiaPixel) {
     require(!image.isNull(), "Missing contrast capture");
     int count = 0;
     for (int y = 0; y < image.height(); ++y) {
         for (int x = 0; x < image.width(); ++x) {
-            count += warmPixel(image.pixel(x, y)) ? 1 : 0;
+            count += matches(image.pixel(x, y)) ? 1 : 0;
         }
     }
     return count;
 }
-int warmMaskChanges(const QImage &a, const QImage &b) {
+int bendMaskChanges(const QImage &a, const QImage &b) {
     require(!a.isNull() && a.size() == b.size(), "Incompatible contrast captures");
     int count = 0;
     for (int y = 0; y < a.height(); ++y) {
         for (int x = 0; x < a.width(); ++x) {
-            count += warmPixel(a.pixel(x, y)) != warmPixel(b.pixel(x, y)) ? 1 : 0;
+            count += fuchsiaPixel(a.pixel(x, y)) != fuchsiaPixel(b.pixel(x, y)) ? 1 : 0;
         }
     }
     return count;
@@ -503,8 +506,7 @@ void testInitialThickness(bool graphics, const QString &path, double expected) {
             "Fixture must exercise local measurements on a folded part");
     require(suggestThickness(analysis) && std::abs(input->value() - expected) < 1.0e-5,
             "Initial field did not use the geometrical proposal");
-    require(label->text().contains(QStringLiteral("Предполагаемая")) &&
-                label->text().contains(QStringLiteral("не подтверждено")) &&
+    require(label->text().endsWith(QStringLiteral(" · по измерениям в модели")) &&
                 !controller.session().manualThicknessMm() && !controller.session().modified(),
             "Local auto-fill changed provenance or dirtied the project");
     require(pairs->currentIndex() == 0 && pairs->currentData().toInt() == -1,
@@ -600,14 +602,15 @@ void testBendWorkflow(bool graphics) {
     require(tabs->currentIndex() == 1, "Cannot open selected bend parameters");
     if (graphics) {
         const auto first = viewer->captureImage();
-        require(warmPixels(first) > 100 && warmPixels(first) < first.width() * first.height() / 5,
-                "Bend zone lacks local warm contrast");
+        require(contrastPixels(first) > 100 &&
+                    contrastPixels(first) < first.width() * first.height() / 5,
+                "Bend zone lacks local fuchsia contrast");
         list->setCurrentIndex(list->model()->index(1, 0));
         require(differences(first, viewer->captureImage()) > 20,
                 "Changing bend did not change highlighted surfaces");
         const auto second = viewer->captureImage();
-        require(warmPixels(second) > 100 && warmMaskChanges(first, second) > 100,
-                "Warm highlight did not follow the chosen bend");
+        require(contrastPixels(second) > 100 && bendMaskChanges(first, second) > 100,
+                "Fuchsia highlight did not follow the chosen bend");
         const auto &bends = controller.session().document()->metadata().bendAnalysis.bends;
         viewer->highlightBend(bends[0], controller.session().revision() - 1);
         require(differences(second, viewer->captureImage()) == 0, "Stale bend color applied");
@@ -618,10 +621,11 @@ void testBendWorkflow(bool graphics) {
         QApplication::sendEvent(canvas, &nativeWindowChanged);
         canvas->update();
         waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
-        require(viewer->isReady() && warmPixels(viewer->captureImage()) > 100,
+        require(viewer->isReady() && contrastPixels(viewer->captureImage()) > 100,
                 "Scene recreation lost bend contrast");
         viewer->highlightFaces({}, controller.session().revision());
-        require(warmPixels(viewer->captureImage()) == 0, "Clearing evidence kept old bend color");
+        require(contrastPixels(viewer->captureImage()) == 0,
+                "Clearing evidence kept old bend color");
         viewer->highlightBend(bends[1], controller.session().revision());
         const auto output = qEnvironmentVariable("BENDING_BEND_SNAPSHOT");
         if (!output.isEmpty()) {
@@ -633,17 +637,14 @@ void testBendWorkflow(bool graphics) {
             painter.end();
             require(image.save(output), "Cannot save bend snapshot");
         }
-        // Pick an orange surface pixel: custom display groups must retain the
+        // Pick a fuchsia surface pixel: custom display groups must retain the
         // original revision-scoped CAD face owners, and overlays are not selectable.
         const auto colored = viewer->captureImage();
-        const auto orange = [&](int x, int y) {
-            const auto pixel = colored.pixel(x, y);
-            return qRed(pixel) > 220 && qGreen(pixel) < 180 && qBlue(pixel) < 120;
-        };
+        const auto isBend = [&](int x, int y) { return fuchsiaPixel(colored.pixel(x, y)); };
         QPoint pick(-1, -1);
         for (int y = colored.height() / 4; y < colored.height() * 3 / 4 && pick.x() < 0; ++y) {
             for (int x = 1; x < colored.width() - 1; ++x) {
-                if (orange(x - 1, y) && orange(x, y) && orange(x + 1, y)) {
+                if (isBend(x - 1, y) && isBend(x, y) && isBend(x + 1, y)) {
                     pick = {x, y};
                     break;
                 }
@@ -739,7 +740,7 @@ void testBendPreparationWorkflow(bool graphics) {
     require(angle->value() == 120 && radius->value() == 5.25, "Selection lost saved target");
     if (graphics) {
         waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
-        require(viewer->isReady() && warmPixels(viewer->captureImage()) > 100,
+        require(viewer->isReady() && contrastPixels(viewer->captureImage()) > 100,
                 "Preparing a bend lost its contrast highlight");
         if (const auto output = qEnvironmentVariable("BENDING_PREPARATION_SNAPSHOT");
             !output.isEmpty()) {
@@ -906,7 +907,7 @@ void testSingleBendWorkflow(bool graphics) {
         waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
         require(viewer->isReady(), "Operation graphics unavailable");
         flat = viewer->captureImage();
-        require(warmPixels(flat) > 50, "Flat bend zone not distinguished");
+        require(contrastPixels(flat, warmPixel) > 50, "Flat bend zone not distinguished");
     }
     snapshot("flat");
     slider->setValue(10);
@@ -1658,8 +1659,8 @@ void testTrimmedBendWorkflow(bool graphics) {
         for (int i = expected - 1; i >= 0; --i) {
             list->setCurrentIndex(list->model()->index(i, 0));
             if (graphics) {
-                const auto count = warmPixels(viewer->captureImage());
-                std::cout << "Private bend " << i + 1 << ": " << count << " warm pixels\n";
+                const auto count = contrastPixels(viewer->captureImage());
+                std::cout << "Private bend " << i + 1 << ": " << count << " fuchsia pixels\n";
                 require(count > 50, "Private bend is not visibly contrasted");
             }
             require(

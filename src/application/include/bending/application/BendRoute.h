@@ -227,4 +227,9 @@ struct RouteDraft {
 };
 using RouteDraftPtr = std::shared_ptr<const RouteDraft>;
 using RouteDraftResult = std::variant<RouteDraftPtr, BendRouteError>;
+struct RouteDraftPose {
+    // Two points and the sheet normal for each mark on the reference wall.
+    std::vector<std::array<PointMm, 3>> edges;
+};
+using RouteDraftPoseObserver = std::function<void(RouteDraftPose)>;
 } // namespace bending::application

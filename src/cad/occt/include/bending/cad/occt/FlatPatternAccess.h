@@ -28,6 +28,8 @@ struct SheetBendRegion {
 struct SheetLayout {
     std::vector<SheetWallRegion> walls;
     std::vector<SheetBendRegion> bends;
+    bool usesJoinedWallFaces = false;
+    bool hasPresentationOnlyBends = false;
 };
 class OcctFlatPatternAccess final {
   public:
@@ -39,7 +41,8 @@ class OcctFlatPatternAccess final {
     [[nodiscard]] static const TopoDS_Shape &geometry(const application::FlatPattern &);
     [[nodiscard]] static const std::vector<std::vector<application::PointMm>> &
     openingContours(const application::FlatPattern &);
-    [[nodiscard]] static const std::vector<TopoDS_Shape> &
+    // One pair of presentation edges per bend, above and below the sheet.
+    [[nodiscard]] static const std::vector<std::array<TopoDS_Shape, 2>> &
     bendLines(const application::FlatPattern &);
     [[nodiscard]] static const SheetLayout &layout(const application::FlatPattern &);
     // Proven owner of the original STEP face, in the same frame as layout().

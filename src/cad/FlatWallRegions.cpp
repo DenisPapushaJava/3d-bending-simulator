@@ -1,5 +1,8 @@
 #include "FlatWallRegions.h"
+#include "bending/application/Document.h"
+#include "bending/cad/occt/FlatPatternAccess.h"
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -7,6 +10,7 @@
 #include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
+#include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -95,6 +99,103 @@ bool boundedWall(const TopoDS_Shape &solid, const std::array<TopoDS_Face, 2> &an
     return true;
 }
 } // namespace
+std::map<std::size_t, std::size_t>
+mapSourceWallOwners(const TopoDS_Shape &original, const TopoDS_Shape &calculation,
+                    std::span<const SheetWallRegion> walls,
+                    std::span<const application::FaceInfo> metadata, bool differentTopology,
+                    double tolerance, std::stop_token stop) {
+    TopTools_IndexedMapOfShape sourceFaces, targetFaces;
+    TopExp::MapShapes(original, TopAbs_FACE, sourceFaces);
+    TopExp::MapShapes(calculation, TopAbs_FACE, targetFaces);
+    std::map<std::size_t, std::size_t> owners;
+    std::size_t comparisons = 0;
+    for (const auto &face : metadata) {
+        if (stop.stop_requested())
+            return {};
+        if (face.surface != application::SurfaceKind::Plane || face.index == 0 ||
+            face.index > static_cast<std::size_t>(sourceFaces.Extent()))
+            continue;
+        TopoDS_Face sourceFace;
+        gp_Pln plane;
+        Bnd_Box sourceBox;
+        if (differentTopology) {
+            sourceFace = TopoDS::Face(sourceFaces(static_cast<int>(face.index)));
+            plane = BRepAdaptor_Surface(sourceFace).Plane();
+            BRepBndLib::Add(sourceFace, sourceBox);
+        }
+        std::optional<std::size_t> owner;
+        bool ambiguous = false;
+        for (std::size_t w = 0; w < walls.size() && !ambiguous; ++w)
+            for (auto index : walls[w].faces) {
+                if (stop.stop_requested())
+                    return {};
+                if (!differentTopology) {
+                    if (index == face.index) {
+                        if (owner && *owner != w) {
+                            ambiguous = true;
+                            break;
+                        }
+                        owner = w;
+                    }
+                    continue;
+                }
+                const auto targetFace = TopoDS::Face(targetFaces(static_cast<int>(index)));
+                BRepAdaptor_Surface surface(targetFace);
+                if (surface.GetType() != GeomAbs_Plane ||
+                    !plane.Axis().Direction().IsParallel(surface.Plane().Axis().Direction(),
+                                                         1.e-7) ||
+                    plane.Distance(surface.Plane().Location()) > tolerance * 4)
+                    continue;
+                Bnd_Box box;
+                BRepBndLib::Add(targetFace, box);
+                if (sourceBox.IsOut(box))
+                    continue;
+                if (comparisons >= 2048) {
+                    ambiguous = true; // An untested candidate cannot prove unique ownership.
+                    break;
+                }
+                ++comparisons;
+                try {
+                    // IDs of the filled solid are not IDs of the imported skin.
+                    // Require complete area ownership, not a centroid or a few samples.
+                    BRepAlgoAPI_Common common;
+                    TopTools_ListOfShape arguments, tools;
+                    arguments.Append(sourceFace);
+                    tools.Append(targetFace);
+                    common.SetArguments(arguments);
+                    common.SetTools(tools);
+                    common.SetNonDestructive(true);
+                    common.Build();
+                    if (!common.IsDone()) {
+                        ambiguous = true;
+                        break;
+                    }
+                    const auto overlapArea = area(common.Shape());
+                    if (!std::isfinite(overlapArea) || !std::isfinite(face.areaMm2)) {
+                        ambiguous = true;
+                        break;
+                    }
+                    if (overlapArea <= 0 || face.areaMm2 < 1.e-8 ||
+                        std::abs(overlapArea - face.areaMm2) >
+                            std::max(1.e-9, std::min(face.areaMm2 * 1.e-7,
+                                                     tolerance * std::sqrt(face.areaMm2) * 8)))
+                        continue;
+                    if (owner && *owner != w) {
+                        ambiguous = true;
+                        break;
+                    }
+                    owner = w;
+                } catch (const Standard_Failure &) {
+                    ambiguous = true;
+                    break;
+                }
+            }
+        if (owner && !ambiguous)
+            owners[face.index] = *owner;
+    }
+    return owners;
+}
+
 std::optional<std::vector<TopoDS_Shape>>
 isolateFlatWalls(const TopoDS_Shape &source, const std::vector<TopoDS_Shape> &sectors,
                  const std::vector<std::array<TopoDS_Face, 2>> &anchors, double tolerance,

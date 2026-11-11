@@ -1,10 +1,15 @@
 #include "BendRecognizer.h"
+#include "ShapeVolumeDifference.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom2dAdaptor_Curve.hxx>
 #include <Geom2d_BSplineCurve.hxx>
@@ -14,6 +19,7 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Lin.hxx>
@@ -37,6 +43,7 @@ struct Rail {
     gp_Dir radial;
     gp_Pln plane;
     std::size_t flange;
+    TopoDS_Edge edge;
 };
 struct Patch {
     std::size_t face;
@@ -73,6 +80,8 @@ struct EndBounds {
     bool straight;
     double minimumU;
     double maximumU;
+    TopoDS_Vertex firstU;
+    TopoDS_Vertex lastU;
 };
 // A monotone graph v(u) across the entire sector. Non-rational spline poles
 // bound v by the convex-hull property; no sampled curve is treated as proof.
@@ -120,13 +129,33 @@ std::optional<EndBounds> inspectEnd(const TopoDS_Edge &edge, const TopoDS_Face &
     } else if (adaptor.GetType() != GeomAbs_Line) {
         return {};
     }
-    return EndBounds{adjacentFace, minimumV,
-                     maximumV,     normalPlanarCap && maximumV - minimumV <= tolerance,
-                     minimumU,     maximumU};
+    auto firstU = TopExp::FirstVertex(edge);
+    auto lastU = TopExp::LastVertex(edge);
+    if (b.X() < a.X())
+        std::swap(firstU, lastU);
+    return EndBounds{
+        adjacentFace, minimumV, maximumV, normalPlanarCap && maximumV - minimumV <= tolerance,
+        minimumU,     maximumU, firstU,   lastU};
 }
 
 bool joinEnds(std::vector<EndBounds> &caps, double u0, double u1, double v0, double v1,
-              double tolerance) {
+              double tolerance, double radius, const std::vector<Rail> &rails) {
+    const auto onRail = [&](const TopoDS_Vertex &vertex, double mismatch) {
+        if (caps.size() <= 2 || vertex.IsNull())
+            return false;
+        for (const auto &rail : rails) {
+            const auto first = TopExp::FirstVertex(rail.edge);
+            const auto last = TopExp::LastVertex(rail.edge);
+            if (first.IsNull() || last.IsNull() || (!vertex.IsSame(first) && !vertex.IsSame(last)))
+                continue;
+            // UVBounds includes both ends of this rail. The uncertainty
+            // at the opposite end can move the reported global extremum.
+            const double local = std::max(BRep_Tool::Tolerance(first), BRep_Tool::Tolerance(last));
+            if (mismatch * radius <= std::min(tolerance, local))
+                return true;
+        }
+        return false;
+    };
     std::array<std::vector<EndBounds>, 2> groups;
     for (const auto &piece : caps) {
         if (piece.maximumV < (v0 + v1) / 2)
@@ -144,15 +173,26 @@ bool joinEnds(std::vector<EndBounds> &caps, double u0, double u1, double v0, dou
                   [](const auto &a, const auto &b) { return a.minimumU < b.minimumU; });
         auto end = pieces.front();
         double cursor = u0;
+        TopoDS_Vertex previous;
         for (const auto &piece : pieces) {
-            if (std::abs(piece.minimumU - cursor) > angularTolerance)
-                return false;
+            const double gap = std::abs(piece.minimumU - cursor);
+            if (gap > angularTolerance) {
+                // Independent STEP pcurves can disagree at the same BRep
+                // vertex. Never bridge a gap between distinct vertices.
+                if (previous.IsNull()
+                        ? !onRail(piece.firstU, gap)
+                        : (!previous.IsSame(piece.firstU) ||
+                           gap * radius > std::min(tolerance, BRep_Tool::Tolerance(previous))))
+                    return false;
+            }
             cursor = piece.maximumU;
+            previous = piece.lastU;
             end.minimumV = std::min(end.minimumV, piece.minimumV);
             end.maximumV = std::max(end.maximumV, piece.maximumV);
             end.straight = end.straight && piece.straight;
         }
-        if (std::abs(cursor - u1) > angularTolerance)
+        const double tail = std::abs(cursor - u1);
+        if (tail > angularTolerance && !onRail(previous, tail))
             return false;
         end.straight = end.straight && end.maximumV - end.minimumV <= tolerance;
         joined.push_back(end);
@@ -242,7 +282,8 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
                 std::abs(plane.Distance(cylinder.Location()) - cylinder.Radius()) > tolerance) {
                 return {};
             }
-            rails.push_back({radial, plane, static_cast<std::size_t>(faces.FindIndex(other))});
+            rails.push_back(
+                {radial, plane, static_cast<std::size_t>(faces.FindIndex(other)), edge});
         } else {
             const bool normalPlanarCap =
                 otherSurface.GetType() == GeomAbs_Plane &&
@@ -260,7 +301,7 @@ std::optional<Patch> inspectPatch(const TopoDS_Face &face, std::size_t index,
         capFaces.push_back(cap.face);
     std::sort(capFaces.begin(), capFaces.end());
     capFaces.erase(std::unique(capFaces.begin(), capFaces.end()), capFaces.end());
-    if (!joinEnds(caps, u0, u1, v0, v1, tolerance))
+    if (!joinEnds(caps, u0, u1, v0, v1, tolerance, cylinder.Radius(), rails))
         return {};
     if (rails.size() != 2 || caps.size() != 2 || rails[0].flange == rails[1].flange ||
         caps[0].face == caps[1].face) {
@@ -316,7 +357,7 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     if (inner.outward || !outer.outward || thickness <= 20.0 * tolerance ||
         !parallel(inner.cylinder.Axis().Direction(), outer.cylinder.Axis().Direction()) ||
         gp_Lin(inner.cylinder.Axis()).Distance(outer.cylinder.Location()) > tolerance ||
-        std::abs(inner.angle - outer.angle) > angularTolerance || inner.caps != outer.caps ||
+        inner.caps != outer.caps ||
         !inner.middleRadial.IsEqual(outer.middleRadial, angularTolerance)) {
         return {};
     }
@@ -356,6 +397,18 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
         flanges[i * 2] = a.flange;
         flanges[i * 2 + 1] = b->flange;
     }
+    double angle = inner.angle;
+    if (std::abs(inner.angle - outer.angle) > angularTolerance) {
+        // In a compound end the UV extrema include the uncertainty of the
+        // trim. The matched tangent rails determine the actual rotation.
+        if (!inner.trimmedEnds || !outer.trimmedEnds || inner.caps.size() <= 2)
+            return {};
+        angle = inner.rails[0].radial.Angle(inner.rails[1].radial);
+        if (angle < minimumAngle || angle > maximumAngle ||
+            std::abs(inner.angle - angle) * inner.cylinder.Radius() > tolerance ||
+            std::abs(outer.angle - angle) * outer.cylinder.Radius() > tolerance)
+            return {};
+    }
     // Canonical axis direction independent of the surface parametrisation.
     auto start = inner.start;
     auto end = inner.end;
@@ -385,7 +438,7 @@ std::optional<RecognizedBend> match(const Patch &inner, const Patch &outer, doub
     for (auto &limit : straight)
         limit = std::clamp(limit, 0., fullLength);
     return RecognizedBend{point(start),   point(end),
-                          inner.angle,    inner.cylinder.Radius(),
+                          angle,          inner.cylinder.Radius(),
                           thickness,      fullLength,
                           inner.face,     outer.face,
                           flanges,        inner.trimmedEnds || outer.trimmedEnds,
@@ -427,6 +480,76 @@ bool preferWorkpieceReversed(const RecognizedBend &bend, const Patch &inner,
     } catch (const Standard_Failure &) {
         return false; // An optional setup hint cannot fail recognition.
     }
+}
+
+bool isThroughCutPlate(const TopoDS_Shape &shape, const TopTools_IndexedMapOfShape &faces,
+                       const BendAnalysis &analysis, std::stop_token stop) {
+    if (analysis.bends.empty() || !analysis.interiorContourDiagnostics.empty())
+        return false;
+    const auto &first = analysis.bends.front();
+    const gp_Pnt start(first.axisStart.x, first.axisStart.y, first.axisStart.z);
+    const gp_Pnt end(first.axisEnd.x, first.axisEnd.y, first.axisEnd.z);
+    const gp_Dir normal(gp_Vec(start, end));
+    const double thickness = start.Distance(end);
+    const double tolerance = std::clamp(analysis.lengthToleranceMm, 1.e-6, 1.e-4);
+    const auto height = [&](const gp_Pnt &p) { return gp_Vec(start, p).Dot(gp_Vec(normal)); };
+    for (const auto &bend : analysis.bends) {
+        const gp_Pnt a(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z);
+        const gp_Pnt b(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z);
+        const auto [low, high] = std::minmax({height(a), height(b)});
+        if (!parallel(gp_Dir(gp_Vec(a, b)), normal) || std::abs(low) > tolerance ||
+            std::abs(high - thickness) > tolerance)
+            return false;
+    }
+    TopoDS_Face skin;
+    double largest = 0;
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        if (stop.stop_requested())
+            return false;
+        const auto face = TopoDS::Face(faces(i));
+        const BRepAdaptor_Surface surface(face, false);
+        if (surface.GetType() != GeomAbs_Plane)
+            continue;
+        GProp_GProps area;
+        BRepGProp::SurfaceProperties(face, area);
+        if (area.Mass() <= largest)
+            continue;
+        largest = area.Mass();
+        const auto plane = surface.Plane();
+        const auto z = height(plane.Location());
+        skin = parallel(plane.Axis().Direction(), normal) &&
+                       std::min(std::abs(z), std::abs(z - thickness)) <= tolerance
+                   ? face
+                   : TopoDS_Face{};
+    }
+    if (skin.IsNull())
+        return false;
+
+    // The end of a formed profile is also an extruded contour. Require a
+    // broad plate skin, using the same aspect criteria as thickness recognition.
+    const auto plane = BRepAdaptor_Surface(skin, false).Plane();
+    gp_Trsf local;
+    local.SetTransformation(plane.Position());
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(BRepBuilderAPI_Transform(skin, local, false).Shape(), box, false, false);
+    if (box.IsVoid() || box.IsOpen())
+        return false;
+    const auto span = gp_Vec(box.CornerMin(), box.CornerMax());
+    if (std::min(span.X(), span.Y()) < 5 * thickness ||
+        largest < std::hypot(span.X(), span.Y()) * 5 * thickness)
+        return false;
+
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+    if (solids.Extent() != 1 || stop.stop_requested())
+        return false;
+    const double z = height(plane.Location());
+    const auto prism =
+        BRepPrimAPI_MakePrism(skin, gp_Vec(normal) * (z < thickness / 2 ? thickness : -thickness),
+                              true)
+            .Shape();
+    return BRepCheck_Analyzer(prism).IsValid() &&
+           sameVolumeWithin(shape, prism, tolerance, 1.e-9, stop);
 }
 } // namespace
 
@@ -539,6 +662,16 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
                 result.unrecognizedCylindricalFaces -= 2;
             }
         }
+        try {
+            if (isThroughCutPlate(shape, faces, result, stop)) {
+                result.unrecognizedCylindricalFaces += 2 * result.bends.size();
+                result.bends.clear();
+            }
+        } catch (const Standard_Failure &) {
+            // An inconclusive stock check leaves the existing bend analysis intact.
+        }
+        if (stop.stop_requested())
+            return {};
         result.status = BendRecognitionStatus::Completed;
     } catch (const Standard_Failure &) {
         result.bends.clear();

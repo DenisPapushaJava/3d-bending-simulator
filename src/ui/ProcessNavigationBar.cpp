@@ -5,7 +5,7 @@
 #include <QHBoxLayout>
 
 namespace bending::ui {
-ProcessNavigationBar::ProcessNavigationBar(QAction &drawing, QWidget *parent)
+ProcessNavigationBar::ProcessNavigationBar(QAction &drawing, QAction &dxf, QWidget *parent)
     : QToolBar(QStringLiteral("Этапы работы"), parent), group_(new QButtonGroup(this)) {
     setObjectName(QStringLiteral("processNavigation"));
     setMovable(false);
@@ -37,14 +37,21 @@ ProcessNavigationBar::ProcessNavigationBar(QAction &drawing, QWidget *parent)
     }
     setCurrentStage(0);
     connect(group_, &QButtonGroup::idClicked, this, &ProcessNavigationBar::stageRequested);
-    auto *drawingButton = new ProcessStepButton(3, QStringLiteral("Чертёж / PDF"), panel);
-    drawingButton->setObjectName("drawingStageButton");
-    drawingButton->setStatus(QStringLiteral("Виды и развёртка"));
-    drawingButton->setEnabled(drawing.isEnabled());
-    layout->addWidget(drawingButton, 1);
-    connect(drawingButton, &QToolButton::clicked, &drawing, &QAction::trigger);
-    connect(&drawing, &QAction::changed, drawingButton,
-            [drawingButton, action = &drawing] { drawingButton->setEnabled(action->isEnabled()); });
+    const auto addExport = [&](QAction &action, int icon, const QString &name,
+                               const char *objectName) {
+        auto *button = new ProcessStepButton(icon, name, panel);
+        button->setObjectName(QString::fromLatin1(objectName));
+        const auto refresh = [button, &action] {
+            button->setEnabled(action.isEnabled());
+            button->setStatus(action.statusTip());
+        };
+        refresh();
+        layout->addWidget(button, 1);
+        connect(button, &QToolButton::clicked, &action, &QAction::trigger);
+        connect(&action, &QAction::changed, button, refresh);
+    };
+    addExport(drawing, 3, QStringLiteral("Чертёж / PDF"), "drawingStageButton");
+    addExport(dxf, 4, QStringLiteral("Развёртка / DXF"), "flatDxfStageButton");
     addWidget(panel);
 }
 void ProcessNavigationBar::setCurrentStage(int stage) {

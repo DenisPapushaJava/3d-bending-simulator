@@ -42,7 +42,7 @@ struct MeasurementSelection {
 // Screen picking of prepared flat centre lines; no CAD selection/measurement.
 [[nodiscard]] std::optional<std::size_t> flatBendAt(const application::FlatPatternInfo &,
                                                     const DimensionLayout &, QPointF,
-                                                    double tolerancePixels);
+                                                    double tolerancePixels, double facing);
 // Presentation only: measurements come from the immutable document/prepared frame.
 [[nodiscard]] DimensionAnnotations
 documentDimensions(const application::DocumentMetadata &, const TopTools_IndexedMapOfShape &,

@@ -36,6 +36,8 @@
 #include <V3d_DirectionalLight.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_QuaternionSLerp.hxx>
 
 #include <QAction>
 #include <QActionGroup>
@@ -49,6 +51,7 @@
 #include <QPointer>
 #include <QResizeEvent>
 #include <QStackedLayout>
+#include <QTimeLine>
 #include <QTimer>
 #include <QToolButton>
 #include <QWheelEvent>
@@ -64,10 +67,55 @@
 namespace bending::viewer {
 namespace {
 
+const Quantity_Color bendHighlight(1., 0., 1., Quantity_TOC_sRGB);
+const Quantity_Color bendHighlightAccent(1., .60, .94, Quantity_TOC_sRGB);
+constexpr double flatBendWidth = 5.;
+constexpr double selectedFlatBendWidth = 8.;
+
 QString failureText(const Standard_Failure &error) {
     const auto *message = error.GetMessageString();
     return message && *message ? QString::fromUtf8(message)
                                : QStringLiteral("Ошибка отображения OCCT");
+}
+
+struct SheetReposition {
+    gp_Pnt from, to;
+    gp_Quaternion rotation;
+
+    gp_Trsf at(double progress) const {
+        gp_Trsf transform;
+        transform.SetRotationPart(
+            gp_QuaternionSLerp::Interpolate(rotation, gp_Quaternion(), progress).Normalized());
+        const auto anchor = from.Translated(gp_Vec(from, to) * progress);
+        transform.SetTranslationPart(gp_Vec(to.Transformed(transform), anchor));
+        return transform;
+    }
+};
+
+std::optional<SheetReposition> sheetReposition(const cad::SheetOrientationVisual &from,
+                                               const cad::SheetOrientationVisual &to) {
+    if (from.edges.empty() || from.edges.size() != to.edges.size())
+        return {};
+    const auto axes = [](const cad::SheetEdgeMarker &edge) {
+        const gp_Vec tangent(edge.points[0], edge.points[1]);
+        return gp_Ax3(edge.points[0].Translated(tangent * .5), gp_Dir(edge.normal),
+                      gp_Dir(tangent));
+    };
+    const auto oldAxes = axes(from.edges.front()), newAxes = axes(to.edges.front());
+    gp_Trsf placement;
+    placement.SetDisplacement(newAxes, oldAxes);
+    // The marks follow the same source wall. Compare their positions to guard
+    // against a different edge being picked in either preview.
+    for (std::size_t i = 0; i < from.edges.size(); ++i)
+        for (std::size_t p = 0; p < 2; ++p)
+            if (to.edges[i].points[p].Transformed(placement).Distance(from.edges[i].points[p]) >
+                .05)
+                return {};
+    const auto rotation = placement.GetRotation();
+    if (std::abs(rotation.GetRotationAngle()) < .02 &&
+        oldAxes.Location().Distance(newAxes.Location()) < 1.)
+        return {};
+    return SheetReposition{oldAxes.Location(), newAxes.Location(), rotation};
 }
 
 struct FaceHighlights {
@@ -117,6 +165,32 @@ class OcctCanvas final : public QWidget {
         setAttribute(Qt::WA_NoSystemBackground);
         setMouseTracking(true);
         setFocusPolicy(Qt::StrongFocus);
+        repositionLabel_ = new QLabel(QStringLiteral("Переустановка детали · схема"), this);
+        repositionLabel_->setObjectName(QStringLiteral("sheetRepositionLabel"));
+        repositionLabel_->setAttribute(Qt::WA_NativeWindow);
+        repositionLabel_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        repositionLabel_->setStyleSheet(
+            QStringLiteral("background:#243441;color:#F4F7F9;border-radius:4px;padding:4px 8px;"));
+        repositionLabel_->hide();
+        repositionTimeline_.setUpdateInterval(25);
+        connect(&repositionTimeline_, &QTimeLine::valueChanged, this, [this](double value) {
+            if (!reposition_)
+                return;
+            repositionProgress_ = repositionStart_ + (1. - repositionStart_) * value;
+            guarded([&] {
+                const auto transform = reposition_->at(repositionProgress_) * fromOldPose_;
+                context_->SetLocation(presentation_, TopLoc_Location(transform));
+                view_->Redraw();
+            });
+        });
+        connect(&repositionTimeline_, &QTimeLine::finished, this, [this] {
+            if (draftReposition_) {
+                repositionLabel_->setText(QStringLiteral("Проверяем гиб…"));
+                positionRepositionLabel();
+            } else {
+                finishReposition();
+            }
+        });
         controls_ = new QWidget(this);
         controls_->setObjectName(QStringLiteral("viewportControls"));
         controls_->setAttribute(Qt::WA_NativeWindow);
@@ -438,6 +512,7 @@ class OcctCanvas final : public QWidget {
 
     QString present(const TopoDS_Shape &shape, application::DocumentPtr document, quint64 revision,
                     bool diagnostic = false) {
+        finishReposition();
         const bool sameSource = document && document == document_ && revision == revision_;
         const bool wasDerived = preview_ || flat_;
         if (sameSource)
@@ -569,8 +644,8 @@ class OcctCanvas final : public QWidget {
                             displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame : AIS_Shaded,
                             displayStyle_ == DisplayStyle::Edges);
     }
-    QString presentPreview(application::BendPreviewPtr preview, std::size_t index,
-                           quint64 revision) {
+    QString presentPreview(application::BendPreviewPtr preview, std::size_t index, quint64 revision,
+                           bool reposition = false) {
         if (revision != revision_ || !document_ || !preview || index >= preview->frameCount()) {
             return QStringLiteral("Неактуальный результат просмотра сгиба");
         }
@@ -580,6 +655,26 @@ class OcctCanvas final : public QWidget {
         // from CAD or changing between the machine (Y-up) and kinematic (Z-up) spaces.
         const bool preserveView =
             preview_ && bool(preview_->toolSetup()) == bool(preview->toolSetup());
+        const bool continuing = reposition && entering && draftReposition_;
+        const double progress = continuing ? repositionProgress_ : 0.;
+        const int remaining =
+            continuing
+                ? std::clamp(repositionTimeline_.duration() - repositionTimeline_.currentTime(), 1,
+                             110)
+            : preview->unverifiedDraft() ? 220
+                                         : 320;
+        resetReposition();
+        deferredBendHover_ = false;
+        std::optional<SheetReposition> motion;
+        if (reposition && ready_ && entering && preserveView && index == 0 && progress < 1.) {
+            try {
+                motion = sheetReposition(
+                    cad::OcctPreviewAccess::frame(*preview_, previewFrame_).orientation,
+                    frame.orientation);
+            } catch (const Standard_Failure &) {
+                // Missing reference geometry leaves the normal preview available.
+            }
+        }
         if (entering && !preserveView)
             rememberSceneCamera();
         Handle(AIS_ColoredShape) candidate;
@@ -592,6 +687,7 @@ class OcctCanvas final : public QWidget {
                 // with its face identities; rigid tools are displayed independently below.
                 const auto &regions =
                     frame.displayShape.IsNull() ? frame.regions : frame.displayRegions;
+                const auto hoveredZone = previewBendZone(frame);
                 for (const auto &region : regions)
                     if (!region.IsNull())
                         builder.Add(display, region);
@@ -605,6 +701,12 @@ class OcctCanvas final : public QWidget {
                     Quantity_Color(1.0, 0.25, 0.04, Quantity_TOC_RGB),
                     Quantity_Color(0.16, 0.70, 0.51, Quantity_TOC_RGB)};
                 for (std::size_t region = 0; region < regions.size(); ++region) {
+                    if (regions[region].IsNull())
+                        continue;
+                    if (!sideAction_->isChecked() && hoveredZone.IsNull()) {
+                        candidate->SetCustomColor(regions[region], colors[region]);
+                        continue;
+                    }
                     TopTools_IndexedMapOfShape regionFaces;
                     TopExp::MapShapes(regions[region], TopAbs_FACE, regionFaces);
                     for (int face = 1; face <= regionFaces.Extent(); ++face) {
@@ -625,17 +727,33 @@ class OcctCanvas final : public QWidget {
                 }
                 if (sideAction_->isChecked())
                     applySheetSideColors(candidate, frame.orientation);
-                if (hoverPreviewBend_ && *hoverPreviewBend_ < frame.bendZones.size()) {
+                if (!hoveredZone.IsNull()) {
                     TopTools_IndexedMapOfShape faces;
-                    TopExp::MapShapes(frame.bendZones[*hoverPreviewBend_], TopAbs_FACE, faces);
-                    for (int f = 1; f <= faces.Extent(); ++f)
-                        candidate->SetCustomColor(faces(f),
-                                                  Quantity_Color(.92, .65, .22, Quantity_TOC_RGB));
+                    TopExp::MapShapes(hoveredZone, TopAbs_FACE, faces);
+                    const auto highlight = [&](const TopoDS_Shape &face) {
+                        candidate->SetCustomColor(face, bendHighlight);
+                        candidate->CustomAspects(face)->SetShadingModel(
+                            Graphic3d_TypeOfShadingModel_Unlit);
+                    };
+                    // A bend region also contains its thickness faces. Reuse the
+                    // classified sheet skins to keep those faces out of the hover.
+                    bool foundSkin = false;
+                    for (const auto &side : frame.orientation.sides)
+                        for (const auto &face : side)
+                            if (faces.Contains(face)) {
+                                highlight(face);
+                                foundSkin = true;
+                            }
+                    if (!foundSkin)
+                        for (int f = 1; f <= faces.Extent(); ++f)
+                            highlight(faces(f));
                 }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
                                                                            : AIS_Shaded,
                                   -1, false);
+                if (motion)
+                    context_->SetLocation(candidate, TopLoc_Location(motion->at(progress)));
                 updateRigidScene(frame);
                 if (!presentation_.IsNull()) {
                     context_->Remove(presentation_, false);
@@ -661,7 +779,6 @@ class OcctCanvas final : public QWidget {
                     }
                     fitPreview(*preview, index, preview->toolSetup() != nullptr);
                 }
-                view_->ZFitAll();
                 if (!dimensionsVisible_) {
                     view_->Redraw();
                 }
@@ -679,6 +796,8 @@ class OcctCanvas final : public QWidget {
         preview_ = std::move(preview);
         flat_.reset();
         previewFrame_ = index;
+        if (motion)
+            runReposition(*motion, false, progress, remaining);
         refreshDimensions();
         refreshOrientation();
         if (onSelection) {
@@ -704,6 +823,7 @@ class OcctCanvas final : public QWidget {
     QString presentFlat(application::FlatPatternPtr flat, quint64 revision) {
         if (revision != revision_ || !document_ || !flat)
             return QStringLiteral("Неактуальная развёртка");
+        finishReposition();
         const bool entering = flat_ != flat;
         if (entering)
             measureSelection_ = {};
@@ -718,9 +838,22 @@ class OcctCanvas final : public QWidget {
                 candidate->SetColor(Quantity_Color(.25, .64, .73, Quantity_TOC_RGB));
                 if (sideAction_->isChecked())
                     applySheetSideColors(candidate, cad::OcctFlatPatternAccess::orientation(*flat));
-                for (const auto &line : cad::OcctFlatPatternAccess::bendLines(*flat)) {
-                    candidate->SetCustomColor(line, Quantity_Color(1., .45, .08, Quantity_TOC_RGB));
-                    candidate->SetCustomWidth(line, 2.5);
+                const auto &lines = cad::OcctFlatPatternAccess::bendLines(*flat);
+                const auto &bends = flat->info().bends;
+                for (std::size_t i = 0; i < std::min(lines.size(), bends.size()); ++i) {
+                    // Positive bends close towards the upper side of the unfolded sheet.
+                    const auto inside = bends[i].direction > 0 ? 0u : 1u;
+                    for (std::size_t side = 0; side < lines[i].size(); ++side) {
+                        const auto &line = lines[i][side];
+                        candidate->SetCustomColor(line, bendHighlight);
+                        candidate->SetCustomWidth(line, flatBendWidth);
+                        const auto drawer = candidate->CustomAspects(line);
+                        drawer->SetOwnLineAspects();
+                        const auto type = side == inside ? Aspect_TOL_SOLID : Aspect_TOL_DASH;
+                        drawer->LineAspect()->SetTypeOfLine(type);
+                        drawer->WireAspect()->SetTypeOfLine(type);
+                        drawer->FreeBoundaryAspect()->SetTypeOfLine(type);
+                    }
                 }
                 context_->Display(candidate,
                                   displayStyle_ == DisplayStyle::Wireframe ? AIS_WireFrame
@@ -759,6 +892,7 @@ class OcctCanvas final : public QWidget {
     }
 
     void clearDocument(quint64 revision) {
+        finishReposition();
         guarded([&] {
             rigidScene_->clear();
             context_->RemoveAll(false);
@@ -889,14 +1023,12 @@ class OcctCanvas final : public QWidget {
                 if (highlights_.bend) {
                     for (const auto i : highlights_.primary) {
                         const auto &face = faces_(static_cast<int>(i));
-                        presentation_->SetCustomColor(
-                            face, Quantity_Color(1.0, 0.20, 0.025, Quantity_TOC_RGB));
+                        presentation_->SetCustomColor(face, bendHighlight);
                         const auto drawer = presentation_->CustomAspects(face);
                         drawer->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
                         drawer->SetFaceBoundaryDraw(true);
                         drawer->SetFaceBoundaryAspect(
-                            new Prs3d_LineAspect(Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB),
-                                                 Aspect_TOL_SOLID, 3.0));
+                            new Prs3d_LineAspect(bendHighlightAccent, Aspect_TOL_SOLID, 3.0));
                     }
                 }
                 auto cutouts = highlights_.cutouts;
@@ -929,7 +1061,7 @@ class OcctCanvas final : public QWidget {
             evidence_ =
                 outline(sideAction_->isChecked() && !highlights_.bend ? std::vector<std::size_t>{}
                                                                       : highlights_.primary,
-                        highlights_.bend ? Quantity_Color(1.0, 0.85, 0.40, Quantity_TOC_RGB)
+                        highlights_.bend ? bendHighlightAccent
                                          : Quantity_Color(1.0, 0.65, 0.1, Quantity_TOC_RGB),
                         3.0);
             view_->Redraw();
@@ -1035,6 +1167,8 @@ class OcctCanvas final : public QWidget {
                 painter.drawPixmap(orbitLockButton_->pos(), orbitLockButton_->grab());
             if (sideLegend_->isVisible())
                 painter.drawPixmap(sideLegend_->pos(), sideLegend_->grab());
+            if (repositionLabel_->isVisible())
+                painter.drawPixmap(repositionLabel_->pos(), repositionLabel_->grab());
         }
         return result;
     }
@@ -1119,10 +1253,12 @@ class OcctCanvas final : public QWidget {
                     if (feature.kind == MeasurementKind::Edge &&
                         selectBase(feature, event->modifiers()))
                         return;
-                    const auto hit = std::abs(view_->Camera()->Direction().Z()) < .15
-                                         ? std::nullopt
-                                         : flatBendAt(flat_->info(), dimensionLayout(),
-                                                      lastPosition_, 8 * devicePixelRatioF());
+                    const double facing = -view_->Camera()->Direction().Z();
+                    const auto hit =
+                        std::abs(facing) < .15
+                            ? std::nullopt
+                            : flatBendAt(flat_->info(), dimensionLayout(), lastPosition_,
+                                         8 * devicePixelRatioF(), facing);
                     const int source = hit && *hit < document_->metadata().bendAnalysis.bends.size()
                                            ? static_cast<int>(*hit)
                                            : -1;
@@ -1454,14 +1590,32 @@ class OcctCanvas final : public QWidget {
         const auto &bends = flat_->info().bends;
         for (std::size_t i = 0; i < std::min(lines.size(), bends.size()); ++i) {
             const bool active = selected && bends[i].bendIndex == *selected;
-            presentation_->SetCustomColor(lines[i],
-                                          active ? Quantity_Color(1., .85, .4, Quantity_TOC_RGB)
-                                                 : Quantity_Color(1., .45, .08, Quantity_TOC_RGB));
-            presentation_->SetCustomWidth(lines[i], active ? 4. : 2.5);
+            for (const auto &line : lines[i]) {
+                presentation_->SetCustomColor(line, active ? bendHighlightAccent : bendHighlight);
+                presentation_->SetCustomWidth(line, active ? selectedFlatBendWidth : flatBendWidth);
+            }
         }
+        updateFlatBendSide();
         context_->Redisplay(presentation_, false);
         if (!dimensionsVisible_)
             view_->Redraw();
+    }
+    bool updateFlatBendSide() {
+        if (!ready_ || !flat_ || presentation_.IsNull())
+            return false;
+        const auto &lines = cad::OcctFlatPatternAccess::bendLines(*flat_);
+        if (lines.empty())
+            return false;
+        const bool top = view_->Camera()->Direction().Z() <= 0;
+        if (presentation_->CustomAspects(lines.front()[0])->IsHidden() == !top &&
+            presentation_->CustomAspects(lines.front()[1])->IsHidden() == top)
+            return false;
+        // In wireframe the sheet cannot occlude the marking on its far side.
+        for (const auto &pair : lines) {
+            presentation_->CustomAspects(pair[0])->SetHidden(!top);
+            presentation_->CustomAspects(pair[1])->SetHidden(top);
+        }
+        return true;
     }
     DimensionLayout dimensionLayout() const {
         const auto separation = view_->Convert(qRound(50.0 * devicePixelRatioF()));
@@ -1500,13 +1654,17 @@ class OcctCanvas final : public QWidget {
         return layout;
     }
     void refreshDimensions() {
+        guarded([&] {
+            if (updateFlatBendSide())
+                context_->Redisplay(presentation_, false);
+        });
         if (!dimensionsVisible_ && dimensions_.objects.empty()) {
             updateDimensionButton();
             return;
         }
         guarded([&] {
             removeDimensions();
-            if (dimensionsVisible_ && document_) {
+            if (dimensionsVisible_ && document_ && !reposition_) {
                 const auto layout = dimensionLayout();
                 dimensions_ =
                     flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout,
@@ -1690,6 +1848,10 @@ class OcctCanvas final : public QWidget {
     }
 
     void fail(const QString &message) {
+        repositionTimeline_.stop();
+        reposition_.reset();
+        draftReposition_ = false;
+        repositionLabel_->hide();
         ready_ = false;
         updateDimensionButton();
         if (onError) {
@@ -1699,6 +1861,10 @@ class OcctCanvas final : public QWidget {
     }
 
     void release() noexcept {
+        repositionTimeline_.stop();
+        reposition_.reset();
+        draftReposition_ = false;
+        repositionLabel_->hide();
         ready_ = false;
         rigidScene_.reset();
         try {
@@ -1806,21 +1972,103 @@ class OcctCanvas final : public QWidget {
     application::BendPreviewPtr preview_;
 
   public:
+    bool isRepositioning() const {
+        return reposition_.has_value();
+    }
+    void startDraftReposition(const application::RouteDraftPose &pose, quint64 revision) {
+        if (!ready_ || reposition_ || revision_ != revision || !preview_ || !preview_->toolSetup())
+            return;
+        try {
+            cad::SheetOrientationVisual target;
+            const auto point = [](application::PointMm p) { return gp_Pnt(p.x, p.y, p.z); };
+            for (const auto &edge : pose.edges)
+                target.edges.push_back(
+                    {{point(edge[0]), point(edge[1])}, gp_Vec(gp_Pnt(), point(edge[2]))});
+            const auto &source =
+                cad::OcctPreviewAccess::frame(*preview_, previewFrame_).orientation;
+            if (const auto motion = sheetReposition(source, target)) {
+                runReposition(*motion, true, 0., 320);
+                refreshDimensions();
+                refreshOrientation();
+            }
+        } catch (const Standard_Failure &) {
+            finishReposition();
+        }
+    }
+    void finishReposition() {
+        if (!reposition_)
+            return;
+        resetReposition();
+        if (deferredBendHover_ && preview_) {
+            presentPreview(preview_, previewFrame_, revision_);
+            return;
+        }
+        guarded([&] { view_->Redraw(); });
+        refreshDimensions();
+        refreshOrientation();
+    }
     void setAnimationRunning(bool running) {
         if (animationRunning_ == running)
             return;
         animationRunning_ = running;
         refreshDimensions();
     }
-    void highlightPreviewBend(std::optional<std::size_t> i) {
-        if (hoverPreviewBend_ == i)
-            return;
+    void highlightPreviewBend(std::optional<std::size_t> i, bool activeZone) {
+        const auto *frame =
+            preview_ ? &cad::OcctPreviewAccess::frame(*preview_, previewFrame_) : nullptr;
+        const auto previous = frame ? previewBendZone(*frame) : TopoDS_Shape{};
         hoverPreviewBend_ = i;
-        if (preview_)
+        hoverActiveZone_ = i.has_value() && activeZone;
+        if (!ready_ || !frame)
+            return;
+        const auto next = previewBendZone(*frame);
+        if ((previous.IsNull() && next.IsNull()) || (!previous.IsNull() && previous.IsSame(next)))
+            return;
+        if (reposition_)
+            deferredBendHover_ = true;
+        else
             presentPreview(preview_, previewFrame_, revision_);
     }
 
   private:
+    TopoDS_Shape previewBendZone(const cad::PreviewFrame &frame) const {
+        if (!hoverPreviewBend_)
+            return {};
+        if (!frame.bendZones.empty())
+            return *hoverPreviewBend_ < frame.bendZones.size() ? frame.bendZones[*hoverPreviewBend_]
+                                                               : TopoDS_Shape{};
+        // Checked frames partition only the active operation from the rest of the sheet.
+        if (!hoverActiveZone_)
+            return {};
+        return frame.displayShape.IsNull() ? frame.regions[1] : frame.displayRegions[1];
+    }
+    void resetReposition() {
+        if (!reposition_)
+            return;
+        repositionTimeline_.stop();
+        reposition_.reset();
+        draftReposition_ = false;
+        repositionLabel_->hide();
+        guarded([&] { context_->SetLocation(presentation_, TopLoc_Location()); });
+    }
+    void runReposition(const SheetReposition &motion, bool draft, double progress, int duration) {
+        reposition_ = motion;
+        draftReposition_ = draft;
+        fromOldPose_ = draft ? motion.at(0).Inverted() : gp_Trsf();
+        repositionStart_ = repositionProgress_ = progress;
+        repositionLabel_->setText(QStringLiteral("Переустановка детали · схема"));
+        positionRepositionLabel();
+        repositionLabel_->show();
+        repositionLabel_->raise();
+        repositionTimeline_.setDuration(duration);
+        repositionTimeline_.start();
+    }
+    QTimeLine repositionTimeline_{320};
+    std::optional<SheetReposition> reposition_;
+    bool draftReposition_ = false;
+    gp_Trsf fromOldPose_;
+    double repositionStart_ = 0., repositionProgress_ = 0.;
+    QLabel *repositionLabel_ = nullptr;
     cad::SheetOrientationVisual sourceOrientation_;
     QAction *sideAction_ = nullptr;
     QWidget *sideLegend_ = nullptr;
@@ -1870,7 +2118,7 @@ class OcctCanvas final : public QWidget {
                                         : QStringLiteral("Стороны в этом состоянии недоступны"));
         nextEdge_->setVisible(mapped && !orientation.edges.empty());
         nextEdge_->setEnabled(orientation.edges.size() > 1);
-        if (ready_ && mapped && !orientation.edges.empty()) {
+        if (ready_ && mapped && !orientation.edges.empty() && !reposition_) {
             try {
                 sideMarkers_ =
                     sheetEdgeMarker(orientation.edges[edgeIndex_ % orientation.edges.size()],
@@ -1886,6 +2134,8 @@ class OcctCanvas final : public QWidget {
             view_->Redraw();
     }
     std::optional<std::size_t> hoverPreviewBend_;
+    bool hoverActiveZone_ = false;
+    bool deferredBendHover_ = false;
     ToolSegmentColors segmentColors_;
     application::FlatPatternPtr flat_;
     std::size_t previewFrame_ = 0;
@@ -1908,6 +2158,10 @@ class OcctCanvas final : public QWidget {
                           : SceneSpace::Cad;
     }
 
+    void positionRepositionLabel() {
+        repositionLabel_->adjustSize();
+        repositionLabel_->move(std::max(12, (width() - repositionLabel_->width()) / 2), 12);
+    }
     void positionControls() {
         controls_->adjustSize();
         controls_->move(qMax(12, width() - controls_->width() - 12), 12);
@@ -1917,6 +2171,8 @@ class OcctCanvas final : public QWidget {
         orbitLockButton_->raise();
         orbitLockButton_->update();
         positionSideLegend();
+        if (reposition_)
+            positionRepositionLabel();
     }
 };
 
@@ -2182,24 +2438,36 @@ void ViewerWidget::highlightBendDiagnostic(
 }
 
 QString ViewerWidget::presentBendPreview(application::BendPreviewPtr preview,
-                                         std::size_t frameIndex, quint64 revision) {
+                                         std::size_t frameIndex, quint64 revision,
+                                         bool reposition) {
     try {
-        return impl_->canvas
-                   ? impl_->canvas->presentPreview(std::move(preview), frameIndex, revision)
-                   : QString{};
+        return impl_->canvas ? impl_->canvas->presentPreview(std::move(preview), frameIndex,
+                                                             revision, reposition)
+                             : QString{};
     } catch (const Standard_Failure &error) {
         return failureText(error);
     } catch (const std::exception &error) {
         return QString::fromUtf8(error.what());
     }
 }
+bool ViewerWidget::isRepositioning() const {
+    return impl_->canvas && impl_->canvas->isRepositioning();
+}
+void ViewerWidget::startDraftReposition(const application::RouteDraftPose &pose, quint64 revision) {
+    if (impl_->canvas)
+        impl_->canvas->startDraftReposition(pose, revision);
+}
+void ViewerWidget::finishReposition() {
+    if (impl_->canvas)
+        impl_->canvas->finishReposition();
+}
 void ViewerWidget::setAnimationRunning(bool running) {
     if (impl_->canvas)
         impl_->canvas->setAnimationRunning(running);
 }
-void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i) {
+void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i, bool activeZone) {
     if (impl_->canvas)
-        impl_->canvas->highlightPreviewBend(i);
+        impl_->canvas->highlightPreviewBend(i, activeZone);
 }
 QString ViewerWidget::endBendPreview() {
     return impl_->canvas ? impl_->canvas->endPreview() : QString{};

@@ -1,5 +1,5 @@
 #pragma once
-#include "bending/application/Document.h"
+#include "bending/application/FlatCutProfile.h"
 #include "bending/application/ModelMeasurements.h"
 #include "bending/core/UnfoldRule.h"
 #include <cmath>
@@ -9,6 +9,12 @@
 
 namespace bending::application {
 inline constexpr std::size_t maximumSheetBends = 32;
+// Unfolding can keep several separate sectors for one connection between walls.
+inline constexpr std::size_t maximumFlatBendSegments = 64;
+[[nodiscard]] inline bool isPlanarCutCandidate(const BendAnalysis &analysis) noexcept {
+    return analysis.status == BendRecognitionStatus::Completed && analysis.bends.empty() &&
+           analysis.interiorContourDiagnostics.empty();
+}
 struct FlatBend {
     std::size_t bendIndex;
     PointMm start; // First tangency boundary, in the common flat XY plane.
@@ -36,6 +42,7 @@ struct FlatPatternInfo {
     // Source material side A after unfolding; unknown must not invent a side.
     std::optional<bool> positiveZIsSideA = {};
     std::shared_ptr<const ModelMeasurements> measurements = {};
+    std::shared_ptr<const FlatCutProfile> cutProfile = {};
 };
 class FlatPattern {
   public:

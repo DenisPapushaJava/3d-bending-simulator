@@ -72,6 +72,14 @@ void ownershipChecks() {
     const auto partial = BRepPrimAPI_MakeBox(gp_Pnt(-1, -1, 1), 16, 6, 38).Shape();
     require(!cad::ownedBendSector(source, partial, anchors, 1e-4, {}),
             "Partial source-skin coverage was accepted");
+    const auto preserve = cad::BendSectorSelection::PreserveSourceSkins;
+    const auto single = cad::ownedBendSector(first, envelope, anchors, 1e-4, {}, preserve);
+    require(single && std::abs(volume(*single) - volume(first)) < 1e-6,
+            "Source-first intersection lost the complete single sector");
+    require(!cad::ownedBendSector(first, partial, anchors, 1e-4, {}, preserve),
+            "Source-first intersection accepted clipped skins");
+    require(!cad::ownedBendSector(source, envelope, anchors, 1e-4, {}, preserve),
+            "Source-first intersection accepted multiple bodies");
     const auto split =
         BRepAlgoAPI_Cut(envelope, BRepPrimAPI_MakeBox(gp_Pnt(-2, -2, 19), 20, 10, 2).Shape())
             .Shape();

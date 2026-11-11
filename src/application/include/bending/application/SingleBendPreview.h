@@ -221,6 +221,11 @@ class SingleBendPreviewBuilder {
                                                            std::stop_token) const {
         return BendRouteError{BendRouteErrorCode::Unsupported, "Draft preview unavailable"};
     }
+    [[nodiscard]] virtual RouteDraftResult
+    buildRouteDraftWithPose(DocumentPtr document, RouteDraftRequest request, std::stop_token stop,
+                            const RouteDraftPoseObserver &) const {
+        return buildRouteDraft(std::move(document), std::move(request), stop);
+    }
     [[nodiscard]] virtual BendRouteResult buildRoute(DocumentPtr, BendRouteRequest,
                                                      std::stop_token) const {
         return BendRouteError{BendRouteErrorCode::Unsupported, "Route builder unavailable"};

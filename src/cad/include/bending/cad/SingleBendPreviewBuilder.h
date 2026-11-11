@@ -14,6 +14,10 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
     [[nodiscard]] application::RouteDraftResult buildRouteDraft(application::DocumentPtr,
                                                                 application::RouteDraftRequest,
                                                                 std::stop_token) const override;
+    [[nodiscard]] application::RouteDraftResult
+    buildRouteDraftWithPose(application::DocumentPtr, application::RouteDraftRequest,
+                            std::stop_token,
+                            const application::RouteDraftPoseObserver &) const override;
     [[nodiscard]] application::BendRouteResult buildRoute(application::DocumentPtr,
                                                           application::BendRouteRequest,
                                                           std::stop_token) const override;
@@ -41,6 +45,9 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
                                                        std::stop_token stop) const override;
 
   private:
+    application::BendRouteResult buildRouteImpl(application::DocumentPtr,
+                                                application::BendRouteRequest, std::stop_token,
+                                                unsigned pairedContinuationTimeMs) const;
     application::BendPreviewResult cachedOperation(application::DocumentPtr, std::size_t,
                                                    core::BendTarget, bool reversed, std::stop_token,
                                                    core::PressTools, bool motion,
