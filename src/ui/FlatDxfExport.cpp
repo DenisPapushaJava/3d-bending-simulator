@@ -171,14 +171,16 @@ void intersectArc(QPointF a, QPointF b, QPointF centre, double radius, double sw
     const auto start = std::atan2(a.y() - centre.y(), a.x() - centre.x());
     const auto direction = sweep < 0 ? -1. : 1.;
     const auto turn = std::abs(sweep);
-    std::array<double, 4> cuts{0, turn};
-    std::size_t count = 2;
+    std::array<double, 4> cuts{};
+    std::size_t count = 1;
     for (double extremum : {std::numbers::pi / 2, -std::numbers::pi / 2}) {
         auto distance = std::fmod((extremum - start) * direction + fullTurn, fullTurn);
         if (distance > 0 && distance < turn)
             cuts[count++] = distance;
     }
-    std::sort(cuts.begin(), cuts.begin() + count);
+    if (count == 3 && cuts[1] > cuts[2])
+        std::swap(cuts[1], cuts[2]);
+    cuts[count++] = turn;
     const auto halfChord = circleHalfChord(centre, radius);
     for (std::size_t i = 1; i < count; ++i) {
         const auto angle = start + direction * cuts[i];
