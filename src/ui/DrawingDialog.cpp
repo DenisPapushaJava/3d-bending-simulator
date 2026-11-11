@@ -1,6 +1,8 @@
 #include "DrawingDialog.h"
 #include "DrawingLayoutController.h"
+#include "ExportFileDialog.h"
 #include "MaterialPresets.h"
+#include "PreviewIcons.h"
 #include "bending/ui/DrawingSheet.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/Preferences.h"
@@ -9,8 +11,6 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QEvent>
-#include <QFileDialog>
-#include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -19,10 +19,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
-#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
@@ -43,31 +41,6 @@
 
 namespace bending::ui {
 namespace {
-QIcon fitPageIcon() {
-    QIcon icon;
-    for (int ratio : {1, 2})
-        for (auto state : {QIcon::Off, QIcon::On}) {
-            QPixmap pixmap(24 * ratio, 24 * ratio);
-            pixmap.setDevicePixelRatio(ratio);
-            pixmap.fill(Qt::transparent);
-            QPainter painter(&pixmap);
-            painter.setRenderHint(QPainter::Antialiasing);
-            painter.setPen(QPen(QColor(state == QIcon::On ? "#087F83" : "#334155"), 1.6,
-                                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            QPainterPath corners;
-            for (const auto corner :
-                 {QPointF(3, 3), QPointF(21, 3), QPointF(3, 21), QPointF(21, 21)}) {
-                corners.moveTo(corner + QPointF(corner.x() < 12 ? 4 : -4, 0));
-                corners.lineTo(corner);
-                corners.lineTo(corner + QPointF(0, corner.y() < 12 ? 4 : -4));
-            }
-            painter.drawPath(corners);
-            painter.drawRoundedRect(QRectF(8, 6, 8, 12), .7, .7);
-            painter.end();
-            icon.addPixmap(pixmap, QIcon::Normal, state);
-        }
-    return icon;
-}
 QString scaleLabel(double scale) {
     return scale >= 1 ? QStringLiteral("%1:1").arg(scale, 0, 'g', 4)
                       : QStringLiteral("1:%1").arg(1 / scale, 0, 'g', 4);
@@ -177,7 +150,7 @@ class DrawingPreviewArea final : public QScrollArea {
         bar->addWidget(zoomLabel_);
         fit_ = action(QStringLiteral("Показать лист целиком"), "fitDrawingPage",
                       QKeySequence(Qt::CTRL | Qt::Key_0));
-        fit_->setIcon(fitPageIcon());
+        fit_->setIcon(previewIcons::fit());
         fit_->setCheckable(true);
         auto *fitButton = new QToolButton(footer_);
         fitButton->setObjectName(QStringLiteral("fitDrawingPageButton"));
@@ -1492,61 +1465,46 @@ DrawingDialog::DrawingDialog(ImportController &c,
     for (auto *check : {impl_->reverse, impl_->breaks})
         connect(check, &QCheckBox::toggled, this, [this] { impl_->invalidate(); });
     connect(impl_->prepare, &QPushButton::clicked, this, [this] { impl_->build(); });
-    connect(&c, &ImportController::stateChanged, this, [this, materials, refreshMaterials] {
-        if (!impl_->controller.session().document() ||
-            impl_->revision != impl_->controller.session().revision()) {
-            reject();
-            return;
-        }
-        if (materials->itemText(0) != materialName(impl_->controller.session().unfoldSettings()))
-            refreshMaterials();
-        impl_->refresh();
-    });
-    connect(impl_->exportPdf, &QPushButton::clicked, this, [this] {
+    const auto saveDialogName = QStringLiteral("drawingPdfFileDialog");
+    connect(&c, &ImportController::stateChanged, this,
+            [this, materials, refreshMaterials, saveDialogName] {
+                if (!impl_->controller.drawing())
+                    closeExportFileDialogs(this, saveDialogName);
+                if (!impl_->controller.session().document() ||
+                    impl_->revision != impl_->controller.session().revision()) {
+                    reject();
+                    return;
+                }
+                if (materials->itemText(0) !=
+                    materialName(impl_->controller.session().unfoldSettings()))
+                    refreshMaterials();
+                impl_->refresh();
+            });
+    connect(impl_->exportPdf, &QPushButton::clicked, this, [this, saveDialogName] {
         if (!impl_->exportPdf->isEnabled())
             return;
         const auto drawing = impl_->controller.drawing();
-        const auto title = impl_->title();
         const auto utf8 = impl_->controller.session().document()->metadata().sourcePath.u8string();
         const auto suggested = suggestedDrawingPdfPath(QString::fromUtf8(
             reinterpret_cast<const char *>(utf8.data()), static_cast<qsizetype>(utf8.size())));
-        auto *file =
-            new QFileDialog(this, QStringLiteral("Сохранить чертёж"),
-                            QFileInfo(suggested).absolutePath(), QStringLiteral("PDF (*.pdf)"));
-        file->setObjectName(QStringLiteral("drawingPdfFileDialog"));
-        file->setAttribute(Qt::WA_DeleteOnClose);
-        file->setAcceptMode(QFileDialog::AcceptSave);
-        file->setFileMode(QFileDialog::AnyFile);
-        file->setDefaultSuffix(QStringLiteral("pdf"));
-        file->selectFile(QFileInfo(suggested).fileName());
-        file->setWindowModality(Qt::WindowModal);
-        connect(
-            file, &QFileDialog::fileSelected, this, [this, drawing, title](const QString &path) {
-                if (path.isEmpty() || !impl_->exportPdf->isEnabled() ||
-                    drawing != impl_->controller.drawing())
+        chooseExportFile(
+            this, saveDialogName, QStringLiteral("Сохранить чертёж"), suggested,
+            QStringLiteral("PDF (*.pdf)"), QStringLiteral("pdf"),
+            [this, drawing](const QString &path) {
+                if (!isVisible() || !impl_->exportPdf->isEnabled() ||
+                    drawing != impl_->controller.drawing()) {
+                    impl_->status->setText(
+                        QStringLiteral("Чертёж изменился. Повторите сохранение."));
                     return;
-                const auto destination = path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
-                                             ? path
-                                             : path + QStringLiteral(".pdf");
-                // A user-supplied different suffix is normalized after QFileDialog's own check.
-                if (destination != path && QFileInfo::exists(destination) &&
-                    QMessageBox::question(this, QStringLiteral("Заменить файл?"),
-                                          QStringLiteral("Файл «%1» уже существует. Заменить его?")
-                                              .arg(QFileInfo(destination).fileName()),
-                                          QMessageBox::Yes | QMessageBox::No,
-                                          QMessageBox::No) != QMessageBox::Yes)
-                    return;
-                if (!impl_->exportPdf->isEnabled() || drawing != impl_->controller.drawing())
-                    return;
-                const auto error = DrawingSheet::writePdf(destination, *drawing, title);
+                }
+                const auto error = DrawingSheet::writePdf(path, *drawing, impl_->title());
                 if (!error.isEmpty())
-                    QMessageBox::warning(this, QStringLiteral("PDF не сохранён"), error);
+                    impl_->status->setText(error);
                 else {
-                    rememberDrawingPdfDirectory(destination);
-                    impl_->status->setText(QStringLiteral("PDF сохранён: %1").arg(destination));
+                    rememberDrawingPdfDirectory(path);
+                    impl_->status->setText(QStringLiteral("PDF сохранён: %1").arg(path));
                 }
             });
-        file->open();
     });
     QTimer::singleShot(0, this, [this] { impl_->build(); });
 }
@@ -1556,7 +1514,9 @@ void DrawingDialog::showAtParent() {
     const bool maximized = isMaximized();
     if (isMinimized() || (maximized && targetScreen && screen() != targetScreen))
         showNormal();
-    if (targetScreen && !isMaximized()) {
+    if (targetScreen && !isMaximized() &&
+        (!isVisible() || screen() != targetScreen ||
+         !targetScreen->availableGeometry().contains(frameGeometry()))) {
         ensurePolished();
         if (layout())
             layout()->activate();

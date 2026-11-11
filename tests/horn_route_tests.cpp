@@ -57,6 +57,32 @@ int main() {
             q.assemblySearch->bendIndices.push_back(i);
         }
         const auto original = q.operations;
+        {
+            auto straight = q;
+            for (auto &op : straight.operations) {
+                op.assignment->punch.segments->front().lengthMm = 180;
+                op.tools = core::toolParameters(*op.assignment);
+            }
+            const auto fit = cad::SingleBendPreviewBuilder{}.buildRoute(doc, straight, {});
+            if (const auto *error = std::get_if<application::BendRouteError>(&fit))
+                throw std::runtime_error("Straight box route: " + error->detail);
+            const auto &route = *std::get<application::BendRoutePtr>(fit);
+            check(application::applyRouteAssemblyResult(straight, route),
+                  "Straight box route was not accepted");
+            const auto &chosen = *straight.operations.front().assignment;
+            std::cout << "straight-stock checks=" << route.evaluatedOperations
+                      << " horns=" << core::usesHornSections(chosen.punch, chosen.punchAssembly)
+                      << " plans=" << route.statistics.plannedAssemblies << std::endl;
+            check(route.steps.size() == 4 && route.evaluatedOperations == 4 &&
+                      route.statistics.plannedAssemblies == 0 &&
+                      std::all_of(straight.operations.begin(), straight.operations.end(),
+                                  [&](const auto &op) {
+                                      return op.assignment == chosen &&
+                                             !core::usesHornSections(chosen.punch,
+                                                                     chosen.punchAssembly);
+                                  }),
+                  "A usable straight assembly was replaced or unnecessary families were tried");
+        }
         cad::SingleBendPreviewBuilder builder;
         const auto result = builder.buildRoute(doc, q, {});
         if (const auto *error = std::get_if<application::BendRouteError>(&result))
@@ -72,19 +98,21 @@ int main() {
         check(route->steps.size() == 4 && q.operations == original,
               "Partial route or mutated input");
         std::optional<core::ToolAssignment> common;
-        bool horns = false;
         for (const auto &op : resolved.operations) {
             if (!common)
                 common = op.assignment;
             check(op.assignment == common, "Route changed the common assembly");
-            horns |= core::usesHornSections(op.assignment->punch, op.assignment->punchAssembly);
             std::cout << "pieces:";
             for (auto i : op.assignment->punchAssembly->pieces)
                 std::cout << ' ' << i;
             std::cout << '\n';
         }
-        check(horns && route->statistics.usedCommonAssembly,
-              "Fixture did not require a common horn assembly");
+        check(common && common->punch.segments && common->punchAssembly,
+              "Missing shared punch assembly");
+        const auto ends = core::punchAssemblyEnds(*common->punch.segments, *common->punchAssembly);
+        check(ends && ends->left && ends->right && route->statistics.usedCommonAssembly &&
+                  route->evaluatedOperations >= 4,
+              "Paired horns did not solve the box after the overlong straight assembly");
         for (const auto &s : route->steps)
             check(s.preview && !s.preview->collision() && s.preview->frameCount() == 61 &&
                       s.preview->punchRetraction(),
@@ -98,10 +126,11 @@ int main() {
                       << " warm transitions=" << (*cached)->statistics.builtTransitions
                       << " reused transitions=" << (*cached)->statistics.reusedTransitions
                       << " warm rejections=" << (*cached)->statistics.reusedRejections << std::endl;
-            check(cached && (*cached)->statistics.reusedTransitions >= 4 &&
-                      (*cached)->statistics.reusedRejections > 0 &&
+            check(cached &&
+                      (*cached)->statistics.reusedTransitions >=
+                          (*cached)->statistics.reusedRejections + 4 &&
                       (*cached)->statistics.builtTransitions < route->statistics.builtTransitions,
-                  "Repeated horn search did not reuse checked transitions/rejections");
+                  "Repeated horn search did not reuse the four checked transitions");
             auto reference = q;
             reference.reuseCalculations = false;
             const auto independent = cad::SingleBendPreviewBuilder{}.buildRoute(doc, reference, {});
@@ -164,7 +193,7 @@ int main() {
             std::stop_source stopping;
             auto cancel = q;
             cancel.onProgress = [&](application::BendRouteProgress p) {
-                if (p.checkedOperations >= 10)
+                if (p.checkedOperations >= 1)
                     stopping.request_stop();
             };
             const auto stopped = builder.buildRoute(doc, cancel, stopping.get_token());

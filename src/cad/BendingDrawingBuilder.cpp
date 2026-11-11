@@ -566,6 +566,7 @@ std::optional<ProfileGroup> planProfileGroup(const TopoDS_Shape &shape,
     if (bends.size() < 2 || bends.size() > 24)
         return {};
     std::optional<ProfileGroup> best;
+    std::optional<std::array<double, 4>> frontBounds;
     for (std::size_t i = 0; i < bends.size(); ++i) {
         const auto axisOf = [](const RecognizedBend &b) {
             return gp_Dir(gp_Vec(gp_Pnt(b.axisStart.x, b.axisStart.y, b.axisStart.z),
@@ -632,7 +633,9 @@ std::optional<ProfileGroup> planProfileGroup(const TopoDS_Shape &shape,
         if (std::min(w, h) <= 0 || std::max(w, h) > 8 * std::min(w, h) || !scale ||
             thickness * *scale < .75)
             continue;
-        const auto front = bounds(shape, frames[0]);
+        if (!frontBounds)
+            frontBounds = bounds(shape, frames[0]);
+        const auto &front = *frontBounds;
         const auto p = project(station, frames[0]);
         const DrawingPoint line{-looking.y, looking.x};
         double low = -1e100, high = 1e100;
@@ -900,7 +903,7 @@ std::optional<VariableSections> variableSections(const TopoDS_Shape &shape,
 void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
                         const DrawingRequest &request, gp_Dir frontUp, std::size_t &budget,
                         std::stop_token stop) {
-    if (!request.unfoldSettings)
+    if (!request.unfoldSettings || isPlanarCutCandidate(document->metadata().bendAnalysis))
         return;
     if (request.preparedFlatError) {
         drawing.flatPatternError = request.preparedFlatError;
@@ -974,17 +977,31 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
         v.dimensions.push_back({{0, 0}, {hi.x, 0}, hi.x, ""});
         v.dimensions.push_back({{0, 0}, {0, hi.y}, hi.y, ""});
         std::vector<double> ys, xs{0, hi.x};
-        for (const auto &b : info.bends) {
-            const auto line = b.centreLine();
+        const auto dimensionLines = flatDimensionLines(unfolded, 1e-5);
+        // On a dense interrupted profile, axial spacing is already
+        // dimensioned on the folded projection. Keep actual flat bend
+        // offsets and the callouts, rather than projecting every diagonal
+        // endpoint onto both stock axes.
+        const bool compactSegmented =
+            !unfolded.repeatedBendGroups.empty() && dimensionLines.size() >= 7 &&
+            drawing.classicalViews &&
+            std::any_of(drawing.classicalViews->front().axialDimensions.begin(),
+                        drawing.classicalViews->front().axialDimensions.end(),
+                        [](const auto &d) { return d.pitchIntervals >= 3; });
+        for (const auto &line : dimensionLines) {
             if (std::abs(line[0].y - line[1].y) < 1.e-5) {
                 ys.push_back(line[0].y);
-                xs.push_back(line[0].x);
-                xs.push_back(line[1].x);
+                if (!compactSegmented) {
+                    xs.push_back(line[0].x);
+                    xs.push_back(line[1].x);
+                }
             } else if (std::abs(line[0].x - line[1].x) < 1.e-5) {
                 xs.push_back(line[0].x);
-                ys.push_back(line[0].y);
-                ys.push_back(line[1].y);
-            } else {
+                if (!compactSegmented) {
+                    ys.push_back(line[0].y);
+                    ys.push_back(line[1].y);
+                }
+            } else if (!compactSegmented) {
                 xs.push_back(line[0].x);
                 xs.push_back(line[1].x);
                 ys.push_back(line[0].y);

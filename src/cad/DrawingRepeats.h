@@ -14,4 +14,6 @@ repeatedDrawingSection(const TopoDS_Shape &flat, const application::DrawingView 
                        const std::vector<application::RecognizedBend> &bends, double tolerance,
                        std::stop_token stop);
 void compactRepeatedFlat(application::DrawingFlatPattern &flat, double tolerance);
+std::vector<std::array<application::PointMm, 2>>
+flatDimensionLines(application::DrawingFlatPattern &flat, double tolerance);
 } // namespace bending::cad

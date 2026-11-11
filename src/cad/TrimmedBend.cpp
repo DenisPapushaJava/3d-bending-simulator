@@ -7,6 +7,8 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_ListIteratorOfListOfStatus.hxx>
+#include <BRepCheck_Result.hxx>
 #include <BRepFill.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
@@ -21,6 +23,8 @@
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_Plane.hxx>
+#include <ShapeAnalysis_ShapeTolerance.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <TColStd_HArray1OfReal.hxx>
 #include <TColgp_HArray1OfPnt2d.hxx>
 #include <TopExp.hxx>
@@ -97,13 +101,52 @@ std::array<TopoDS_Face, 2> cylinders(const TopoDS_Shape &solid) {
     });
     return {faces[0], faces[1]};
 }
-} // namespace
-TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pnt(gp_Pnt)> &map,
-                            double scale, double tolerance, TopoDS_Face *inner,
-                            std::stop_token stop, bool *nonRadialEnd) {
+TopoDS_Shape repairIdentitySolid(const TopoDS_Solid &solid, const BRepCheck_Analyzer &check,
+                                 double tolerance, std::stop_token stop) {
+    bool orientationError = false;
+    for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next()) {
+        for (BRepCheck_ListIteratorOfListOfStatus it(check.Result(ex.Current())->Status());
+             it.More(); it.Next()) {
+            if (it.Value() == BRepCheck_BadOrientationOfSubshape)
+                orientationError = true;
+            else if (it.Value() != BRepCheck_NoError)
+                return {};
+        }
+    }
+    if (!orientationError || stop.stop_requested())
+        return {};
+    constexpr std::array kinds{TopAbs_FACE, TopAbs_WIRE, TopAbs_EDGE, TopAbs_VERTEX};
+    const auto count = [](const TopoDS_Shape &shape, TopAbs_ShapeEnum kind) {
+        TopTools_IndexedMapOfShape items;
+        TopExp::MapShapes(shape, kind, items);
+        return items.Extent();
+    };
+    std::array<int, kinds.size()> before;
+    std::transform(kinds.begin(), kinds.end(), before.begin(),
+                   [&](auto kind) { return count(solid, kind); });
+    ShapeAnalysis_ShapeTolerance tolerances;
+    const double limit = std::max(tolerance, tolerances.Tolerance(solid, 1));
+    ShapeFix_Shape repair(solid);
+    repair.SetPrecision(tolerance);
+    repair.SetMaxTolerance(tolerance);
+    repair.Perform();
+    const auto fixed = repair.Shape();
+    if (stop.stop_requested() || fixed.IsNull() || fixed.ShapeType() != TopAbs_SOLID ||
+        tolerances.Tolerance(fixed, 1) > limit || !BRepCheck_Analyzer(fixed).IsValid())
+        return {};
+    for (std::size_t i = 0; i < kinds.size(); ++i) {
+        if (before[i] != count(fixed, kinds[i]))
+            return {};
+    }
+    return fixed;
+}
+
+TopoDS_Shape mapBend(const TopoDS_Shape &solid, const std::function<gp_Pnt(gp_Pnt)> &map,
+                     double scale, double tolerance, TopoDS_Face *inner, std::stop_token stop,
+                     bool *nonRadialEnd, const TopoDS_Face *skinOnly, bool repairCheck = false) {
     if (nonRadialEnd)
         *nonRadialEnd = false;
-    const auto source = cylinders(solid);
+    const auto source = skinOnly ? std::array{*skinOnly, TopoDS_Face{}} : cylinders(solid);
     TopTools_IndexedMapOfShape edges;
     TopExp::MapShapes(solid, TopAbs_EDGE, edges);
     std::vector<TopoDS_Edge> mapped(static_cast<std::size_t>(edges.Extent()) + 1);
@@ -209,6 +252,10 @@ TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pn
         require(joined && wire.IsDone(), "Cannot close a mapped trimmed bend boundary");
         auto result = BRepBuilderAPI_MakeFace(target, wire.Wire(), true).Face();
         result.Orientation(face.Orientation());
+        if (skinOnly) {
+            require(BRepCheck_Analyzer(result).IsValid(), "Invalid flattened bend skin");
+            return result;
+        }
         if (inner && face.IsSame(source[0]))
             *inner = result;
         sewing.Add(result);
@@ -268,8 +315,39 @@ TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pn
     require(shell.ShapeType() == TopAbs_SHELL && shell.Closed(),
             "Mapped trimmed bend is not one closed shell");
     auto result = BRepBuilderAPI_MakeSolid(TopoDS::Shell(shell)).Solid();
-    require(BRepLib::OrientClosedSolid(result) && BRepCheck_Analyzer(result).IsValid(),
-            "Invalid mapped trimmed bend solid");
-    return result;
+    require(BRepLib::OrientClosedSolid(result), "Invalid mapped trimmed bend solid");
+    const BRepCheck_Analyzer check(result);
+    if (check.IsValid())
+        return result;
+    if (repairCheck) {
+        const auto fixed = repairIdentitySolid(result, check, tolerance, stop);
+        if (!fixed.IsNull())
+            return fixed;
+    }
+    throw TrimmedBendError("Invalid mapped trimmed bend solid");
+}
+} // namespace
+TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &solid, const std::function<gp_Pnt(gp_Pnt)> &map,
+                            double scale, double tolerance, TopoDS_Face *inner,
+                            std::stop_token stop, bool *nonRadialEnd) {
+    return mapBend(solid, map, scale, tolerance, inner, stop, nonRadialEnd, nullptr);
+}
+TopoDS_Shape rebuildTrimmedBendForUnfoldCheck(const TopoDS_Shape &solid, double tolerance,
+                                              std::stop_token stop, bool &nonRadialEnd) {
+    return mapBend(
+        solid, [](gp_Pnt p) { return p; }, 1, tolerance, nullptr, stop, &nonRadialEnd, nullptr,
+        true);
+}
+TopoDS_Face flattenTrimmedBendSkin(const TopoDS_Shape &solid,
+                                   const std::function<gp_Pnt(gp_Pnt)> &map, double tolerance,
+                                   std::stop_token stop) {
+    return flattenBendCylinderFace(cylinders(solid).front(), map, tolerance, stop);
+}
+TopoDS_Face flattenBendCylinderFace(const TopoDS_Face &face,
+                                    const std::function<gp_Pnt(gp_Pnt)> &map, double tolerance,
+                                    std::stop_token stop) {
+    require(BRepAdaptor_Surface(face).GetType() == GeomAbs_Cylinder,
+            "Expected a cylindrical bend section");
+    return TopoDS::Face(mapBend(face, map, 0, tolerance, nullptr, stop, nullptr, &face));
 }
 } // namespace bending::cad

@@ -7,6 +7,8 @@
 #include "RouteDraftCache.h"
 #include "RouteDraftGeometry.h"
 #include "RouteGeometry.h"
+#include "RouteSheetFeatures.h"
+#include "ShapeVolumeDifference.h"
 #include "SheetOrientation.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
@@ -67,6 +69,15 @@ void check(bool ok, const char *detail) {
 void cancelled(std::stop_token stop) {
     if (stop.stop_requested())
         throw BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
+}
+FlatPatternPtr independentRouteFlat(FlatPatternPtr flat) {
+    const auto &layout = OcctFlatPatternAccess::layout(*flat);
+    check(!layout.usesJoinedWallFaces, "Bend route requires the original wall topology");
+    check(!layout.hasPresentationOnlyBends, "Bend route requires complete unfolded solids");
+    // Both route modes model one independent bend per wall-to-wall link.
+    check(layout.walls.size() == layout.bends.size() + 1,
+          "Bend route requires independent links between walls");
+    return flat;
 }
 template <class Op>
 TopoDS_Shape boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance,
@@ -284,8 +295,7 @@ class RouteSearch {
     bool observedPunchCollision = false;
     std::string windowHint; // Qualified explanation only after a real collision-driven attempt.
     BendRouteStatistics statistics;
-    std::vector<Mask> neighbours;
-    std::vector<std::size_t> profileRank;
+    RouteSheetFeatures sheetFeatures;
     std::vector<gp_Dir> referenceAxes;
     std::vector<Mask> jointNeighbours;
     std::vector<Bnd_Box> wallBounds;
@@ -296,8 +306,10 @@ class RouteSearch {
     };
     std::vector<std::vector<AccessObstacle>> accessObstacles;
     bool commonAssemblyPhase = false;
+    bool pairedEndPhase = false, originalAssemblyTried = false;
     struct CommonAssemblyBudget {};
     std::size_t phaseCheckLimit = 0;
+    unsigned pairedContinuationTimeMs = 0;
     std::map<std::pair<Mask, std::size_t>, bool> frontPreferences;
     bool preferredSide(Mask mask, const RouteOperation &op, Mask removed) {
         if (!request.withTools || !request.allowWorkpieceRotation || !op.tools)
@@ -336,7 +348,7 @@ class RouteSearch {
             const auto bounds = wallBounds[i].Transformed(machine * positions.walls[i]);
             box.Add(bounds);
             // Whole walls strictly on one side give a cheap material-amount
-            // preference. A crossing/unknown wall falls back to the old overhang
+            // preference. A crossing/unknown wall falls back to the overhang
             // hint; no Boolean or mesh is built for this heuristic.
             if (bounds.IsVoid() || bounds.IsOpen() || !std::isfinite(wallVolumes[i]) ||
                 wallVolumes[i] <= 0)
@@ -352,7 +364,7 @@ class RouteSearch {
         if (materialKnown &&
             std::abs(frontMaterial - backMaterial) > .01 * (frontMaterial + backMaterial))
             preferred = backMaterial > frontMaterial;
-        else if (!box.IsVoid()) {
+        else if (!box.IsVoid() && !box.IsOpen()) {
             const double front = -box.CornerMin().X(), back = box.CornerMax().X();
             if (std::abs(front - back) > std::max(.5, b.thicknessMm))
                 preferred = back > front;
@@ -372,15 +384,18 @@ class RouteSearch {
 
     void checkBudget() const {
         cancelled(stop);
+        const unsigned timeLimit = pairedEndPhase && !reversed.empty()
+                                       ? std::max(request.maximumTimeMs, pairedContinuationTimeMs)
+                                       : request.maximumTimeMs;
         if (attempts >= request.maximumChecks ||
-            std::chrono::steady_clock::now() - started >
-                std::chrono::milliseconds(request.maximumTimeMs))
+            std::chrono::steady_clock::now() - started > std::chrono::milliseconds(timeLimit))
             throw BendRouteError{BendRouteErrorCode::SearchLimit,
                                  lastFailure.empty() ? "Route search budget reached" : lastFailure,
                                  failedBend, attempts, lastOperationError};
-        if (commonAssemblyPhase && (attempts >= phaseCheckLimit ||
-                                    std::chrono::steady_clock::now() - started >
-                                        std::chrono::milliseconds(request.maximumTimeMs / 2)))
+        if (commonAssemblyPhase &&
+            (attempts >= phaseCheckLimit ||
+             (!pairedEndPhase && std::chrono::steady_clock::now() - started >
+                                     std::chrono::milliseconds(request.maximumTimeMs / 2))))
             throw CommonAssemblyBudget{};
     }
 
@@ -558,7 +573,7 @@ class RouteSearch {
         if (quota < request.operations.size())
             return false;
         phaseCheckLimit = attempts + quota;
-        commonAssemblyPhase = true;
+        originalAssemblyTried = commonAssemblyPhase = true;
         ++statistics.commonAssemblyPasses;
         const auto before = attempts;
         try {
@@ -581,7 +596,56 @@ class RouteSearch {
         resetRestrictedPath();
         return false;
     }
-    bool tryCommonHornAssemblies(Mask full) {
+    bool hasObstructedEnds(Mask mask, const RouteOperation &op) const {
+        const auto window = punchWindow(mask, op.bendIndex);
+        return window && std::isfinite((*window)[0]) && std::isfinite((*window)[1]);
+    }
+    bool hasPairedEnds(const core::ToolAssignment &assignment,
+                       const std::optional<core::ToolAssembly> &assembly) const {
+        if (!assignment.punch.segments || !assembly)
+            return false;
+        const auto ends = core::punchAssemblyEnds(*assignment.punch.segments, *assembly);
+        return ends && ends->left && ends->right;
+    }
+    bool searchCommonAssembly(Mask full, const AssemblyPair &candidate, std::size_t quota,
+                              bool pairedEnds = false) {
+        resetRestrictedPath();
+        commonAssemblyOverride = candidate;
+        commonInputs.resize(inputs.size());
+        for (auto operation : request.operations) {
+            operation.assignment->punchAssembly = candidate.first;
+            operation.assignment->dieAssembly = candidate.second;
+            operation.tools = core::toolParameters(*operation.assignment);
+            commonInputs[operation.bendIndex] = assemblyInput(operation);
+        }
+        commonAssemblyPhase = true;
+        pairedEndPhase = pairedEnds;
+        phaseCheckLimit = attempts + quota;
+        ++statistics.commonAssemblyPasses;
+        const auto before = attempts;
+        const auto cleanup = [&] {
+            statistics.commonAssemblyChecks += attempts - before;
+            pairedEndPhase = commonAssemblyPhase = false;
+            commonAssemblyOverride.reset();
+            commonInputs.clear();
+        };
+        try {
+            if (search(full)) {
+                statistics.usedCommonAssembly = true;
+                cleanup();
+                return true;
+            }
+        } catch (const CommonAssemblyBudget &) {
+            // Exact transitions remain reusable by the ordinary search.
+        } catch (...) {
+            cleanup();
+            throw;
+        }
+        cleanup();
+        resetRestrictedPath();
+        return false;
+    }
+    bool tryCommonHornAssemblies(Mask full, bool pairedFirst = false) {
         if (!request.preferCommonAssembly || !request.automatic || !request.withTools ||
             !request.assemblySearch || request.assemblySearch->compactOnly ||
             request.operations.size() < 2)
@@ -594,6 +658,14 @@ class RouteSearch {
             std::any_of(request.operations.begin(), request.operations.end(), [&](const auto &op) {
                 return !mayPlan(op.bendIndex) || op.assignment != first.assignment;
             }))
+            return false;
+        const auto &flangeDepth = sheetFeatures.flangeDepth;
+        if (pairedFirst &&
+            (flangeDepth.empty() || std::none_of(request.operations.begin(),
+                                                 request.operations.end(), [&](const auto &op) {
+                                                     return flangeDepth[op.bendIndex] > 0 &&
+                                                            hasObstructedEnds(full, op);
+                                                 })))
             return false;
         // This extra preference pass is useful after a real punch obstruction.
         // Other failures still reach the complete bounded per-operation family below.
@@ -612,11 +684,19 @@ class RouteSearch {
         const bool needsLength = core::punchLengthMm(*first.tools) + tolerance < required;
         const bool retainedHorn =
             core::usesHornSections(first.assignment->punch, first.assignment->punchAssembly);
-        if (!retainedHorn && !needsLength && statistics.commonAssemblyPasses &&
+        if (pairedFirst && hasPairedEnds(*first.assignment, first.assignment->punchAssembly) &&
+            !needsLength && first.tools->lengthMm + tolerance >= required &&
+            request.maximumChecks / 2 >= request.operations.size()) {
+            originalAssemblyTried = true;
+            return searchCommonAssembly(
+                full, {first.assignment->punchAssembly, first.assignment->dieAssembly},
+                std::min(request.maximumChecks / 2, request.operations.size() * 2), true);
+        }
+        if (!pairedFirst && !retainedHorn && !needsLength && originalAssemblyTried &&
             !observedPunchCollision)
             return false;
-        if (!retainedHorn && !needsLength && !observedPunchCollision &&
-            !statistics.commonAssemblyPasses &&
+        if (!pairedFirst && !retainedHorn && !needsLength && !observedPunchCollision &&
+            !originalAssemblyTried &&
             (accessObstacles.empty() ||
              std::none_of(request.operations.begin(), request.operations.end(),
                           [&](const auto &op) { return toolAccessRisk(full, op) > 0; })))
@@ -626,12 +706,13 @@ class RouteSearch {
             return (a.second != first.assignment->dieAssembly) <
                    (b.second != first.assignment->dieAssembly);
         });
-        const bool originalTried = statistics.commonAssemblyPasses != 0;
         std::vector<AssemblyPair> commonCandidates;
         for (const auto &candidate : candidates) {
             if (!core::usesHornSections(first.assignment->punch, candidate.first) ||
-                (originalTried && candidate == AssemblyPair{first.assignment->punchAssembly,
-                                                            first.assignment->dieAssembly}) ||
+                (pairedFirst && !hasPairedEnds(*first.assignment, candidate.first)) ||
+                (originalAssemblyTried &&
+                 candidate == AssemblyPair{first.assignment->punchAssembly,
+                                           first.assignment->dieAssembly}) ||
                 std::any_of(commonCandidates.begin(), commonCandidates.end(),
                             [&](const auto &p) { return p.first == candidate.first; }))
                 continue;
@@ -659,48 +740,19 @@ class RouteSearch {
         const auto commonLimit = request.maximumChecks / 2;
         for (std::size_t i = 0; i < commonCandidates.size(); ++i) {
             const auto &candidate = commonCandidates[i];
-            if (attempts >= commonLimit || std::chrono::steady_clock::now() - started >
-                                               std::chrono::milliseconds(request.maximumTimeMs / 2))
+            if (attempts >= commonLimit ||
+                (!pairedFirst && std::chrono::steady_clock::now() - started >
+                                     std::chrono::milliseconds(request.maximumTimeMs / 2)))
                 break;
             const auto quota = std::min(request.operations.size() * 4,
                                         (commonLimit - attempts) / (commonCandidates.size() - i));
             if (quota < request.operations.size())
                 break;
-            resetRestrictedPath();
-            commonAssemblyOverride = candidate;
-            commonInputs.resize(inputs.size());
-            for (auto operation : request.operations) {
-                operation.assignment->punchAssembly = candidate.first;
-                operation.assignment->dieAssembly = candidate.second;
-                operation.tools = core::toolParameters(*operation.assignment);
-                commonInputs[operation.bendIndex] = assemblyInput(operation);
-            }
-            commonAssemblyPhase = true;
-            phaseCheckLimit = attempts + quota;
-            ++statistics.commonAssemblyPasses;
-            const auto before = attempts;
-            try {
-                if (search(full)) {
-                    statistics.commonAssemblyChecks += attempts - before;
-                    statistics.usedCommonAssembly = true;
-                    commonAssemblyPhase = false;
-                    commonAssemblyOverride.reset();
-                    commonInputs.clear();
-                    return true;
-                }
-            } catch (const CommonAssemblyBudget &) {
-                // This family is bounded; exact transitions remain reusable below.
-            } catch (...) {
-                statistics.commonAssemblyChecks += attempts - before;
-                commonAssemblyPhase = false;
-                commonAssemblyOverride.reset();
-                commonInputs.clear();
-                throw;
-            }
-            statistics.commonAssemblyChecks += attempts - before;
-            commonAssemblyPhase = false;
-            commonAssemblyOverride.reset();
-            commonInputs.clear();
+            if (pairedFirst)
+                return searchCommonAssembly(full, candidate,
+                                            std::min(quota, request.operations.size() * 2), true);
+            if (searchCommonAssembly(full, candidate, quota))
+                return true;
         }
         resetRestrictedPath();
         return false;
@@ -1085,6 +1137,11 @@ class RouteSearch {
         if (!prepared) {
             const auto start = std::chrono::steady_clock::now();
             const auto built = cache->workpieces.built, reused = cache->workpieces.reused;
+            TopoDS_Shape sector;
+            const auto &live = OcctDocumentAccess::simulationBends(*after->document)
+                                   .bends[*after->indices[op.bendIndex]];
+            if (additional.empty() && live.trimmedEnds)
+                sector = moved(link->solid, placements.walls[link->parent]);
             auto result = prepareBendOperation(
                 after->document, *after->indices[op.bendIndex], op.target, fixedSecond, stop,
                 request.withTools ? op.tools : std::nullopt, request.withTools,
@@ -1094,7 +1151,7 @@ class RouteSearch {
                         request.reuseWorkpiecePreparation
                     ? &cache->workpieces
                     : nullptr,
-                cache->flat, request.manualExtraction);
+                cache->flat, request.manualExtraction, sector);
             statistics.preparedWorkpieces += cache->workpieces.built - built;
             statistics.reusedWorkpieces += cache->workpieces.reused - reused;
             ++statistics.preparedOperations;
@@ -1155,9 +1212,10 @@ class RouteSearch {
             materialBuilder.Add(material, region);
         const auto expected = moved(OcctDocumentAccess::simulationShape(*before->document),
                                     first.materialTransforms[*rootSide]);
-        check(volume(boolean<BRepAlgoAPI_Cut>(expected, material, tolerance, stop)) <= budget &&
-                  volume(boolean<BRepAlgoAPI_Cut>(material, expected, tolerance, stop)) <= budget,
-              "Operation start does not match the complete preceding state");
+        const bool matchesPredecessor =
+            sameVolumeWithin(expected, material, tolerance, budget, stop);
+        cancelled(stop);
+        check(matchesPredecessor, "Operation start does not match the complete preceding state");
         remember(wanted, preview);
         return preview;
     }
@@ -1177,6 +1235,14 @@ class RouteSearch {
                 statistics.toolAccessRankedStates +=
                     std::any_of(access.begin(), access.end(), [](double risk) { return risk > 0; });
             }
+            const auto &flangeDepth = sheetFeatures.flangeDepth;
+            const auto &profileRank = sheetFeatures.profileRank;
+            // Undo the longer bends first in the common pass. In forward
+            // order this leaves room for the punch during the shorter bends.
+            const bool longerFirst =
+                pairedEndPhase || (commonAssemblyPhase && !flangeDepth.empty() &&
+                                   std::none_of(flangeDepth.begin(), flangeDepth.end(),
+                                                [](int depth) { return depth > 0; }));
             const auto score = [&](std::size_t order) {
                 const auto &op = request.operations[order];
                 // Soft accessibility estimate: fewer still-formed bends on the adjacent
@@ -1201,8 +1267,17 @@ class RouteSearch {
                 // neighbours. This is only a ranking preference, never precedence.
                 const bool separatesJoint =
                     request.allowJointBends && (jointNeighbours[op.bendIndex] & mask) != 0;
-                return std::tuple{prior, access[op.bendIndex], separatesJoint,
-                                  std::popcount(neighbours[op.bendIndex] & mask), continuation};
+                // The search runs backwards: try undoing inner walls before their
+                // return flanges, so the forward route starts at free edges.
+                const int depth = flangeDepth.empty() ? 0 : flangeDepth[op.bendIndex];
+                const auto closingLength =
+                    longerFirst ? -source->metadata().bendAnalysis.bends[op.bendIndex].lengthMm
+                                : 0.;
+                return std::tuple{
+                    prior,          -depth,
+                    closingLength,  access[op.bendIndex],
+                    separatesJoint, std::popcount(sheetFeatures.neighbours[op.bendIndex] & mask),
+                    continuation};
             };
             std::stable_sort(result.begin(), result.end(),
                              [&](auto a, auto b) { return score(a) < score(b); });
@@ -1471,6 +1546,10 @@ class RouteSearch {
                 // Independent installations share one canonical predecessor. A
                 // known successful pose needs neither SDK ranking nor other poses.
                 return {offset};
+        // The first paired pass tests both sides at the center before spending
+        // its budget on alternate axial placements in the fallback search.
+        if (pairedEndPhase)
+            return {0};
         double preferred = -half;
         try {
             const auto current = state(mask);
@@ -1783,6 +1862,8 @@ struct SingleBendPreviewBuilder::SingleCache {
     DocumentPtr source;
     std::mutex mutex;
     std::list<std::pair<Key, BendPreviewResult>> entries;
+    std::mutex workpieceMutex;
+    BendWorkpieceReuse workpieces;
 };
 BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
     DocumentPtr document, std::size_t index, core::BendTarget target, bool reversed,
@@ -1852,11 +1933,17 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
     const auto reference = native && index < native->metadata().bendAnalysis.bends.size()
                                ? std::optional{normalBendAxis(*native, index)}
                                : std::nullopt;
-    auto result = reused
-                      ? BendPreviewResult(reused)
-                      : buildBendOperation(document, index, target, reversed, stop, tools, motion,
-                                           std::move(assignment), !limit || *limit > 0, limit,
-                                           reference, true, nullptr, {}, workpieceOffsetMm);
+    BendPreviewResult result = reused;
+    if (!reused) {
+        // Tool changes can share the prepared sheet. The new installation still
+        // runs all its own collision, support and return checks.
+        std::lock_guard guard(cache->workpieceMutex);
+        if (stop.stop_requested())
+            return BendPreviewError{BendPreviewErrorCode::Cancelled, "Cancelled"};
+        result = buildBendOperation(document, index, target, reversed, stop, tools, motion,
+                                    std::move(assignment), !limit || *limit > 0, limit, reference,
+                                    true, nullptr, {}, workpieceOffsetMm, &cache->workpieces);
+    }
     const auto *error = std::get_if<BendPreviewError>(&result);
     if (!stop.stop_requested() && (!error || stableRejection(error->code))) {
         std::lock_guard guard(cache->mutex);
@@ -1878,6 +1965,12 @@ void SingleBendPreviewBuilder::discardRouteCache() const {
 RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
                                                            RouteDraftRequest request,
                                                            std::stop_token stop) const {
+    return buildRouteDraftWithPose(std::move(document), std::move(request), stop, {});
+}
+RouteDraftResult
+SingleBendPreviewBuilder::buildRouteDraftWithPose(DocumentPtr document, RouteDraftRequest request,
+                                                  std::stop_token stop,
+                                                  const RouteDraftPoseObserver &onPose) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     try {
         cancelled(stop);
@@ -1946,12 +2039,12 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
                                           : BendRouteErrorCode::Unsupported,
                                       e->detail};
             cancelled(stop);
-            work->flat = std::get<FlatPatternPtr>(result);
+            work->flat = independentRouteFlat(std::get<FlatPatternPtr>(result));
         }
         const bool reused = bool(work->draftBasis);
         if (!work->draftBasis)
             work->draftBasis = std::make_shared<RouteDraftBasis>(document, work->flat, stop);
-        const auto result = work->draftBasis->build(std::move(request), reused, stop);
+        const auto result = work->draftBasis->build(std::move(request), reused, stop, onPose);
         cancelled(stop);
         work->drafts.remember(result);
         return result;
@@ -1968,6 +2061,12 @@ RouteDraftResult SingleBendPreviewBuilder::buildRouteDraft(DocumentPtr document,
 }
 BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendRouteRequest request,
                                                      std::stop_token stop) const {
+    return buildRouteImpl(std::move(document), std::move(request), stop, 0);
+}
+BendRouteResult SingleBendPreviewBuilder::buildRouteImpl(DocumentPtr document,
+                                                         BendRouteRequest request,
+                                                         std::stop_token stop,
+                                                         unsigned pairedContinuationTimeMs) const {
     GeometryCacheScope cacheScope(toolCache_, stop);
     try {
         cancelled(stop);
@@ -2140,8 +2239,21 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     ++totals.gaugePrunedToolVariants;
                     continue;
                 }
+                // A promising shared assembly can finish its existing path before
+                // another profile takes the worker. Reserve time for alternatives.
+                const auto continuation = shares > 1 ? timeLeft - timeLeft / 5 : 0;
+                auto result = buildRouteImpl(document, std::move(trial), stop, continuation);
+                if (const auto *error = std::get_if<BendRouteError>(&result);
+                    error && error->code == BendRouteErrorCode::InvalidInput &&
+                    error->operationError == BendPreviewErrorCode::ToolTooShort &&
+                    error->evaluatedOperations == 0) {
+                    // The fixed assembly cannot cover a bend in any pose.
+                    // The next variant has its own assembly and retains the check budget.
+                    if (totals.testedToolVariants == 0)
+                        last = *error;
+                    continue;
+                }
                 ++totals.testedToolVariants;
-                auto result = buildRoute(document, std::move(trial), stop);
                 if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
                     attempts += (*route)->evaluatedOperations;
                     add((*route)->statistics);
@@ -2191,6 +2303,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         }
         std::set<std::size_t> indices;
         std::set<std::string> ids;
+        std::optional<BendRouteError> shortAssembly;
         for (const auto &op : request.operations) {
             if (!validWorkpieceOffset(op.workpieceOffsetMm) || op.bendIndex >= n ||
                 !indices.insert(op.bendIndex).second || op.id.empty() ||
@@ -2227,16 +2340,19 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     core && std::min(lengths.punchLengthMm, lengths.dieLengthMm) +
                                     analysis.lengthToleranceMm >=
                                 (*core)[1] - (*core)[0];
-                if (!lengths.coversBend(analysis.lengthToleranceMm) && !planning && !coreLength)
-                    return BendRouteError{
-                        BendRouteErrorCode::InvalidInput,
-                        "The selected tool assembly is shorter than the bend line",
-                        op.bendIndex,
-                        0,
-                        BendPreviewErrorCode::ToolTooShort,
-                        lengths};
+                if (!lengths.coversBend(analysis.lengthToleranceMm) && !planning && !coreLength &&
+                    !shortAssembly)
+                    shortAssembly =
+                        BendRouteError{BendRouteErrorCode::InvalidInput,
+                                       "The selected tool assembly is shorter than the bend line",
+                                       op.bendIndex,
+                                       0,
+                                       BendPreviewErrorCode::ToolTooShort,
+                                       lengths};
             }
         }
+        if (shortAssembly)
+            return *shortAssembly;
         if (request.withTools &&
             std::any_of(request.operations.begin(), request.operations.end(), [](const auto &op) {
                 return op.tools && op.tools->backgauge &&
@@ -2292,7 +2408,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                                       e->detail};
             }
             cancelled(stop);
-            work->flat = std::get<FlatPatternPtr>(flatResult);
+            work->flat = independentRouteFlat(std::get<FlatPatternPtr>(std::move(flatResult)));
         }
         RouteSearch search;
         search.source = document;
@@ -2302,6 +2418,7 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
         search.flat = work->flat;
         search.request = std::move(request);
         search.stop = stop;
+        search.pairedContinuationTimeMs = pairedContinuationTimeMs;
         search.inputs.resize(n);
         for (auto operation : search.request.operations) {
             // This flag is a preference; the resolved physical side belongs to the key.
@@ -2362,53 +2479,17 @@ BendRouteResult SingleBendPreviewBuilder::buildRoute(DocumentPtr document, BendR
                     axis.Distance(point(other[1])) <= analysis.lengthToleranceMm)
                     search.jointNeighbours[a.bendIndex] |= Mask{1} << b.bendIndex;
             }
-        search.neighbours.resize(n);
-        for (const auto &a : search.layout->bends)
-            for (const auto &b : search.layout->bends)
-                if (a.bendIndex != b.bendIndex && (a.parent == b.parent || a.parent == b.child ||
-                                                   a.child == b.parent || a.child == b.child))
-                    search.neighbours[a.bendIndex] |= Mask{1} << b.bendIndex;
-        if (search.request.automatic && search.request.rankCandidates && n > 2 &&
-            std::all_of(search.layout->bends.begin(), search.layout->bends.end(),
-                        [&](const auto &bend) {
-                            return bend.sectionAxes.Direction().IsParallel(
-                                search.layout->bends.front().sectionAxes.Direction(),
-                                analysis.angleToleranceRadians);
-                        })) {
-            std::vector<std::vector<std::pair<std::size_t, std::size_t>>> graph(
-                search.layout->walls.size());
-            for (const auto &bend : search.layout->bends) {
-                graph[bend.parent].emplace_back(bend.child, bend.bendIndex);
-                graph[bend.child].emplace_back(bend.parent, bend.bendIndex);
-            }
-            if (std::all_of(graph.begin(), graph.end(),
-                            [](const auto &edges) { return edges.size() <= 2; })) {
-                const auto end = std::find_if(graph.begin(), graph.end(),
-                                              [](const auto &edges) { return edges.size() == 1; });
-                if (end != graph.end()) {
-                    auto wall = static_cast<std::size_t>(end - graph.begin());
-                    std::optional<std::size_t> previous;
-                    search.profileRank.resize(n);
-                    for (std::size_t rank = 0; rank < n; ++rank) {
-                        const auto edge = std::find_if(
-                            graph[wall].begin(), graph[wall].end(),
-                            [&](const auto &e) { return !previous || e.first != *previous; });
-                        check(edge != graph[wall].end(), "Incomplete profile chain");
-                        search.profileRank[edge->second] = rank;
-                        previous = wall;
-                        wall = edge->first;
-                    }
-                    search.statistics.usedProfilePriority = true;
-                }
-            }
-        }
+        const bool rank = search.request.automatic && search.request.rankCandidates;
+        search.sheetFeatures = analyseRouteSheet(*search.layout, n, analysis.angleToleranceRadians,
+                                                 rank, rank && search.request.withTools);
+        search.statistics.usedProfilePriority = !search.sheetFeatures.profileRank.empty();
         search.prepareToolAccess();
         bool found = false;
         if (search.request.onProgress)
             search.request.onProgress({BendRoutePhase::ToolCandidate, 0, 0, 0, std::nullopt});
         try {
-            found = search.tryCommonAssembly(full) || search.tryCommonHornAssemblies(full) ||
-                    search.search(full);
+            found = search.tryCommonHornAssemblies(full, true) || search.tryCommonAssembly(full) ||
+                    search.tryCommonHornAssemblies(full) || search.search(full);
         } catch (BendRouteError &e) {
             e.statistics = search.statistics;
             throw;

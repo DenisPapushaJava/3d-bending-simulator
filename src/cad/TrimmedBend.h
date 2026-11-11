@@ -17,4 +17,13 @@ class TrimmedBendError : public std::runtime_error {
 TopoDS_Shape mapTrimmedBend(const TopoDS_Shape &, const std::function<gp_Pnt(gp_Pnt)> &,
                             double angleScale, double tolerance, TopoDS_Face *inner = nullptr,
                             std::stop_token stop = {}, bool *nonRadialEnd = nullptr);
+// Identity reconstruction used only to check an unfolded stock. The caller
+// must compare the returned solid with the actual source sector in both directions.
+TopoDS_Shape rebuildTrimmedBendForUnfoldCheck(const TopoDS_Shape &, double tolerance,
+                                              std::stop_token stop, bool &nonRadialEnd);
+// Presentation only: map the complete inner skin without rebuilding the caps.
+TopoDS_Face flattenTrimmedBendSkin(const TopoDS_Shape &, const std::function<gp_Pnt(gp_Pnt)> &,
+                                   double tolerance, std::stop_token stop);
+TopoDS_Face flattenBendCylinderFace(const TopoDS_Face &, const std::function<gp_Pnt(gp_Pnt)> &,
+                                    double tolerance, std::stop_token stop);
 } // namespace bending::cad

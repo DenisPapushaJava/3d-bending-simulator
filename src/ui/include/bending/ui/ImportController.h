@@ -77,6 +77,7 @@ class ImportController final : public QObject {
     [[nodiscard]] application::RouteDraftPtr routeDraft() const;
     [[nodiscard]] std::optional<application::BendRouteError> routeDraftError() const;
     [[nodiscard]] bool isPreparingDraft() const;
+    [[nodiscard]] const std::optional<application::RouteDraftPose> &routeDraftPose() const;
     [[nodiscard]] application::BendPreviewPtr bendPreview() const;
     [[nodiscard]] const std::optional<application::BendPreviewError> &bendPreviewError() const;
     [[nodiscard]] bool isPreparingPreview() const;
@@ -99,6 +100,7 @@ class ImportController final : public QObject {
 
   signals:
     void stateChanged();
+    void routeDraftPoseChanged();
 
   private:
     class Impl;

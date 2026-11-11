@@ -1,16 +1,24 @@
 #include "BendFixtures.h"
+#include "FlatCutProfileBuilder.h"
 #include "TrayFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
+#include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom_Line.hxx>
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp_Explorer.hxx>
@@ -240,8 +248,265 @@ void treePatterns(const std::filesystem::path &folder) {
         cad::FlatPatternBuilder{}.build(tube, {{core::SheetMaterial::MildSteel, {}, 1}, {}}, {});
     check(std::holds_alternative<application::FlatPatternError>(result) &&
               std::get<application::FlatPatternError>(result).detail ==
-                  "Closed or disconnected sheet graph",
+                  "Multiple bend paths disagree on the wall placement",
           "Closed sheet was split without a seam");
+}
+
+void cyclicReliefPattern(const std::filesystem::path &folder) {
+    // Cutting out the web and both bends in the middle leaves two separate
+    // paths between the same continuous flanges. No seam is needed.
+    const auto relief = BRepPrimAPI_MakeBox(gp_Pnt(-2, -1, 30), 14, 42, 20).Shape();
+    const auto document = load(BRepAlgoAPI_Cut(reverseProfile(), relief).Shape(),
+                               folder / "relief-across-two-bends.step");
+    check(document->metadata().bendAnalysis.bends.size() == 4,
+          "Cycle fixture did not retain all four bend zones");
+    const auto flat = build(document, {core::SheetMaterial::MildSteel, .5, 1});
+    const auto &info = flat->info();
+    const auto &layout = cad::OcctFlatPatternAccess::layout(*flat);
+    const double allowance = std::numbers::pi / 2 * 5;
+    const double developedWidth = 28 + 60 + 2 * allowance;
+    check(layout.walls.size() == 4 && layout.bends.size() == 4 && info.bends.size() == 4 &&
+              std::abs(info.bounds.maximum.x - 80) < 1.e-5 &&
+              std::abs(info.bounds.maximum.y - developedWidth) < 1.e-5 && info.cutProfile &&
+              info.cutProfile->loops.size() == 2,
+          "A consistent bend cycle lost a wall, bend or internal relief");
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*flat), properties);
+    check(std::abs(std::abs(properties.Mass()) -
+                   2 * (80 * developedWidth - 20 * (28 + 4 + 2 * allowance))) < 1.e-4,
+          "Unfolding the cycle added or removed material");
+}
+
+void coplanarWallPattern(const std::filesystem::path &folder) {
+    const auto profile = reverseProfile();
+    const auto lower = BRepPrimAPI_MakeBox(gp_Pnt(-50, -10, -5), 100, 30, 90).Shape();
+    const auto upper = BRepPrimAPI_MakeBox(gp_Pnt(-50, 20, -5), 100, 30, 90).Shape();
+    const auto joined = BRepAlgoAPI_Fuse(BRepAlgoAPI_Common(profile, lower).Shape(),
+                                         BRepAlgoAPI_Common(profile, upper).Shape())
+                            .Shape();
+    const auto drill =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(3, 20, 40), gp_Dir(1, 0, 0)), 3, 4).Shape();
+    const auto document =
+        load(BRepAlgoAPI_Cut(joined, drill).Shape(), folder / "coplanar-wall-seam.step");
+    const auto reference = build(
+        load(BRepAlgoAPI_Cut(profile, drill).Shape(), folder / "coplanar-wall-reference.step"));
+    const auto flat = build(document);
+    const auto &info = flat->info();
+    const auto &layout = cad::OcctFlatPatternAccess::layout(*flat);
+    check(layout.usesJoinedWallFaces && layout.walls.size() == 3 && info.bends.size() == 2 &&
+              info.cutProfile && info.cutProfile->loops.size() == 2 &&
+              std::abs(info.cutProfile->loops.back().radiusMm - 3) < 1.e-6 &&
+              std::abs(info.bounds.maximum.x - reference->info().bounds.maximum.x) < 1.e-5 &&
+              std::abs(info.bounds.maximum.y - reference->info().bounds.maximum.y) < 1.e-5,
+          "Joining coplanar wall faces lost the through hole or changed the developed stock");
+}
+
+void splitLinkPattern(const std::filesystem::path &folder) {
+    // The relief interrupts both skins of the bend but leaves both flanges
+    // continuous. In the flat stock it is one internal rectangular opening.
+    const auto blank = fixtures::bentStrip();
+    const auto relief = BRepPrimAPI_MakeBox(gp_Pnt(-3, -2, 30), 12, 11, 20).Shape();
+    const auto doc = load(BRepAlgoAPI_Cut(blank, relief).Shape(), folder / "split-link.step");
+    check(doc->metadata().bendAnalysis.bends.size() == 2,
+          "Relief fixture must contain two complete bend zones");
+    const auto flat = build(doc, {core::SheetMaterial::MildSteel, .5, 1});
+    const auto &info = flat->info();
+    const auto &layout = cad::OcctFlatPatternAccess::layout(*flat);
+    const auto allowance = std::numbers::pi / 2 * 5;
+    check(layout.walls.size() == 2 && layout.bends.size() == 2 && info.bends.size() == 2 &&
+              std::abs(info.bounds.maximum.x - 80) < 1.e-5 &&
+              std::abs(info.bounds.maximum.y - (60 + allowance)) < 1.e-5,
+          "Split bend did not preserve the two flanges and the two bend zones");
+    for (const auto &bend : info.bends)
+        check(std::abs(bend.lengthMm() - 30) < 1.e-5 &&
+                  std::abs(bend.allowanceMm - allowance) < 1.e-5,
+              "Split bend merged the relief interval into a continuous bend");
+    check(info.cutProfile && info.cutProfile->loops.size() == 2,
+          "DXF cutting profile lost the internal relief");
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*flat), properties);
+    check(std::abs(std::abs(properties.Mass()) -
+                   2 * (80 * (60 + allowance) - 20 * (5 + allowance))) < 1.e-4,
+          "Flat geometry added or removed material at the relief");
+
+    application::RouteDraftRequest draft;
+    application::BendRouteRequest route;
+    for (const auto &bend : info.bends) {
+        draft.operations.push_back({"B" + std::to_string(bend.bendIndex + 1),
+                                    bend.bendIndex,
+                                    {bend.turnRadians, bend.radiusMm},
+                                    {},
+                                    {}});
+    }
+    route.operations = draft.operations;
+    cad::SingleBendPreviewBuilder planner;
+    const auto draftResult = planner.buildRouteDraft(doc, draft, {});
+    const auto routeResult = planner.buildRoute(doc, route, {});
+    const auto unsupported = [](const auto &result) {
+        const auto *error = std::get_if<application::BendRouteError>(&result);
+        return error && error->code == application::BendRouteErrorCode::Unsupported &&
+               error->evaluatedOperations == 0;
+    };
+    check(unsupported(draftResult) && unsupported(routeResult),
+          "An independent-motion route accepted a shared split bend link");
+
+    // An oblique end of the same internal relief maps to a spline, even
+    // though the external perimeter is still a rectangle.
+    const auto inclinedPlane =
+        BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 46), gp_Dir(-.6, 0, 1))).Face();
+    const auto above = BRepPrimAPI_MakeHalfSpace(inclinedPlane, gp_Pnt(0, 0, 60)).Solid();
+    const auto obliqueRelief = BRepAlgoAPI_Cut(relief, above).Shape();
+    const auto obliqueDoc =
+        load(BRepAlgoAPI_Cut(blank, obliqueRelief).Shape(), folder / "split-link-oblique.step");
+    const auto oblique = build(obliqueDoc, {core::SheetMaterial::MildSteel, .5, 1});
+    const auto &cut = oblique->info().cutProfile;
+    check(cut && cut->midThickness && cut->loops.size() == 2 && cut->loops[1].vertices.size() > 4 &&
+              oblique->info().bends.size() == 2,
+          "Curved internal relief was lost or rejected in the cutting profile");
+}
+
+void manySegmentsOfOneBend(const std::filesystem::path &folder) {
+    constexpr int slotCount = 32;
+    constexpr double slotLength = 1;
+    BRep_Builder builder;
+    TopoDS_Compound reliefs;
+    builder.MakeCompound(reliefs);
+    for (int i = 0; i < slotCount; ++i) {
+        const auto slot =
+            BRepPrimAPI_MakeBox(gp_Pnt(-3, -2, 2 + 2.4 * i), 12, 11, slotLength).Shape();
+        builder.Add(reliefs, slot);
+    }
+    BRepAlgoAPI_Cut cut(fixtures::bentStrip(), reliefs);
+    check(cut.IsDone() && !cut.HasErrors(), "Split bend fixture cut failed");
+    const auto document = load(cut.Shape(), folder / "many-segments.step");
+    const auto flat = build(document, {core::SheetMaterial::MildSteel, .5, 1});
+    const auto &info = flat->info();
+    const auto &layout = cad::OcctFlatPatternAccess::layout(*flat);
+    check(layout.walls.size() == 2 && info.bends.size() == slotCount + 1 && info.cutProfile &&
+              info.cutProfile->loops.size() == slotCount + 1,
+          "Unfolding lost separate bend sectors or reliefs beyond the route limit");
+    double length = 0;
+    for (const auto &bend : info.bends)
+        length += bend.lengthMm();
+    check(std::abs(length - (80 - slotCount * slotLength)) < 1.e-5,
+          "Bend sectors fill a relief or lose material");
+}
+
+void linearCutJoin() {
+    const auto buildContour = [](double gap, double tolerance) {
+        const std::array<gp_Pnt, 4> points = {gp_Pnt(0, 0, 0), gp_Pnt(30, 0, 0), gp_Pnt(30, 20, 0),
+                                              gp_Pnt(0, 20, 0)};
+        std::array<TopoDS_Vertex, 4> vertices;
+        for (std::size_t i = 0; i < vertices.size(); ++i)
+            vertices[i] = BRepBuilderAPI_MakeVertex(points[i]);
+        BRep_Builder{}.UpdateVertex(vertices[1], .01);
+        const Handle(Geom_Line) side = new Geom_Line(gp_Pnt(30, gap, 0), gp_Dir(0, 1, 0));
+        const auto edge =
+            BRepBuilderAPI_MakeEdge(side, vertices[1], vertices[2], 0, 20 - gap).Edge();
+        BRepBuilderAPI_MakeWire wire;
+        wire.Add(BRepBuilderAPI_MakeEdge(vertices[0], vertices[1]));
+        wire.Add(edge);
+        wire.Add(BRepBuilderAPI_MakeEdge(vertices[2], vertices[3]));
+        wire.Add(BRepBuilderAPI_MakeEdge(vertices[3], vertices[0]));
+        const auto face =
+            BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(), gp_Dir(0, 0, 1)), wire.Wire()).Face();
+        check(BRepCheck_Analyzer(face).IsValid() &&
+                  std::abs(BRepAdaptor_Curve(edge).Value(0).Y() - gap) < 1.e-9,
+              "DXF join fixture did not preserve the topological endpoint and curve gap");
+        return cad::buildFlatCutProfile(face, {}, {}, {}, {}, {}, 1, tolerance, {});
+    };
+    const auto cut = buildContour(.000667, .01);
+    check(cut && cut->loops.size() == 1 && cut->loops.front().vertices.size() == 4,
+          "A bounded shared-vertex line join did not preserve the four cutting segments");
+    const auto &corners = cut->loops.front().vertices;
+    check(std::any_of(corners.begin(), corners.end(),
+                      [](const auto &v) {
+                          return std::abs(v.point.x - 30) < 1.e-9 && std::abs(v.point.y) < 1.e-9;
+                      }),
+          "The repaired join did not use the shared CAD vertex");
+    check(!buildContour(.002, .01) && !buildContour(.000667, .0005),
+          "An excessive cut join gap was accepted");
+}
+
+void planarCutStock(const std::filesystem::path &folder) {
+    const auto blank = BRepPrimAPI_MakeBox(120, 70, 2).Shape();
+    const auto hole = [](double depth) {
+        return BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(25, 20, 3), gp_Dir(0, 0, -1)), 5, depth)
+            .Shape();
+    };
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(2, 3, 4), gp_Dir(1, 2, 3)), .71);
+    const gp_Circ bore(gp_Ax2(gp_Pnt(25, 20, -1), gp_Dir(0, 0, 1)), 5);
+    BRepBuilderAPI_MakeWire splitBore;
+    splitBore.Add(BRepBuilderAPI_MakeEdge(bore, 0, std::numbers::pi / 2).Edge());
+    splitBore.Add(BRepBuilderAPI_MakeEdge(bore, std::numbers::pi / 2, 2 * std::numbers::pi).Edge());
+    const auto cutter =
+        BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(splitBore.Wire()).Face(), gp_Vec(0, 0, 4))
+            .Shape();
+    const auto plate = BRepAlgoAPI_Cut(blank, cutter).Shape();
+    auto document = load(BRepBuilderAPI_Transform(plate, rotation, true).Shape(),
+                         folder / "planar-cut-stock.step");
+    check(std::count_if(document->faces().begin(), document->faces().end(),
+                        [](const auto &face) {
+                            return face.surface == application::SurfaceKind::Cylinder;
+                        }) == 2,
+          "Fixture lost its two cylindrical faces");
+    const auto flat = build(document, {});
+    const auto &info = flat->info();
+    check(info.bends.empty() && std::abs(info.thicknessMm - 2) < 1.e-6 && info.cutProfile &&
+              info.cutProfile->loops.size() == 2 &&
+              info.cutProfile->loops.front().vertices.size() == 4 &&
+              std::abs(info.cutProfile->loops.back().radiusMm - 5) < 1.e-6,
+          "Tilted planar stock lost its outline or through hole");
+    const auto splitBlank =
+        BRepAlgoAPI_Fuse(BRepPrimAPI_MakeBox(40, 70, 2).Shape(),
+                         BRepPrimAPI_MakeBox(gp_Pnt(40, 0, 0), 80, 70, 2).Shape())
+            .Shape();
+    const auto split = load(BRepAlgoAPI_Cut(splitBlank, hole(4)).Shape(),
+                            folder / "planar-cut-stock-split-skin.step");
+    check(std::none_of(split->faces().begin(), split->faces().end(),
+                       [](const auto &face) {
+                           return face.surface == application::SurfaceKind::Plane &&
+                                  face.areaMm2 > 6000;
+                       }),
+          "Planar fixture no longer has fragmented skins");
+    const auto splitFlat = build(split, {});
+    const auto &splitCut = splitFlat->info().cutProfile;
+    check(splitCut && splitCut->loops.size() == 2 &&
+              std::abs(splitCut->loops.back().radiusMm - 5) < 1.e-6 &&
+              std::abs(splitFlat->info().bounds.maximum.x * splitFlat->info().bounds.maximum.y -
+                       120 * 70) < 1.e-5,
+          "Complete planar section lost some of the stock or its through hole");
+    const auto blind = load(BRepAlgoAPI_Cut(blank, hole(2)).Shape(), folder / "planar-pocket.step");
+    check(std::holds_alternative<application::FlatPatternError>(
+              cad::FlatPatternBuilder{}.build(blind, {{}, {}}, {})),
+          "Planar stock with a pocket was accepted as a prismatic cut profile");
+
+    // Curved inner and outer edges of a broad plate can have exactly the
+    // same local cylindrical geometry as a short bend.
+    const auto rounded = fixtures::bentStrip(16, 30, std::numbers::pi / 2, 3, true, 110);
+    const auto boreAt = [](double depth) {
+        return BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(30, -50, 4), gp_Dir(0, 0, -1)), 5, depth)
+            .Shape();
+    };
+    const auto roundedPlate =
+        load(BRepBuilderAPI_Transform(BRepAlgoAPI_Cut(rounded, boreAt(5)).Shape(), rotation, true)
+                 .Shape(),
+             folder / "planar-rounded-contour.step");
+    check(application::isPlanarCutCandidate(roundedPlate->metadata().bendAnalysis),
+          "The curved edges of a broad planar stock were reported as a bend");
+    const auto roundedFlat = build(roundedPlate, {});
+    check(std::abs(roundedFlat->info().thicknessMm - 3) < 1.e-6 && roundedFlat->info().cutProfile &&
+              roundedFlat->info().cutProfile->loops.size() == 2,
+          "Direct export lost the thickness or through hole of rounded planar stock");
+    const auto roundedPocket =
+        load(BRepAlgoAPI_Cut(rounded, boreAt(2)).Shape(), folder / "rounded-pocket.step");
+    check(!application::isPlanarCutCandidate(roundedPocket->metadata().bendAnalysis),
+          "A blind pocket passed the full-body planar proof");
+    const auto shortBend = load(fixtures::bentStrip(4, 2, std::numbers::pi / 2, 3),
+                                folder / "short-formed-profile.step");
+    check(shortBend->metadata().bendAnalysis.bends.size() == 1,
+          "A genuine short bend was classified as a cutting contour");
 }
 
 void ignoredCutouts(const std::filesystem::path &folder) {
@@ -258,6 +523,26 @@ void ignoredCutouts(const std::filesystem::path &folder) {
           "Countersink influenced allowance/outer contour or modified the original");
     check(cad::OcctFlatPatternAccess::openingContours(*flat).size() == 3,
           "A hole or one of the two countersink rims was lost/duplicated");
+    const auto cuts = flat->info().cutProfile;
+    check(cuts && cuts->loops.size() == 3 && cuts->blindOpenings == 0 &&
+              cuts->loops.front().vertices.size() >= 5,
+          "Laser profile lost a contour or the in-plane chamfer");
+    std::vector<double> radii;
+    for (const auto &loop : cuts->loops)
+        if (loop.radiusMm > 0)
+            radii.push_back(loop.radiusMm);
+    std::sort(radii.begin(), radii.end());
+    check(radii.size() == 2 && std::abs(radii[0] - 1.5) < 1.e-6 && std::abs(radii[1] - 2.5) < 1.e-6,
+          "Countersink rim was used as a cut or bore diameter was changed");
+    const auto blind = build(load(
+        BRepAlgoAPI_Cut(
+            fixtures::profiledBend(false),
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(14, -26, 25), gp_Dir(-1, 0, 0)), 1.5, 2).Shape())
+            .Shape(),
+        folder / "blind-cut.step"));
+    check(blind->info().cutProfile && blind->info().cutProfile->blindOpenings == 1 &&
+              blind->info().cutProfile->loops.size() == 1,
+          "A blind opening was exported as a through cut");
     GProp_GProps props;
     BRepGProp::VolumeProperties(cad::OcctFlatPatternAccess::geometry(*flat), props);
     const double cutVolume = 55.5 * std::numbers::pi;
@@ -268,6 +553,32 @@ void ignoredCutouts(const std::filesystem::path &folder) {
          e.Next())
         ++faces;
     check(faces == document->metadata().faceCount, "The display gained artificial hole caps");
+    TopoDS_Shape slot = BRepPrimAPI_MakeBox(gp_Pnt(7, -18, 20), 8, 4, 10).Shape();
+    for (double z : {20., 30.})
+        slot =
+            BRepAlgoAPI_Fuse(
+                slot,
+                BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(7, -16, z), gp_Dir(1, 0, 0)), 2, 8).Shape())
+                .Shape();
+    const auto slotted = build(load(BRepAlgoAPI_Cut(fixtures::profiledBend(false), slot).Shape(),
+                                    folder / "slot-cut.step"));
+    const auto slotCuts = slotted->info().cutProfile;
+    check(slotCuts && slotCuts->loops.size() == 2, "A through-slot did not reach the DXF profile");
+    const auto &slotVertices = slotCuts->loops.back().vertices;
+    double totalSweep = 0;
+    for (std::size_t i = 0; i < slotVertices.size(); ++i) {
+        const auto &v = slotVertices[i];
+        const double sweep = std::abs(4 * std::atan(v.bulge));
+        if (sweep == 0)
+            continue;
+        const auto &next = slotVertices[(i + 1) % slotVertices.size()].point;
+        const auto radius =
+            std::hypot(v.point.x - next.x, v.point.y - next.y) / (2 * std::sin(sweep / 2));
+        check(std::abs(radius - 2) < 1.e-6, "A through-slot arc changed radius");
+        totalSweep += sweep;
+    }
+    check(std::abs(totalSweep - 2 * std::numbers::pi) < 1.e-6,
+          "A through-slot lost its exact semicircular ends");
     for (bool through : {true, false}) {
         const auto zone =
             build(load(fixtures::bendWithZoneOpening(through), folder / "zone-opening.step"));
@@ -276,6 +587,7 @@ void ignoredCutouts(const std::filesystem::path &folder) {
                   !cad::OcctFlatPatternAccess::openingContours(*zone).empty() &&
                   std::abs(zone->info().bounds.maximum.y - whole->info().bounds.maximum.y) < 1e-5,
               "A bend-zone opening blocked unfolding or changed the blank length");
+        check(!zone->info().cutProfile, "An ambiguous bend-zone opening reached the laser file");
     }
     gp_Trsf rotation;
     rotation.SetRotation(gp_Ax1(gp_Pnt(2, 3, 4), gp_Dir(1, 2, 3)), .71);
@@ -285,6 +597,8 @@ void ignoredCutouts(const std::filesystem::path &folder) {
     check(cad::OcctFlatPatternAccess::openingContours(*rotated).size() == 3 &&
               std::abs(displayVolume(*rotated) - displayVolume(*flat)) < .1,
           "Cutout mapping depends on the STEP world orientation");
+    check(rotated->info().cutProfile && rotated->info().cutProfile->loops.size() == 3,
+          "Laser profile depends on source STEP orientation");
     auto boss = BRepAlgoAPI_Fuse(fixtures::profiledBend(),
                                  BRepPrimAPI_MakeBox(gp_Pnt(12, -20, 30), 5, 5, 5))
                     .Shape();
@@ -419,6 +733,12 @@ void densePerforation(const std::filesystem::path &folder) {
               openings.size() == 2 * rows * columns,
           "Dense perforation lost its bend or contours on the blank");
 
+    const auto cuts = flat->info().cutProfile;
+    check(cuts && cuts->loops.size() == 1 + 2 * rows * columns &&
+              std::count_if(cuts->loops.begin(), cuts->loops.end(),
+                            [](const auto &loop) { return loop.radiusMm > 0; }) == rows * columns,
+          "Perforations are missing from the laser profile or were counted twice");
+
     application::DrawingRequest request;
     request.unfoldSettings = flat->info().settings;
     request.preparedFlatPattern = flat;
@@ -509,6 +829,12 @@ int main(int argc, char **argv) {
         }
         trayPatterns(folder);
         treePatterns(folder);
+        cyclicReliefPattern(folder);
+        manySegmentsOfOneBend(folder);
+        coplanarWallPattern(folder);
+        splitLinkPattern(folder);
+        linearCutJoin();
+        planarCutStock(folder);
         ignoredCutouts(folder);
         densePerforation(folder);
         auto channel = load(fixtures::channel(), folder / "channel.step");
