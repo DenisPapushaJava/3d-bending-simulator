@@ -444,14 +444,14 @@ TopoDS_Shape bendSolid(const RecognizedBend &b, const TopTools_IndexedMapOfShape
     if (railAngle) {
         // Use the validated rail angle for the partition envelope. The
         // actual skins and cut edges are recovered from the source below.
-        const auto railU = [&](std::size_t id, double near) {
+        const auto railU = [&](std::size_t id, double referenceAngle) {
             gp_Vec normal(plane(faces, id).Axis().Direction());
-            const auto radial = gp_Vec(cylinder.Location(), s.Value(near, 0));
+            const auto radial = gp_Vec(cylinder.Location(), s.Value(referenceAngle, 0));
             if (normal.Dot(radial) < 0)
                 normal.Reverse();
             const double angle = std::atan2(normal.Dot(gp_Vec(cylinder.YAxis().Direction())),
                                             normal.Dot(gp_Vec(cylinder.XAxis().Direction())));
-            return near + std::remainder(angle - near, 2 * std::numbers::pi);
+            return referenceAngle + std::remainder(angle - referenceAngle, 2 * std::numbers::pi);
         };
         auto first = railU(b.flangeFaces[0], u0), last = railU(b.flangeFaces[2], u1);
         if (std::abs(first - u0) * cylinder.Radius() > tolerance)
