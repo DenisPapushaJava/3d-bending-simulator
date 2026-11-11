@@ -514,15 +514,15 @@ int main(int argc, char **argv) {
         measure->click();
         check(!measurementHint->isVisible(),
               "DXF measurement hint remained after disabling the mode");
-        auto *color = dxfDialog->findChild<QToolButton *>("flatDxfColor");
-        check(color && color->menu(), "DXF colour palette is missing");
-        color->menu()->popup(color->mapToGlobal(color->rect().bottomLeft()));
+        auto *colorButton = dxfDialog->findChild<QToolButton *>("flatDxfColor");
+        check(colorButton && colorButton->menu(), "DXF colour palette is missing");
+        colorButton->menu()->popup(colorButton->mapToGlobal(colorButton->rect().bottomLeft()));
         QApplication::processEvents();
-        auto *orange = color->menu()->findChild<QToolButton *>("flatDxfColor30");
+        auto *orange = colorButton->menu()->findChild<QToolButton *>("flatDxfColor30");
         check(orange && orange->isVisible(), "DXF colour swatches are hidden");
         orange->click();
         const auto previewItems = preview->scene()->items();
-        check(orange->isChecked() && !color->menu()->isVisible() &&
+        check(orange->isChecked() && !colorButton->menu()->isVisible() &&
                   std::any_of(previewItems.begin(), previewItems.end(),
                               [](QGraphicsItem *item) {
                                   const auto *path = qgraphicsitem_cast<QGraphicsPathItem *>(item);
@@ -569,8 +569,8 @@ int main(int argc, char **argv) {
         auto *bendLines = dxfDialog->findChild<QCheckBox *>();
         bendLines->setChecked(false);
         check(saveDxf->isEnabled() && !layer->isEnabled(), "Cut-only mode cannot export");
-        QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
-        QApplication::sendEvent(layer, &escape);
+        QKeyEvent layerEscape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(layer, &layerEscape);
         check(dxfDialog->isVisible(), "Escape closed the DXF dialog outside measurement mode");
         dxfButtons->button(QDialogButtonBox::Cancel)->click();
         check(!dxfDialog->isVisible(), "The Close button did not close the DXF dialog");
