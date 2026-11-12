@@ -383,7 +383,7 @@ std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, con
         std::optional<DrawingPoint> roundingBefore;
     };
     constexpr double tolerance = 1e-5;
-    const auto near = [](double a, double b) { return std::abs(a - b) <= tolerance; };
+    const auto withinTolerance = [](double a, double b) { return std::abs(a - b) <= tolerance; };
     const auto wire = BRepTools::OuterWire(face);
     if (wire.IsNull() || !BRep_Tool::IsClosed(wire))
         return {};
@@ -394,8 +394,8 @@ std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, con
     };
     const auto continuous = [&](const Run &a, const Run &b) {
         return !b.roundingBefore && a.horizontal == b.horizontal &&
-               direction(a) * direction(b) > 0 && near(a.last.x, b.first.x) &&
-               near(a.last.y, b.first.y);
+               direction(a) * direction(b) > 0 && withinTolerance(a.last.x, b.first.x) &&
+               withinTolerance(a.last.y, b.first.y);
     };
     std::size_t edgeCount = 0;
     for (BRepTools_WireExplorer e(wire, face); e.More(); e.Next()) {
@@ -405,7 +405,7 @@ std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, con
             return {};
         const BRepAdaptor_Curve curve(e.Current());
         if (curve.GetType() == GeomAbs_Circle && !rounding &&
-            near(curve.LastParameter() - curve.FirstParameter(), std::numbers::pi / 2)) {
+            withinTolerance(curve.LastParameter() - curve.FirstParameter(), std::numbers::pi / 2)) {
             rounding = project(curve.Circle().Location(), frame);
             continue;
         }
@@ -415,7 +415,7 @@ std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, con
         auto b = project(curve.Value(curve.LastParameter()), frame);
         if (e.Current().Orientation() == TopAbs_REVERSED)
             std::swap(a, b);
-        const bool horizontal = near(a.y, b.y), vertical = near(a.x, b.x);
+        const bool horizontal = withinTolerance(a.y, b.y), vertical = withinTolerance(a.x, b.x);
         if (horizontal == vertical)
             return {};
         const Run run{a, b, horizontal, std::exchange(rounding, std::nullopt)};
@@ -436,7 +436,7 @@ std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, con
     // Intersect the straight supports at each corner. At a fillet the
     // intersection defines the nominal step, while witnesses stay on real edges.
     const auto tangent = [&](const Run &r, DrawingPoint end, DrawingPoint center) {
-        return r.horizontal ? near(end.x, center.x) : near(end.y, center.y);
+        return r.horizontal ? withinTolerance(end.x, center.x) : withinTolerance(end.y, center.y);
     };
     std::vector<DrawingPoint> corners;
     const auto count = runs.size();
@@ -447,7 +447,8 @@ std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, con
         if (const auto c = after.roundingBefore) {
             if (!tangent(before, before.last, *c) || !tangent(after, after.first, *c))
                 return {};
-        } else if (!near(before.last.x, after.first.x) || !near(before.last.y, after.first.y))
+        } else if (!withinTolerance(before.last.x, after.first.x) ||
+                   !withinTolerance(before.last.y, after.first.y))
             return {};
         corners.push_back(before.horizontal ? DrawingPoint{after.first.x, before.last.y}
                                             : DrawingPoint{before.last.x, after.first.y});
@@ -480,11 +481,11 @@ std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, con
         }
         const auto value = coordinate(b) - coordinate(a);
         const auto fullSpan = coordinate(view.maximum) - coordinate(view.minimum);
-        if (value <= tolerance || near(value, fullSpan) ||
+        if (value <= tolerance || withinTolerance(value, fullSpan) ||
             std::any_of(dimensions.begin(), dimensions.end(), [&](const auto &d) {
-                const bool sameAxis = near(d.start.y, d.end.y) == horizontal;
-                return sameAxis && near(coordinate(d.start), coordinate(a)) &&
-                       near(coordinate(d.end), coordinate(b));
+                const bool sameAxis = withinTolerance(d.start.y, d.end.y) == horizontal;
+                return sameAxis && withinTolerance(coordinate(d.start), coordinate(a)) &&
+                       withinTolerance(coordinate(d.end), coordinate(b));
             }))
             continue;
         dimensions.push_back({a, b, value, {}, std::array{first, last}});
