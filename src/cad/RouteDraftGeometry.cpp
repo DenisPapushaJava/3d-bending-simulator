@@ -434,7 +434,9 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
                 cancelled(stop);
                 RouteDraftPose pose;
                 for (const auto &edge : frame.orientation.edges) {
-                    const auto point = [](const auto &p) { return PointMm{p.X(), p.Y(), p.Z()}; };
+                    const auto point = [](const auto &coordinates) {
+                        return PointMm{coordinates.X(), coordinates.Y(), coordinates.Z()};
+                    };
                     pose.edges.push_back(
                         {point(edge.points[0]), point(edge.points[1]), point(edge.normal)});
                 }

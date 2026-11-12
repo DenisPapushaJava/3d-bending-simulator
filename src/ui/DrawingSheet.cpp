@@ -552,7 +552,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
           bool fullProfile = false, std::optional<QRectF> cellArea = {}, bool classical = false,
           std::vector<QLineF> *dimensionLines = nullptr, QRectF *selectionBounds = nullptr,
           drawing::LayoutContext *context = nullptr, bool compactDimensions = false,
-          const DrawingPlacedView *placed = nullptr, bool flatDimensions = false) {
+          const DrawingPlacedView *placedView = nullptr, bool flatDimensions = false) {
     if (context)
         context->checkpoint();
     const bool schematic = v.profileStart.has_value();
@@ -747,7 +747,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     };
     std::vector<LinearRequest> requests;
     const bool plateContour = !flatDimensions && drawing.bends.empty();
-    const auto *reduced = placed && placed->essentialDimensions ? placed : nullptr;
+    const auto *reduced = placedView && placedView->essentialDimensions ? placedView : nullptr;
     const auto append = [&](const auto &list, DrawingDimensionSource source, bool position,
                             bool chain) {
         for (std::size_t i = 0; i < list.size(); ++i) {
@@ -801,7 +801,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                       ? nullptr
                       : &placement,
                   request.position, witnesses(d), measureOnly, alternative, flexible, request.chain,
-                  placed && placed->smallOptionalText &&
+                  placedView && placedView->smallOptionalText &&
                       drawing::optionalDimension(request.source, flatDimensions, plateContour, d));
         if (request.chain) {
             for (std::size_t i = 0; i < chainLanes.size(); ++i)
@@ -1076,19 +1076,19 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             }
             slotNote(v.openingAxes[i], count);
         }
-        const auto diameterNote = [&](DrawingPoint center, double diameter, std::size_t count) {
+        const auto diameterNote = [&](DrawingPoint holeCenter, double diameter, std::size_t count) {
             const auto value = (count > 1 ? QStringLiteral("%1×").arg(count) : QString{}) +
                                QChar(0x2300) + number(diameter);
-            leaderNote(p, map({center.x, center.y + diameter / 2}), bounds, value, annotationArea,
-                       occupied, true);
+            leaderNote(p, map({holeCenter.x, holeCenter.y + diameter / 2}), bounds, value,
+                       annotationArea, occupied, true);
         };
         std::vector<bool> inRow(v.holeDiameters.size());
         if (!reduced)
             for (const auto &row : v.circularOpeningRows) {
                 for (auto index : row)
                     inRow.at(index) = true;
-                const auto &[center, diameter] = v.holeDiameters.at(row.front());
-                diameterNote(center, diameter, row.size());
+                const auto &[holeCenter, diameter] = v.holeDiameters.at(row.front());
+                diameterNote(holeCenter, diameter, row.size());
             }
         std::vector<double> diameters;
         for (std::size_t i = 0; i < v.holeDiameters.size(); ++i) {
