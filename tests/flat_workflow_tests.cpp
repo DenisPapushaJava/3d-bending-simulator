@@ -260,8 +260,8 @@ void checkDxfMeasurements() {
     move(50, 33);
     const auto bendHit = view.mapFromScene(QPointF(50, -40));
     const auto farEdge = view.mapFromScene(QPointF(50, -80));
-    check(hasInk(xInk, view.mapFromScene(QPointF(0, -33))) &&
-              hasInk(yInk, bendHit) && !hasInk(yInk, farEdge),
+    check(hasInk(xInk, view.mapFromScene(QPointF(0, -33))) && hasInk(yInk, bendHit) &&
+              !hasInk(yInk, farEdge),
           "DXF quick spans did not follow the axis colours or stop at the visible bend");
     view.setBends(false, Qt::red);
     move(50, 33);

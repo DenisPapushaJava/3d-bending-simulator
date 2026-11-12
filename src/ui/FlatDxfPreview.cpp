@@ -356,8 +356,8 @@ std::array<std::optional<FlatDxfPreview::Dimension>, 2>
 FlatDxfPreview::quickDimensionsAt(QPointF point) const {
     std::array<std::optional<Dimension>, 2> result;
     double radialDistance = 6 / transform().m11();
-    if (!drawingBounds_.adjusted(-radialDistance, -radialDistance,
-                                 radialDistance, radialDistance).contains(point))
+    if (!drawingBounds_.adjusted(-radialDistance, -radialDistance, radialDistance, radialDistance)
+             .contains(point))
         return result;
 
     constexpr double infinity = std::numeric_limits<double>::infinity();
@@ -385,7 +385,9 @@ FlatDxfPreview::quickDimensionsAt(QPointF point) const {
             radial = Dimension{QLineF(circle ? centre - ray : centre, centre + ray),
                                (circle ? QStringLiteral("Ø") : QStringLiteral("R")) +
                                    mm(circle ? 2 * radius : radius),
-                               {}, {}, edge};
+                               {},
+                               {},
+                               edge};
         }
         const std::array center{centre.x(), centre.y()};
         for (std::size_t axis = 0; axis < 2; ++axis) {
@@ -394,8 +396,8 @@ FlatDxfPreview::quickDimensionsAt(QPointF point) const {
                 continue; // A tangency does not bound a span across the contour.
             const double halfSpan = std::sqrt((radius - across) * (radius + across));
             for (double along : {-halfSpan, halfSpan}) {
-                const auto candidate = axis == 0 ? QPointF(along, delta.y())
-                                                 : QPointF(delta.x(), along);
+                const auto candidate =
+                    axis == 0 ? QPointF(along, delta.y()) : QPointF(delta.x(), along);
                 if (circle || onSweep(angle(candidate), edge.start, edge.sweep))
                     hit(axis, center[axis] + along);
             }
@@ -438,8 +440,8 @@ FlatDxfPreview::quickDimensionsAt(QPointF point) const {
 }
 
 void FlatDxfPreview::updateHover(const QPoint &position, Qt::KeyboardModifiers modifiers) {
-    if (first_ || dimension_ || modifiers.testAnyFlags(Qt::ShiftModifier | Qt::AltModifier |
-                                                       Qt::ControlModifier)) {
+    if (first_ || dimension_ ||
+        modifiers.testAnyFlags(Qt::ShiftModifier | Qt::AltModifier | Qt::ControlModifier)) {
         quickDimensions_ = {};
         hover_ = pickAt(position, modifiers);
     } else {

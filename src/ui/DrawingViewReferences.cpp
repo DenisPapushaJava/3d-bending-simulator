@@ -3,7 +3,7 @@
 
 namespace bending::ui::drawing {
 const application::DrawingView &LayoutContext::view(const application::BendingDrawing &drawing,
-                                                   DrawingViewKey key) {
+                                                    DrawingViewKey key) {
     const auto id = std::pair{key.kind, key.index};
     if (const auto it = views_.find(id); it != views_.end())
         return it->second;

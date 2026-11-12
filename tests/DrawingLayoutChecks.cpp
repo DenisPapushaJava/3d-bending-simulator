@@ -551,8 +551,8 @@ void worker() {
     const auto gui = QThread::currentThread();
     ui::DrawingLayoutController controller(
         nullptr,
-        [&](auto source, const auto &, auto, std::stop_token,
-            auto, auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
+        [&](auto source, const auto &, auto, std::stop_token, auto,
+            auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
             outsideGui = QThread::currentThread() != gui;
             if (++calls == 1) {
                 entered = true;
@@ -615,12 +615,13 @@ void worker() {
     QApplication::processEvents();
     require(published == 0, "Destroyed layout controller delivered a late result");
     QString error;
-    ui::DrawingLayoutController failing(
-        nullptr,
-        [](auto, const auto &, auto, auto, auto, auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
-            throw ui::DrawingLayoutInterrupted(ui::DrawingLayoutInterruption::LimitExceeded,
-                                               "Test budget exhausted");
-        });
+    ui::DrawingLayoutController failing(nullptr,
+                                        [](auto, const auto &, auto, auto, auto,
+                                           auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
+                                            throw ui::DrawingLayoutInterrupted(
+                                                ui::DrawingLayoutInterruption::LimitExceeded,
+                                                "Test budget exhausted");
+                                        });
     QObject::connect(&failing, &ui::DrawingLayoutController::failed, &controller,
                      [&](const QString &value) { error = value; });
     failing.request(first, {}, ui::DrawingFlatSide::Automatic);

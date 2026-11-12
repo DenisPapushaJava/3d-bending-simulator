@@ -374,7 +374,8 @@ void leaderNote(QPainter &p, QPointF anchor, QRectF bounds, const QString &value
     const double height = textLines.size() * 4.2 + 1;
     const auto crossed = [&](QRectF box) {
         const auto *obstacles = dimensionObstacles ? dimensionObstacles : lines;
-        return obstacles && std::any_of(obstacles->begin(), obstacles->end(), [&](const auto &line) {
+        return obstacles &&
+               std::any_of(obstacles->begin(), obstacles->end(), [&](const auto &line) {
                    return crossesTextBox(line.p1(), line.p2(), box);
                });
     };
@@ -728,8 +729,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         // An inner step can use a farther row without displacing an end flange.
         const auto horizontalClearance = [&](std::size_t index) {
             const auto &d = v.dimensions[index];
-            if (std::abs(d.start.y - d.end.y) > 1e-7 ||
-                std::abs(d.start.x - d.end.x) <= 1e-7)
+            if (std::abs(d.start.y - d.end.y) > 1e-7 || std::abs(d.start.x - d.end.x) <= 1e-7)
                 return std::numeric_limits<double>::infinity();
             const double y = (d.start.y + d.end.y) / 2;
             return std::min(std::abs(y - v.minimum.y), std::abs(y - v.maximum.y));
@@ -751,13 +751,11 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     const auto append = [&](const auto &list, DrawingDimensionSource source, bool position,
                             bool chain) {
         for (std::size_t i = 0; i < list.size(); ++i) {
-            const bool optional = reduced &&
-                                  drawing::optionalDimension(source, flatDimensions,
-                                                             plateContour, list[i]);
-            if (!optional || std::find(reduced->retainedDimensions.begin(),
-                                       reduced->retainedDimensions.end(),
-                                       DrawingDimensionId{source, i}) !=
-                                 reduced->retainedDimensions.end()) {
+            const bool optional = reduced && drawing::optionalDimension(source, flatDimensions,
+                                                                        plateContour, list[i]);
+            if (!optional ||
+                std::find(reduced->retainedDimensions.begin(), reduced->retainedDimensions.end(),
+                          DrawingDimensionId{source, i}) != reduced->retainedDimensions.end()) {
                 requests.push_back({&list[i], position, chain, source, i});
             } else if (context && context->omittedDimensions) {
                 ++*context->omittedDimensions;
@@ -802,8 +800,7 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                           v.sectionDimensions.empty() && !(paired && fullProfile)
                       ? nullptr
                       : &placement,
-                  request.position, witnesses(d), measureOnly, alternative, flexible,
-                  request.chain,
+                  request.position, witnesses(d), measureOnly, alternative, flexible, request.chain,
                   placed && placed->smallOptionalText &&
                       drawing::optionalDimension(request.source, flatDimensions, plateContour, d));
         if (request.chain) {
@@ -826,9 +823,10 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                 return dx > 1e-7 && std::abs(d.end.y - d.start.y) < dx * 1e-7;
             };
             std::size_t rows =
-                std::count_if(requests.begin(), requests.end(), [&](const auto &request) {
-                    return !request.chain && horizontal(*request.dimension);
-                }) +
+                std::count_if(requests.begin(), requests.end(),
+                              [&](const auto &request) {
+                                  return !request.chain && horizontal(*request.dimension);
+                              }) +
                 std::any_of(requests.begin(), requests.end(), [&](const auto &request) {
                     return request.chain && horizontal(*request.dimension);
                 });
@@ -1081,8 +1079,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         const auto diameterNote = [&](DrawingPoint center, double diameter, std::size_t count) {
             const auto value = (count > 1 ? QStringLiteral("%1×").arg(count) : QString{}) +
                                QChar(0x2300) + number(diameter);
-            leaderNote(p, map({center.x, center.y + diameter / 2}), bounds, value,
-                       annotationArea, occupied, true);
+            leaderNote(p, map({center.x, center.y + diameter / 2}), bounds, value, annotationArea,
+                       occupied, true);
         };
         std::vector<bool> inRow(v.holeDiameters.size());
         if (!reduced)
@@ -1188,11 +1186,10 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         const auto count = group.corners.size();
         const bool teens = count % 100 >= 11 && count % 100 <= 14;
         const auto suffix = !teens && count % 10 == 1 ? QStringLiteral("место")
-                            : !teens && count % 10 >= 2 && count % 10 <= 4
-                                ? QStringLiteral("места")
-                                : QStringLiteral("мест");
-        const QString quantity = count > 1 ? QStringLiteral("%1 %2").arg(count).arg(suffix)
-                                           : QString{};
+                            : !teens && count % 10 >= 2 && count % 10 <= 4 ? QStringLiteral("места")
+                                                                           : QStringLiteral("мест");
+        const QString quantity =
+            count > 1 ? QStringLiteral("%1 %2").arg(count).arg(suffix) : QString{};
         const double width = std::max(textWidthMm(value), textWidthMm(quantity));
         const double height = quantity.isEmpty() ? 5. : 10.;
         struct Callout {
@@ -1240,14 +1237,15 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                     direction /= norm;
                     const auto end = start + length * direction;
                     const auto shelfEnd = end + QPointF(direction.x() < 0 ? -width : width, 0);
-                    const Callout candidate{QLineF(start, end), QLineF(end, shelfEnd),
-                                            QRectF(std::min(end.x(), shelfEnd.x()), end.y() - 5,
-                                                   width, height)};
+                    const Callout candidate{
+                        QLineF(start, end), QLineF(end, shelfEnd),
+                        QRectF(std::min(end.x(), shelfEnd.x()), end.y() - 5, width, height)};
                     if (!annotationArea.contains(candidate.box) ||
                         !annotationArea.contains(start) || candidate.box.intersects(bounds) ||
                         overlaps(candidate.box, occupied) || crossesText(start, end, occupied) ||
-                        crossesText(end, shelfEnd, occupied) || !clear(candidate, placement.lines) ||
-                        !clear(candidate, detailLeaders) || crossesOutline(candidate.leader, direction))
+                        crossesText(end, shelfEnd, occupied) ||
+                        !clear(candidate, placement.lines) || !clear(candidate, detailLeaders) ||
+                        crossesOutline(candidate.leader, direction))
                         continue;
                     const auto intersectsLeader = [&](const QLineF &line) {
                         return candidate.leader.intersects(line, nullptr) ==
@@ -1255,9 +1253,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
                     };
                     if (std::any_of(detailLeaders.begin(), detailLeaders.end(), intersectsLeader))
                         continue;
-                    const auto crossings = static_cast<std::size_t>(
-                        std::count_if(placement.lines.begin(), placement.lines.end(),
-                                      intersectsLeader));
+                    const auto crossings = static_cast<std::size_t>(std::count_if(
+                        placement.lines.begin(), placement.lines.end(), intersectsLeader));
                     if (crossings) {
                         if (crossings < fewestCrossings) {
                             fewestCrossings = crossings;
@@ -2462,13 +2459,12 @@ void paintCompositionFrame(QPainter &p, const BendingDrawing &d, const DrawingTi
         classicalParameters(p, d, title, {96, 7, frame.right() - 103, 8});
     if (title.quantity)
         text(p, QRectF(25, frame.bottom() - titleBlockHeight, frame.right() - 220, 12),
-             QStringLiteral("Количество: %1 шт.").arg(*title.quantity),
-             3.5, Qt::AlignLeft | Qt::AlignTop);
+             QStringLiteral("Количество: %1 шт.").arg(*title.quantity), 3.5,
+             Qt::AlignLeft | Qt::AlignTop);
     if (std::any_of(plan.views.begin(), plan.views.end(),
                     [page](const auto &at) { return at.page == page && at.omittedDimensions; }))
         text(p, QRectF(25, frame.bottom() - titleBlockHeight + 7, frame.right() - 220, 6),
-             QStringLiteral("Часть размеров не показана"), 2.5,
-             Qt::AlignLeft | Qt::AlignVCenter);
+             QStringLiteral("Часть размеров не показана"), 2.5, Qt::AlignLeft | Qt::AlignVCenter);
 }
 } // namespace drawing
 int DrawingSheet::pageCount(const BendingDrawing &d, const DrawingTitle &title) {

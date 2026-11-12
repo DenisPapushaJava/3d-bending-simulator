@@ -261,13 +261,14 @@ class DrawingPreviewArea final : public QScrollArea {
     }
     QSize paperSize() const {
         if (!fitToWindow_)
-            return {paperWidth_, static_cast<int>(paperWidth_ * paperMm_.height() / paperMm_.width())};
+            return {paperWidth_,
+                    static_cast<int>(paperWidth_ * paperMm_.height() / paperMm_.width())};
         const auto available = viewport()->size() - QSize(24, 24);
         if (available.width() < 2 || available.height() < 2)
             return {};
-        const auto width = std::min(
-            available.width(),
-            static_cast<int>(available.height() * paperMm_.width() / paperMm_.height()));
+        const auto width =
+            std::min(available.width(),
+                     static_cast<int>(available.height() * paperMm_.width() / paperMm_.height()));
         return {width, static_cast<int>(width * paperMm_.height() / paperMm_.width())};
     }
     void fitPaper() {
@@ -1089,18 +1090,17 @@ class DrawingDialog::Impl {
             status->setToolTip(detail +
                                QStringLiteral("\nРазмеры развёртки — от края заготовки, не X "
                                               "упора. Калибровка станка не выполнена."));
-            status->setText(QStringLiteral("%1 · %2 лист(а)\nРазмеры гибов: %3 из %4%5%6")
-                                .arg(DrawingSheet::paperName(plan->paperFormat))
-                                .arg(plan->pages)
-                                .arg(coverage.dimensioned)
-                                .arg(coverage.total)
-                                .arg(drawing->flatPatternError
-                                         ? QStringLiteral("\nРазвёртка не включена")
-                                         : QString{})
-                                .arg(plan->omittedDimensions
-                                         ? QStringLiteral("\nНе показано размеров: %1")
-                                               .arg(plan->omittedDimensions)
-                                         : QString{}));
+            status->setText(
+                QStringLiteral("%1 · %2 лист(а)\nРазмеры гибов: %3 из %4%5%6")
+                    .arg(DrawingSheet::paperName(plan->paperFormat))
+                    .arg(plan->pages)
+                    .arg(coverage.dimensioned)
+                    .arg(coverage.total)
+                    .arg(drawing->flatPatternError ? QStringLiteral("\nРазвёртка не включена")
+                                                   : QString{})
+                    .arg(plan->omittedDimensions ? QStringLiteral("\nНе показано размеров: %1")
+                                                       .arg(plan->omittedDimensions)
+                                                 : QString{}));
             render();
         } else {
             image->clear();

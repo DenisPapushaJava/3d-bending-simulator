@@ -26,7 +26,8 @@ void DrawingLayoutController::request(application::BendingDrawingPtr source,
                                       DrawingLayoutLimits limits, DrawingPaperFormat format) {
     drawing::initializeFont(); // Resource registration stays on the GUI thread.
     cancel();
-    pending_ = Request{std::move(source), std::move(choices), side, limits, format, {}, generation_};
+    pending_ =
+        Request{std::move(source), std::move(choices), side, limits, format, {}, generation_};
     dispatch();
 }
 void DrawingLayoutController::dispatch() {

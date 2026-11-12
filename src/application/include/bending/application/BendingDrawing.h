@@ -106,7 +106,7 @@ struct DrawingView {
     std::vector<DrawingBendCallout> groupedBendNotes;
     std::vector<std::pair<DrawingPoint, double>> holeDiameters;
     std::vector<std::vector<std::size_t>> circularOpeningRows; // Indices in holeDiameters.
-    std::vector<std::vector<std::size_t>> obroundOpeningRows; // Indices in openingAxes.
+    std::vector<std::vector<std::size_t>> obroundOpeningRows;  // Indices in openingAxes.
     std::vector<DrawingContourCorners> contourCorners;
     std::vector<DrawingViewArrow> viewArrows;
 };

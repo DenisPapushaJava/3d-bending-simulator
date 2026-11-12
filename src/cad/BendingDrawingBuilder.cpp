@@ -295,9 +295,10 @@ std::vector<PlateCorner> plateCorners(const TopoDS_Face &face, const gp_Dir &nor
     return result;
 }
 
-std::vector<DrawingContourCorners>
-confirmedPlateCorners(const TopoDS_Shape &shape, const TopoDS_Face &front,
-                      const TopoDS_Face &back, const Frame &frame, std::stop_token stop) {
+std::vector<DrawingContourCorners> confirmedPlateCorners(const TopoDS_Shape &shape,
+                                                         const TopoDS_Face &front,
+                                                         const TopoDS_Face &back,
+                                                         const Frame &frame, std::stop_token stop) {
     constexpr double tolerance = 1e-5;
     const BRepAdaptor_Surface frontSurface(front), backSurface(back);
     if (frontSurface.GetType() != GeomAbs_Plane || backSurface.GetType() != GeomAbs_Plane ||
@@ -342,9 +343,10 @@ confirmedPlateCorners(const TopoDS_Shape &shape, const TopoDS_Face &front,
                     continue;
                 const BRepAdaptor_Surface wall(TopoDS::Face(neighbor));
                 if (a.kind == DrawingContourCorners::Kind::Round)
-                    sharedWalls += wall.GetType() == GeomAbs_Cylinder &&
-                                   wall.Cylinder().Axis().Direction().IsParallel(frame.normal, 1e-7) &&
-                                   std::abs(wall.Cylinder().Radius() - a.size) <= tolerance;
+                    sharedWalls +=
+                        wall.GetType() == GeomAbs_Cylinder &&
+                        wall.Cylinder().Axis().Direction().IsParallel(frame.normal, 1e-7) &&
+                        std::abs(wall.Cylinder().Radius() - a.size) <= tolerance;
                 else
                     sharedWalls += wall.GetType() == GeomAbs_Plane &&
                                    wall.Plane().Axis().Direction().IsNormal(frame.normal, 1e-7);
@@ -360,8 +362,9 @@ confirmedPlateCorners(const TopoDS_Shape &shape, const TopoDS_Face &front,
         std::vector<std::pair<DrawingPoint, DrawingPoint>> rays;
         const gp_Vec chamferOutward(a.anchor, a.corner);
         for (double fraction : {.5, .3, .7, .15, .85}) {
-            const auto point = curve.Value(
-                curve.FirstParameter() + fraction * (curve.LastParameter() - curve.FirstParameter()));
+            const auto point =
+                curve.Value(curve.FirstParameter() +
+                            fraction * (curve.LastParameter() - curve.FirstParameter()));
             const auto outward = a.kind == DrawingContourCorners::Kind::Round
                                      ? gp_Vec(curve.Circle().Location(), point)
                                      : chamferOutward;
@@ -373,8 +376,7 @@ confirmedPlateCorners(const TopoDS_Shape &shape, const TopoDS_Face &front,
 }
 
 std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, const Frame &frame,
-                                                    const DrawingView &view,
-                                                    std::stop_token stop) {
+                                                    const DrawingView &view, std::stop_token stop) {
     struct Run {
         DrawingPoint first, last;
         bool horizontal;
@@ -1938,8 +1940,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                   ? &projection
                                   : nullptr);
         }
-        if (bendAnalysis.status == BendRecognitionStatus::Completed &&
-            bendAnalysis.bends.empty() && bendAnalysis.interiorContourDiagnostics.empty() &&
+        if (bendAnalysis.status == BendRecognitionStatus::Completed && bendAnalysis.bends.empty() &&
+            bendAnalysis.interiorContourDiagnostics.empty() &&
             metadata.thickness.status == ThicknessStatus::Detected) {
             std::size_t opposite = 0;
             bool ambiguous = false;
@@ -1963,7 +1965,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             if (!ambiguous && opposite && opposite <= static_cast<std::size_t>(faces.Extent())) {
                 try {
                     main.contourCorners = confirmedPlateCorners(
-                        shape, face, TopoDS::Face(faces(static_cast<int>(opposite))), frames[0], stop);
+                        shape, face, TopoDS::Face(faces(static_cast<int>(opposite))), frames[0],
+                        stop);
                     drawing->views[0].contourCorners = main.contourCorners;
                 } catch (const Standard_Failure &) {
                     // Optional corner sizes require usable analytic geometry on both faces.

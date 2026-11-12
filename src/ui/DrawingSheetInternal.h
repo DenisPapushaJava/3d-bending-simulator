@@ -95,8 +95,7 @@ application::DrawingView preparedView(const application::BendingDrawing &, Drawi
 application::DrawingView selectedView(const application::BendingDrawing &, DrawingViewKey,
                                       const std::vector<DrawingViewChoice> *);
 void paintPlaced(QPainter &, const application::BendingDrawing &, const DrawingPlacedView &,
-                 DrawingFlatSide, std::vector<QRectF> &, QRectF *selectionBounds,
-                 LayoutContext &);
+                 DrawingFlatSide, std::vector<QRectF> &, QRectF *selectionBounds, LayoutContext &);
 void recordViews(DrawingSheetPlan &, LayoutContext &);
 void paintRecorded(QPainter &, const DrawingPlacedView &, DrawingFlatSide);
 void paintCompositionFrame(QPainter &, const application::BendingDrawing &, const DrawingTitle &,

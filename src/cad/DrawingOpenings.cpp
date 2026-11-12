@@ -237,8 +237,8 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                 if (curve.GetType() == GeomAbs_Circle) {
                     const auto circle = curve.Circle();
                     equalSemicircles &=
-                        std::abs(curve.LastParameter() - curve.FirstParameter() - std::numbers::pi) <
-                            1e-7 &&
+                        std::abs(curve.LastParameter() - curve.FirstParameter() -
+                                 std::numbers::pi) < 1e-7 &&
                         (circleCenters.empty() || std::abs(radius - circle.Radius()) < tolerance);
                     curved = true;
                     if (!circleCenters.empty() &&
@@ -294,14 +294,14 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                         major = gp_Dir(gp_Vec(a, b));
                     }
             const auto dimensions = bounds(wire, gp_Ax2(center, plane.Axis().Direction(), major));
-            const bool obround = !circular && edges == 4 && circleCenters.size() == 2 &&
-                                 lineDirections.size() == 2 && equalSemicircles &&
-                                 farthest > tolerance && std::abs(longestLine - farthest) < tolerance &&
-                                 lineDirections[0].IsParallel(major, 1e-7) &&
-                                 lineDirections[1].IsParallel(major, 1e-7) &&
-                                 std::abs(dimensions[2] - dimensions[0] - farthest - 2 * radius) <
-                                     tolerance &&
-                                 std::abs(dimensions[3] - dimensions[1] - 2 * radius) < tolerance;
+            const bool obround =
+                !circular && edges == 4 && circleCenters.size() == 2 &&
+                lineDirections.size() == 2 && equalSemicircles && farthest > tolerance &&
+                std::abs(longestLine - farthest) < tolerance &&
+                lineDirections[0].IsParallel(major, 1e-7) &&
+                lineDirections[1].IsParallel(major, 1e-7) &&
+                std::abs(dimensions[2] - dimensions[0] - farthest - 2 * radius) < tolerance &&
+                std::abs(dimensions[3] - dimensions[1] - 2 * radius) < tolerance;
             DrawingOpening opening{wire,
                                    center,
                                    plane.Axis().Direction(),

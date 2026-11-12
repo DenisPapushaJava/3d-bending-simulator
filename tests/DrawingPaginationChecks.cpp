@@ -170,10 +170,11 @@ void drawingPaginationChecks() {
                             crowded->views[0].holeDimensions.size(),
                 "A crowded projection should keep overall, contour and fitting hole dimensions");
         require(at.smallOptionalText &&
-                    std::any_of(at.dimensions.begin(), at.dimensions.end(), [](const auto &d) {
-                        return d.source == ui::DrawingDimensionSource::Hole &&
-                               std::abs(d.textBounds.height() - 3.5) < 1e-7;
-                    }),
+                    std::any_of(at.dimensions.begin(), at.dimensions.end(),
+                                [](const auto &d) {
+                                    return d.source == ui::DrawingDimensionSource::Hole &&
+                                           std::abs(d.textBounds.height() - 3.5) < 1e-7;
+                                }),
                 "A dense sheet did not retain secondary dimensions with smaller text");
     }
 
