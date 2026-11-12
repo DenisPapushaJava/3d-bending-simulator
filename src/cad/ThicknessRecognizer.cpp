@@ -186,8 +186,29 @@ application::ThicknessAnalysis recognizeThickness(const TopoDS_Shape &shape, dou
         IntCurvesFace_ShapeIntersector ray;
         ray.Load(shape, topologyTolerance);
         BRepClass3d_SolidClassifier material(shape);
+        const auto wallGap = [](const PlaneFace &a, const PlaneFace &b) -> std::optional<double> {
+            if (!a.outward.IsOpposite(b.outward, 1.0e-7))
+                return {};
+            const double gap =
+                -gp_Vec(a.plane.Location(), b.plane.Location()).Dot(gp_Vec(a.outward));
+            if (!std::isfinite(gap) || gap <= std::max(a.tolerance, b.tolerance) * 100 ||
+                gap > std::sqrt(std::min(a.area, b.area)) / 5)
+                return {};
+            return gap;
+        };
+        const double minimum = topologyTolerance * 10;
         int rays = 0;
         for (const auto &[index, a] : planes) {
+            if (stop.stop_requested())
+                return {};
+            const double maximum = std::sqrt(a.area) / 5;
+            // A ray can yield a measurement only if some plane passes the same
+            // pair checks used after the first hit on the original solid.
+            if (maximum <= minimum ||
+                std::none_of(planes.begin(), planes.end(), [&](const auto &entry) {
+                    return entry.first != index && wallGap(a, entry.second).has_value();
+                }))
+                continue;
             const auto &face = TopoDS::Face(faces(index));
             std::vector<gp_Pnt> samples;
             const auto add = [&](double u, double v) {
@@ -211,10 +232,6 @@ application::ThicknessAnalysis recognizeThickness(const TopoDS_Shape &shape, dou
                 for (double fv : fractions)
                     add(u0 + fu * (u1 - u0), v0 + fv * (v1 - v0));
             const auto inward = a.outward.Reversed();
-            const double minimum = topologyTolerance * 10;
-            const double maximum = std::sqrt(a.area) / 5;
-            if (maximum <= minimum)
-                continue;
             for (const auto &sample : samples) {
                 if (stop.stop_requested())
                     return {};
@@ -249,13 +266,10 @@ application::ThicknessAnalysis recognizeThickness(const TopoDS_Shape &shape, dou
                     continue;
                 const auto &b = found->second;
                 const double uncertainty = std::max(a.tolerance, b.tolerance);
-                const double gap =
-                    -gp_Vec(a.plane.Location(), b.plane.Location()).Dot(gp_Vec(a.outward));
-                if (!a.outward.IsOpposite(b.outward, 1.0e-7) || !std::isfinite(gap) ||
-                    gap <= uncertainty * 100 || gap > std::sqrt(std::min(a.area, b.area)) / 5 ||
-                    std::abs(ray.WParameter(first) - gap) > uncertainty)
+                const auto gap = wallGap(a, b);
+                if (!gap || std::abs(ray.WParameter(first) - *gap) > uncertainty)
                     continue;
-                remember(index, other, gap, ThicknessEvidenceKind::PlanarWalls, uncertainty);
+                remember(index, other, *gap, ThicknessEvidenceKind::PlanarWalls, uncertainty);
             }
         }
         if (!recordBendThickness())

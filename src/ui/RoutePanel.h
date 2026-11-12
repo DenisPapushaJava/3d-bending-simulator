@@ -32,6 +32,9 @@ class RoutePanel final : public QWidget {
     [[nodiscard]] int selected() const {
         return selected_;
     }
+    [[nodiscard]] int stepCount() const {
+        return static_cast<int>(ids_.size());
+    }
     [[nodiscard]] std::size_t operation() const {
         return selected_ > 0 ? static_cast<std::size_t>(selected_ - 1) : 0;
     }
@@ -55,7 +58,7 @@ class RoutePanel final : public QWidget {
     void redo();
     struct OrderEdit {
         std::vector<std::string> before, after;
-        std::string selected;
+        int previousStep, nextStep;
         bool grouped = false;
     };
     std::vector<OrderEdit> undo_, redo_;
@@ -65,6 +68,7 @@ class RoutePanel final : public QWidget {
     application::BendRoutePtr route_;
     std::vector<std::string> ids_;
     std::vector<std::string> sourceIds_;
+    std::vector<std::vector<std::string>> draftGroups_;
     std::vector<std::size_t> indices_;
     std::vector<QPushButton *> steps_;
     int selected_ = 0;

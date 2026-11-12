@@ -26,6 +26,7 @@ struct DrawingDimension {
     std::optional<std::array<DrawingPoint, 2>> witnesses = {};
     std::size_t pitchIntervals = 0; // Verified equally spaced coordinates; valueMm is full span.
     double pitchMm = 0;
+    bool openingPatternReference = false; // Base coordinate or pitch of a confirmed row.
 };
 struct DrawingAngle {
     DrawingPoint vertex;
@@ -44,6 +45,7 @@ struct DrawingCenterAxes {
     DrawingPoint center;
     DrawingPoint first;
     DrawingPoint second;
+    bool obround = false;
 };
 struct DrawingDirectionNote {
     DrawingPoint anchor;
@@ -64,6 +66,14 @@ struct DrawingDetailLocator {
 struct DrawingBendCallout {
     DrawingPoint anchor;
     std::vector<std::size_t> bends;
+};
+struct DrawingContourCorners {
+    enum class Kind { Round, Chamfer45 };
+    Kind kind;
+    double sizeMm;
+    // Candidate rays for each physical corner. A pair is a point on the contour
+    // and a point in the outward direction.
+    std::vector<std::vector<std::pair<DrawingPoint, DrawingPoint>>> corners;
 };
 struct DrawingView {
     std::vector<DrawingPath> paths;
@@ -95,6 +105,9 @@ struct DrawingView {
     std::vector<DrawingDimension> axialDimensions;
     std::vector<DrawingBendCallout> groupedBendNotes;
     std::vector<std::pair<DrawingPoint, double>> holeDiameters;
+    std::vector<std::vector<std::size_t>> circularOpeningRows; // Indices in holeDiameters.
+    std::vector<std::vector<std::size_t>> obroundOpeningRows;  // Indices in openingAxes.
+    std::vector<DrawingContourCorners> contourCorners;
     std::vector<DrawingViewArrow> viewArrows;
 };
 struct DrawingBend {
@@ -192,6 +205,7 @@ struct DrawingFlatPattern {
     FlatPatternInfo info;
     // Groups of actual bend IDs sharing one phase of verified periodic line coordinates.
     std::vector<std::vector<std::size_t>> repeatedBendGroups;
+    std::size_t dimensionsWithoutWitnesses = 0;
 };
 struct BendingDrawing {
     std::array<DrawingView, 4> views; // Front, top, left: first-angle projection; isometric.

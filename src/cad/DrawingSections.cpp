@@ -21,6 +21,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <limits>
+#include <map>
 
 namespace bending::cad {
 namespace {
@@ -197,6 +198,42 @@ bool aligned(const gp_Ax2 &section, const gp_Ax2 &source, const DrawingSectionMa
     return true;
 }
 void compactCoordinates(DrawingView &view) {
+    using Center = std::pair<double, double>;
+    const auto center = [](DrawingPoint p) { return Center{p.x, p.y}; };
+    std::map<Center, std::optional<std::size_t>> openings;
+    const auto addOpening = [&](DrawingPoint point, std::optional<std::size_t> index) {
+        auto [it, added] = openings.try_emplace(center(point), index);
+        if (!added)
+            it->second.reset(); // Different contours share this projected center.
+    };
+    const auto circleCount = view.holeDiameters.size();
+    for (std::size_t i = 0; i < circleCount; ++i)
+        addOpening(view.holeDiameters[i].first, i);
+    for (std::size_t i = 0; i < view.openingAxes.size(); ++i) {
+        const auto &axes = view.openingAxes[i];
+        addOpening(axes.center, axes.obround ? std::optional(circleCount + i) : std::nullopt);
+    }
+    const auto sameOpening = [&](std::size_t first, std::size_t second) {
+        if (first < circleCount && second < circleCount)
+            return std::abs(view.holeDiameters[first].second - view.holeDiameters[second].second) <
+                   1e-5;
+        if (first < circleCount || second < circleCount)
+            return false;
+        const auto &a = view.openingAxes[first - circleCount];
+        const auto &b = view.openingAxes[second - circleCount];
+        const double ax = a.first.x - a.center.x, ay = a.first.y - a.center.y;
+        const double bx = b.first.x - b.center.x, by = b.first.y - b.center.y;
+        const double al = std::hypot(ax, ay), bl = std::hypot(bx, by);
+        return std::abs(al - bl) < 1e-5 && std::abs(ax * by - ay * bx) < 1e-7 * al * bl &&
+               std::abs(std::hypot(a.second.x - a.center.x, a.second.y - a.center.y) -
+                        std::hypot(b.second.x - b.center.x, b.second.y - b.center.y)) < 1e-5;
+    };
+    struct Row {
+        std::size_t base;
+        bool horizontal;
+        std::vector<std::size_t> holes;
+    };
+    std::vector<Row> rows;
     std::vector<DrawingDimension> result;
     for (bool horizontal : {true, false}) {
         std::vector<DrawingDimension> group;
@@ -216,6 +253,20 @@ void compactCoordinates(DrawingView &view) {
                 result.push_back(group[first++]);
                 continue;
             }
+            Row row{result.size(), horizontal, {}};
+            const auto across = [horizontal](DrawingPoint point) {
+                return horizontal ? point.y : point.x;
+            };
+            for (std::size_t i = first; i < end; ++i) {
+                const auto hole = openings.find(center(group[i].end));
+                if (hole == openings.end() || !hole->second ||
+                    std::abs(across(group[i].end) - across(group[first].end)) > 1e-5 ||
+                    (!row.holes.empty() && !sameOpening(row.holes.front(), *hole->second)))
+                    break;
+                row.holes.push_back(*hole->second);
+            }
+            if (row.holes.size() == end - first)
+                rows.push_back(std::move(row));
             result.push_back(group[first]);
             DrawingDimension pitch{group[first].end,
                                    group[end - 1].end,
@@ -230,6 +281,30 @@ void compactCoordinates(DrawingView &view) {
             pitch.pitchMm = step;
             result.push_back(std::move(pitch));
             first = end;
+        }
+    }
+    std::vector<bool> used(circleCount + view.openingAxes.size());
+    for (auto &row : rows) {
+        const auto reference = result[row.base].end;
+        const auto across = std::find_if(result.begin(), result.end(), [&](const auto &d) {
+            const bool horizontal = std::abs(d.end.y - d.start.y) < 1e-7;
+            return !d.pitchIntervals && horizontal != row.horizontal &&
+                   std::abs((horizontal ? d.end.x - reference.x : d.end.y - reference.y)) < 1e-5;
+        });
+        if (across == result.end() ||
+            std::any_of(row.holes.begin(), row.holes.end(), [&](auto i) { return used[i]; }))
+            continue;
+        for (auto i : row.holes)
+            used[i] = true;
+        across->openingPatternReference = true;
+        result[row.base].openingPatternReference = true;
+        result[row.base + 1].openingPatternReference = true;
+        if (row.holes.front() < circleCount)
+            view.circularOpeningRows.push_back(std::move(row.holes));
+        else {
+            for (auto &i : row.holes)
+                i -= circleCount;
+            view.obroundOpeningRows.push_back(std::move(row.holes));
         }
     }
     view.holeDimensions = std::move(result);

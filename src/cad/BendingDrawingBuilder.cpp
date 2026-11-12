@@ -48,6 +48,7 @@
 #include <iterator>
 #include <numbers>
 #include <stdexcept>
+#include <utility>
 
 namespace bending::cad {
 namespace {
@@ -207,6 +208,289 @@ void overallDimensions(const TopoDS_Shape &shape, const Frame &frame, DrawingVie
             overallWitnesses(shape, frame, dimension, horizontal, stop);
         view.dimensions.push_back(std::move(dimension));
     }
+}
+struct PlateCorner {
+    TopoDS_Edge edge;
+    gp_Pnt first, last, anchor, corner;
+    DrawingContourCorners::Kind kind;
+    double size;
+};
+
+std::vector<PlateCorner> plateCorners(const TopoDS_Face &face, const gp_Dir &normal,
+                                      std::stop_token stop) {
+    constexpr double tolerance = 1e-5;
+    const auto wire = BRepTools::OuterWire(face);
+    if (wire.IsNull() || !BRep_Tool::IsClosed(wire))
+        return {};
+    struct Segment {
+        TopoDS_Edge edge;
+        gp_Pnt first, last;
+        bool line;
+    };
+    std::vector<Segment> segments;
+    for (BRepTools_WireExplorer it(wire, face); it.More(); it.Next()) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        if (segments.size() == 128)
+            return {};
+        const BRepAdaptor_Curve curve(it.Current());
+        auto first = curve.Value(curve.FirstParameter()), last = curve.Value(curve.LastParameter());
+        if (it.Current().Orientation() == TopAbs_REVERSED)
+            std::swap(first, last);
+        segments.push_back({it.Current(), first, last, curve.GetType() == GeomAbs_Line});
+    }
+    if (segments.size() < 4)
+        return {};
+    std::vector<PlateCorner> result;
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        const auto &before = segments[(i + segments.size() - 1) % segments.size()];
+        const auto &at = segments[i];
+        const auto &after = segments[(i + 1) % segments.size()];
+        if (!before.line || !after.line || before.last.Distance(at.first) > tolerance ||
+            after.first.Distance(at.last) > tolerance)
+            continue;
+        const gp_Vec incoming(before.first, before.last), outgoing(after.first, after.last);
+        if (incoming.Magnitude() <= tolerance || outgoing.Magnitude() <= tolerance ||
+            !gp_Dir(incoming).IsNormal(gp_Dir(outgoing), 1e-7))
+            continue;
+        const auto along = incoming.Normalized(), across = outgoing.Normalized();
+        const gp_Vec diagonal(at.first, at.last);
+        const double a = diagonal.Dot(along), b = diagonal.Dot(across);
+        if (a <= tolerance || b <= tolerance || std::abs(a - b) > tolerance)
+            continue;
+        const auto corner = at.first.Translated(a * along);
+        if (corner.Distance(at.last.Translated(-b * across)) > tolerance)
+            continue;
+        const BRepAdaptor_Curve curve(at.edge);
+        auto kind = DrawingContourCorners::Kind::Chamfer45;
+        double size = a;
+        if (at.line) {
+            // A long side between two short diagonal cuts is not a chamfer.
+            if (!gp_Dir(diagonal).IsParallel(gp_Dir(along + across), 1e-6) ||
+                a >= std::min(incoming.Magnitude(), outgoing.Magnitude()) - tolerance)
+                continue;
+        } else {
+            if (curve.GetType() != GeomAbs_Circle ||
+                std::abs(curve.LastParameter() - curve.FirstParameter() - std::numbers::pi / 2) >
+                    1e-7)
+                continue;
+            const auto circle = curve.Circle();
+            if (!circle.Axis().Direction().IsParallel(normal, 1e-7) ||
+                std::abs(gp_Vec(circle.Location(), at.first).Dot(along)) > tolerance ||
+                std::abs(gp_Vec(circle.Location(), at.last).Dot(across)) > tolerance ||
+                std::abs(circle.Radius() - a) > tolerance)
+                continue;
+            kind = DrawingContourCorners::Kind::Round;
+            size = circle.Radius();
+        }
+        const auto anchor = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+        const gp_Vec inward(corner, anchor);
+        if (inward.Magnitude() <= tolerance ||
+            BRepClass_FaceClassifier(face, corner, tolerance).State() != TopAbs_OUT ||
+            BRepClass_FaceClassifier(face, anchor.Translated(.1 * inward), tolerance).State() !=
+                TopAbs_IN)
+            continue;
+        result.push_back({at.edge, at.first, at.last, anchor, corner, kind, size});
+    }
+    return result;
+}
+
+std::vector<DrawingContourCorners> confirmedPlateCorners(const TopoDS_Shape &shape,
+                                                         const TopoDS_Face &front,
+                                                         const TopoDS_Face &back,
+                                                         const Frame &frame, std::stop_token stop) {
+    constexpr double tolerance = 1e-5;
+    const BRepAdaptor_Surface frontSurface(front), backSurface(back);
+    if (frontSurface.GetType() != GeomAbs_Plane || backSurface.GetType() != GeomAbs_Plane ||
+        !frontSurface.Plane().Axis().Direction().IsParallel(frame.normal, 1e-7) ||
+        !backSurface.Plane().Axis().Direction().IsParallel(frame.normal, 1e-7))
+        return {};
+    const auto first = plateCorners(front, frame.normal, stop);
+    if (first.empty())
+        return {};
+    const auto second = plateCorners(back, frame.normal, stop);
+    if (second.empty())
+        return {};
+    const auto frontPlane = frontSurface.Plane(), backPlane = backSurface.Plane();
+    const gp_Vec normal(frame.normal);
+    const auto offset = gp_Vec(frontPlane.Location(), backPlane.Location()).Dot(normal) * normal;
+    TopTools_IndexedDataMapOfShapeListOfShape neighbors;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, neighbors);
+    std::vector<DrawingContourCorners> result;
+    for (const auto &a : first) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const auto start = a.first.Translated(offset), end = a.last.Translated(offset);
+        const PlateCorner *match = nullptr;
+        for (const auto &b : second) {
+            if (a.kind != b.kind || std::abs(a.size - b.size) > tolerance ||
+                a.anchor.Translated(offset).Distance(b.anchor) > tolerance ||
+                !((start.Distance(b.first) <= tolerance && end.Distance(b.last) <= tolerance) ||
+                  (start.Distance(b.last) <= tolerance && end.Distance(b.first) <= tolerance)))
+                continue;
+            if (match) {
+                match = nullptr;
+                break;
+            }
+            match = &b;
+        }
+        if (!match)
+            continue;
+        int sharedWalls = 0;
+        for (const auto &neighbor : neighbors.FindFromKey(a.edge))
+            for (const auto &opposite : neighbors.FindFromKey(match->edge)) {
+                if (!neighbor.IsSame(opposite))
+                    continue;
+                const BRepAdaptor_Surface wall(TopoDS::Face(neighbor));
+                if (a.kind == DrawingContourCorners::Kind::Round)
+                    sharedWalls +=
+                        wall.GetType() == GeomAbs_Cylinder &&
+                        wall.Cylinder().Axis().Direction().IsParallel(frame.normal, 1e-7) &&
+                        std::abs(wall.Cylinder().Radius() - a.size) <= tolerance;
+                else
+                    sharedWalls += wall.GetType() == GeomAbs_Plane &&
+                                   wall.Plane().Axis().Direction().IsNormal(frame.normal, 1e-7);
+            }
+        if (sharedWalls != 1)
+            continue;
+        auto group = std::find_if(result.begin(), result.end(), [&](const auto &g) {
+            return g.kind == a.kind && std::abs(g.sizeMm - a.size) <= tolerance;
+        });
+        if (group == result.end())
+            group = result.insert(result.end(), {a.kind, a.size, {}});
+        const BRepAdaptor_Curve curve(a.edge);
+        std::vector<std::pair<DrawingPoint, DrawingPoint>> rays;
+        const gp_Vec chamferOutward(a.anchor, a.corner);
+        for (double fraction : {.5, .3, .7, .15, .85}) {
+            const auto point =
+                curve.Value(curve.FirstParameter() +
+                            fraction * (curve.LastParameter() - curve.FirstParameter()));
+            const auto outward = a.kind == DrawingContourCorners::Kind::Round
+                                     ? gp_Vec(curve.Circle().Location(), point)
+                                     : chamferOutward;
+            rays.emplace_back(project(point, frame), project(point.Translated(outward), frame));
+        }
+        group->corners.push_back(std::move(rays));
+    }
+    return result;
+}
+
+std::vector<DrawingDimension> contourStepDimensions(const TopoDS_Face &face, const Frame &frame,
+                                                    const DrawingView &view, std::stop_token stop) {
+    struct Run {
+        DrawingPoint first, last;
+        bool horizontal;
+        std::optional<DrawingPoint> roundingBefore;
+    };
+    constexpr double tolerance = 1e-5;
+    const auto withinTolerance = [](double a, double b) { return std::abs(a - b) <= tolerance; };
+    const auto wire = BRepTools::OuterWire(face);
+    if (wire.IsNull() || !BRep_Tool::IsClosed(wire))
+        return {};
+    std::vector<Run> runs;
+    std::optional<DrawingPoint> rounding;
+    const auto direction = [](const Run &run) {
+        return run.horizontal ? run.last.x - run.first.x : run.last.y - run.first.y;
+    };
+    const auto continuous = [&](const Run &a, const Run &b) {
+        return !b.roundingBefore && a.horizontal == b.horizontal &&
+               direction(a) * direction(b) > 0 && withinTolerance(a.last.x, b.first.x) &&
+               withinTolerance(a.last.y, b.first.y);
+    };
+    std::size_t edgeCount = 0;
+    for (BRepTools_WireExplorer e(wire, face); e.More(); e.Next()) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        if (++edgeCount > 128)
+            return {};
+        const BRepAdaptor_Curve curve(e.Current());
+        if (curve.GetType() == GeomAbs_Circle && !rounding &&
+            withinTolerance(curve.LastParameter() - curve.FirstParameter(), std::numbers::pi / 2)) {
+            rounding = project(curve.Circle().Location(), frame);
+            continue;
+        }
+        if (curve.GetType() != GeomAbs_Line)
+            return {};
+        auto a = project(curve.Value(curve.FirstParameter()), frame);
+        auto b = project(curve.Value(curve.LastParameter()), frame);
+        if (e.Current().Orientation() == TopAbs_REVERSED)
+            std::swap(a, b);
+        const bool horizontal = withinTolerance(a.y, b.y), vertical = withinTolerance(a.x, b.x);
+        if (horizontal == vertical)
+            return {};
+        const Run run{a, b, horizontal, std::exchange(rounding, std::nullopt)};
+        if (!runs.empty() && continuous(runs.back(), run))
+            runs.back().last = b;
+        else
+            runs.push_back(run);
+    }
+    if (runs.size() < 4 || (rounding && runs.front().roundingBefore))
+        return {};
+    if (rounding)
+        runs.front().roundingBefore = rounding;
+    if (continuous(runs.back(), runs.front())) {
+        runs.front().first = runs.back().first;
+        runs.front().roundingBefore = runs.back().roundingBefore;
+        runs.pop_back();
+    }
+    // Intersect the straight supports at each corner. At a fillet the
+    // intersection defines the nominal step, while witnesses stay on real edges.
+    const auto tangent = [&](const Run &r, DrawingPoint end, DrawingPoint center) {
+        return r.horizontal ? withinTolerance(end.x, center.x) : withinTolerance(end.y, center.y);
+    };
+    std::vector<DrawingPoint> corners;
+    const auto count = runs.size();
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto &before = runs[(i + count - 1) % count], &after = runs[i];
+        if (before.horizontal == after.horizontal)
+            return {};
+        if (const auto c = after.roundingBefore) {
+            if (!tangent(before, before.last, *c) || !tangent(after, after.first, *c))
+                return {};
+        } else if (!withinTolerance(before.last.x, after.first.x) ||
+                   !withinTolerance(before.last.y, after.first.y))
+            return {};
+        corners.push_back(before.horizontal ? DrawingPoint{after.first.x, before.last.y}
+                                            : DrawingPoint{before.last.x, after.first.y});
+    }
+    double area = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto a = corners[i], b = corners[(i + 1) % count];
+        area += (a.x - view.minimum.x) * (b.y - view.minimum.y) -
+                (b.x - view.minimum.x) * (a.y - view.minimum.y);
+    }
+    if (!std::isfinite(area) || std::abs(area) <= tolerance)
+        return {};
+    const auto reentrant = [&](std::size_t i) {
+        const auto &a = runs[(i + count - 1) % count], &b = runs[i];
+        const double cross = direction(a) * direction(b) * (a.horizontal ? 1 : -1);
+        return (cross < 0) != (area < 0);
+    };
+    std::vector<DrawingDimension> dimensions;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto next = (i + 1) % count;
+        if (!reentrant(i) && !reentrant(next))
+            continue;
+        const bool horizontal = runs[i].horizontal;
+        const auto coordinate = [horizontal](DrawingPoint p) { return horizontal ? p.x : p.y; };
+        auto a = corners[i], b = corners[next];
+        auto first = runs[(i + count - 1) % count].last, last = runs[next].first;
+        if (coordinate(a) > coordinate(b)) {
+            std::swap(a, b);
+            std::swap(first, last);
+        }
+        const auto value = coordinate(b) - coordinate(a);
+        const auto fullSpan = coordinate(view.maximum) - coordinate(view.minimum);
+        if (value <= tolerance || withinTolerance(value, fullSpan) ||
+            std::any_of(dimensions.begin(), dimensions.end(), [&](const auto &d) {
+                const bool sameAxis = withinTolerance(d.start.y, d.end.y) == horizontal;
+                return sameAxis && withinTolerance(coordinate(d.start), coordinate(a)) &&
+                       withinTolerance(coordinate(d.end), coordinate(b));
+            }))
+            continue;
+        dimensions.push_back({a, b, value, {}, std::array{first, last}});
+    }
+    return dimensions;
 }
 struct CircleArcs {
     DrawingPoint center;
@@ -1051,16 +1335,26 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
                 }
             return best;
         };
-        for (auto *dimensions : {&v.dimensions, &v.sectionDimensions, &v.axialDimensions})
-            for (auto &dimension : *dimensions) {
+        for (auto *dimensions : {&v.dimensions, &v.sectionDimensions, &v.axialDimensions}) {
+            auto kept = dimensions->begin();
+            for (auto it = dimensions->begin(); it != dimensions->end(); ++it) {
+                if (stop.stop_requested())
+                    throw DrawingError{"Cancelled", true};
+                auto &dimension = *it;
                 const bool horizontal = std::abs(dimension.end.x - dimension.start.x) >
                                         std::abs(dimension.end.y - dimension.start.y);
                 const auto first = witness(dimension.start, horizontal),
                            second = witness(dimension.end, horizontal);
                 if (!first || !second)
-                    throw DrawingError{"Cannot attach a flat dimension to its contour"};
+                    continue;
                 dimension.witnesses = std::array{*first, *second};
+                if (kept != it)
+                    *kept = std::move(dimension);
+                ++kept;
             }
+            unfolded.dimensionsWithoutWitnesses += dimensions->end() - kept;
+            dimensions->erase(kept, dimensions->end());
+        }
         for (const auto &contour : OcctFlatPatternAccess::openingContours(*flat)) {
             budget += contour.size();
             if (budget > 200000)
@@ -1646,6 +1940,39 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                       (*drawing->classicalViews)[i].reverseProjection
                                   ? &projection
                                   : nullptr);
+        }
+        if (bendAnalysis.status == BendRecognitionStatus::Completed && bendAnalysis.bends.empty() &&
+            bendAnalysis.interiorContourDiagnostics.empty() &&
+            metadata.thickness.status == ThicknessStatus::Detected) {
+            std::size_t opposite = 0;
+            bool ambiguous = false;
+            for (const auto &e : metadata.thickness.evidence) {
+                if (e.kind != ThicknessEvidenceKind::PlanarWalls ||
+                    (e.firstFace != base && e.secondFace != base))
+                    continue;
+                const auto candidate = e.firstFace == base ? e.secondFace : e.firstFace;
+                ambiguous |= opposite && opposite != candidate;
+                opposite = candidate;
+            }
+            auto &main = (*drawing->classicalViews)[0];
+            if (opposite) {
+                try {
+                    main.sectionDimensions = contourStepDimensions(face, frames[0], main, stop);
+                    drawing->views[0].sectionDimensions = main.sectionDimensions;
+                } catch (const Standard_Failure &) {
+                    // A contour measurement is optional if OCCT cannot read the outer wire.
+                }
+            }
+            if (!ambiguous && opposite && opposite <= static_cast<std::size_t>(faces.Extent())) {
+                try {
+                    main.contourCorners = confirmedPlateCorners(
+                        shape, face, TopoDS::Face(faces(static_cast<int>(opposite))), frames[0],
+                        stop);
+                    drawing->views[0].contourCorners = main.contourCorners;
+                } catch (const Standard_Failure &) {
+                    // Optional corner sizes require usable analytic geometry on both faces.
+                }
+            }
         }
         for (auto &auxiliary : drawing->auxiliaryViews) {
             auto frame = frames.at(auxiliary.projection);

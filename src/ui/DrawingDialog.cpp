@@ -7,6 +7,7 @@
 #include "bending/ui/ImportController.h"
 #include "bending/ui/Preferences.h"
 #include <QAction>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -36,6 +37,7 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 
@@ -249,24 +251,32 @@ class DrawingPreviewArea final : public QScrollArea {
     QSpinBox *pageControl() const {
         return page_;
     }
+    void setPaperFormat(DrawingPaperFormat format) {
+        const auto size = DrawingSheet::paperSizeMm(format);
+        if (size == paperMm_)
+            return;
+        paperWidth_ = qRound(paperWidth_ * size.width() / paperMm_.width());
+        paperMm_ = size;
+        fitPaper();
+    }
     QSize paperSize() const {
         if (!fitToWindow_)
             return {paperWidth_,
-                    static_cast<int>(paperWidth_ * DrawingSheet::heightMm / DrawingSheet::widthMm)};
+                    static_cast<int>(paperWidth_ * paperMm_.height() / paperMm_.width())};
         const auto available = viewport()->size() - QSize(24, 24);
         if (available.width() < 2 || available.height() < 2)
             return {};
-        const auto width = std::min(
-            available.width(),
-            static_cast<int>(available.height() * DrawingSheet::widthMm / DrawingSheet::heightMm));
-        return {width, static_cast<int>(width * DrawingSheet::heightMm / DrawingSheet::widthMm)};
+        const auto width =
+            std::min(available.width(),
+                     static_cast<int>(available.height() * paperMm_.width() / paperMm_.height()));
+        return {width, static_cast<int>(width * paperMm_.height() / paperMm_.width())};
     }
     void fitPaper() {
         if (widget() && !paperSize().isEmpty())
             widget()->resize(paperSize());
         fit_->setChecked(fitToWindow_);
         zoomLabel_->setText(
-            QStringLiteral("%1%").arg(qRound(paperSize().width() / referenceWidth * 100)));
+            QStringLiteral("%1%").arg(qRound(paperSize().width() / referenceWidth() * 100)));
         viewport()->setCursor(fitToWindow_ ? Qt::ArrowCursor : Qt::OpenHandCursor);
         if (viewChanged)
             viewChanged();
@@ -340,8 +350,8 @@ class DrawingPreviewArea final : public QScrollArea {
                     (mouse->globalPosition().toPoint() - pressPosition_).manhattanLength() < 5) {
                     const auto point = widget()->mapFromGlobal(mouse->globalPosition().toPoint());
                     if (widget()->rect().contains(point))
-                        paperClicked({point.x() * DrawingSheet::widthMm / widget()->width(),
-                                      point.y() * DrawingSheet::heightMm / widget()->height()});
+                        paperClicked({point.x() * paperMm_.width() / widget()->width(),
+                                      point.y() * paperMm_.height() / widget()->height()});
                 }
                 return true;
             }
@@ -350,7 +360,10 @@ class DrawingPreviewArea final : public QScrollArea {
     }
 
   private:
-    static constexpr double referenceWidth = DrawingSheet::widthMm * 96 / 25.4;
+    QSizeF paperMm_ = DrawingSheet::paperSizeMm(DrawingPaperFormat::A4);
+    double referenceWidth() const {
+        return paperMm_.width() * 96 / 25.4;
+    }
     QFrame *footer_ = nullptr;
     QWidget *state_ = nullptr;
     QLabel *stateTitle_ = nullptr;
@@ -389,8 +402,8 @@ class DrawingPreviewArea final : public QScrollArea {
         const auto point = widget()->mapFrom(viewport(), anchor);
         const QPointF fraction(static_cast<double>(point.x()) / widget()->width(),
                                static_cast<double>(point.y()) / widget()->height());
-        paperWidth_ = std::clamp(qRound(widget()->width() * factor), qRound(referenceWidth * .1),
-                                 qRound(referenceWidth * 4));
+        paperWidth_ = std::clamp(qRound(widget()->width() * factor), qRound(referenceWidth() * .1),
+                                 qRound(referenceWidth() * 4));
         fitToWindow_ = false;
         fitPaper();
         const auto offset = widget()->mapTo(viewport(), QPoint{}) +
@@ -437,6 +450,7 @@ class DrawingDialog::Impl {
     QComboBox *viewScale;
     QLabel *scaleCaption;
     QComboBox *flatSide;
+    QButtonGroup *paperFormats;
     QLabel *sideInfo;
     QWidget *sectionOptions;
     QComboBox *sectionPlace;
@@ -450,6 +464,8 @@ class DrawingDialog::Impl {
     std::vector<DrawingViewChoice> choices;
     application::BendingDrawingPtr compositionSource;
     std::shared_ptr<const DrawingSheetPlan> plan;
+    // One completed plan per format for the current geometry and view settings.
+    std::array<std::shared_ptr<const DrawingSheetPlan>, 2> paperPlans;
     QString layoutError;
     std::optional<std::size_t> selected;
     bool settingsChanged = false;
@@ -472,6 +488,12 @@ class DrawingDialog::Impl {
                 quantity->value() ? std::optional<int>{quantity->value()} : std::nullopt,
                 DrawingLayout::Classical,
                 plan};
+    }
+    DrawingPaperFormat paperFormat() const {
+        return static_cast<DrawingPaperFormat>(paperFormats->checkedId());
+    }
+    std::shared_ptr<const DrawingSheetPlan> &cachedPaperPlan() {
+        return paperPlans[paperFormat() == DrawingPaperFormat::A4 ? 0 : 1];
     }
     static std::vector<std::size_t> cutKey(const application::DrawingSectionLocation &location) {
         auto key = location.bends;
@@ -625,6 +647,7 @@ class DrawingDialog::Impl {
         cancelLayout();
         layoutTimer->stop();
         plan.reset();
+        paperPlans = {};
         layoutError.clear();
         exportPdf->setEnabled(false);
         image->clear();
@@ -704,6 +727,7 @@ class DrawingDialog::Impl {
                 }
             sectionRefresh = false;
             plan.reset();
+            paperPlans = {};
             layoutError.clear();
             const QSignalBlocker block(views), blockSide(flatSide);
             views->clear();
@@ -729,17 +753,27 @@ class DrawingDialog::Impl {
             geometryEdited = false;
         }
         selectionControls();
+        if (!plan && cachedPaperPlan())
+            displayPlan(cachedPaperPlan());
         if (!plan) {
             if (!layoutBusy) {
                 layoutBusy = true;
                 showLayoutProgress();
                 layouts->request(drawing, choices,
-                                 static_cast<DrawingFlatSide>(flatSide->currentIndex()));
+                                 static_cast<DrawingFlatSide>(flatSide->currentIndex()), {},
+                                 paperFormat());
             }
             return false;
         }
         selectionControls();
         return true;
+    }
+    void displayPlan(std::shared_ptr<const DrawingSheetPlan> ready) {
+        plan = std::move(ready);
+        layoutError.clear();
+        preview->setPaperFormat(plan->paperFormat);
+        preview->setPageCount(plan->pages);
+        followSelection();
     }
     void cancelLayout() {
         if (layouts)
@@ -817,14 +851,19 @@ class DrawingDialog::Impl {
         render();
     }
     void scheduleLayout() {
+        paperPlans = {};
+        switchPaperFormat();
+    }
+    void switchPaperFormat() {
         cancelLayout();
+        layoutTimer->stop();
         plan.reset();
         layoutError.clear();
         exportPdf->setEnabled(false);
         image->clear();
         selectionControls();
-        if (sectionDirty) {
-            layoutTimer->stop();
+        if (sectionDirty || settingsChanged ||
+            (cachedPaperPlan() && compositionSource == controller.drawing())) {
             refresh();
             return;
         }
@@ -875,6 +914,8 @@ class DrawingDialog::Impl {
         sectionRefresh = false;
         sectionEdits.clear();
         cancelLayout();
+        plan.reset();
+        paperPlans = {};
         settingsChanged = true;
         exportPdf->setEnabled(false);
         status->setText(QStringLiteral("Ориентация изменена. Нажмите «Сформировать виды»."));
@@ -914,7 +955,9 @@ class DrawingDialog::Impl {
             if (plan && selectedRow >= 0 &&
                 static_cast<std::size_t>(selectedRow) < choices.size()) {
                 QPainter marker(&raster);
-                marker.scale(pixels / DrawingSheet::widthMm, pixels / DrawingSheet::widthMm);
+                const double pixelsPerMm =
+                    pixels / DrawingSheet::paperSizeMm(plan->paperFormat).width();
+                marker.scale(pixelsPerMm, pixelsPerMm);
                 marker.setPen(QPen(QColor("#38898B"), .3, Qt::DashLine));
                 marker.setBrush(Qt::NoBrush);
                 for (const auto &at : plan->views)
@@ -943,6 +986,8 @@ class DrawingDialog::Impl {
         const auto drawing = controller.drawing();
         views->setEnabled(same && !busy && drawing && !settingsChanged);
         flatSide->setEnabled(same && !busy && drawing && !settingsChanged);
+        for (auto *button : paperFormats->buttons())
+            button->setEnabled(same && !busy);
         exportPdf->setEnabled(same && !busy && drawing && !settingsChanged && plan && !layoutBusy &&
                               !layoutTimer->isActive() && layoutError.isEmpty());
         sectionControls();
@@ -994,10 +1039,11 @@ class DrawingDialog::Impl {
             const bool cut = drawing->views[0].omittedX.has_value();
             const auto coverage = DrawingSheet::coverage(*drawing, title());
             status->setText(
-                QStringLiteral("%1 · A3 · %2 лист(а)%3. Размеры полок и углы: %4 из %5 "
+                QStringLiteral("%1 · %2 · %3 лист(а)%4. Размеры полок и углы: %5 из %6 "
                                "распознанных гибов. Все размеры справочные.")
                     .arg(coverage.missing.empty() ? QStringLiteral("Лист сформирован")
                                                   : QStringLiteral("Неполные размеры"))
+                    .arg(DrawingSheet::paperName(plan->paperFormat))
                     .arg(DrawingSheet::pageCount(*drawing, title()))
                     .arg(cut ? QStringLiteral(
                                    " · подтверждённый однородный участок показан с разрывом")
@@ -1044,13 +1090,17 @@ class DrawingDialog::Impl {
             status->setToolTip(detail +
                                QStringLiteral("\nРазмеры развёртки — от края заготовки, не X "
                                               "упора. Калибровка станка не выполнена."));
-            status->setText(QStringLiteral("A3 · %1 лист(а)\nРазмеры гибов: %2 из %3%4")
-                                .arg(plan->pages)
-                                .arg(coverage.dimensioned)
-                                .arg(coverage.total)
-                                .arg(drawing->flatPatternError
-                                         ? QStringLiteral("\nРазвёртка не включена")
-                                         : QString{}));
+            status->setText(
+                QStringLiteral("%1 · %2 лист(а)\nРазмеры гибов: %3 из %4%5%6")
+                    .arg(DrawingSheet::paperName(plan->paperFormat))
+                    .arg(plan->pages)
+                    .arg(coverage.dimensioned)
+                    .arg(coverage.total)
+                    .arg(drawing->flatPatternError ? QStringLiteral("\nРазвёртка не включена")
+                                                   : QString{})
+                    .arg(plan->omittedDimensions ? QStringLiteral("\nНе показано размеров: %1")
+                                                       .arg(plan->omittedDimensions)
+                                                 : QString{}));
             render();
         } else {
             image->clear();
@@ -1105,6 +1155,34 @@ DrawingDialog::DrawingDialog(ImportController &c,
     auto *panel = new QWidget(this);
     panel->setMaximumWidth(310);
     auto *left = new QVBoxLayout(panel);
+    auto *viewHeader = new QHBoxLayout;
+    viewHeader->addWidget(new QLabel(QStringLiteral("Виды на листе"), panel), 1);
+    impl_->paperFormats = new QButtonGroup(this);
+    for (const auto format : {DrawingPaperFormat::A4, DrawingPaperFormat::A3}) {
+        const bool a4 = format == DrawingPaperFormat::A4;
+        const auto label = DrawingSheet::paperName(format);
+        auto *button = new QToolButton(panel);
+        button->setObjectName(QStringLiteral("drawingPaper%1").arg(label));
+        button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        button->setIcon(previewIcons::paper(label));
+        button->setIconSize(QSize(24, 24));
+        button->setFixedSize(34, 32);
+        button->setFocusPolicy(Qt::StrongFocus);
+        button->setAccessibleName(QStringLiteral("Формат %1").arg(label));
+        button->setToolTip(a4 ? QStringLiteral("А4 · 297 × 210 мм")
+                              : QStringLiteral("А3 · 420 × 297 мм"));
+        button->setCheckable(true);
+        button->setChecked(a4);
+        button->setStyleSheet(QStringLiteral(
+            "QToolButton{background:#F7F9FA;border:1px solid #C5CFD8;border-radius:5px;}"
+            "QToolButton:hover:enabled{background:#EEF4F5;}"
+            "QToolButton:checked{background:#E5F3F3;border-color:#087F83;}"
+            "QToolButton:focus{border:2px solid #087F83;}"
+            "QToolButton:disabled{border-color:#DCE3E9;}"));
+        impl_->paperFormats->addButton(button, static_cast<int>(format));
+        viewHeader->addWidget(button);
+    }
+    left->addLayout(viewHeader);
     auto *options = new QWidget(panel);
     auto *optionLayout = new QVBoxLayout(options);
     optionLayout->setContentsMargins(0, 0, 0, 0);
@@ -1116,8 +1194,6 @@ DrawingDialog::DrawingDialog(ImportController &c,
     optionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     optionScroll->setWidget(options);
     left->addWidget(optionScroll, 1);
-    auto *viewHeading = new QLabel(QStringLiteral("Виды на листе"), panel);
-    optionLayout->addWidget(viewHeading);
     impl_->views = new QListWidget(panel);
     impl_->views->setObjectName(QStringLiteral("drawingViews"));
     impl_->views->setAccessibleName(QStringLiteral("Виды на листе"));
@@ -1336,13 +1412,12 @@ DrawingDialog::DrawingDialog(ImportController &c,
             [this](std::shared_ptr<const DrawingSheetPlan> plan) {
                 if (!impl_->layoutBusy || impl_->settingsChanged ||
                     impl_->controller.session().revision() != impl_->revision ||
-                    plan->source != impl_->controller.drawing())
+                    plan->source != impl_->controller.drawing() ||
+                    plan->paperFormat != impl_->paperFormat())
                     return;
                 impl_->layoutBusy = false;
-                impl_->plan = std::move(plan);
-                impl_->layoutError.clear();
-                impl_->preview->setPageCount(impl_->plan->pages);
-                impl_->followSelection();
+                impl_->cachedPaperPlan() = plan;
+                impl_->displayPlan(std::move(plan));
                 impl_->refresh();
             });
     connect(impl_->layouts.get(), &DrawingLayoutController::failed, this,
@@ -1455,6 +1530,10 @@ DrawingDialog::DrawingDialog(ImportController &c,
         impl_->persistSettings();
         impl_->scheduleLayout();
     });
+    connect(impl_->paperFormats, &QButtonGroup::idToggled, this, [this](int, bool checked) {
+        if (checked)
+            impl_->switchPaperFormat();
+    });
     connect(resetViews, &QPushButton::clicked, this, [this] { impl_->resetComposition(); });
     connect(impl_->page, &QSpinBox::valueChanged, this, [this] {
         impl_->render();
@@ -1484,15 +1563,16 @@ DrawingDialog::DrawingDialog(ImportController &c,
         if (!impl_->exportPdf->isEnabled())
             return;
         const auto drawing = impl_->controller.drawing();
+        const auto plan = impl_->plan;
         const auto utf8 = impl_->controller.session().document()->metadata().sourcePath.u8string();
         const auto suggested = suggestedDrawingPdfPath(QString::fromUtf8(
             reinterpret_cast<const char *>(utf8.data()), static_cast<qsizetype>(utf8.size())));
         chooseExportFile(
             this, saveDialogName, QStringLiteral("Сохранить чертёж"), suggested,
             QStringLiteral("PDF (*.pdf)"), QStringLiteral("pdf"),
-            [this, drawing](const QString &path) {
+            [this, drawing, plan](const QString &path) {
                 if (!isVisible() || !impl_->exportPdf->isEnabled() ||
-                    drawing != impl_->controller.drawing()) {
+                    drawing != impl_->controller.drawing() || plan != impl_->plan) {
                     impl_->status->setText(
                         QStringLiteral("Чертёж изменился. Повторите сохранение."));
                     return;

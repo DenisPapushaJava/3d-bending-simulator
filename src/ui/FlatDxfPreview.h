@@ -60,9 +60,12 @@ class FlatDxfPreview final : public QGraphicsView {
 
     static Curve curve(const application::FlatCutVertex &start, const application::PointMm &end);
     std::optional<Pick> pickAt(const QPoint &position, Qt::KeyboardModifiers modifiers) const;
+    std::array<std::optional<Dimension>, 2> quickDimensionsAt(QPointF point) const;
+    void updateHover(const QPoint &position, Qt::KeyboardModifiers modifiers);
     Dimension between(const Pick &first, const Pick &second) const;
     void clearMeasurement();
     void selectAt(const QPoint &position, Qt::KeyboardModifiers modifiers);
+    void drawQuickDimensions(QPainter &painter) const;
     void drawDimensionLabel(QPainter &painter, const Dimension &dimension, QPointF anchor,
                             const QRectF &arcBounds) const;
 
@@ -77,6 +80,7 @@ class FlatDxfPreview final : public QGraphicsView {
     std::optional<Pick> hover_;
     std::optional<Pick> first_;
     std::optional<Dimension> dimension_;
+    std::array<std::optional<Dimension>, 2> quickDimensions_;
     double fitScale_ = 1;
     bool fitted_ = true;
     bool measuring_ = false;

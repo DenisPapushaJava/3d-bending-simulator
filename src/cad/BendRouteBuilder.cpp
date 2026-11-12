@@ -70,13 +70,55 @@ void cancelled(std::stop_token stop) {
     if (stop.stop_requested())
         throw BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
 }
-FlatPatternPtr independentRouteFlat(FlatPatternPtr flat) {
+FlatPatternPtr routeFlat(FlatPatternPtr flat, const BendAnalysis &analysis) {
     const auto &layout = OcctFlatPatternAccess::layout(*flat);
     check(!layout.usesJoinedWallFaces, "Bend route requires the original wall topology");
     check(!layout.hasPresentationOnlyBends, "Bend route requires complete unfolded solids");
-    // Both route modes model one independent bend per wall-to-wall link.
-    check(layout.walls.size() == layout.bends.size() + 1,
-          "Bend route requires independent links between walls");
+    std::vector<std::size_t> parents(layout.walls.size(), layout.walls.size());
+    check(!parents.empty(), "Bend route requires a root wall");
+    parents.front() = 0;
+    for (const auto &link : layout.bends) {
+        check(link.child != 0 && parents[link.parent] != parents.size() &&
+                  (parents[link.child] == parents.size() || parents[link.child] == link.parent),
+              "Bend route requires a tree of wall links");
+        parents[link.child] = link.parent;
+    }
+    check(std::none_of(parents.begin(), parents.end(),
+                       [&](auto parent) { return parent == parents.size(); }),
+          "Bend route requires connected walls");
+    if (layout.bends.size() != layout.walls.size() - 1) {
+        std::vector<std::size_t> order, counts(parents.size());
+        std::vector<const SheetBendRegion *> links(analysis.bends.size());
+        for (const auto &link : layout.bends) {
+            order.push_back(link.bendIndex);
+            links[link.bendIndex] = &link;
+            ++counts[link.child];
+        }
+        for (const auto &stroke : routeBendStrokes(analysis, order)) {
+            const auto &primary = *links[stroke.front()];
+            const auto child = primary.child;
+            check(stroke.size() == counts[child] &&
+                      std::all_of(stroke.begin(), stroke.end(),
+                                  [&](auto bend) { return links[bend]->child == child; }) &&
+                      (stroke.size() == 1 || jointBendEnvelope(analysis, stroke)),
+                  "Bend route requires compatible zones on each shared wall link");
+            if (stroke.size() == 1)
+                continue;
+            const auto reference = primary.childAtProgress(.5);
+            const auto origin = primary.sectionAxes.Location();
+            for (const auto bend : stroke) {
+                const auto &link = *links[bend];
+                const auto pose = link.childAtProgress(.5);
+                check(origin.Transformed(reference).Distance(origin.Transformed(pose)) <=
+                              analysis.lengthToleranceMm &&
+                          gp_Dir(1, 0, 0).Transformed(reference).Angle(gp_Dir(1, 0, 0).Transformed(
+                              pose)) <= analysis.angleToleranceRadians &&
+                          gp_Dir(0, 1, 0).Transformed(reference).Angle(
+                              gp_Dir(0, 1, 0).Transformed(pose)) <= analysis.angleToleranceRadians,
+                      "Shared bend zones disagree on the motion of their wall");
+            }
+        }
+    }
     return flat;
 }
 template <class Op>
@@ -298,6 +340,8 @@ class RouteSearch {
     RouteSheetFeatures sheetFeatures;
     std::vector<gp_Dir> referenceAxes;
     std::vector<Mask> jointNeighbours;
+    std::vector<Mask> requiredStroke;
+    std::vector<double> requiredStrokeLength;
     std::vector<Bnd_Box> wallBounds;
     std::vector<double> wallVolumes;
     struct AccessObstacle {
@@ -1221,10 +1265,16 @@ class RouteSearch {
     }
     std::vector<std::size_t> candidates(Mask mask) {
         std::vector<std::size_t> result;
-        for (std::size_t order = request.operations.size(); order-- > 0;)
-            if ((mask & (Mask{1} << request.operations[order].bendIndex)) &&
-                (request.automatic || static_cast<std::size_t>(std::popcount(mask)) == order + 1))
+        for (std::size_t order = request.operations.size(); order-- > 0;) {
+            const auto index = request.operations[order].bendIndex;
+            const auto stroke = requiredStroke[index];
+            const bool candidate =
+                request.automatic
+                    ? !stroke || index == static_cast<std::size_t>(std::countr_zero(stroke))
+                    : static_cast<std::size_t>(std::popcount(mask)) == order + 1;
+            if (candidate && (mask & (Mask{1} << index)))
                 result.push_back(order);
+        }
         if (request.automatic && request.rankCandidates) {
             const auto original = result;
             std::array<double, maximumSheetBends> access{};
@@ -1378,9 +1428,31 @@ class RouteSearch {
     bool tryCandidate(Mask mask, std::size_t order,
                       const std::vector<RouteOperation> &additional = {}) {
         const auto &op = request.operations[order];
+        if (requiredStroke[op.bendIndex] && request.withTools &&
+            std::any_of(additional.begin(), additional.end(), [&](const auto &member) {
+                return (!request.allowAxialPlacement &&
+                        member.workpieceOffsetMm != op.workpieceOffsetMm) ||
+                       ((member.tools != op.tools || member.assignment != op.assignment) &&
+                        !(mayPlan(op.bendIndex) && mayPlan(member.bendIndex) &&
+                          !request.assemblySearch->compactOnly && op.assignment &&
+                          member.assignment &&
+                          sameToolSetupExceptAssemblies(*op.assignment, *member.assignment)));
+            })) {
+            lastFailure = "Для участков одного гиба нужна общая оснастка и установка.";
+            lastOperationError.reset();
+            failedBend = op.bendIndex;
+            return false;
+        }
         std::vector<bool> reverseReference;
         double required = OcctDocumentAccess::simulationBends(*native).bends[op.bendIndex].lengthMm;
-        if (!additional.empty()) {
+        if (requiredStroke[op.bendIndex]) {
+            // These zones have one parent transform in every state. Their
+            // relative orientation and axial span are invariant.
+            required = requiredStrokeLength[op.bendIndex];
+            for (const auto &member : additional)
+                reverseReference.push_back(
+                    referenceAxes[op.bendIndex].Dot(referenceAxes[member.bendIndex]) < 0);
+        } else if (!additional.empty()) {
             const auto after = state(mask);
             std::vector<std::size_t> indices{*after->indices[op.bendIndex]};
             for (const auto &member : additional)
@@ -1784,8 +1856,26 @@ class RouteSearch {
         const auto singles = candidates(mask);
         std::set<Mask> triedGroups;
         for (const auto order : singles) {
+            const auto group = requiredStroke[request.operations[order].bendIndex];
+            if (!group || (mask & group) != group || !triedGroups.insert(group).second)
+                continue;
+            std::vector<RouteOperation> members;
+            const auto groupSize = static_cast<std::size_t>(std::popcount(group));
+            for (std::size_t i = 0; i < request.operations.size(); ++i) {
+                const auto &member = request.operations[i];
+                if (i != order && (group & (Mask{1} << member.bendIndex)) &&
+                    (request.automatic || (i < order && order - i < groupSize)))
+                    members.push_back(member);
+            }
+            if (members.size() + 1 != groupSize)
+                continue;
+            if (tryJointCandidate(mask, order, std::move(members)))
+                return true;
+        }
+        for (const auto order : singles) {
             const auto &op = request.operations[order];
-            if (!request.allowJointBends || !jointNeighbours[op.bendIndex])
+            if (requiredStroke[op.bendIndex] || !request.allowJointBends ||
+                !jointNeighbours[op.bendIndex])
                 continue;
             std::vector<RouteOperation> additional;
             Mask group = Mask{1} << op.bendIndex;
@@ -1794,7 +1884,8 @@ class RouteSearch {
             for (std::size_t other = request.operations.size(); other-- > 0;) {
                 const auto &member = request.operations[other];
                 const Mask bit = Mask{1} << member.bendIndex;
-                if (!(mask & bit) || !(jointNeighbours[op.bendIndex] & bit) ||
+                if (requiredStroke[member.bendIndex] || !(mask & bit) ||
+                    !(jointNeighbours[op.bendIndex] & bit) ||
                     (!request.allowAxialPlacement && request.withTools &&
                      member.workpieceOffsetMm != op.workpieceOffsetMm) ||
                     std::abs(member.target.angleRadians - op.target.angleRadians) >
@@ -1837,7 +1928,7 @@ class RouteSearch {
             }
         }
         for (const auto order : singles)
-            if (tryCandidate(mask, order))
+            if (!requiredStroke[request.operations[order].bendIndex] && tryCandidate(mask, order))
                 return true;
         dead.insert(mask);
         return false;
@@ -2005,7 +2096,20 @@ SingleBendPreviewBuilder::buildRouteDraftWithPose(DocumentPtr document, RouteDra
                 return BendRouteError{BendRouteErrorCode::InvalidInput,
                                       "Draft target must match CAD", op.bendIndex};
         }
-        const auto &active = request.operations[request.step ? request.step - 1 : 0];
+        const auto strokes = routeDraftStrokes(request, analysis);
+        if (request.step > strokes.size())
+            return BendRouteError{BendRouteErrorCode::InvalidInput, "Invalid draft stroke"};
+        const auto &stroke = strokes[request.step ? request.step - 1 : 0];
+        const auto &active = request.operations[stroke.front()];
+        if (request.withTools && std::any_of(stroke.begin(), stroke.end(), [&](auto position) {
+                const auto &member = request.operations[position];
+                return member.tools != active.tools || member.assignment != active.assignment ||
+                       member.workpieceReversed != active.workpieceReversed ||
+                       member.workpieceOffsetMm != active.workpieceOffsetMm;
+            }))
+            return BendRouteError{BendRouteErrorCode::InvalidInput,
+                                  "Для участков одного гиба нужна общая оснастка и установка.",
+                                  active.bendIndex};
         if (request.withTools && active.tools &&
             !core::standardAirBendOpening(analysis.bends[active.bendIndex].thicknessMm,
                                           active.tools->openingMm))
@@ -2039,7 +2143,7 @@ SingleBendPreviewBuilder::buildRouteDraftWithPose(DocumentPtr document, RouteDra
                                           : BendRouteErrorCode::Unsupported,
                                       e->detail};
             cancelled(stop);
-            work->flat = independentRouteFlat(std::get<FlatPatternPtr>(result));
+            work->flat = routeFlat(std::get<FlatPatternPtr>(result), analysis);
         }
         const bool reused = bool(work->draftBasis);
         if (!work->draftBasis)
@@ -2408,7 +2512,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRouteImpl(DocumentPtr document,
                                       e->detail};
             }
             cancelled(stop);
-            work->flat = independentRouteFlat(std::get<FlatPatternPtr>(std::move(flatResult)));
+            work->flat = routeFlat(std::get<FlatPatternPtr>(std::move(flatResult)),
+                                   native->metadata().bendAnalysis);
         }
         RouteSearch search;
         search.source = document;
@@ -2435,6 +2540,16 @@ BendRouteResult SingleBendPreviewBuilder::buildRouteImpl(DocumentPtr document,
                                                 search.request.manualExtraction});
         }
         search.layout = &OcctFlatPatternAccess::layout(*search.flat);
+        if (!search.request.automatic && search.layout->walls.size() - 1 != n) {
+            RouteDraftRequest ordered;
+            ordered.operations = std::move(search.request.operations);
+            const auto strokes = routeDraftStrokes(ordered, native->metadata().bendAnalysis);
+            search.request.operations.clear();
+            search.request.operations.reserve(n);
+            for (const auto &stroke : strokes)
+                for (const auto position : stroke)
+                    search.request.operations.push_back(std::move(ordered.operations[position]));
+        }
         search.tolerance = analysis.lengthToleranceMm;
         search.expectedVolume = volume(OcctDocumentAccess::simulationShape(*native));
         double minimumLength = analysis.bends.front().lengthMm;
@@ -2466,6 +2581,27 @@ BendRouteResult SingleBendPreviewBuilder::buildRouteImpl(DocumentPtr document,
             search.wallVolumes.push_back(amount);
         }
         search.jointNeighbours.resize(n);
+        search.requiredStroke.resize(n);
+        search.requiredStrokeLength.resize(n);
+        std::vector<Mask> wallLinks(search.layout->walls.size());
+        for (const auto &link : search.layout->bends)
+            wallLinks[link.child] |= Mask{1} << link.bendIndex;
+        for (const auto &link : search.layout->bends)
+            if (std::popcount(wallLinks[link.child]) > 1)
+                search.requiredStroke[link.bendIndex] = wallLinks[link.child];
+        if (search.layout->walls.size() - 1 != n) {
+            std::vector<std::size_t> order;
+            order.reserve(n);
+            for (const auto &link : search.layout->bends)
+                order.push_back(link.bendIndex);
+            const auto &sourceAnalysis = native->metadata().bendAnalysis;
+            for (const auto &stroke : routeBendStrokes(sourceAnalysis, order))
+                if (stroke.size() > 1) {
+                    const auto length = routeStrokeLengthMm(sourceAnalysis, stroke);
+                    for (const auto index : stroke)
+                        search.requiredStrokeLength[index] = length;
+                }
+        }
         const auto &flatBends = search.flat->info().bends;
         for (const auto &a : flatBends)
             for (const auto &b : flatBends) {

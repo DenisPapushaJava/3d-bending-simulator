@@ -224,6 +224,7 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
             gp_Dir major = plane.XAxis().Direction();
             bool allowed = true, curved = false, circular = true;
             double radius = 0, span = 0;
+            bool equalSemicircles = true;
             double longestLine = 0;
             std::vector<gp_Dir> lineDirections;
             int edges = 0;
@@ -235,6 +236,10 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                 }
                 if (curve.GetType() == GeomAbs_Circle) {
                     const auto circle = curve.Circle();
+                    equalSemicircles &=
+                        std::abs(curve.LastParameter() - curve.FirstParameter() -
+                                 std::numbers::pi) < 1e-7 &&
+                        (circleCenters.empty() || std::abs(radius - circle.Radius()) < tolerance);
                     curved = true;
                     if (!circleCenters.empty() &&
                         (circle.Location().Distance(circleCenters.front()) > tolerance ||
@@ -289,6 +294,14 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                         major = gp_Dir(gp_Vec(a, b));
                     }
             const auto dimensions = bounds(wire, gp_Ax2(center, plane.Axis().Direction(), major));
+            const bool obround =
+                !circular && edges == 4 && circleCenters.size() == 2 &&
+                lineDirections.size() == 2 && equalSemicircles && farthest > tolerance &&
+                std::abs(longestLine - farthest) < tolerance &&
+                lineDirections[0].IsParallel(major, 1e-7) &&
+                lineDirections[1].IsParallel(major, 1e-7) &&
+                std::abs(dimensions[2] - dimensions[0] - farthest - 2 * radius) < tolerance &&
+                std::abs(dimensions[3] - dimensions[1] - 2 * radius) < tolerance;
             DrawingOpening opening{wire,
                                    center,
                                    plane.Axis().Direction(),
@@ -297,7 +310,8 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                                    gp_Vec(plane.Axis().Direction()).Crossed(gp_Vec(major)) *
                                        std::max(std::abs(dimensions[1]), std::abs(dimensions[3])),
                                    circular,
-                                   {}};
+                                   {},
+                                   obround};
             for (TopExp_Explorer ei(wire, TopAbs_EDGE); ei.More(); ei.Next())
                 for (const auto &neighbor : neighbors.FindFromKey(ei.Current())) {
                     BRepAdaptor_Surface wall(TopoDS::Face(neighbor));
@@ -369,7 +383,7 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
         if (!opening.circular)
             view.openingAxes.push_back(
                 {c, project(opening.center.Translated(opening.major), projection),
-                 project(opening.center.Translated(opening.minor), projection)});
+                 project(opening.center.Translated(opening.minor), projection), opening.obround});
     }
     for (bool horizontal : {true, false}) {
         auto sorted = centers;

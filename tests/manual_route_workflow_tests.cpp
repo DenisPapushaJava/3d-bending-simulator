@@ -8,6 +8,8 @@
 #include "bending/ui/MainWindow.h"
 #include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -130,6 +132,43 @@ void verifyFormingCheck(const QString &folder) {
         require(image.save(output + "-forming-checked.png"),
                 "Cannot capture checked forming scope");
     }
+    controller.closeDocument();
+    window.close();
+}
+void verifySharedStroke(const QString &folder) {
+    const auto path = folder + "/shared-stroke.step";
+    const auto relief = BRepPrimAPI_MakeBox(gp_Pnt(-3, -2, 30), 12, 11, 20).Shape();
+    const auto shape = BRepAlgoAPI_Cut(fixtures::bentStrip(), relief).Shape();
+    STEPControl_Writer writer;
+    require(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone &&
+                writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
+            "Cannot write shared stroke fixture");
+    auto files = std::make_shared<project::ProjectFiles>();
+    auto builder = std::make_shared<Builder>();
+    auto tools = tool_fixture::pair(16);
+    ui::MainWindow window({"test", "test"}, files, files, builder, {tools.punch, tools.die});
+    window.setAutomaticPartInputPrompt(false);
+    window.show();
+    auto &controller = window.importController();
+    window.openStep(path);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.session().orderedBends().size() == 2 &&
+                controller.setBendToolAssignment(0, tools) &&
+                controller.setBendToolAssignment(1, tools),
+            "Cannot prepare shared stroke fixture");
+    window.findChild<QToolButton *>("processStage2")->click();
+    wait([&] { return !controller.hasWork(); });
+    auto *step = window.findChild<QPushButton *>("routeStep1");
+    require(step && !window.findChild<QPushButton *>("routeStep2"),
+            "Shared stroke must have one numbered step");
+    step->click();
+    wait([&] { return !controller.hasWork(); });
+    if (!controller.routeDraft() && controller.routeDraftError())
+        throw std::runtime_error("Shared stroke workflow: " + controller.routeDraftError()->detail);
+    const auto draft = controller.routeDraft();
+    require(draft && draft->request.step == 1 && draft->visual->activeBendCount() == 2 &&
+                draft->checkedToolPositions == 21 && !draft->toolLengths,
+            "Shared stroke draft did not publish the checked press positions");
     controller.closeDocument();
     window.close();
 }
@@ -1131,6 +1170,7 @@ x.XCloseDisplay(d)
         window.close();
         verifyToolStageTransitions(folder.path());
         verifyFormingCheck(folder.path());
+        verifySharedStroke(folder.path());
         verifyCompactDraftPublication(folder.path());
         std::cout << "Manual prefixes, collision scope, stable reorder, undo/redo, explicit check "
                      "and stale selection passed\n";

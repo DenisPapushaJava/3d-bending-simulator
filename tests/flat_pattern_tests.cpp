@@ -340,15 +340,41 @@ void splitLinkPattern(const std::filesystem::path &folder) {
     }
     route.operations = draft.operations;
     cad::SingleBendPreviewBuilder planner;
+    const auto blankResult = planner.buildRouteDraft(doc, draft, {});
+    check(std::holds_alternative<application::RouteDraftPtr>(blankResult),
+          "Shared bend has no flat draft pose");
+    draft.step = 1;
     const auto draftResult = planner.buildRouteDraft(doc, draft, {});
+    if (const auto *error = std::get_if<application::BendRouteError>(&draftResult))
+        throw std::runtime_error("Shared bend draft: " + error->detail);
+    const auto draftMotion = std::get<application::RouteDraftPtr>(draftResult);
+    check(draftMotion->visual->unverifiedDraft() && draftMotion->visual->activeBendCount() == 2 &&
+              draftMotion->visual->frameCount() == 21 &&
+              std::abs(draftMotion->visual->model().widthMm - 80) < 1.e-5,
+          "Shared draft did not use one motion over the complete axial span");
+    const auto repeated = planner.buildRouteDraft(doc, draft, {});
+    check(std::get<application::RouteDraftPtr>(repeated)->reusedVisual,
+          "Shared draft did not reuse its checked positions");
+    draft.step = 2;
+    check(std::get<application::BendRouteError>(planner.buildRouteDraft(doc, draft, {})).code ==
+              application::BendRouteErrorCode::InvalidInput,
+          "A shared bend exposed a second independent draft step");
+
     const auto routeResult = planner.buildRoute(doc, route, {});
-    const auto unsupported = [](const auto &result) {
-        const auto *error = std::get_if<application::BendRouteError>(&result);
-        return error && error->code == application::BendRouteErrorCode::Unsupported &&
-               error->evaluatedOperations == 0;
-    };
-    check(unsupported(draftResult) && unsupported(routeResult),
-          "An independent-motion route accepted a shared split bend link");
+    if (const auto *error = std::get_if<application::BendRouteError>(&routeResult))
+        throw std::runtime_error("Shared bend route: " + error->detail);
+    const auto checked = std::get<application::BendRoutePtr>(routeResult);
+    check(checked->steps.size() == 1 && checked->steps.front().additionalBends.size() == 1 &&
+              checked->steps.front().preview->activeBendCount() == 2 &&
+              checked->statistics.builtTransitions == 1,
+          "Shared bend was evaluated as more than one physical stroke");
+    route.withTools = true;
+    for (auto &op : route.operations)
+        op.tools = core::PressTools{16, std::numbers::pi / 3, std::numbers::pi / 6, .8, 65, 40};
+    const auto tooShort = planner.buildRoute(doc, route, {});
+    check(std::get<application::BendRouteError>(tooShort).operationError ==
+              application::BendPreviewErrorCode::ToolTooShort,
+          "A tool shorter than the joint span was accepted");
 
     // An oblique end of the same internal relief maps to a spline, even
     // though the external perimeter is still a rectangle.

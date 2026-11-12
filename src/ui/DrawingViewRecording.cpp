@@ -14,9 +14,13 @@ void recordViews(DrawingSheetPlan &plan, LayoutContext &context) {
             painter.setRenderHint(QPainter::Antialiasing);
             at.dimensions.clear();
             context.dimensions = &at.dimensions;
+            at.omittedDimensions = 0;
+            context.omittedDimensions = &at.omittedDimensions;
             paintPlaced(painter, *plan.source, at, plan.flatSide, occupied, &at.selectionBounds,
-                        &context);
+                        context);
             context.dimensions = nullptr;
+            context.omittedDimensions = nullptr;
+            plan.omittedDimensions += at.omittedDimensions;
             if (!painter.end())
                 throw std::runtime_error("Не удалось подготовить изображение вида");
             context.checkpoint();
@@ -29,7 +33,9 @@ void recordViews(DrawingSheetPlan &plan, LayoutContext &context) {
             context.bytes += bytes;
             at.recording = std::make_shared<const DrawingViewRecording>(DrawingViewRecording{
                 QByteArray(picture.data(), picture.size()), at.key, at.page, at.area, at.centre,
-                at.scale, plan.flatSide, at.compactDimensions, at.sheetLinks});
+                at.scale, plan.flatSide, at.compactDimensions, at.sheetLinks,
+                at.essentialDimensions, at.omittedDimensions, at.retainedDimensions,
+                at.smallOptionalText});
         }
     }
 }
@@ -38,7 +44,11 @@ void paintRecorded(QPainter &painter, const DrawingPlacedView &at, DrawingFlatSi
     const auto &record = at.recording;
     if (!record || record->key != at.key || record->page != at.page || record->area != at.area ||
         record->centre != at.centre || record->scale != at.scale || record->side != side ||
-        record->compactDimensions != at.compactDimensions || record->sheetLinks != at.sheetLinks)
+        record->compactDimensions != at.compactDimensions || record->sheetLinks != at.sheetLinks ||
+        record->essentialDimensions != at.essentialDimensions ||
+        record->omittedDimensions != at.omittedDimensions ||
+        record->retainedDimensions != at.retainedDimensions ||
+        record->smallOptionalText != at.smallOptionalText)
         throw std::runtime_error("Устаревшее изображение вида. Повторите компоновку.");
     // QPicture playback keeps vector paths and text in the PDF. Each replay owns
     // its stream cursor; immutable commands can be shared by preview/export.

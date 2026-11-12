@@ -18,6 +18,7 @@ bool validProjectDrawingSettings(const ProjectDrawingSettings &s) {
         s.quarterTurns > 3 ||
         (s.baseFace && (*s.baseFace == 0 || *s.baseFace > std::numeric_limits<int>::max())) ||
         s.flatSide < DrawingFlatSide::Automatic || s.flatSide > DrawingFlatSide::Opposite ||
+        (s.paperFormat != DrawingPaperFormat::A4 && s.paperFormat != DrawingPaperFormat::A3) ||
         s.sectionEdits.size() > 128 || s.views.size() > 1024)
         return false;
     for (auto i = s.sectionEdits.begin(); i != s.sectionEdits.end(); ++i) {

@@ -288,7 +288,8 @@ void fitCache() {
         section.view = v;
         section.designation = std::string(1, static_cast<char>('A' + i));
         d->sections.push_back(std::move(section));
-        choices.push_back({{ui::DrawingViewKind::Section, i}, true, .1});
+        // Leave room for competing cell assignments while still needing multiple sheets.
+        choices.push_back({{ui::DrawingViewKind::Section, i}, true, i % 2 ? .1 : .05});
     }
     ui::DrawingLayoutLimits disabled;
     disabled.maximumCachedFits = 0;
@@ -311,7 +312,7 @@ void fitCache() {
     // A new input/selection/scale owns a new cache even if all item indices coincide.
     auto changed = std::make_shared<application::BendingDrawing>(*d);
     changed->sections[0].view.dimensions.push_back({{0, 250}, {700, 250}, 700, ""});
-    choices[1].scale = .05;
+    choices[1].scale = .04;
     choices.back().visible = false;
     const auto updated = ui::DrawingSheet::compose(changed, choices);
     sameLayout(*ui::DrawingSheet::compose(changed, choices, {}, {}, disabled), *updated);
@@ -550,7 +551,7 @@ void worker() {
     const auto gui = QThread::currentThread();
     ui::DrawingLayoutController controller(
         nullptr,
-        [&](auto source, const auto &, auto, std::stop_token,
+        [&](auto source, const auto &, auto, std::stop_token, auto,
             auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
             outsideGui = QThread::currentThread() != gui;
             if (++calls == 1) {
@@ -591,7 +592,7 @@ void worker() {
 
     entered = false;
     auto stopping = std::make_unique<ui::DrawingLayoutController>(
-        nullptr, [&](auto source, const auto &, auto, std::stop_token stop, auto) {
+        nullptr, [&](auto source, const auto &, auto, std::stop_token stop, auto, auto) {
             entered = true;
             std::mutex mutex;
             std::unique_lock lock(mutex);
@@ -614,12 +615,13 @@ void worker() {
     QApplication::processEvents();
     require(published == 0, "Destroyed layout controller delivered a late result");
     QString error;
-    ui::DrawingLayoutController failing(
-        nullptr,
-        [](auto, const auto &, auto, auto, auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
-            throw ui::DrawingLayoutInterrupted(ui::DrawingLayoutInterruption::LimitExceeded,
-                                               "Test budget exhausted");
-        });
+    ui::DrawingLayoutController failing(nullptr,
+                                        [](auto, const auto &, auto, auto, auto,
+                                           auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
+                                            throw ui::DrawingLayoutInterrupted(
+                                                ui::DrawingLayoutInterruption::LimitExceeded,
+                                                "Test budget exhausted");
+                                        });
     QObject::connect(&failing, &ui::DrawingLayoutController::failed, &controller,
                      [&](const QString &value) { error = value; });
     failing.request(first, {}, ui::DrawingFlatSide::Automatic);

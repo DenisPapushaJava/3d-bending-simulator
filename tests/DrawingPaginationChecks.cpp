@@ -143,6 +143,41 @@ void drawingPaginationChecks() {
                     "Separate projection has no correct reference to its main view");
     interrupted(drawing, choices, *paginated);
 
+    auto crowded = std::make_shared<application::BendingDrawing>();
+    rectangle(crowded->views[0], 1000, 300);
+    crowded->views[0].sectionDimensions.push_back({{980, 0}, {980, 60}, 60, ""});
+    for (int i = 0; i < 48; ++i) {
+        const double x = 500 + 8 * i;
+        crowded->views[0].holeDimensions.push_back({{0, 150}, {x, 150}, x, ""});
+    }
+    const std::vector<ui::DrawingViewChoice> mainOnly{
+        {{ui::DrawingViewKind::Projection, 0}, true, .1}};
+    for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+        const auto essential = ui::DrawingSheet::compose(crowded, mainOnly, {}, {}, {}, format);
+        require(essential->views.size() == 1, "The crowded projection did not fit on one sheet");
+        const auto &at = essential->views.front();
+        const auto count = [&](ui::DrawingDimensionSource source) {
+            return std::count_if(at.dimensions.begin(), at.dimensions.end(),
+                                 [&](const auto &dimension) { return dimension.source == source; });
+        };
+        require(at.scale == .1 && at.recording && count(ui::DrawingDimensionSource::Overall) == 2 &&
+                    count(ui::DrawingDimensionSource::Section) == 1 &&
+                    count(ui::DrawingDimensionSource::Hole) > 0 &&
+                    essential->omittedDimensions > 0 &&
+                    essential->omittedDimensions + at.dimensions.size() ==
+                        crowded->views[0].dimensions.size() +
+                            crowded->views[0].sectionDimensions.size() +
+                            crowded->views[0].holeDimensions.size(),
+                "A crowded projection should keep overall, contour and fitting hole dimensions");
+        require(at.smallOptionalText &&
+                    std::any_of(at.dimensions.begin(), at.dimensions.end(),
+                                [](const auto &d) {
+                                    return d.source == ui::DrawingDimensionSource::Hole &&
+                                           std::abs(d.textBounds.height() - 3.5) < 1e-7;
+                                }),
+                "A dense sheet did not retain secondary dimensions with smaller text");
+    }
+
     ui::DrawingLayoutLimits reference;
     reference.maximumCachedFits = 0;
     verifySameDrawingLayout(*compact,

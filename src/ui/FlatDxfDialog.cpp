@@ -29,7 +29,8 @@
 
 namespace bending::ui {
 namespace {
-constexpr auto layerKey = "flatDxf/bendLayer";
+constexpr auto layerKey = "flatDxf/bendLayerName";
+constexpr auto legacyLayerKey = "flatDxf/bendLayer";
 constexpr auto colorKey = "flatDxf/bendColor";
 
 struct BendColor {
@@ -165,9 +166,14 @@ FlatDxfDialog::FlatDxfDialog(ImportController &controller,
     bends->setEnabled(!planar);
     layout->addRow(bends);
     const auto settings = preferences();
-    const auto savedLayer = settings->value(layerKey, QStringLiteral("BENDING")).toString();
-    auto *layer =
-        new QLineEdit(validBendLayer(savedLayer) ? savedLayer : QStringLiteral("BENDING"), this);
+    const auto defaultLayer = FlatDxfOptions{}.bendLayer;
+    auto savedLayer = settings->value(layerKey).toString();
+    if (!settings->contains(layerKey)) {
+        savedLayer = settings->value(legacyLayerKey).toString();
+        if (savedLayer == QStringLiteral("BENDING"))
+            savedLayer = defaultLayer;
+    }
+    auto *layer = new QLineEdit(validBendLayer(savedLayer) ? savedLayer : defaultLayer, this);
     layer->setMaxLength(63);
     layer->setToolTip(QStringLiteral("Латинские буквы, цифры, дефис и подчёркивание"));
     layout->addRow(QStringLiteral("Слой"), layer);

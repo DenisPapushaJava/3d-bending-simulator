@@ -3,15 +3,117 @@
 #include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/ToolGeometry.h"
 #include <algorithm>
+#include <map>
 #include <set>
 
 namespace bending::application {
+namespace {
+struct StrokeAxis {
+    PointMm origin;
+    PointMm direction;
+    double length;
+    explicit StrokeAxis(const RecognizedBend &bend)
+        : origin(bend.axisStart), direction{bend.axisEnd.x - origin.x, bend.axisEnd.y - origin.y,
+                                            bend.axisEnd.z - origin.z},
+          length(std::hypot(direction.x, direction.y, direction.z)) {}
+    double project(PointMm p) const {
+        return ((p.x - origin.x) * direction.x + (p.y - origin.y) * direction.y +
+                (p.z - origin.z) * direction.z) /
+               length;
+    }
+    double distance(PointMm p, double along) const {
+        const auto t = along / length;
+        return std::hypot(p.x - origin.x - t * direction.x, p.y - origin.y - t * direction.y,
+                          p.z - origin.z - t * direction.z);
+    }
+};
+bool compatibleStrokeZones(const BendAnalysis &analysis, std::size_t first, std::size_t second) {
+    const auto &a = analysis.bends[first];
+    const auto &b = analysis.bends[second];
+    const auto tolerance = analysis.lengthToleranceMm;
+    const StrokeAxis axis(a);
+    if (!(axis.length > tolerance) ||
+        std::abs(a.angleRadians - b.angleRadians) > analysis.angleToleranceRadians ||
+        std::abs(a.innerRadiusMm - b.innerRadiusMm) > tolerance ||
+        std::abs(a.thicknessMm - b.thicknessMm) > tolerance)
+        return false;
+    const auto from = axis.project(b.axisStart), to = axis.project(b.axisEnd);
+    return std::abs(to - from) > tolerance && axis.distance(b.axisStart, from) <= tolerance &&
+           axis.distance(b.axisEnd, to) <= tolerance &&
+           (std::max(from, to) < -tolerance || std::min(from, to) > axis.length + tolerance);
+}
+} // namespace
+std::vector<BendStroke> routeBendStrokes(const BendAnalysis &analysis,
+                                         std::span<const std::size_t> order) {
+    using Walls = std::array<std::array<std::size_t, 2>, 2>;
+    std::map<Walls, std::size_t> strokesByWallPair;
+    std::vector<BendStroke> strokes;
+    for (const auto index : order) {
+        auto position = strokes.size();
+        if (index < analysis.bends.size()) {
+            const auto &faces = analysis.bends[index].flangeFaces;
+            Walls walls{{{faces[0], faces[1]}, {faces[2], faces[3]}}};
+            for (auto &wall : walls)
+                std::sort(wall.begin(), wall.end());
+            std::sort(walls.begin(), walls.end());
+            if (walls[0][0] && walls[0][0] != walls[0][1] && walls[1][0] != walls[1][1] &&
+                walls[0] != walls[1]) {
+                const auto [found, inserted] = strokesByWallPair.try_emplace(walls, position);
+                if (!inserted && std::all_of(strokes[found->second].begin(),
+                                             strokes[found->second].end(), [&](auto member) {
+                                                 return compatibleStrokeZones(analysis, member,
+                                                                              index);
+                                             }))
+                    position = found->second;
+            }
+        }
+        if (position == strokes.size())
+            strokes.emplace_back();
+        strokes[position].push_back(index);
+    }
+    return strokes;
+}
+std::vector<BendStroke> routeDraftStrokes(const RouteDraftRequest &request,
+                                          const BendAnalysis &analysis) {
+    std::vector<std::size_t> order;
+    order.reserve(request.operations.size());
+    for (const auto &op : request.operations)
+        order.push_back(op.bendIndex);
+    auto strokes = routeBendStrokes(analysis, order);
+    // Draft consumers refer to positions in the request, which can be reordered.
+    std::vector<std::size_t> positions(analysis.bends.size(), order.size());
+    for (std::size_t i = 0; i < order.size(); ++i)
+        if (order[i] < positions.size())
+            positions[order[i]] = i;
+    for (auto &stroke : strokes)
+        for (auto &index : stroke)
+            index = index < positions.size() ? positions[index] : order.size();
+    return strokes;
+}
+double routeStrokeLengthMm(const BendAnalysis &analysis, const BendStroke &stroke) {
+    const auto &first = analysis.bends.at(stroke.front());
+    if (stroke.size() == 1)
+        return first.lengthMm;
+    const StrokeAxis axis(first);
+    double low = 0, high = axis.length;
+    for (const auto index : stroke)
+        for (const auto p :
+             {analysis.bends.at(index).axisStart, analysis.bends.at(index).axisEnd}) {
+            const auto along = axis.project(p);
+            low = std::min(low, along);
+            high = std::max(high, along);
+        }
+    return high - low;
+}
 std::optional<BendEndSupport> compactDraftCoverage(const RouteDraftRequest &request,
-                                                   const BendAnalysis &analysis) noexcept {
+                                                   const BendAnalysis &analysis) {
     if (!request.withTools || !request.step || request.step > request.operations.size() ||
         !allowsShortToolEndSupport(request.allowPartialEndSupport, request.maximumEndSupportLossMm))
         return {};
-    const auto &op = request.operations[request.step - 1];
+    const auto strokes = routeDraftStrokes(request, analysis);
+    if (request.step > strokes.size() || strokes[request.step - 1].size() != 1)
+        return {};
+    const auto &op = request.operations[strokes[request.step - 1].front()];
     if (op.bendIndex >= analysis.bends.size() || !op.tools || !core::validPressTools(*op.tools) ||
         !op.assignment || !continuousDrawingTools(*op.assignment) ||
         !validWorkpieceOffset(op.workpieceOffsetMm))

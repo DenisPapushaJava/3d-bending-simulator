@@ -29,10 +29,7 @@ inline void chooseExportFile(QWidget *owner, const QString &name, const QString 
     auto *picker = new QFileDialog(owner);
     picker->setObjectName(name);
     picker->setAttribute(Qt::WA_DeleteOnClose);
-    picker->setWindowModality(Qt::NonModal);
-    // Native file pickers may block their owner's whole window hierarchy.
-    picker->setOption(QFileDialog::DontUseNativeDialog);
-    picker->setOption(QFileDialog::DontConfirmOverwrite);
+    picker->setWindowModality(Qt::WindowModal);
     picker->setWindowTitle(title);
     picker->setDirectory(suggested.absolutePath());
     picker->setNameFilter(filter);
@@ -48,7 +45,9 @@ inline void chooseExportFile(QWidget *owner, const QString &name, const QString 
             const auto extension = QLatin1Char('.') + suffix;
             const auto destination =
                 path.endsWith(extension, Qt::CaseInsensitive) ? path : path + extension;
-            if (!QFileInfo::exists(destination)) {
+            // The file picker confirms the selected path. Only an appended
+            // extension can change the destination after that confirmation.
+            if (destination == path || !QFileInfo::exists(destination)) {
                 save(destination);
                 return;
             }
@@ -61,13 +60,12 @@ inline void chooseExportFile(QWidget *owner, const QString &name, const QString 
             confirm->setTextFormat(Qt::PlainText);
             confirm->setDefaultButton(QMessageBox::No);
             confirm->setAttribute(Qt::WA_DeleteOnClose);
-            confirm->setWindowModality(Qt::NonModal);
             QObject::connect(confirm, &QDialog::finished, owner, [save, destination](int result) {
                 if (result == QMessageBox::Yes)
                     save(destination);
             });
-            confirm->show();
+            confirm->open();
         });
-    picker->show();
+    picker->open();
 }
 } // namespace bending::ui
