@@ -5,6 +5,7 @@
 #include "CollisionHighlight.h"
 #include "CollisionReuse.h"
 #include "FlatPatternDisplay.h"
+#include "JointBends.h"
 #include "RouteGeometry.h"
 #include "SheetOrientation.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -213,17 +214,47 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
     const auto &layout = OcctFlatPatternAccess::layout(*impl_->flat);
     const auto &analysis = impl_->source->metadata().bendAnalysis;
     const auto n = request.operations.size();
-    require(n && request.step <= n, "Invalid draft prefix");
-    const auto &active = request.operations[request.step ? request.step - 1 : 0];
-    const auto &bend = analysis.bends[active.bendIndex];
+    const auto strokes = routeDraftStrokes(request, analysis);
+    require(!strokes.empty() && request.step <= strokes.size(), "Invalid draft prefix");
+    const auto &stroke = strokes[request.step ? request.step - 1 : 0];
+    const auto &active = request.operations[stroke.front()];
+    BendStroke zones;
+    for (const auto position : stroke)
+        zones.push_back(request.operations[position].bendIndex);
+    const auto joint = zones.size() > 1 ? jointBendEnvelope(analysis, zones) : std::nullopt;
+    require(zones.size() == 1 || joint.has_value(), "Invalid shared draft stroke");
+    const auto &bend = joint ? *joint : analysis.bends[active.bendIndex];
     const auto link = std::find_if(layout.bends.begin(), layout.bends.end(),
                                    [&](const auto &b) { return b.bendIndex == active.bendIndex; });
     require(link != layout.bends.end(), "Draft bend has no layout link");
     const bool flipped = active.workpieceReversed != impl_->referenceReversed[active.bendIndex];
+    auto sectionAxes = link->sectionAxes;
+    std::vector<std::array<double, 2>> intervals{{0, bend.lengthMm}};
+    if (joint) {
+        intervals.clear();
+        const gp_Vec axis(sectionAxes.Direction());
+        const auto projection = [&](PointMm p) {
+            return gp_Vec(sectionAxes.Location(), gp_Pnt(p.x, p.y, p.z)).Dot(axis);
+        };
+        double first = std::numeric_limits<double>::infinity();
+        for (const auto index : zones) {
+            const auto &zone = analysis.bends[index];
+            const auto a = projection(zone.axisStart), b = projection(zone.axisEnd);
+            intervals.push_back({std::min(a, b), std::max(a, b)});
+            first = std::min(first, intervals.back()[0]);
+        }
+        sectionAxes.SetLocation(sectionAxes.Location().Translated(axis * first));
+        for (auto &interval : intervals) {
+            interval[0] -= first;
+            interval[1] -= first;
+            if (flipped)
+                interval = {bend.lengthMm - interval[1], bend.lengthMm - interval[0]};
+        }
+    }
     auto visual = std::make_shared<CadPreview>();
     visual->draft = true;
     visual->reversed = active.workpieceReversed;
-    visual->otherBends = request.step ? request.step - 1 : 0;
+    visual->activeBends = zones.size();
     if (active.assignment)
         visual->gaps = {active.assignment->dieAssembly
                             ? core::maximumAssemblyGap(*active.assignment->dieAssembly)
@@ -237,12 +268,15 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
         impl_->source->metadata().closedCutouts.status == ClosedCutoutStatus::Filled;
     std::vector<double> progress(n);
     for (std::size_t i = 0; i + 1 < request.step; ++i)
-        progress[request.operations[i].bendIndex] = 1;
+        for (const auto position : strokes[i]) {
+            progress[request.operations[position].bendIndex] = 1;
+            ++visual->otherBends;
+        }
     auto result = std::make_shared<RouteDraft>();
     result->source = impl_->source;
     result->request = request;
     result->reusedBasis = reused;
-    if (request.step > 1 && trimmedAxialCore(bend)) {
+    if (request.step > 1 && !joint && trimmedAxialCore(bend)) {
         const gp_Pnt start(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z);
         const gp_Pnt end(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z);
         const gp_Dir axis(gp_Vec(start, end));
@@ -301,16 +335,22 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
                                           double origin) {
                 if (!assembly || !tool.segments)
                     return 0.;
-                double from = start - origin + (axialCoverage ? axialCoverage->supportedFromMm : 0);
-                double to =
-                    start - origin + (axialCoverage ? axialCoverage->supportedToMm : bend.lengthMm);
-                if (tool.kind == core::ToolKind::Punch && active.tools->punchReversed) {
-                    const double extent = core::punchLengthMm(*active.tools);
-                    const double oldFrom = from;
-                    from = extent - to;
-                    to = extent - oldFrom;
+                double uncovered = 0;
+                for (const auto &interval : intervals) {
+                    double from = start - origin +
+                                  (axialCoverage ? axialCoverage->supportedFromMm : interval[0]);
+                    double to = start - origin +
+                                (axialCoverage ? axialCoverage->supportedToMm : interval[1]);
+                    if (tool.kind == core::ToolKind::Punch && active.tools->punchReversed) {
+                        const double extent = core::punchLengthMm(*active.tools);
+                        const double oldFrom = from;
+                        from = extent - to;
+                        to = extent - oldFrom;
+                    }
+                    uncovered +=
+                        core::assemblyUncoveredLength(*tool.segments, *assembly, from, to).value();
                 }
-                return core::assemblyUncoveredLength(*tool.segments, *assembly, from, to).value();
+                return uncovered;
             };
             visual->uncoveredToolLength = {
                 countMissing(active.assignment->die, active.assignment->dieAssembly, 0),
@@ -345,7 +385,8 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
     for (std::size_t f = 0; f < count; ++f) {
         cancelled(stop);
         const double p = count == 1 ? 0 : static_cast<double>(f) / (count - 1);
-        progress[active.bendIndex] = p;
+        for (const auto index : zones)
+            progress[index] = p;
         const auto placement = routePlacement(layout, progress);
         gp_Trsf machine;
         PreviewFrame frame;
@@ -354,7 +395,7 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
                 simulation::draftPressState(visual->geometry, *active.tools, p, shoulders);
             require(state.has_value(), "Cannot position the draft sheet on tools");
             visual->states.push_back(*state);
-            const auto axes = link->sectionAxes.Transformed(placement.walls[link->parent]);
+            const auto axes = sectionAxes.Transformed(placement.walls[link->parent]);
             const auto &section = state->section;
             const auto a = section.fixed[0], b = section.fixed[1];
             machine.SetDisplacement(
@@ -534,14 +575,24 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
             skin.Orientation(face.orientation);
             const auto region = face.owner.value_or(face.region);
             const bool selected =
-                request.step && region == layout.walls.size() +
-                                              static_cast<std::size_t>(link - layout.bends.begin());
+                request.step && region >= layout.walls.size() &&
+                std::find(zones.begin(), zones.end(),
+                          layout.bends[region - layout.walls.size()].bendIndex) != zones.end();
             builder.Add(regions[selected ? 1 : 0], skin);
             if (face.side != SheetSide::Neutral)
                 frame.orientation.sides[face.side == SheetSide::A ? 0 : 1].push_back(skin);
             if (region >= layout.walls.size())
                 builder.Add(frame.bendZones[layout.bends[region - layout.walls.size()].bendIndex],
                             skin);
+        }
+        for (const auto &group : strokes) {
+            if (group.size() == 1)
+                continue;
+            auto strokeShape = compound();
+            for (const auto position : group)
+                builder.Add(strokeShape, frame.bendZones[request.operations[position].bendIndex]);
+            for (const auto position : group)
+                frame.bendZones[request.operations[position].bendIndex] = strokeShape;
         }
         auto display = compound();
         for (std::size_t i = 0; i < 3; ++i) {

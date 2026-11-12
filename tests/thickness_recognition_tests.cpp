@@ -202,8 +202,8 @@ int main(int argc, char **argv) {
         };
         const auto plate = BRepPrimAPI_MakeBox(100, 60, 2).Shape();
         proposal(import("plate.step", plate), 2, true);
-        const auto faceted = import("many-faces.step", facetedPlate(140));
-        check(faceted->metadata().faceCount > 128, "Old complexity limit not exercised");
+        // Three samples per side would exhaust the ray budget before the plate proof.
+        const auto faceted = import("many-faces.step", facetedPlate(360));
         proposal(faceted, 2, true);
         proposal(import("angle.step", fixtures::bentStrip()), 2, false);
         proposal(import("narrow-channel.step", fixtures::channel(80, 2, 40)), 2, false);

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 namespace bending::ui {
@@ -250,6 +251,7 @@ void FlatDxfPreview::fitDrawing() {
     scale(fitScale_, fitScale_);
     centerOn(bounds.center());
     fitted_ = true;
+    quickDimensions_ = {};
 }
 
 std::optional<FlatDxfPreview::Pick> FlatDxfPreview::pickAt(const QPoint &position,
@@ -350,6 +352,102 @@ std::optional<FlatDxfPreview::Pick> FlatDxfPreview::pickAt(const QPoint &positio
     return std::nullopt;
 }
 
+std::array<std::optional<FlatDxfPreview::Dimension>, 2>
+FlatDxfPreview::quickDimensionsAt(QPointF point) const {
+    std::array<std::optional<Dimension>, 2> result;
+    double radialDistance = 6 / transform().m11();
+    if (!drawingBounds_.adjusted(-radialDistance, -radialDistance,
+                                 radialDistance, radialDistance).contains(point))
+        return result;
+
+    constexpr double infinity = std::numeric_limits<double>::infinity();
+    constexpr double tolerance = 1e-8;
+    const std::array origin{point.x(), point.y()};
+    std::array low{-infinity, -infinity}, high{infinity, infinity};
+    const auto hit = [&](std::size_t axis, double value) {
+        const double offset = value - origin[axis];
+        if (offset < -tolerance)
+            low[axis] = std::max(low[axis], value);
+        else if (offset > tolerance)
+            high[axis] = std::min(high[axis], value);
+    };
+    std::optional<Dimension> radial;
+    const auto roundContour = [&](const Curve &edge, bool circle) {
+        const auto centre = edge.circle.center();
+        const double radius = edge.circle.width() / 2;
+        const auto delta = point - centre;
+        const double distance = std::hypot(delta.x(), delta.y());
+        const double rimDistance = std::abs(distance - radius);
+        if (rimDistance < std::min(radialDistance, radius / 2) &&
+            (circle || onSweep(angle(delta), edge.start, edge.sweep))) {
+            const auto ray = delta * (radius / distance);
+            radialDistance = rimDistance;
+            radial = Dimension{QLineF(circle ? centre - ray : centre, centre + ray),
+                               (circle ? QStringLiteral("Ø") : QStringLiteral("R")) +
+                                   mm(circle ? 2 * radius : radius),
+                               {}, {}, edge};
+        }
+        const std::array center{centre.x(), centre.y()};
+        for (std::size_t axis = 0; axis < 2; ++axis) {
+            const double across = std::abs(origin[1 - axis] - center[1 - axis]);
+            if (across >= radius)
+                continue; // A tangency does not bound a span across the contour.
+            const double halfSpan = std::sqrt((radius - across) * (radius + across));
+            for (double along : {-halfSpan, halfSpan}) {
+                const auto candidate = axis == 0 ? QPointF(along, delta.y())
+                                                 : QPointF(delta.x(), along);
+                if (circle || onSweep(angle(candidate), edge.start, edge.sweep))
+                    hit(axis, center[axis] + along);
+            }
+        }
+    };
+    const auto intersectLine = [&](const QLineF &line) {
+        const std::array start{line.x1(), line.y1()};
+        const std::array end{line.x2(), line.y2()};
+        for (std::size_t axis = 0; axis < 2; ++axis) {
+            const double across = end[1 - axis] - start[1 - axis];
+            if (std::abs(across) <= tolerance)
+                continue;
+            const double t = (origin[1 - axis] - start[1 - axis]) / across;
+            if (t >= 0 && t <= 1)
+                hit(axis, std::lerp(start[axis], end[axis], t));
+        }
+    };
+    for (const auto &edge : outline_) {
+        if (edge.sweep != 0)
+            roundContour(edge, false);
+        else
+            intersectLine(edge.chord);
+    }
+    for (const auto &circle : circles_)
+        roundContour(Curve{{}, circle, 0, 360}, true);
+    if (radial) {
+        result[0] = std::move(radial);
+        return result;
+    }
+    if (bends_ && bends_->isVisible())
+        for (const auto &line : bendLines_)
+            intersectLine(line);
+    if (std::isfinite(low[0]) && std::isfinite(high[0]))
+        result[0] = Dimension{QLineF(low[0], point.y(), high[0], point.y()),
+                              QStringLiteral("X %1").arg(mm(high[0] - low[0]))};
+    if (std::isfinite(low[1]) && std::isfinite(high[1]))
+        result[1] = Dimension{QLineF(point.x(), low[1], point.x(), high[1]),
+                              QStringLiteral("Y %1").arg(mm(high[1] - low[1]))};
+    return result;
+}
+
+void FlatDxfPreview::updateHover(const QPoint &position, Qt::KeyboardModifiers modifiers) {
+    if (first_ || dimension_ || modifiers.testAnyFlags(Qt::ShiftModifier | Qt::AltModifier |
+                                                       Qt::ControlModifier)) {
+        quickDimensions_ = {};
+        hover_ = pickAt(position, modifiers);
+    } else {
+        hover_.reset();
+        quickDimensions_ = quickDimensionsAt(mapToScene(position));
+    }
+}
+
 FlatDxfPreview::Dimension FlatDxfPreview::between(const Pick &a, const Pick &b) const {
     const bool edgeA = a.kind == PickKind::Edge, edgeB = b.kind == PickKind::Edge;
     if (edgeA != edgeB) {
@@ -395,8 +493,10 @@ void FlatDxfPreview::clearMeasurement() {
     first_.reset();
     hover_.reset();
     dimension_.reset();
-    emit measurementChanged(
-        measuring_ ? QStringLiteral("Выберите точку, линию, дугу или окружность") : QString{});
+    quickDimensions_ = {};
+    emit measurementChanged(measuring_ ? QStringLiteral("Наведите для быстрого размера · "
+                                                        "Щёлкните для точного замера")
+                                       : QString{});
     viewport()->update();
 }
 
@@ -406,6 +506,7 @@ void FlatDxfPreview::selectAt(const QPoint &position, Qt::KeyboardModifiers modi
         viewport()->update();
         return;
     }
+    quickDimensions_ = {};
     const auto &pick = *hover_;
     if (first_) {
         dimension_ = between(*first_, pick);
@@ -478,11 +579,54 @@ void FlatDxfPreview::drawDimensionLabel(QPainter &painter, const Dimension &dime
     }
 }
 
+void FlatDxfPreview::drawQuickDimensions(QPainter &painter) const {
+    const auto background = palette().base().color();
+    const auto colors = axisColors(background);
+    const QColor radialColor(background.lightness() < 128 ? "#e8aa72" : "#9a531e");
+    const auto labelOffset = QFontMetricsF(font()).height() / 2 + 10;
+    std::optional<double> sharedLabelY;
+    if (quickDimensions_[0] && quickDimensions_[1] && viewport()->height() >= 4 * labelOffset)
+        sharedLabelY = std::clamp(viewportTransform().map(quickDimensions_[0]->line.p1()).y(),
+                                  2 * labelOffset, viewport()->height() - 2 * labelOffset);
+    for (std::size_t axis = 0; axis < quickDimensions_.size(); ++axis) {
+        if (!quickDimensions_[axis])
+            continue;
+        const auto &dimension = *quickDimensions_[axis];
+        const auto &color = dimension.arc ? radialColor : (axis == 0 ? colors.x : colors.y);
+        const QPointF a = viewportTransform().map(dimension.line.p1());
+        const QPointF b = viewportTransform().map(dimension.line.p2());
+        painter.setPen(QPen(color, 1.3, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(a, b);
+        painter.setPen(QPen(color, 1.3));
+        QRectF arcBounds;
+        if (const auto &arc = dimension.arc) {
+            const auto circle = viewportTransform().mapRect(arc->circle);
+            QPainterPath highlight;
+            highlight.arcMoveTo(circle, arc->start);
+            highlight.arcTo(circle, arc->start, arc->sweep);
+            painter.drawPath(highlight);
+            arcBounds = highlight.boundingRect();
+        }
+        painter.setBrush(color);
+        painter.drawEllipse(a, 2, 2);
+        painter.drawEllipse(b, 2, 2);
+        auto anchor = (a + b) / 2;
+        anchor.setY(sharedLabelY.value_or(anchor.y()) + (axis == 0 ? -labelOffset : labelOffset));
+        drawDimensionLabel(painter, dimension, anchor, arcBounds);
+    }
+}
+
 void FlatDxfPreview::drawForeground(QPainter *painter, const QRectF &) {
     if (!measuring_)
         return;
     painter->save();
     painter->resetTransform();
+    if (quickDimensions_[0] || quickDimensions_[1]) {
+        drawQuickDimensions(*painter);
+        painter->restore();
+        return;
+    }
     const QColor color(0, 116, 169);
     painter->setPen(QPen(color, 1.6));
     painter->setBrush(Qt::NoBrush);
@@ -547,7 +691,7 @@ void FlatDxfPreview::drawForeground(QPainter *painter, const QRectF &) {
 }
 
 void FlatDxfPreview::keyPressEvent(QKeyEvent *event) {
-    if (event->key() == Qt::Key_Escape && measuring_ && (first_ || dimension_)) {
+    if (event->key() == Qt::Key_Escape && measuring_) {
         clearMeasurement();
         event->accept();
         return;
@@ -557,6 +701,7 @@ void FlatDxfPreview::keyPressEvent(QKeyEvent *event) {
 
 void FlatDxfPreview::leaveEvent(QEvent *event) {
     hover_.reset();
+    quickDimensions_ = {};
     viewport()->update();
     QGraphicsView::leaveEvent(event);
 }
@@ -564,6 +709,9 @@ void FlatDxfPreview::leaveEvent(QEvent *event) {
 void FlatDxfPreview::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::MiddleButton) {
         panPosition_ = event->position().toPoint();
+        quickDimensions_ = {};
+        hover_.reset();
+        viewport()->update();
         viewport()->setCursor(Qt::ClosedHandCursor);
         event->accept();
     } else if (event->button() == Qt::LeftButton && measuring_ && !drawingBounds_.isEmpty()) {
@@ -582,7 +730,7 @@ void FlatDxfPreview::mouseMoveEvent(QMouseEvent *event) {
         fitted_ = false;
         hover_.reset();
     } else if (measuring_ && !drawingBounds_.isEmpty()) {
-        hover_ = pickAt(event->position().toPoint(), event->modifiers());
+        updateHover(event->position().toPoint(), event->modifiers());
     } else {
         QGraphicsView::mouseMoveEvent(event);
         return;
@@ -623,8 +771,8 @@ void FlatDxfPreview::wheelEvent(QWheelEvent *event) {
     scale(next / old, next / old);
     centerOn(mapToScene(viewport()->rect().center()) + anchor - mapToScene(cursor));
     fitted_ = false;
-    if (measuring_)
-        hover_ = pickAt(cursor, event->modifiers());
+    if (measuring_ && !panPosition_)
+        updateHover(cursor, event->modifiers());
     viewport()->update();
     event->accept();
 }

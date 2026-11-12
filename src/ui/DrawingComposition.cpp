@@ -92,18 +92,19 @@ namespace {
 struct Item {
     std::vector<DrawingViewChoice> choices;
     bool compactDimensions = false;
+    bool essentialDimensions = false;
+    bool smallOptionalText = false;
 };
 struct FitKey {
     // Source/side are constant. A stable full item ID identifies immutable
     // choices, scale and annotation policy, not its position in a trial order.
+    // Fit uses paper coordinates; restoreFit supplies the actual page.
     std::size_t item;
-    int page;
     std::array<std::uint64_t, 4> area;
     auto operator<=>(const FitKey &) const = default;
 };
-FitKey fitKey(std::size_t item, int page, const QRectF &area) {
+FitKey fitKey(std::size_t item, const QRectF &area) {
     return {item,
-            page,
             {std::bit_cast<std::uint64_t>(area.x()), std::bit_cast<std::uint64_t>(area.y()),
              std::bit_cast<std::uint64_t>(area.width()),
              std::bit_cast<std::uint64_t>(area.height())}};
@@ -118,8 +119,11 @@ struct FitPlacement {
 };
 // No CAD, paths, dimension recordings or painter state retained by the cache.
 // nullopt is an ordinary fit failure, never cancellation or a spent budget.
-using CachedFit = std::optional<std::vector<FitPlacement>>;
-CachedFit cacheFit(const std::vector<DrawingPlacedView> &views) {
+struct CachedFit {
+    std::optional<std::vector<FitPlacement>> placements;
+    std::string failure; // Kept only for a whole-sheet fit.
+};
+std::vector<FitPlacement> cacheFit(const std::vector<DrawingPlacedView> &views) {
     std::vector<FitPlacement> result;
     result.reserve(views.size());
     for (const auto &view : views)
@@ -128,11 +132,11 @@ CachedFit cacheFit(const std::vector<DrawingPlacedView> &views) {
     return result;
 }
 std::optional<std::vector<DrawingPlacedView>> restoreFit(const CachedFit &cached, int page) {
-    if (!cached)
+    if (!cached.placements)
         return {};
     std::vector<DrawingPlacedView> result;
-    result.reserve(cached->size());
-    for (const auto &view : *cached) {
+    result.reserve(cached.placements->size());
+    for (const auto &view : *cached.placements) {
         result.push_back(
             {view.key, page, view.area, view.centre, view.scale, view.selectionBounds});
         result.back().compactDimensions = view.compactDimensions;
@@ -145,17 +149,21 @@ double width(const DrawingView &v) {
 double height(const DrawingView &v) {
     return v.maximum.y - v.minimum.y;
 }
-double dimensionPadding(const std::optional<DrawingView> &view, bool verticalSpace,
-                        bool compact = false) {
+double dimensionPadding(const DrawingView *view, bool verticalSpace, bool compact = false,
+                        bool essential = false) {
     if (!view)
         return 44;
     std::size_t count = 0;
     const auto usesSpace = [verticalSpace](const DrawingDimension &d) {
         return (std::abs(d.end.x - d.start.x) >= std::abs(d.end.y - d.start.y)) == verticalSpace;
     };
-    for (const auto *dimensions :
-         {&view->dimensions, &view->holeDimensions, &view->sectionDimensions})
+    for (const auto *dimensions : {&view->dimensions, &view->sectionDimensions})
         count += std::count_if(dimensions->begin(), dimensions->end(), usesSpace);
+    count += std::count_if(view->holeDimensions.begin(), view->holeDimensions.end(),
+                           [&](const auto &dimension) {
+                               return (!essential || dimension.openingPatternReference) &&
+                                      usesSpace(dimension);
+                           });
     // Axial spans share a chain line. Other dimensions need individual lanes,
     // distributed over two sides; this is only an allocation hint, never a fit proof.
     count += std::any_of(view->axialDimensions.begin(), view->axialDimensions.end(), usesSpace);
@@ -164,7 +172,8 @@ double dimensionPadding(const std::optional<DrawingView> &view, bool verticalSpa
     // It is only a paper-space hint; paintPlaced still proves the complete fit.
     return std::max(44., (compact && verticalSpace ? 22. : 44.) + count * 7.);
 }
-double minimumScale(const BendingDrawing &d, DrawingViewKey key, const DrawingView &v) {
+double minimumScale(const BendingDrawing &d, DrawingViewKey key, const DrawingView &v,
+                    QSizeF referenceSize) {
     if (key.kind == DrawingViewKind::Projection)
         return .01;
     if (key.kind == DrawingViewKind::Flat)
@@ -179,10 +188,37 @@ double minimumScale(const BendingDrawing &d, DrawingViewKey key, const DrawingVi
             std::max({readable, .75 / b.thicknessMm, 1.5 / (b.innerRadiusMm + b.thicknessMm)});
     }
     const double reference =
-        standardDrawingScale(std::min(160. / width(v), 120. / height(v))).value_or(1.);
+        standardDrawingScale(std::min(referenceSize.width() / width(v),
+                                      referenceSize.height() / height(v)))
+            .value_or(.001);
     return std::min(reference, readable > 0 ? readable : reference * .5);
 }
+struct SingleViewFit {
+    double width;
+    double height;
+    double minimum;
+    std::optional<double> fixed;
+    double automaticCap;
+    double maximum(QRectF area) const {
+        return std::min((area.width() - 70) / width, (area.height() - 48) / height);
+    }
+    std::optional<double> initial(double maximumScale) const {
+        return fixed ? fixed : standardDrawingScale(std::min(maximumScale, automaticCap));
+    }
+};
+SingleViewFit singleViewFit(const BendingDrawing &d, const DrawingViewChoice &choice,
+                            const DrawingView &view, QRectF fullArea, DrawingPaperFormat format) {
+    // Reserve physical space for annotations around large sections on A4.
+    const QSizeF referenceSize = format == DrawingPaperFormat::A4
+                                     ? QSizeF((fullArea.width() - 70) * .75,
+                                              (fullArea.height() - 48) * .75)
+                                     : QSizeF(160, 120);
+    return {width(view), height(view),
+            choice.scale ? .00001 : minimumScale(d, choice.key, view, referenceSize),
+            choice.scale, choice.key.kind == DrawingViewKind::Flat ? 1. : 100.};
+}
 std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item, QRectF area,
+                                       QRectF fullArea, DrawingPaperFormat format,
                                        DrawingFlatSide side, int page,
                                        drawing::LayoutContext &context) {
     context.checkpoint();
@@ -190,10 +226,10 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
     std::string lastError;
     const bool family = item.choices.front().key.kind == DrawingViewKind::Projection;
     if (family) {
-        std::array<std::optional<DrawingView>, 3> views;
+        std::array<const DrawingView *, 3> views{};
         std::optional<double> fixed;
         for (const auto &choice : item.choices) {
-            views.at(choice.key.index) = drawing::selectedView(d, choice.key, context.choices);
+            views.at(choice.key.index) = &context.view(d, choice.key);
             if (choice.scale) {
                 if (fixed && *fixed != *choice.scale)
                     throw std::runtime_error("Масштабы связанных видов должны совпадать");
@@ -215,9 +251,9 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
             (area.width() - (lateral ? 4 * margin + gap : 2 * margin) - 8) / std::max(rawW, 1.e-8),
             (area.height() - (top ? 4 * margin + gap : 2 * margin)) / std::max(rawH, 1.e-8));
         const double fullFit = std::min(
-            (drawing::contentArea.width() - (lateral ? 4 * margin + gap : 2 * margin) - 8) /
+            (fullArea.width() - (lateral ? 4 * margin + gap : 2 * margin) - 8) /
                 std::max(rawW, 1.e-8),
-            (drawing::contentArea.height() - (top ? 4 * margin + gap : 2 * margin)) /
+            (fullArea.height() - (top ? 4 * margin + gap : 2 * margin)) /
                 std::max(rawH, 1.e-8));
         const double minimum =
             fixed ? .001 : std::max(.001, standardDrawingScale(fullFit * .5).value_or(.001));
@@ -229,17 +265,16 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
             // density before reducing scale: short/thin views can reserve paper
             // that the heavily dimensioned main view actually needs.
             for (int allocation = 0; allocation < 3; ++allocation) {
-                const double mainW = allocation ? std::max(dimensionPadding(views[0], false),
-                                                           dimensionPadding(views[1], false))
+                const auto padding = [&](std::size_t index, bool vertical) {
+                    return dimensionPadding(views[index], vertical, allocation == 2,
+                                            item.essentialDimensions);
+                };
+                const double mainW = allocation ? std::max(padding(0, false), padding(1, false))
                                                 : 2 * margin;
                 const double mainH =
-                    allocation ? std::max(dimensionPadding(views[0], true, allocation == 2),
-                                          dimensionPadding(views[2], true, allocation == 2))
-                               : 2 * margin;
-                const double sidePadding =
-                    allocation ? dimensionPadding(views[2], false) : 2 * margin;
-                const double topPadding =
-                    allocation ? dimensionPadding(views[1], true, allocation == 2) : 2 * margin;
+                    allocation ? std::max(padding(0, true), padding(2, true)) : 2 * margin;
+                const double sidePadding = allocation ? padding(2, false) : 2 * margin;
+                const double topPadding = allocation ? padding(1, true) : 2 * margin;
                 const double sideW = lateral ? (area.width() - gap) *
                                                    (width(*views[2]) * *scale + sidePadding) /
                                                    (rawW * *scale + mainW + sidePadding)
@@ -268,9 +303,12 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
                     placed.push_back({choice.key, page, cell,
                                       cell.center() + QPointF(0, allocation == 2 ? 6 : 0), *scale});
                 }
-                for (auto &at : placed)
+                for (auto &at : placed) {
                     at.compactDimensions = item.compactDimensions;
-                QImage scratch(420, 297, QImage::Format_RGB32);
+                    at.essentialDimensions = item.essentialDimensions;
+                    at.smallOptionalText = item.smallOptionalText;
+                }
+                QImage scratch(1, 1, QImage::Format_RGB32);
                 QPainter painter(&scratch);
                 std::vector<QRectF> occupied;
                 auto painting = placed.front().key;
@@ -278,7 +316,7 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
                     for (auto &p : placed) {
                         painting = p.key;
                         drawing::paintPlaced(painter, d, p, side, occupied, &p.selectionBounds,
-                                             &context);
+                                             context);
                     }
                     return placed;
                 } catch (const DrawingLayoutInterrupted &) {
@@ -295,23 +333,22 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
         }
     } else {
         const auto &choice = item.choices.front();
-        const auto v = drawing::selectedView(d, choice.key, context.choices);
-        const double fit =
-            std::min((area.width() - 70) / width(v), (area.height() - 48) / height(v));
-        auto scale = choice.scale ? choice.scale
-                                  : standardDrawingScale(std::min(
-                                        fit, choice.key.kind == DrawingViewKind::Flat ? 1. : 100.));
-        const double minimum = choice.scale ? .00001 : minimumScale(d, choice.key, v);
-        for (int attempt = 0; attempt < 8 && scale && *scale + 1.e-9 >= minimum; ++attempt) {
+        const auto &v = context.view(d, choice.key);
+        const auto geometry = singleViewFit(d, choice, v, fullArea, format);
+        const double fit = geometry.maximum(area);
+        auto scale = geometry.initial(fit);
+        for (int attempt = 0; attempt < 8 && scale && *scale + 1.e-9 >= geometry.minimum; ++attempt) {
             if (*scale > fit + 1.e-9)
                 throw std::runtime_error("Вид не помещается в выбранном масштабе");
             DrawingPlacedView at{choice.key, page, area, area.center() + QPointF(0, 4), *scale};
             at.compactDimensions = item.compactDimensions;
-            QImage scratch(420, 297, QImage::Format_RGB32);
+            at.essentialDimensions = item.essentialDimensions;
+            at.smallOptionalText = item.smallOptionalText;
+            QImage scratch(1, 1, QImage::Format_RGB32);
             QPainter painter(&scratch);
             std::vector<QRectF> occupied;
             try {
-                drawing::paintPlaced(painter, d, at, side, occupied, &at.selectionBounds, &context);
+                drawing::paintPlaced(painter, d, at, side, occupied, &at.selectionBounds, context);
                 return {at};
             } catch (const DrawingLayoutInterrupted &) {
                 throw;
@@ -326,8 +363,7 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
     throw std::runtime_error(lastError.empty() ? "Недостаточно места для читаемого вида"
                                                : lastError);
 }
-std::vector<std::vector<QRectF>> cells(std::size_t count) {
-    const auto area = drawing::contentArea;
+std::vector<std::vector<QRectF>> cells(std::size_t count, QRectF area) {
     std::vector<std::vector<QRectF>> result;
     for (int columns : {1, 2, 3}) {
         if (static_cast<std::size_t>(columns) > count)
@@ -371,21 +407,66 @@ struct UnplacedItem {
     std::size_t item;
     std::string reason;
 };
+template <typename FitsCell>
+std::optional<std::vector<int>> matchCells(std::size_t count, const FitsCell &fitsCell) {
+    std::vector<int> owner(count, -1);
+    const auto match = [&](auto &&self, std::size_t i, std::vector<bool> &visited) -> bool {
+        for (std::size_t j = 0; j < count; ++j)
+            if (!visited[j] && fitsCell(i, j)) {
+                visited[j] = true;
+                if (owner[j] < 0 ||
+                    self(self, static_cast<std::size_t>(owner[j]), visited)) {
+                    owner[j] = static_cast<int>(i);
+                    return true;
+                }
+            }
+        return false;
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+        std::vector<bool> visited(count);
+        if (!match(match, i, visited))
+            return {};
+    }
+    return owner;
+}
 std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
                                       const std::vector<std::size_t> &order, DrawingSheetPlan &plan,
                                       std::map<FitKey, CachedFit> &fitCache,
-                                      drawing::LayoutContext &context) {
+                                      drawing::LayoutContext &context, bool allowEssential = false) {
     struct FitAttempt {
         std::optional<std::vector<DrawingPlacedView>> placed;
         bool checked = false;
     };
     const auto cacheLimit = std::min(context.limits.maximumCachedFits, std::size_t{4096});
+    const auto fullArea = drawing::contentArea(DrawingSheet::paperSizeMm(plan.paperFormat));
+    std::vector<std::optional<SingleViewFit>> singleViews(items.size());
     std::size_t begin = 0;
     while (begin < order.size()) {
         context.checkpoint();
         bool packed = false;
+        std::string fullAreaFailure;
         for (auto count = std::min(std::size_t{6}, order.size() - begin); count && !packed; --count)
-            for (const auto &areas : cells(count)) {
+            for (const auto &areas : cells(count, fullArea)) {
+                context.checkpoint();
+                // Reject a grid only when its cells cannot even accommodate the
+                // standalone views at the scales that fitItem is allowed to try.
+                const auto canFit = [&](std::size_t i, std::size_t j) {
+                    const auto id = order[begin + i];
+                    const auto &choice = items[id].choices.front();
+                    if (choice.key.kind == DrawingViewKind::Projection)
+                        return true;
+                    auto &geometry = singleViews[id];
+                    if (!geometry)
+                        geometry = singleViewFit(*plan.source, choice,
+                                                 context.view(*plan.source, choice.key),
+                                                 fullArea, plan.paperFormat);
+                    const auto maximum = geometry->maximum(areas[j]);
+                    const auto scale = geometry->initial(maximum);
+                    return scale && *scale + 1.e-9 >= geometry->minimum &&
+                           *scale <= maximum + 1.e-9;
+                };
+                if (count > 1 && !matchCells(count, canFit))
+                    continue;
                 std::vector fits(count, std::vector<FitAttempt>(count));
                 // Matching explores cells in the same order, evaluating only the pairs it visits.
                 const auto fitsCell = [&](std::size_t i, std::size_t j) {
@@ -394,49 +475,37 @@ std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
                     if (attempt.checked)
                         return attempt.placed.has_value();
                     attempt.checked = true;
-                    const auto key = fitKey(order[begin + i], plan.pages, areas[j]);
+                    const auto key = fitKey(order[begin + i], areas[j]);
+                    const bool wholeSheet = count == 1 && areas[j] == fullArea;
                     if (const auto cached = fitCache.find(key); cached != fitCache.end()) {
                         attempt.placed = restoreFit(cached->second, plan.pages);
+                        if (wholeSheet)
+                            fullAreaFailure = cached->second.failure;
                         ++plan.fitCacheHits;
                         return attempt.placed.has_value();
                     }
                     ++plan.fitCalls;
                     try {
-                        attempt.placed = fitItem(*plan.source, items[order[begin + i]], areas[j],
-                                                 plan.flatSide, plan.pages, context);
+                        attempt.placed =
+                            fitItem(*plan.source, items[order[begin + i]], areas[j], fullArea,
+                                    plan.paperFormat, plan.flatSide, plan.pages, context);
                         if (fitCache.size() < cacheLimit)
-                            fitCache.emplace(key, cacheFit(*attempt.placed));
+                            fitCache.emplace(key, CachedFit{cacheFit(*attempt.placed), {}});
                     } catch (const DrawingLayoutInterrupted &) {
                         throw;
-                    } catch (const std::runtime_error &) {
+                    } catch (const std::runtime_error &error) {
+                        if (wholeSheet)
+                            fullAreaFailure = error.what();
                         if (fitCache.size() < cacheLimit)
-                            fitCache.emplace(key, std::nullopt);
+                            fitCache.emplace(key, CachedFit{{}, wholeSheet ? fullAreaFailure : ""});
                     }
                     return attempt.placed.has_value();
                 };
-                std::vector<int> owner(count, -1);
-                const auto match = [&](auto &&self, std::size_t i,
-                                       std::vector<bool> &visited) -> bool {
-                    for (std::size_t j = 0; j < count; ++j)
-                        if (!visited[j] && fitsCell(i, j)) {
-                            visited[j] = true;
-                            if (owner[j] < 0 ||
-                                self(self, static_cast<std::size_t>(owner[j]), visited)) {
-                                owner[j] = static_cast<int>(i);
-                                return true;
-                            }
-                        }
-                    return false;
-                };
-                bool complete = true;
-                for (std::size_t i = 0; i < count && complete; ++i) {
-                    std::vector<bool> visited(count);
-                    complete = match(match, i, visited);
-                }
-                if (!complete)
+                const auto owner = matchCells(count, fitsCell);
+                if (!owner)
                     continue;
                 for (std::size_t j = 0; j < count; ++j) {
-                    const auto &at = *fits[static_cast<std::size_t>(owner[j])][j].placed;
+                    const auto &at = *fits[static_cast<std::size_t>((*owner)[j])][j].placed;
                     plan.views.insert(plan.views.end(), at.begin(), at.end());
                 }
                 begin += count;
@@ -445,14 +514,53 @@ std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
                 break;
             }
         if (!packed) {
-            std::string reason;
-            try {
-                (void)fitItem(*plan.source, items[order[begin]], drawing::contentArea,
-                              plan.flatSide, plan.pages, context);
-            } catch (const DrawingLayoutInterrupted &) {
-                throw;
-            } catch (const std::runtime_error &e) {
-                reason = e.what();
+            const auto &item = items[order[begin]];
+            if (allowEssential && std::any_of(item.choices.begin(), item.choices.end(),
+                                             [&](const auto &choice) {
+                    const auto &v = context.view(*plan.source, choice.key);
+                    return !v.holeDimensions.empty() ||
+                           (!v.sectionDimensions.empty() &&
+                            (plan.source->bends.empty() || choice.key.kind == DrawingViewKind::Flat)) ||
+                           (choice.key.kind == DrawingViewKind::Flat && !v.axialDimensions.empty());
+                })) {
+                auto fallback = item;
+                fallback.compactDimensions = true;
+                fallback.smallOptionalText = true;
+                std::vector<DrawingPlacedView> at;
+                const auto now = std::chrono::steady_clock::now();
+                const auto deadline = std::min(now + std::chrono::milliseconds(120),
+                                               now + (context.deadline - now) / 10);
+                const auto remaining = context.limits.maximumDimensionProbes - context.probes;
+                if (deadline > now && remaining >= 8) {
+                    context.retentionBudget = {
+                        deadline, context.probes + std::min<std::size_t>(2048, remaining / 8)};
+                    try {
+                        at = fitItem(*plan.source, fallback, fullArea, fullArea, plan.paperFormat,
+                                     plan.flatSide, plan.pages, context);
+                    } catch (const drawing::LayoutContext::RetentionLimit &) {
+                    } catch (const DrawingLayoutInterrupted &) {
+                        throw;
+                    } catch (const std::runtime_error &) {
+                    }
+                    context.retentionBudget.reset();
+                }
+                if (at.empty()) {
+                    fallback.essentialDimensions = true;
+                    try {
+                        at = fitItem(*plan.source, fallback, fullArea, fullArea, plan.paperFormat,
+                                     plan.flatSide, plan.pages, context);
+                    } catch (const DrawingLayoutInterrupted &) {
+                        throw;
+                    } catch (const std::runtime_error &) {
+                        // Keep the detailed failure from the original layout.
+                    }
+                }
+                if (!at.empty()) {
+                    plan.views.insert(plan.views.end(), at.begin(), at.end());
+                    ++begin;
+                    ++plan.pages;
+                    continue;
+                }
             }
             const auto name =
                 items[order[begin]].choices.size() > 1
@@ -460,9 +568,10 @@ std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
                     : DrawingSheet::viewName(*plan.source, items[order[begin]].choices.front().key);
             return UnplacedItem{order[begin],
                                 (name +
-                                 QStringLiteral(": размеры или выноски не помещаются на A3. "
-                                                "Выберите «Авто» или меньший масштаб. ") +
-                                 QString::fromStdString(reason))
+                                 QStringLiteral(": размеры или выноски не помещаются на %1. "
+                                                "Выберите «Авто» или меньший масштаб. ")
+                                     .arg(DrawingSheet::paperName(plan.paperFormat)) +
+                                 QString::fromStdString(fullAreaFailure))
                                     .toStdString()};
         }
     }
@@ -486,11 +595,12 @@ std::size_t internItem(std::vector<Item> &items, Item item) {
     return items.size() - 1;
 }
 std::vector<double> familyScales(const BendingDrawing &drawing, const Item &family,
-                                 const std::vector<DrawingViewChoice> *choices) {
-    std::array<std::optional<DrawingView>, 3> views;
+                                 drawing::LayoutContext &context,
+                                 DrawingPaperFormat format) {
+    std::array<const DrawingView *, 3> views{};
     std::optional<double> fixed;
     for (const auto &choice : family.choices) {
-        views.at(choice.key.index) = drawing::selectedView(drawing, choice.key, choices);
+        views.at(choice.key.index) = &context.view(drawing, choice.key);
         if (choice.scale) {
             if (fixed && fixed != choice.scale)
                 throw std::runtime_error("Масштабы связанных видов должны совпадать");
@@ -510,14 +620,28 @@ std::vector<double> familyScales(const BendingDrawing &drawing, const Item &fami
     const double rawH =
         (primaryH > 0 ? primaryH : height(*views[1])) + (top ? height(*views[1]) : 0.);
     constexpr double margin = 22, gap = 6;
+    const auto fullArea = drawing::contentArea(DrawingSheet::paperSizeMm(format));
     const double fit =
-        std::min((drawing::contentArea.width() - (lateral ? 4 * margin + gap : 2 * margin) - 8) /
+        std::min((fullArea.width() - (lateral ? 4 * margin + gap : 2 * margin) - 8) /
                      std::max(rawW, 1.e-8),
-                 (drawing::contentArea.height() - (top ? 4 * margin + gap : 2 * margin)) /
+                 (fullArea.height() - (top ? 4 * margin + gap : 2 * margin)) /
                      std::max(rawH, 1.e-8));
+    // On A4, the common scale for separated projections can exceed the scale
+    // estimated for all three together. Start from the largest individual view.
+    double start = fit;
+    if (format == DrawingPaperFormat::A4) {
+        double largestWidth = 0., largestHeight = 0.;
+        for (const auto &view : views)
+            if (view) {
+                largestWidth = std::max(largestWidth, width(*view));
+                largestHeight = std::max(largestHeight, height(*view));
+            }
+        start = std::min((fullArea.width() - 2 * margin - 8) / largestWidth,
+                         (fullArea.height() - 2 * margin) / largestHeight);
+    }
     const double minimum = std::max(.001, standardDrawingScale(fit * .5).value_or(.001));
     std::vector<double> result;
-    for (auto scale = standardDrawingScale(fit);
+    for (auto scale = standardDrawingScale(start);
          scale && result.size() < 7 && *scale + 1.e-9 >= minimum;
          scale = standardDrawingScale(*scale * .8))
         result.push_back(*scale);
@@ -568,19 +692,90 @@ void linkProjectionSheets(DrawingSheetPlan &plan, drawing::LayoutContext &contex
     // Prove the complete captions/annotations before recording any vector plan.
     // No late overlay may invalidate an otherwise accepted sheet.
     for (int page = 0; page < plan.pages; ++page) {
-        QImage scratch(420, 297, QImage::Format_RGB32);
+        QImage scratch(1, 1, QImage::Format_RGB32);
         QPainter painter(&scratch);
         std::vector<QRectF> occupied;
         for (auto &at : plan.views)
             if (at.page == page)
                 drawing::paintPlaced(painter, *plan.source, at, plan.flatSide, occupied,
-                                     &at.selectionBounds, &context);
+                                     &at.selectionBounds, context);
+    }
+}
+
+void retainOptionalDimensions(DrawingSheetPlan &plan, drawing::LayoutContext &context) {
+    if (std::none_of(plan.views.begin(), plan.views.end(),
+                     [](const auto &at) { return at.essentialDimensions; }))
+        return;
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    const auto deadline = std::min(now + std::chrono::milliseconds(400),
+                                   now + (context.deadline - now) / 10);
+    const auto remaining = context.limits.maximumDimensionProbes - context.probes;
+    const auto probeEnd = context.probes + std::min<std::size_t>(4096, remaining / 4);
+    // The fallback is already valid. Improving it must leave budget for recording.
+    struct ResetBudget {
+        drawing::LayoutContext &context;
+        ~ResetBudget() { context.retentionBudget.reset(); }
+    } reset{context};
+    struct Candidate {
+        DrawingPlacedView *placed;
+        DrawingDimensionId id;
+        int priority;
+    };
+    constexpr std::size_t maximumTrials = 32;
+    std::vector<Candidate> candidates;
+    const auto order = [](const Candidate &a, const Candidate &b) {
+        return std::pair{a.priority, a.id.second} < std::pair{b.priority, b.id.second};
+    };
+    for (auto &at : plan.views) {
+        if (!at.essentialDimensions)
+            continue;
+        const auto &v = context.view(*plan.source, at.key);
+        const bool flat = at.key.kind == DrawingViewKind::Flat;
+        const bool plate = plan.source->bends.empty();
+        const auto add = [&](DrawingDimensionSource source, const auto &list, int priority) {
+            std::size_t considered = 0;
+            for (std::size_t i = 0; i < list.size() && considered < maximumTrials; ++i)
+                if (drawing::optionalDimension(source, flat, plate, list[i])) {
+                    candidates.push_back({&at, {source, i}, priority});
+                    ++considered;
+                }
+        };
+        add(DrawingDimensionSource::Section, v.sectionDimensions, 0);
+        add(DrawingDimensionSource::Hole, v.holeDimensions, 1);
+        add(DrawingDimensionSource::Axial, v.axialDimensions, 2);
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), order);
+    for (std::size_t i = 0; i < std::min(candidates.size(), maximumTrials); ++i) {
+        if (Clock::now() >= deadline || context.probes >= probeEnd)
+            break;
+        const auto &candidate = candidates[i];
+        auto &at = *candidate.placed;
+        context.retentionBudget = {
+            deadline, context.probes + std::min<std::size_t>(384, probeEnd - context.probes)};
+        at.retainedDimensions.push_back(candidate.id);
+        try {
+            QImage scratch(1, 1, QImage::Format_RGB32);
+            QPainter painter(&scratch);
+            std::vector<QRectF> occupied;
+            for (const auto &other : plan.views)
+                if (other.page == at.page)
+                    drawing::paintPlaced(painter, *plan.source, other, plan.flatSide, occupied,
+                                         nullptr, context);
+        } catch (const drawing::LayoutContext::RetentionLimit &) {
+            at.retainedDimensions.pop_back();
+        } catch (const DrawingLayoutInterrupted &) {
+            throw;
+        } catch (const std::runtime_error &) {
+            at.retainedDimensions.pop_back();
+        }
     }
 }
 } // namespace
 std::shared_ptr<const DrawingSheetPlan>
 DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewChoice> &choices,
-                      DrawingFlatSide side, std::stop_token stop, DrawingLayoutLimits limits) {
+                      DrawingFlatSide side, std::stop_token stop, DrawingLayoutLimits limits,
+                      DrawingPaperFormat format) {
     drawing::LayoutContext context(stop, limits);
     context.checkpoint();
     if (!source)
@@ -591,6 +786,14 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     plan->choices = choices;
     context.choices = &plan->choices;
     plan->flatSide = side;
+    plan->paperFormat = format;
+    const auto paper = paperSizeMm(format);
+    const auto frame = drawing::frameArea(paper);
+    const auto titleLeft = frame.right() - drawing::titleBlockWidth;
+    const QRectF isoArea(25, frame.bottom() - 41, titleLeft - 35, 38);
+    const auto isoFit = [&](const DrawingView &v) {
+        return std::min((isoArea.width() - 20) / width(v), 24. / height(v));
+    };
     std::vector<Item> items;
     Item family;
     std::optional<DrawingViewChoice> iso;
@@ -618,8 +821,8 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     if (items.empty())
         throw std::runtime_error("Выберите хотя бы один размерный вид");
     if (iso && iso->scale) {
-        const auto v = drawing::selectedView(*source, iso->key, context.choices);
-        const double compactFit = std::min(175. / width(v), 24. / height(v));
+        const auto &v = context.view(*source, iso->key);
+        const double compactFit = isoFit(v);
         if (*iso->scale > compactFit + 1.e-9) {
             // An explicit larger isometric view participates in normal sheet packing.
             items.push_back({{*iso}});
@@ -629,17 +832,19 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     std::map<FitKey, CachedFit> fitCache;
     std::vector<std::size_t> originalOrder(items.size());
     std::iota(originalOrder.begin(), originalOrder.end(), 0);
-    auto failure = packItems(items, originalOrder, *plan, fitCache, context);
-    if (failure) {
+    const auto reset = [&] {
+        plan->views.clear();
+        plan->pages = 0;
+    };
+    const auto fullLayout = [&]() -> std::optional<UnplacedItem> {
+        auto failure = packItems(items, originalOrder, *plan, fitCache, context);
+        if (!failure)
+            return {};
         const auto originalFailure = *failure;
         if (family.choices.empty() || failure->item != 0 || plan->pages != 0)
-            throw std::runtime_error(failure->reason);
+            return failure;
         // Validate the common explicit scale before considering any new policy.
-        const auto scales = familyScales(*source, family, context.choices);
-        const auto reset = [&] {
-            plan->views.clear();
-            plan->pages = 0;
-        };
+        const auto scales = familyScales(*source, family, context, format);
         auto compactFamily = family;
         compactFamily.compactDimensions = true;
         const auto compactId = internItem(items, std::move(compactFamily));
@@ -648,7 +853,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
         reset();
         failure = packItems(items, order, *plan, fitCache, context);
         if (failure && failure->item != compactId)
-            throw std::runtime_error(failure->reason);
+            return failure;
         if (failure) {
             bool accepted = false;
             const auto partitions = familyPartitions(family);
@@ -673,7 +878,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
                         if (failure) {
                             if (items[failure->item].choices.front().key.kind !=
                                 DrawingViewKind::Projection)
-                                throw std::runtime_error(failure->reason);
+                                return failure;
                             continue;
                         }
                         try {
@@ -693,18 +898,24 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
                     break;
             }
             if (!accepted)
-                throw std::runtime_error(originalFailure.reason);
+                return originalFailure;
         }
+        return {};
+    };
+    if (fullLayout()) {
+        reset();
+        if (const auto failure = packItems(items, originalOrder, *plan, fitCache, context, true))
+            throw std::runtime_error(failure->reason);
     }
     if (iso)
         for (int page = 0; page < plan->pages; ++page) {
-            const auto v = drawing::selectedView(*source, iso->key, context.choices);
-            const QRectF area(25, 251, 195, 38);
-            const double fit = std::min(175. / width(v), 24. / height(v));
+            const auto &v = context.view(*source, iso->key);
+            const double fit = isoFit(v);
             const auto scale = iso->scale ? iso->scale : standardDrawingScale(fit);
             if (!scale || *scale > fit + 1.e-9)
                 throw std::runtime_error("Изометрия не помещается в выбранном масштабе");
-            plan->views.push_back({iso->key, page, area, area.center() + QPointF(0, 4), *scale});
+            plan->views.push_back(
+                {iso->key, page, isoArea, isoArea.center() + QPointF(0, 4), *scale});
             auto &at = plan->views.back();
             const QSizeF size(width(v) * *scale, height(v) * *scale);
             at.selectionBounds =
@@ -714,7 +925,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     std::set<std::size_t> covered;
     for (const auto &at : plan->views)
         if (at.key.kind != DrawingViewKind::Flat && at.key.kind != DrawingViewKind::Isometric) {
-            const auto v = drawing::selectedView(*source, at.key, context.choices);
+            const auto &v = context.view(*source, at.key);
             covered.insert(v.dimensionedBends.begin(), v.dimensionedBends.end());
         }
     for (std::size_t i = 0; i < source->bends.size(); ++i)
@@ -725,6 +936,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
             else
                 plan->coverage.missing.push_back(i);
         }
+    retainOptionalDimensions(*plan, context);
     drawing::recordViews(*plan, context);
     plan->dimensionProbes = context.probes;
     plan->recordingBytes = context.bytes;

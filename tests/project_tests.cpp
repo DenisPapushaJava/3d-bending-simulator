@@ -80,6 +80,7 @@ void testProject() {
     drawing.reverseView = true;
     drawing.allowBreaks = false;
     drawing.flatSide = DrawingFlatSide::Opposite;
+    drawing.paperFormat = DrawingPaperFormat::A3;
     drawing.sectionEdits = {{{0, 2}, .376, true}};
     drawing.views = {{{DrawingViewKind::Section, 0, {{0, 2}}}, false, .5},
                      {{DrawingViewKind::Isometric, 0}, true, {}}};

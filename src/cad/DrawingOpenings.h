@@ -14,6 +14,7 @@ struct DrawingOpening {
     gp_Vec minor;
     bool circular = false;
     std::vector<std::size_t> wallFaces;
+    bool obround = false;
 };
 std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                                             const TopTools_IndexedMapOfShape &faces,

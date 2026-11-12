@@ -2,6 +2,13 @@
 #include <algorithm>
 
 namespace bending::ui::drawing {
+const application::DrawingView &LayoutContext::view(const application::BendingDrawing &drawing,
+                                                   DrawingViewKey key) {
+    const auto id = std::pair{key.kind, key.index};
+    if (const auto it = views_.find(id); it != views_.end())
+        return it->second;
+    return views_.emplace(id, selectedView(drawing, key, choices)).first->second;
+}
 application::DrawingView selectedView(const application::BendingDrawing &drawing,
                                       DrawingViewKey key,
                                       const std::vector<DrawingViewChoice> *choices) {

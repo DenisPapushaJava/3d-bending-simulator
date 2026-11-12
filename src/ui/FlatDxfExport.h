@@ -8,7 +8,7 @@
 namespace bending::ui {
 struct FlatDxfOptions {
     bool includeBends = true;
-    QString bendLayer = QStringLiteral("BENDING");
+    QString bendLayer = QStringLiteral("BEND");
     int bendColor = 1; // AutoCAD Color Index (ACI), red by default.
 };
 

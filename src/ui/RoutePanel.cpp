@@ -405,8 +405,6 @@ void RoutePanel::moveTo(int from, int to, bool selectMovedStep) {
     core::BendSequence sequence(ids_);
     if (!sequence.move(static_cast<std::size_t>(from), static_cast<std::size_t>(to)))
         return;
-    const auto before = ids_;
-    const auto selected = ids_[static_cast<std::size_t>(from)];
     if (selectMovedStep)
         selected_ = to + 1;
     if (route_ && std::any_of(route_->steps.begin(), route_->steps.end(),
@@ -427,7 +425,7 @@ void RoutePanel::moveTo(int from, int to, bool selectMovedStep) {
         if (!selectMovedStep)
             groupedDragOrder_ = expanded;
         if (onReorder(expanded, true)) {
-            undo_.push_back({beforeSources, expanded, selected, true});
+            undo_.push_back({beforeSources, expanded, from + 1, to + 1, true});
             redo_.clear();
             if (undo_.size() > 50)
                 undo_.erase(undo_.begin());
@@ -435,8 +433,18 @@ void RoutePanel::moveTo(int from, int to, bool selectMovedStep) {
             groupedDragOrder_.reset();
         return;
     }
-    if (onReorder(sequence.bendIds(), false)) {
-        undo_.push_back({before, sequence.bendIds(), selected});
+    std::vector<std::string> expanded;
+    for (const auto &id : sequence.bendIds()) {
+        const auto i =
+            static_cast<std::size_t>(std::find(ids_.begin(), ids_.end(), id) - ids_.begin());
+        if (i < draftGroups_.size())
+            expanded.insert(expanded.end(), draftGroups_[i].begin(), draftGroups_[i].end());
+        else
+            expanded.push_back(id);
+    }
+    const auto beforeSources = sourceIds_;
+    if (onReorder(expanded, false)) {
+        undo_.push_back({beforeSources, expanded, from + 1, to + 1});
         redo_.clear();
         if (undo_.size() > 50)
             undo_.erase(undo_.begin());
@@ -448,9 +456,7 @@ void RoutePanel::undo() {
     if (undo_.empty() || !onReorder || sourceIds_ != undo_.back().after)
         return;
     const auto edit = undo_.back();
-    selected_ = static_cast<int>(std::find(edit.before.begin(), edit.before.end(), edit.selected) -
-                                 edit.before.begin()) +
-                1;
+    selected_ = edit.previousStep;
     if (onReorder(edit.before, edit.grouped)) {
         undo_.pop_back();
         redo_.push_back(edit);
@@ -462,9 +468,7 @@ void RoutePanel::redo() {
     if (redo_.empty() || !onReorder || sourceIds_ != redo_.back().before)
         return;
     const auto edit = redo_.back();
-    selected_ = static_cast<int>(std::find(edit.after.begin(), edit.after.end(), edit.selected) -
-                                 edit.after.begin()) +
-                1;
+    selected_ = edit.nextStep;
     if (onReorder(edit.after, edit.grouped)) {
         redo_.pop_back();
         undo_.push_back(edit);
@@ -490,18 +494,28 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     for (const auto index : sourceIndices)
         if (const auto *entry = session.bend(index))
             sourceIds_.push_back(entry->id);
-    auto indices = sourceIndices;
+    std::vector<std::size_t> indices;
     std::vector<std::string> ids;
+    draftGroups_.clear();
     if (route) {
-        indices.clear();
         for (const auto &step : route->steps) {
             ids.push_back(step.id);
             indices.push_back(step.bendIndex);
         }
-    } else
-        for (auto i : indices)
-            if (const auto *b = session.bend(i))
-                ids.push_back(b->id);
+    } else if (session.document()) {
+        for (const auto &stroke : application::routeBendStrokes(
+                 session.document()->metadata().bendAnalysis, sourceIndices)) {
+            std::vector<std::string> group;
+            for (const auto index : stroke)
+                if (const auto *b = session.bend(index))
+                    group.push_back(b->id);
+            if (!group.empty()) {
+                indices.push_back(stroke.front());
+                ids.push_back(group.front());
+                draftGroups_.push_back(std::move(group));
+            }
+        }
+    }
     const bool changed = ids != ids_ || route != route_;
     const bool newRoute = route && route != route_;
     const bool leavingJointRoute =
@@ -557,13 +571,15 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     for (std::size_t i = 0; i < steps_.size(); ++i) {
         steps_[i]->setProperty("routePosition", static_cast<int>(i));
         steps_[i]->setProperty("routeId", i ? QString::fromStdString(ids_[i - 1]) : QString{});
+        QStringList draftZones;
+        if (i && !route_)
+            for (const auto &id : draftGroups_[i - 1])
+                draftZones.push_back(QString::fromStdString(id));
         steps_[i]->setToolTip(
             i ? (route_ ? QString{} : QStringLiteral("Черновик · ")) +
                     QStringLiteral("Шаг %1 · %2 · форма после гиба. Перетащите между шагами.")
                         .arg(i)
-                        .arg(route_ ? stepZones(route_->steps[i - 1])
-                                    : QStringLiteral("B%1").arg(indices_[i - 1] + 1, 2, 10,
-                                                                QLatin1Char('0')))
+                        .arg(route_ ? stepZones(route_->steps[i - 1]) : draftZones.join(" + "))
               : QStringLiteral("0 — заготовка: все гибы разогнуты"));
         steps_[i]->setAccessibleName(i ? QStringLiteral("Показать результат шага %1").arg(i)
                                        : QStringLiteral("Показать заготовку"));

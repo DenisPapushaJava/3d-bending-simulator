@@ -214,6 +214,9 @@ void checkDxfMeasurements() {
     pattern->data.cutProfile = profile;
     pattern->data.bends = {{0, {0, 40, 0}, {120, 40, 0}, {}, 1, 1, 2, .5, 5}};
     ui::FlatDxfPreview view;
+    auto palette = view.palette();
+    palette.setColor(QPalette::Base, Qt::white);
+    view.setPalette(palette);
     view.resize(720, 480);
     view.show();
     view.setPattern(pattern);
@@ -232,6 +235,50 @@ void checkDxfMeasurements() {
         QApplication::sendEvent(view.viewport(), &press);
     };
     const auto formatted = [](double value) { return QLocale().toString(value, 'f', 2); };
+    const auto move = [&](double x, double y) {
+        const auto position = view.mapFromScene(QPointF(x, -y));
+        QMouseEvent event(QEvent::MouseMove, QPointF(position),
+                          QPointF(view.viewport()->mapToGlobal(position)), Qt::NoButton,
+                          Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &event);
+    };
+    const auto hasInk = [&](QColor ink, std::optional<QPoint> near = {}) {
+        const auto frame = view.viewport()->grab().toImage();
+        const auto area = near ? QRect(*near - QPoint(2, 2), QSize(5, 5)).intersected(frame.rect())
+                               : frame.rect();
+        for (int y = area.top(); y <= area.bottom(); ++y)
+            for (int x = area.left(); x <= area.right(); ++x) {
+                const auto color = frame.pixelColor(x, y);
+                if (std::abs(color.red() - ink.red()) < 15 &&
+                    std::abs(color.green() - ink.green()) < 15 &&
+                    std::abs(color.blue() - ink.blue()) < 15)
+                    return true;
+            }
+        return false;
+    };
+    const QColor xInk("#b91c1c"), yInk("#047857"), radialInk("#9a531e");
+    move(50, 33);
+    const auto bendHit = view.mapFromScene(QPointF(50, -40));
+    const auto farEdge = view.mapFromScene(QPointF(50, -80));
+    check(hasInk(xInk, view.mapFromScene(QPointF(0, -33))) &&
+              hasInk(yInk, bendHit) && !hasInk(yInk, farEdge),
+          "DXF quick spans did not follow the axis colours or stop at the visible bend");
+    view.setBends(false, Qt::red);
+    move(50, 33);
+    check(hasInk(yInk, view.mapFromScene(QPointF(50, -80))),
+          "DXF quick span did not reach the cut edge after hiding bends");
+    view.setBends(true, Qt::red);
+    click(50, 0);
+    move(50, 33);
+    check(!hasInk(yInk, view.mapFromScene(QPointF(50, -40))),
+          "DXF quick spans obscured an unfinished click measurement");
+    QKeyEvent resetQuick(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(&view, &resetQuick);
+    move(36, 20);
+    check(hasInk(radialInk), "DXF quick diameter did not appear after resetting the ruler");
+    QEvent leave(QEvent::Leave);
+    QApplication::sendEvent(&view, &leave);
+    check(!hasInk(radialInk), "DXF quick diameter remained after leaving the preview");
     click(100, 44);
     check(result == QStringLiteral("R%1 мм").arg(formatted(10)), "Incorrect DXF arc radius");
     click(100.5, 54.5);
@@ -422,7 +469,7 @@ void checkPlanarDxf(ui::MainWindow &window) {
               dxf.open(QIODevice::ReadOnly),
           "Cannot write planar DXF");
     const auto bytes = dxf.readAll();
-    check(bytes.contains("\nCUT\n") && !bytes.contains("\nBENDING\n"),
+    check(bytes.contains("\nCUT\n") && !bytes.contains("\nBEND\n"),
           "Planar DXF contains a bend layer");
     dialog->reject();
     QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -448,6 +495,7 @@ int main(int argc, char **argv) {
         window.resize(1280, 850);
         window.show();
         checkPlanarDxf(window);
+        ui::preferences()->setValue("flatDxf/bendLayer", QStringLiteral("BENDING"));
         window.setFlatPatternBuilder(builder);
         const auto sample =
             app.arguments().contains(QStringLiteral("--sample"))
@@ -532,7 +580,8 @@ int main(int argc, char **argv) {
         auto *dxfButtons = dxfDialog->findChild<QDialogButtonBox *>();
         auto *saveDxf = dxfButtons->button(QDialogButtonBox::Save);
         auto *layer = dxfDialog->findChild<QLineEdit *>();
-        check(saveDxf->isEnabled() && layer->text() == "BENDING", "DXF defaults are incorrect");
+        check(saveDxf->isEnabled() && layer->text() == "BEND",
+              "The legacy DXF layer default was not updated");
         auto drawingBuilder = std::make_shared<SharedDrawingBuilder>();
         window.setDrawingBuilder(drawingBuilder);
         auto *drawingAction = window.findChild<QAction *>("bendingDrawingAction");
@@ -556,8 +605,13 @@ int main(int argc, char **argv) {
         auto *pdfPicker = pdfDialog->findChild<QFileDialog *>("drawingPdfFileDialog");
         auto *dxfPicker = dxfDialog->findChild<QFileDialog *>("flatDxfFileDialog");
         check(pdfPicker && dxfPicker && pdfPicker->isVisible() && dxfPicker->isVisible() &&
-                  !QApplication::activeModalWidget(),
-              "File selection blocked the other preview");
+                  pdfPicker->parentWidget() == pdfDialog &&
+                  dxfPicker->parentWidget() == dxfDialog &&
+                  pdfPicker->windowModality() == Qt::WindowModal &&
+                  dxfPicker->windowModality() == Qt::WindowModal &&
+                  !pdfPicker->testOption(QFileDialog::DontUseNativeDialog) &&
+                  !dxfPicker->testOption(QFileDialog::DontUseNativeDialog),
+              "Save pickers did not use native, preview-scoped dialogs");
         pdfPicker->reject();
         dxfPicker->reject();
         pdfDialog->reject();
@@ -590,9 +644,10 @@ int main(int argc, char **argv) {
               "Cannot read DXF outputs");
         const auto dxf = exported.readAll(), cuts = cutOnly.readAll();
         check(dxf.contains("$INSUNITS\n70\n4\n") && !dxf.contains("LWPOLYLINE") &&
-                  dxf.contains("AcDbEntity\n8\nBENDING\n100\nAcDbLine") &&
-                  cuts.contains("AcDbEntity\n8\nCUT\n100\nAcDbLine") && !cuts.contains("BENDING") &&
-                  !dxf.contains("\nDIMENSION\n") && !dxf.contains("\nTEXT\n"),
+                  dxf.contains("AcDbEntity\n8\nBEND\n100\nAcDbLine") &&
+                  cuts.contains("AcDbEntity\n8\nCUT\n100\nAcDbLine") &&
+                  !cuts.contains("\nBEND\n") && !dxf.contains("\nDIMENSION\n") &&
+                  !dxf.contains("\nTEXT\n"),
               "DXF units or cut/bend separation is incorrect");
         ui::rememberFlatDxfDirectory(dxfPath);
         check(ui::suggestedFlatDxfPath(QStringLiteral("/missing/01.23 Деталь.step")) ==
@@ -917,6 +972,12 @@ int main(int argc, char **argv) {
         QMetaObject::invokeMethod(newPicker, "accept", Qt::DirectConnection);
         check(QFile::exists(newPath) && liveDxf->isVisible(),
               "Saving the current DXF failed or closed the comparison window");
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        liveSave->click();
+        auto *reopenedPicker = liveDxf->findChild<QFileDialog *>("flatDxfFileDialog");
+        check(reopenedPicker && reopenedPicker->directory() == QDir(exportDir.path()),
+              "The next DXF save did not offer the last successful folder");
+        reopenedPicker->reject();
         const auto partRevision = c.session().revision();
         c.open(native(exportDir.filePath("missing.step")));
         wait([&] { return c.flatPattern() && !c.hasWork(); });

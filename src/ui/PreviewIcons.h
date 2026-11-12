@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QFont>
 #include <QIcon>
 #include <QPainter>
 #include <QPainterPath>
@@ -7,7 +8,7 @@
 
 namespace bending::ui::previewIcons {
 namespace detail {
-inline QIcon make(void (*draw)(QPainter &)) {
+template <typename Draw> inline QIcon make(Draw draw) {
     QIcon icon;
     for (int ratio : {1, 2})
         for (auto state : {QIcon::Off, QIcon::On}) {
@@ -36,6 +37,30 @@ inline QIcon fit() {
         }
         painter.drawPath(corners);
         painter.drawRoundedRect(QRectF(8, 6, 8, 12), .7, .7);
+    });
+}
+
+inline QIcon paper(const QString &label) {
+    return detail::make([label](QPainter &painter) {
+        const QRectF sheet(2, 4, 20, 16);
+        constexpr double fold = 3;
+        QPainterPath outline;
+        outline.moveTo(sheet.topLeft());
+        outline.lineTo(sheet.topRight() - QPointF(fold, 0));
+        outline.lineTo(sheet.topRight() + QPointF(0, fold));
+        outline.lineTo(sheet.bottomRight());
+        outline.lineTo(sheet.bottomLeft());
+        outline.closeSubpath();
+        outline.moveTo(sheet.topRight() - QPointF(fold, 0));
+        outline.lineTo(sheet.topRight() + QPointF(-fold, fold));
+        outline.lineTo(sheet.topRight() + QPointF(0, fold));
+        painter.drawPath(outline);
+
+        auto font = painter.font();
+        font.setPixelSize(10);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.drawText(sheet.adjusted(0, 1, -1, 0), Qt::AlignCenter, label);
     });
 }
 

@@ -388,13 +388,22 @@ void ImportController::Impl::dispatchDraft() {
                                                         : 0) &&
                                 (!p->toolSetup() ||
                                  (*value)->checkedToolPositions == p->frameCount());
-                            if (valid && !job.request.operations.empty()) {
-                                const auto &op =
-                                    job.request
-                                        .operations[job.request.step ? job.request.step - 1 : 0];
+                            const auto &analysis = job.document->metadata().bendAnalysis;
+                            const auto strokes = routeDraftStrokes(job.request, analysis);
+                            if (valid && !strokes.empty() && job.request.step <= strokes.size()) {
+                                const auto &stroke =
+                                    strokes[job.request.step ? job.request.step - 1 : 0];
+                                const auto &op = job.request.operations[stroke.front()];
+                                BendStroke zones;
+                                for (const auto position : stroke)
+                                    zones.push_back(job.request.operations[position].bendIndex);
+                                const double width = routeStrokeLengthMm(analysis, zones);
                                 const bool tools = job.request.withTools && op.tools &&
                                                    core::validPressTools(*op.tools);
                                 valid =
+                                    p->activeBendCount() == zones.size() &&
+                                    std::abs(p->model().widthMm - width) <=
+                                        analysis.lengthToleranceMm &&
                                     bool(p->toolSetup()) == tools &&
                                     p->workpieceReversed() == op.workpieceReversed &&
                                     p->workpieceOffsetMm() == (tools ? op.workpieceOffsetMm : 0);
@@ -418,10 +427,9 @@ void ImportController::Impl::dispatchDraft() {
                                                  op.assignment->die.drawing);
                                 std::optional<BendRouteToolLengthIssue> expectedLengths;
                                 if (tools) {
-                                    const auto &analysis = job.document->metadata().bendAnalysis;
                                     const BendRouteToolLengthIssue lengths{
-                                        analysis.bends[op.bendIndex].lengthMm,
-                                        core::punchLengthMm(*op.tools), op.tools->lengthMm};
+                                        p->model().widthMm, core::punchLengthMm(*op.tools),
+                                        op.tools->lengthMm};
                                     if (!lengths.coversBend(analysis.lengthToleranceMm) &&
                                         !compactDraftCoverage(job.request, analysis))
                                         expectedLengths = lengths;
@@ -1061,7 +1069,9 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
         return false;
     const auto &session = s->session;
     const auto indices = session.orderedBends();
-    if (request.operations.size() != indices.size() || request.step > indices.size() ||
+    if (request.operations.size() != indices.size() ||
+        request.step >
+            routeBendStrokes(session.document()->metadata().bendAnalysis, indices).size() ||
         indices.size() != session.document()->metadata().bendAnalysis.bends.size())
         return false;
     for (std::size_t i = 0; i < indices.size(); ++i) {
@@ -1101,7 +1111,8 @@ bool ImportController::prefetchNextRouteDraft(
     if (s->stopping || hasWork() || s->activeFlat || !builder || !s->draft ||
         s->routeBuilder.lock() != builder || s->session.activeRequest() ||
         s->draft->source != s->session.document() ||
-        s->draft->request.step >= s->draft->request.operations.size())
+        s->draft->request.step >=
+            routeDraftStrokes(s->draft->request, s->draft->source->metadata().bendAnalysis).size())
         return false;
     auto request = s->draft->request;
     ++request.step;

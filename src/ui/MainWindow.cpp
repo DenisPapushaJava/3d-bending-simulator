@@ -565,6 +565,19 @@ class MainWindow::Impl {
                 }
             }
         }
+        if (includeJoint && index && members.empty() && session.document()) {
+            const auto &analysis = session.document()->metadata().bendAnalysis;
+            for (const auto &stroke :
+                 application::routeBendStrokes(analysis, session.orderedBends()))
+                if (stroke.size() > 1 &&
+                    std::find(stroke.begin(), stroke.end(), *index) != stroke.end()) {
+                    for (const auto member : stroke)
+                        if (member != *index)
+                            members.push_back(session.bend(member)->id);
+                    span = application::routeStrokeLengthMm(analysis, stroke);
+                    break;
+                }
+        }
         if ((id != toolContextId || members != toolContextMembers) && toolDraftChanged &&
             !commitStageTools())
             return false;
@@ -591,8 +604,16 @@ class MainWindow::Impl {
                              [&](const auto &value) { return value.bendIndex == index; });
             if (step != route->steps.end())
                 routePanel->select(static_cast<int>(step - route->steps.begin()) + 1, false);
-        } else if (found != order.end())
-            routePanel->select(static_cast<int>(found - order.begin()) + 1, false);
+        } else if (found != order.end()) {
+            const auto &analysis = controller->session().document()->metadata().bendAnalysis;
+            const auto strokes = application::routeBendStrokes(analysis, order);
+            const auto stroke =
+                std::find_if(strokes.begin(), strokes.end(), [&](const auto &group) {
+                    return std::find(group.begin(), group.end(), index) != group.end();
+                });
+            if (stroke != strokes.end())
+                routePanel->select(static_cast<int>(stroke - strokes.begin()) + 1, false);
+        }
         if (!setToolContext(index))
             return;
         propertyTabs->setCurrentIndex(3);
@@ -1399,18 +1420,29 @@ class MainWindow::Impl {
         const auto indices = controller->session().orderedBends();
         return indices.empty() ? std::nullopt : std::optional{indices.front()};
     }
-    std::vector<std::size_t> selectedJointBends() const {
+    std::vector<std::size_t> selectedJointBends(bool includeBlank = false) const {
+        if (!includeBlank && routePanel->selected() <= 0)
+            return {};
         const auto route = controller->bendRoute();
-        if (!viewingRoute || !route || routePanel->selected() <= 0 ||
-            routePanel->operation() >= route->steps.size())
-            return {};
-        const auto &step = route->steps[routePanel->operation()];
-        if (step.additionalBends.empty())
-            return {};
-        std::vector<std::size_t> result{step.bendIndex};
-        for (const auto &member : step.additionalBends)
-            result.push_back(member.bendIndex);
-        return result;
+        if (viewingRoute && route && routePanel->selected() > 0 &&
+            routePanel->operation() < route->steps.size()) {
+            const auto &step = route->steps[routePanel->operation()];
+            if (step.additionalBends.empty())
+                return {};
+            std::vector<std::size_t> result{step.bendIndex};
+            for (const auto &member : step.additionalBends)
+                result.push_back(member.bendIndex);
+            return result;
+        }
+        const auto &session = controller->session();
+        if (session.document()) {
+            auto strokes = application::routeBendStrokes(
+                session.document()->metadata().bendAnalysis, session.orderedBends());
+            const auto index = routePanel->operation();
+            if (index < strokes.size() && strokes[index].size() > 1)
+                return std::move(strokes[index]);
+        }
+        return {};
     }
     void beginPreviewReplacement(bool preserveFrame = false) {
         manualDraftWarmup.stop();
@@ -1439,16 +1471,21 @@ class MainWindow::Impl {
         const bool multiple =
             controller->session().document()->metadata().bendAnalysis.bends.size() > 1;
         const int step = routePanel->selected();
-        const auto joint = selectedJointBends();
+        const auto joint = selectedJointBends(true);
         const auto oldRoute = controller->bendRoute();
         beginPreviewReplacement(true);
         stopPlayback();
         if (!joint.empty()) {
             for (const auto member : joint)
                 if (!controller->setBendWorkpieceOrientation(
-                        member, !controller->session().bend(member)->workpieceReversed))
+                        member, oldRoute && step > 0
+                                    ? !controller->session().bend(member)->workpieceReversed
+                                    : reversed))
                     return;
-            prepareRoute(false, oldRoute->withTools);
+            if (oldRoute)
+                prepareRoute(false, oldRoute->withTools);
+            else
+                routePanel->select(step);
             return;
         }
         if (!controller->setBendWorkpieceOrientation(*index, reversed))
@@ -1482,6 +1519,8 @@ class MainWindow::Impl {
             std::vector<application::BendToolUpdate> jointUpdates;
             for (const auto member : joint) {
                 const auto *part = session.bend(member);
+                if (!part || !part->tools)
+                    return;
                 auto actual = part->catalogTools;
                 auto parameters = *part->tools;
                 parameters.punchReversed = reversed;
@@ -1489,8 +1528,13 @@ class MainWindow::Impl {
                     actual->punchReversed = reversed;
                 jointUpdates.push_back({member, parameters, std::move(actual)});
             }
-            if (controller->setBendToolAssignments(jointUpdates))
-                prepareRoute(false, true);
+            const bool verified = viewingRoute && controller->bendRoute();
+            if (controller->setBendToolAssignments(jointUpdates)) {
+                if (verified)
+                    prepareRoute(false, true);
+                else
+                    routePanel->select(step);
+            }
             return;
         }
         if (all) {
@@ -2122,13 +2166,22 @@ class MainWindow::Impl {
                     const auto &operations = draft->request.operations;
                     const auto step = draft->request.step;
                     const auto order = session.orderedBends();
-                    const double tolerance = document->metadata().bendAnalysis.lengthToleranceMm;
-                    if (step <= order.size() && step <= operations.size() &&
-                        operations[step - 1].bendIndex == static_cast<std::size_t>(row) &&
-                        std::abs(operations[step - 1].workpieceOffsetMm) <= tolerance &&
-                        std::equal(operations.begin(), operations.begin() + step, order.begin(),
-                                   [](const auto &operation, std::size_t index) {
-                                       return operation.bendIndex == index;
+                    const auto &analysis = document->metadata().bendAnalysis;
+                    const auto strokes = application::routeDraftStrokes(draft->request, analysis);
+                    const auto current = application::routeBendStrokes(analysis, order);
+                    const double tolerance = analysis.lengthToleranceMm;
+                    if (step <= strokes.size() && step <= current.size() &&
+                        operations[strokes[step - 1].front()].bendIndex ==
+                            static_cast<std::size_t>(row) &&
+                        std::abs(operations[strokes[step - 1].front()].workpieceOffsetMm) <=
+                            tolerance &&
+                        std::equal(strokes.begin(), strokes.begin() + step, current.begin(),
+                                   [&](const auto &positions, const auto &group) {
+                                       return std::equal(
+                                           positions.begin(), positions.end(), group.begin(),
+                                           group.end(), [&](auto position, auto index) {
+                                               return operations[position].bendIndex == index;
+                                           });
                                    })) {
                         const double clearance = std::max(.1, tolerance);
                         compactPunchMaximum = *draft->centredPunchOpeningMm - 2 * clearance;
@@ -2140,7 +2193,8 @@ class MainWindow::Impl {
                     compactSectionMinimum.reset();
             }
             if (allBends && selectionRequest) {
-                const auto &bends = document->metadata().bendAnalysis.bends;
+                const auto &analysis = document->metadata().bendAnalysis;
+                const auto &bends = analysis.bends;
                 for (std::size_t i = 0; i < bends.size(); ++i)
                     if (const auto target = session.bendTarget(i)) {
                         selectionRequest->bendLengthMm =
@@ -2150,6 +2204,12 @@ class MainWindow::Impl {
                         selectionRequest->innerRadiusMm =
                             std::min(selectionRequest->innerRadiusMm, target->innerRadiusMm);
                     }
+                for (const auto &stroke :
+                     application::routeBendStrokes(analysis, session.orderedBends()))
+                    if (stroke.size() > 1)
+                        selectionRequest->bendLengthMm =
+                            std::max(selectionRequest->bendLengthMm,
+                                     application::routeStrokeLengthMm(analysis, stroke));
             }
             if (selectionRequest) {
                 const auto &analysis = document->metadata().bendAnalysis;
@@ -4203,8 +4263,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                 }
             const auto draft = impl_->viewingDraft ? impl_->controller->routeDraft() : nullptr;
             if (Impl::canChainDraft(draft) &&
-                impl_->routePanel->selected() <
-                    static_cast<int>(impl_->controller->session().orderedBends().size())) {
+                impl_->routePanel->selected() < impl_->routePanel->stepCount()) {
                 impl_->advancePlaybackStep();
                 return;
             }
@@ -4318,11 +4377,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             if (impl_->viewingRoute && route &&
                 impl_->routePanel->operation() < route->steps.size())
                 activeZone = *i == route->steps[impl_->routePanel->operation()].bendIndex;
-            else if (impl_->viewingDraft && draft) {
-                const auto operation = draft->request.step ? draft->request.step - 1 : 0;
-                activeZone = operation < draft->request.operations.size() &&
-                             *i == draft->request.operations[operation].bendIndex;
-            } else if (document)
+            else if (!draft && document)
                 activeZone = *i == 0 && document->metadata().bendAnalysis.bends.size() == 1;
         }
         impl_->viewer->highlightPreviewBend(i, activeZone);

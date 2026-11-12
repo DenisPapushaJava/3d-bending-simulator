@@ -14,6 +14,7 @@ enum class DrawingViewKind {
     Isometric = 6
 };
 enum class DrawingFlatSide { Automatic = 0, First = 1, Opposite = 2 };
+enum class DrawingPaperFormat { A4 = 0, A3 = 1 };
 
 struct DrawingViewIdentity {
     DrawingViewKind kind;
@@ -42,6 +43,7 @@ struct ProjectDrawingSettings {
     DrawingFlatSide flatSide = DrawingFlatSide::Automatic;
     std::vector<DrawingSectionEdit> sectionEdits;
     std::vector<ProjectDrawingView> views;
+    DrawingPaperFormat paperFormat = DrawingPaperFormat::A4;
     bool operator==(const ProjectDrawingSettings &) const = default;
 };
 

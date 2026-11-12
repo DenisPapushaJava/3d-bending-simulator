@@ -7,6 +7,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <stop_token>
+#include <utility>
 
 class QPainter;
 namespace bending::ui {
@@ -23,12 +24,14 @@ struct DrawingViewChoice {
     std::optional<double> scale = {}; // Standard paper scale; projections share it.
 };
 using application::DrawingFlatSide;
+using application::DrawingPaperFormat;
 struct DrawingFlatOrientation {
     bool reversed = false;
     std::optional<bool> sideA = {};
     std::size_t up = 0, down = 0;
 };
 enum class DrawingDimensionSource { Axial, Hole, Section, Overall };
+using DrawingDimensionId = std::pair<DrawingDimensionSource, std::size_t>;
 struct DrawingPlacedDimension {
     DrawingDimensionSource source;
     std::size_t index;
@@ -49,6 +52,10 @@ struct DrawingPlacedView {
     std::shared_ptr<const DrawingViewRecording> recording = {};
     bool compactDimensions = false;
     QString sheetLinks = {}; // References to related projections on other sheets.
+    bool essentialDimensions = false;
+    std::size_t omittedDimensions = 0;
+    std::vector<DrawingDimensionId> retainedDimensions = {}; // Optional dimensions in fallback.
+    bool smallOptionalText = false;
 };
 struct DrawingLayoutLimits {
     std::chrono::milliseconds maximumTime{30000};
@@ -75,6 +82,8 @@ struct DrawingSheetPlan {
     std::size_t dimensionProbes = 0;
     std::size_t recordingBytes = 0;
     std::size_t fitCalls = 0, fitCacheHits = 0, fitCacheEntries = 0;
+    DrawingPaperFormat paperFormat = DrawingPaperFormat::A3;
+    std::size_t omittedDimensions = 0;
 };
 struct DrawingTitle {
     QString name;
@@ -89,6 +98,12 @@ class DrawingSheet final {
   public:
     static constexpr double widthMm = 420;
     static constexpr double heightMm = 297;
+    [[nodiscard]] static QSizeF paperSizeMm(DrawingPaperFormat format) {
+        return format == DrawingPaperFormat::A4 ? QSizeF(297, 210) : QSizeF(widthMm, heightMm);
+    }
+    [[nodiscard]] static QString paperName(DrawingPaperFormat format) {
+        return format == DrawingPaperFormat::A4 ? QStringLiteral("A4") : QStringLiteral("A3");
+    }
     [[nodiscard]] static std::vector<DrawingViewChoice>
     defaultViews(const application::BendingDrawing &);
     [[nodiscard]] static QString viewName(const application::BendingDrawing &, DrawingViewKey);
@@ -99,7 +114,7 @@ class DrawingSheet final {
     [[nodiscard]] static std::shared_ptr<const DrawingSheetPlan>
     compose(application::BendingDrawingPtr, const std::vector<DrawingViewChoice> &,
             DrawingFlatSide = DrawingFlatSide::Automatic, std::stop_token = {},
-            DrawingLayoutLimits = {});
+            DrawingLayoutLimits = {}, DrawingPaperFormat = DrawingPaperFormat::A3);
     [[nodiscard]] static int pageCount(const application::BendingDrawing &drawing,
                                        const DrawingTitle &title = {});
     [[nodiscard]] static application::DrawingMeasurementCoverage

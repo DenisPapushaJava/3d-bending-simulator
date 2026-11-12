@@ -58,6 +58,7 @@ QJsonValue drawingSettingsJson(const std::optional<ProjectDrawingSettings> &sett
                        {"reverseView", s.reverseView},
                        {"allowBreaks", s.allowBreaks},
                        {"flatSide", static_cast<int>(s.flatSide)},
+                       {"paperFormat", static_cast<int>(s.paperFormat)},
                        {"sectionEdits", edits},
                        {"views", views}};
 }
@@ -100,6 +101,13 @@ bool readDrawingSettings(const QJsonValue &value, std::optional<ProjectDrawingSe
     if (side < 0 || side > static_cast<int>(DrawingFlatSide::Opposite))
         return false;
     s.flatSide = static_cast<DrawingFlatSide>(side);
+    if (const auto format = o.value("paperFormat"); !format.isUndefined()) {
+        const int id = format.toInt(-1);
+        if (id != static_cast<int>(DrawingPaperFormat::A4) &&
+            id != static_cast<int>(DrawingPaperFormat::A3))
+            return false;
+        s.paperFormat = static_cast<DrawingPaperFormat>(id);
+    }
     const auto edits = o.value("sectionEdits");
     const auto views = o.value("views");
     if (!edits.isArray() || edits.toArray().size() > 128 || !views.isArray() ||
