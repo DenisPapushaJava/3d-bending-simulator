@@ -1,6 +1,7 @@
 #include "bending/ui/MainWindow.h"
 #include "BendMessagePanel.h"
 #include "DrawingDialog.h"
+#include "ExportFileDialog.h"
 #include "FlatDxfDialog.h"
 #include "MaterialPresets.h"
 #include "PartInputDialog.h"
@@ -1133,18 +1134,19 @@ class MainWindow::Impl {
             }
         const auto flat = controller->flatPattern();
         if (flatDxfAction) {
-            const bool ready = flat && flat->info().cutProfile;
+            const bool ready = bool(controller->dxfFlatPattern());
             const bool bent = document && !document->metadata().bendAnalysis.bends.empty();
-            const bool failed = (flat && !ready) || controller->flatPatternError().has_value();
+            const bool failed = !ready && (flat || controller->flatPatternError().has_value());
             const bool canExport = controller->canPrepareFlatPattern();
             flatDxfAction->setEnabled(
-                flatDxfDialog || (canExport && (planar ? flatBuilder && !failed &&
-                                                             !controller->isPreparingFlatPattern()
-                                                       : ready && s.hasPartInputs())));
+                flatDxfDialog ||
+                (canExport && (planar ? ready || (flatBuilder && !failed &&
+                                                  !controller->isPreparingFlatPattern())
+                                      : ready && s.hasPartInputs())));
             flatDxfAction->setStatusTip(
                 !document ? QStringLiteral("Откройте деталь")
                 : failed  ? QStringLiteral("Контуры резки недоступны")
-                : planar && controller->isPreparingFlatPattern()
+                : planar && !ready && controller->isPreparingFlatPattern()
                     ? QStringLiteral("Проверяем контур резки…")
                 : planar ? QStringLiteral("Деталь без гибов")
                 : !bent  ? QStringLiteral("Контуры резки недоступны")
@@ -3080,12 +3082,25 @@ class MainWindow::Impl {
             refreshPreview();
             return;
         }
-        auto path = displayPath(controller->session().projectPath());
+        const auto &session = controller->session();
+        auto path = displayPath(session.projectPath());
         if (choosePath || path.isEmpty()) {
-            QFileDialog dialog(window, QStringLiteral("Сохранить проект"), path,
+            auto suggestedPath = session.projectPath();
+            if (suggestedPath.empty() && session.document()) {
+                suggestedPath = session.document()->metadata().sourcePath;
+                if (suggestedPath.has_filename())
+                    suggestedPath.replace_extension(".bend");
+            }
+            QFileDialog dialog(window, QStringLiteral("Сохранить проект"), {},
                                QStringLiteral("Проект симулятора (*.bend)"));
             dialog.setAcceptMode(QFileDialog::AcceptSave);
+            setSaveDialogLabels(dialog);
             dialog.setDefaultSuffix(QStringLiteral("bend"));
+            if (!suggestedPath.empty()) {
+                const QFileInfo suggested(displayPath(suggestedPath));
+                dialog.setDirectory(suggested.absolutePath());
+                dialog.selectFile(suggested.fileName());
+            }
             if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
                 return;
             }
@@ -3403,7 +3418,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             return;
         }
         auto &controller = *impl_->controller;
-        const auto flat = controller.flatPattern();
+        const auto flat = controller.dxfFlatPattern();
         const auto &session = controller.session();
         if (!session.document() || !controller.canPrepareFlatPattern())
             return;

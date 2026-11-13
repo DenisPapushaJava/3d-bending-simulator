@@ -2,6 +2,7 @@
 
 #include "bending/application/BendPreparation.h"
 #include "bending/application/ProjectDrawingSettings.h"
+#include "bending/application/ProjectDxf.h"
 #include "bending/core/UnfoldRule.h"
 
 #include <functional>
@@ -43,6 +44,7 @@ struct OpenedProject {
     std::vector<BendPreparation> bends{};
     core::UnfoldSettings unfold{};
     std::optional<ProjectDrawingSettings> drawing = {};
+    ProjectDxf dxf = {};
 };
 [[nodiscard]] std::optional<std::string> projectSettingsError(const OpenedProject &project);
 using ImportResult = std::variant<DocumentPtr, OpenedProject, ImportError>;

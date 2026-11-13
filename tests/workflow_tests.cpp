@@ -396,7 +396,13 @@ void testProjectWorkflow(bool graphics) {
     const auto finished = [&] {
         return !controller.hasWork() && !controller.session().activeRequest();
     };
-    window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/plate-mm.step"));
+    QTemporaryDir temporary;
+    require(temporary.isValid(), "Cannot create project directory");
+    const auto source = temporary.filePath(QStringLiteral("Планка 01.22.STP"));
+    require(QFile::copy(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/plate-mm.step"),
+                        source),
+            "Cannot create STEP with a Unicode name");
+    window.openStep(source);
     waitUntil([&] { return finished() && controller.session().document(); });
     auto *label = window.findChild<QLabel *>(QStringLiteral("thicknessProperties"));
     require(label && label->text().contains(QStringLiteral("определена по геометрии")),
@@ -443,13 +449,13 @@ void testProjectWorkflow(bool graphics) {
     window.close();
     require(window.isVisible() && controller.session().manualThicknessMm() == 2.0,
             "Cancelled close lost parameters");
-    QTemporaryDir temporary;
-    require(temporary.isValid(), "Cannot create project directory");
     const auto destination = temporary.path() + QStringLiteral("/Мой проект.bend");
+    QString proposedPath;
     QTimer::singleShot(0, [&] {
         bool found = false;
         for (auto *widget : QApplication::topLevelWidgets()) {
             if (auto *dialog = qobject_cast<QFileDialog *>(widget)) {
+                proposedPath = dialog->selectedFiles().value(0);
                 dialog->selectFile(destination);
                 QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
                 found = true;
@@ -458,6 +464,8 @@ void testProjectWorkflow(bool graphics) {
         require(found, "Save did not open file dialog");
     });
     window.findChild<QAction *>(QStringLiteral("saveProjectAction"))->trigger();
+    require(proposedPath == temporary.filePath(QStringLiteral("Планка 01.22.bend")),
+            "First project save did not suggest the STEP name and folder");
     waitUntil(finished);
     require(QFileInfo::exists(destination) && !controller.session().modified() &&
                 controller.saveError().isEmpty(),
@@ -468,6 +476,15 @@ void testProjectWorkflow(bool graphics) {
     require(controller.session().manualThicknessMm() == 2.0 &&
                 label->text().contains(QStringLiteral("задана вручную")),
             "Project did not restore manual thickness");
+    proposedPath.clear();
+    QTimer::singleShot(0, [&] {
+        if (auto *dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget())) {
+            proposedPath = dialog->selectedFiles().value(0);
+            dialog->reject();
+        }
+    });
+    window.findChild<QAction *>(QStringLiteral("saveProjectAsAction"))->trigger();
+    require(proposedPath == destination, "Save As did not suggest the existing project path");
     const auto restored = controller.session().document();
     const auto broken = temporary.path() + QStringLiteral("/broken.bend");
     QFile corrupt(broken);

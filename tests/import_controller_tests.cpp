@@ -197,11 +197,12 @@ void testShutdown() {
 }
 class GatedWriter final : public ProjectWriter {
   public:
-    std::optional<std::string>
-    save(const std::filesystem::path &path, const Document &, std::optional<double>,
-         const std::vector<BendPreparation> &bends, std::stop_token stop,
-         bending::core::UnfoldSettings,
-         const std::optional<ProjectDrawingSettings> &drawing) const override {
+    std::optional<std::string> save(const std::filesystem::path &path, const Document &,
+                                    std::optional<double>,
+                                    const std::vector<BendPreparation> &bends, std::stop_token stop,
+                                    bending::core::UnfoldSettings,
+                                    const std::optional<ProjectDrawingSettings> &drawing,
+                                    const ProjectDxf &) const override {
         require(QThread::currentThread() != QCoreApplication::instance()->thread(),
                 "Save ran in GUI thread");
         if (path == "failed.bend") {

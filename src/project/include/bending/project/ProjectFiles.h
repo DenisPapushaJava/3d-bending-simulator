@@ -16,7 +16,8 @@ class ProjectFiles final : public application::DocumentImporter, public applicat
          std::optional<double> manualThicknessMm,
          const std::vector<application::BendPreparation> &bends, std::stop_token stop,
          core::UnfoldSettings unfold = {},
-         const std::optional<application::ProjectDrawingSettings> &drawing = {}) const override;
+         const std::optional<application::ProjectDrawingSettings> &drawing = {},
+         const application::ProjectDxf &dxf = {}) const override;
 
   private:
     cad::StepImporter importer_;

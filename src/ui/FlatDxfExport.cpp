@@ -16,16 +16,18 @@ using application::PointMm;
 constexpr double axisTolerance = 1.e-8;
 constexpr double markingGapMm = .3;
 constexpr double fullTurn = 2 * std::numbers::pi;
+constexpr auto cutLayer = "0";
 bool finite(const PointMm &p) {
     return std::isfinite(p.x) && std::isfinite(p.y);
 }
 
 class Dxf {
   public:
-    QByteArray bytes;
-
     void tag(int code, const QByteArray &value) {
-        bytes += QByteArray::number(code) + '\n' + value + '\n';
+        bytes_ += QByteArray::number(code).rightJustified(3, ' ');
+        bytes_ += "\r\n";
+        bytes_ += value;
+        bytes_ += "\r\n";
     }
     void integer(int code, int value) {
         tag(code, QByteArray::number(value));
@@ -49,53 +51,309 @@ class Dxf {
         tag(100, "AcDbSymbolTable");
         integer(70, count);
     }
-    void continuousLinetype() {
-        tag(0, "LTYPE");
-        handle();
-        tag(330, tableHandle_);
-        tag(100, "AcDbSymbolTableRecord");
-        tag(100, "AcDbLinetypeTableRecord");
-        tag(2, "CONTINUOUS");
-        integer(70, 0);
-        tag(3, "Solid line");
-        integer(72, 65);
-        integer(73, 0);
-        real(40, 0);
-    }
-    void layer(const QByteArray &name, int color) {
-        tag(0, "LAYER");
-        handle();
-        tag(330, tableHandle_);
-        tag(100, "AcDbSymbolTableRecord");
-        tag(100, "AcDbLayerTableRecord");
-        tag(2, name);
-        integer(70, 0);
-        integer(62, color);
-        tag(6, "CONTINUOUS");
-    }
     void entity(const QByteArray &type, const QByteArray &layer, const QByteArray &subclass) {
-        tag(0, type);
-        handle();
-        tag(100, "AcDbEntity");
-        tag(8, layer);
-        tag(100, subclass);
+        ownedEntity(type, layer, subclass, model_.block);
     }
     void line(const QByteArray &layer, const PointMm &start, const PointMm &end) {
+        include(start);
+        include(end);
         entity("LINE", layer, "AcDbLine");
         xy(10, start);
         real(30, 0);
         xy(11, end);
         real(31, 0);
     }
+    void include(const PointMm &p) {
+        minimum_.x = std::min(minimum_.x, p.x);
+        minimum_.y = std::min(minimum_.y, p.y);
+        maximum_.x = std::max(maximum_.x, p.x);
+        maximum_.y = std::max(maximum_.y, p.y);
+    }
+    void circleGeometry(const PointMm &centre, double radius) {
+        point(10, centre.x, centre.y, 0);
+        real(40, radius);
+    }
+
+    void begin(const QByteArray &bendLayer, int bendColor) {
+        section("CLASSES");
+        objectClass("ACDBDICTIONARYWDFLT", "AcDbDictionaryWithDefault", 0, 1);
+        objectClass("MATERIAL", "AcDbMaterial", 1153, 3);
+        tag(0, "ENDSEC");
+        section("TABLES");
+        table("VPORT", 1);
+        tableRecord("VPORT", "AcDbViewportTableRecord", "*Active");
+        integer(70, 0);
+        xy(10, {0, 0, 0});
+        xy(11, {1, 1, 0});
+        point(16, 0, 0, 1);
+        point(17, 0, 0, 0);
+        real(40, 1000);
+        real(41, 1.34);
+        tag(0, "ENDTAB");
+        table("LTYPE", 3);
+        for (const auto *name : {"ByBlock", "ByLayer", "Continuous"}) {
+            tableRecord("LTYPE", "AcDbLinetypeTableRecord", name);
+            integer(70, 0);
+            tag(3, "");
+            integer(72, 65);
+            integer(73, 0);
+            real(40, 0);
+        }
+        tag(0, "ENDTAB");
+        table("LAYER", bendLayer.isEmpty() ? 1 : 2);
+        layer(cutLayer, 7);
+        if (!bendLayer.isEmpty())
+            layer(bendLayer, bendColor);
+        tag(0, "ENDTAB");
+        table("STYLE", 1);
+        tableRecord("STYLE", "AcDbTextStyleTableRecord", "Standard", textStyle_);
+        integer(70, 0);
+        real(40, 0);
+        real(41, 1);
+        real(50, 0);
+        integer(71, 0);
+        real(42, 2.5);
+        tag(3, "txt");
+        tag(4, "");
+        tag(0, "ENDTAB");
+        table("VIEW", 0);
+        tag(0, "ENDTAB");
+        table("UCS", 0);
+        tag(0, "ENDTAB");
+        table("APPID", 1);
+        tableRecord("APPID", "AcDbRegAppTableRecord", "ACAD");
+        integer(70, 0);
+        tag(0, "ENDTAB");
+        table("DIMSTYLE", 1);
+        tag(100, "AcDbDimStyleTable");
+        integer(71, 1);
+        tag(340, dimensionStyle_);
+        tableRecord("DIMSTYLE", "AcDbDimStyleTableRecord", "Standard", dimensionStyle_, 105);
+        integer(70, 0);
+        tag(340, textStyle_);
+        tag(0, "ENDTAB");
+        table("BLOCK_RECORD", 2);
+        blockRecord(model_);
+        blockRecord(paper_);
+        tag(0, "ENDTAB");
+        tag(0, "ENDSEC");
+
+        section("BLOCKS");
+        block(model_);
+        block(paper_);
+        tag(0, "ENDSEC");
+        section("ENTITIES");
+    }
+
+    bool writeTo(QIODevice &file) {
+        tag(0, "ENDSEC");
+        section("OBJECTS");
+        dictionary("DICTIONARY", root_, "0");
+        dictionaryEntry("ACAD_GROUP", groups_);
+        dictionaryEntry("ACAD_LAYOUT", layouts_);
+        dictionaryEntry("ACAD_PLOTSTYLENAME", plotStyles_);
+        dictionaryEntry("ACAD_MATERIAL", materials_);
+        dictionary("DICTIONARY", groups_, root_);
+        dictionary("DICTIONARY", layouts_, root_);
+        dictionaryEntry(model_.layoutName, model_.layout);
+        dictionaryEntry(paper_.layoutName, paper_.layout);
+        dictionary("ACDBDICTIONARYWDFLT", plotStyles_, root_);
+        dictionaryEntry("Normal", normalPlotStyle_);
+        tag(100, "AcDbDictionaryWithDefault");
+        tag(340, normalPlotStyle_);
+        tag(0, "ACDBPLACEHOLDER");
+        tag(5, normalPlotStyle_);
+        tag(330, plotStyles_);
+        dictionary("DICTIONARY", materials_, root_);
+        dictionaryEntry("ByBlock", byBlockMaterial_);
+        dictionaryEntry("ByLayer", byLayerMaterial_);
+        dictionaryEntry("Global", globalMaterial_);
+        material("ByBlock", byBlockMaterial_);
+        material("ByLayer", byLayerMaterial_);
+        material("Global", globalMaterial_);
+        layout(model_, 0);
+        layout(paper_, 1);
+        tag(0, "ENDSEC");
+        tag(0, "EOF");
+
+        Dxf header;
+        header.section("HEADER");
+        header.tag(9, "$ACADVER");
+        header.tag(1, "AC1027");
+        header.tag(9, "$ACADMAINTVER");
+        header.integer(70, 105);
+        header.tag(9, "$DWGCODEPAGE");
+        header.tag(3, "ANSI_1251");
+        header.tag(9, "$EXTMIN");
+        header.point(10, minimum_.x, minimum_.y, 0);
+        header.tag(9, "$EXTMAX");
+        header.point(10, maximum_.x, maximum_.y, 0);
+        header.tag(9, "$LUNITS");
+        header.integer(70, 2);
+        header.tag(9, "$INSUNITS");
+        header.integer(70, 4);
+        header.tag(9, "$MEASUREMENT");
+        header.integer(70, 1);
+        header.tag(9, "$TILEMODE");
+        header.integer(70, 1);
+        header.tag(9, "$DIMSTYLE");
+        header.tag(2, "Standard");
+        header.tag(9, "$CMATERIAL");
+        header.tag(347, byLayerMaterial_);
+        header.tag(9, "$HANDSEED");
+        header.tag(5, nextHandle());
+        header.tag(0, "ENDSEC");
+        return file.write(header.bytes_) == header.bytes_.size() &&
+               file.write(bytes_) == bytes_.size();
+    }
 
   private:
+    struct Space {
+        QByteArray blockName;
+        QByteArray layoutName;
+        QByteArray block;
+        QByteArray layout;
+    };
+
+    void objectClass(const QByteArray &name, const QByteArray &className, int flags,
+                     int instances) {
+        tag(0, "CLASS");
+        tag(1, name);
+        tag(2, className);
+        tag(3, "ObjectDBX Classes");
+        integer(90, flags);
+        integer(91, instances);
+        integer(280, 0);
+        integer(281, 0);
+    }
+
+    void ownedEntity(const QByteArray &type, const QByteArray &layer, const QByteArray &subclass,
+                     const QByteArray &owner) {
+        tag(0, type);
+        handle();
+        tag(330, owner);
+        tag(100, "AcDbEntity");
+        tag(8, layer);
+        tag(100, subclass);
+    }
+    void tableRecord(const QByteArray &type, const QByteArray &subclass, const QByteArray &name,
+                     const QByteArray &recordHandle = {}, int handleCode = 5) {
+        tag(0, type);
+        tag(handleCode, recordHandle.isEmpty() ? nextHandle() : recordHandle);
+        tag(330, tableHandle_);
+        tag(100, "AcDbSymbolTableRecord");
+        tag(100, subclass);
+        tag(2, name);
+    }
+    void layer(const QByteArray &name, int color) {
+        tableRecord("LAYER", "AcDbLayerTableRecord", name);
+        integer(70, 0);
+        integer(62, color);
+        tag(6, "Continuous");
+        integer(370, -3);
+        tag(390, normalPlotStyle_);
+        tag(347, globalMaterial_);
+    }
+    void blockRecord(const Space &space) {
+        tableRecord("BLOCK_RECORD", "AcDbBlockTableRecord", space.blockName, space.block);
+        tag(340, space.layout);
+        integer(70, 0);
+        integer(280, 1);
+        integer(281, 0);
+    }
+    void block(const Space &space) {
+        ownedEntity("BLOCK", "0", "AcDbBlockBegin", space.block);
+        tag(2, space.blockName);
+        integer(70, 0);
+        point(10, 0, 0, 0);
+        tag(3, space.blockName);
+        tag(1, "");
+        ownedEntity("ENDBLK", "0", "AcDbBlockEnd", space.block);
+    }
+    void dictionary(const QByteArray &type, const QByteArray &id, const QByteArray &owner) {
+        tag(0, type);
+        tag(5, id);
+        tag(330, owner);
+        tag(100, "AcDbDictionary");
+        integer(281, 1);
+    }
+    void dictionaryEntry(const QByteArray &name, const QByteArray &id) {
+        tag(3, name);
+        tag(350, id);
+    }
+    void material(const QByteArray &name, const QByteArray &id) {
+        tag(0, "MATERIAL");
+        tag(5, id);
+        tag(102, "{ACAD_REACTORS");
+        tag(330, materials_);
+        tag(102, "}");
+        tag(330, materials_);
+        tag(100, "AcDbMaterial");
+        tag(1, name);
+    }
+    void layout(const Space &space, int tabOrder) {
+        tag(0, "LAYOUT");
+        tag(5, space.layout);
+        tag(330, layouts_);
+        tag(100, "AcDbPlotSettings");
+        tag(1, "");
+        tag(2, "none_device");
+        real(142, 1);
+        real(143, 1);
+        integer(70, tabOrder == 0 ? 1024 : 0);
+        integer(72, 1);
+        integer(74, 5);
+        real(147, 1);
+        tag(100, "AcDbLayout");
+        tag(1, space.layoutName);
+        integer(70, 1);
+        integer(71, tabOrder);
+        xy(10, {0, 0, 0});
+        xy(11, {420, 297, 0});
+        point(12, 0, 0, 0);
+        point(14, 1.e20, 1.e20, 1.e20);
+        point(15, -1.e20, -1.e20, -1.e20);
+        real(146, 0);
+        point(13, 0, 0, 0);
+        point(16, 1, 0, 0);
+        point(17, 0, 1, 0);
+        integer(76, 0);
+        tag(330, space.block);
+    }
+    void point(int code, double x, double y, double z) {
+        xy(code, {x, y, z});
+        real(code + 20, z);
+    }
+
+    QByteArray nextHandle() {
+        return QByteArray::number(nextHandle_++, 16).toUpper();
+    }
     QByteArray handle() {
-        const auto value = QByteArray::number(nextHandle_++, 16).toUpper();
+        const auto value = nextHandle();
         tag(5, value);
         return value;
     }
+    QByteArray bytes_;
     QByteArray tableHandle_;
+    PointMm minimum_{std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::infinity(), 0};
+    PointMm maximum_{-std::numeric_limits<double>::infinity(),
+                     -std::numeric_limits<double>::infinity(), 0};
     unsigned nextHandle_ = 0x100;
+    // These records refer to one another, so allocate their handles before writing either section.
+    const Space model_{"*Model_Space", "Model", nextHandle(), nextHandle()};
+    const Space paper_{"*Paper_Space", "Layout1", nextHandle(), nextHandle()};
+    const QByteArray root_ = nextHandle();
+    const QByteArray groups_ = nextHandle();
+    const QByteArray layouts_ = nextHandle();
+    const QByteArray plotStyles_ = nextHandle();
+    const QByteArray normalPlotStyle_ = nextHandle();
+    const QByteArray textStyle_ = nextHandle();
+    const QByteArray dimensionStyle_ = nextHandle();
+    const QByteArray materials_ = nextHandle();
+    const QByteArray byBlockMaterial_ = nextHandle();
+    const QByteArray byLayerMaterial_ = nextHandle();
+    const QByteArray globalMaterial_ = nextHandle();
 };
 
 double angleDegrees(const PointMm &point, const PointMm &centre) {
@@ -113,7 +371,7 @@ bool writeCutEdge(Dxf &dxf, const application::FlatCutVertex &vertex, const Poin
         !std::isfinite(bulge))
         return false;
     if (bulge == 0) {
-        dxf.line("CUT", start, end);
+        dxf.line(cutLayer, start, end);
         return true;
     }
 
@@ -127,10 +385,19 @@ bool writeCutEdge(Dxf &dxf, const application::FlatCutVertex &vertex, const Poin
     const auto expectedSweep = std::abs(radians) * (180 / std::numbers::pi);
     if (sweep <= 0 || sweep >= 360 || std::abs(sweep - expectedSweep) > 1.e-6)
         return false;
-    dxf.entity("ARC", "CUT", "AcDbCircle");
-    dxf.xy(10, centre);
-    dxf.real(30, 0);
-    dxf.real(40, radius);
+    dxf.include(start);
+    dxf.include(end);
+    const std::array<PointMm, 4> extrema{{{centre.x + radius, centre.y, 0},
+                                          {centre.x, centre.y + radius, 0},
+                                          {centre.x - radius, centre.y, 0},
+                                          {centre.x, centre.y - radius, 0}}};
+    for (std::size_t i = 0; i < extrema.size(); ++i) {
+        const double delta = 90 * static_cast<double>(i) - first;
+        if ((delta < 0 ? delta + 360 : delta) <= sweep)
+            dxf.include(extrema[i]);
+    }
+    dxf.entity("ARC", cutLayer, "AcDbCircle");
+    dxf.circleGeometry(centre, radius);
     dxf.tag(100, "AcDbArc");
     dxf.real(50, first);
     dxf.real(51, last);
@@ -384,33 +651,20 @@ QString writeFlatDxf(const QString &path, const application::FlatPatternInfo &fl
         return QStringLiteral("Проверьте имя и цвет слоя линий гиба.");
     const auto bendLayer = options.bendLayer.toLatin1();
     Dxf dxf;
-    dxf.section("HEADER");
-    dxf.tag(9, "$ACADVER");
-    dxf.tag(1, "AC1015");
-    dxf.tag(9, "$INSUNITS");
-    dxf.integer(70, 4);
-    dxf.tag(9, "$MEASUREMENT");
-    dxf.integer(70, 1);
-    dxf.tag(0, "ENDSEC");
-    dxf.section("TABLES");
-    dxf.table("LTYPE", 1);
-    dxf.continuousLinetype();
-    dxf.tag(0, "ENDTAB");
-    dxf.table("LAYER", includeBends ? 3 : 2);
-    dxf.layer("0", 7);
-    dxf.layer("CUT", 7);
-    if (includeBends)
-        dxf.layer(bendLayer, options.bendColor);
-    dxf.tag(0, "ENDTAB");
-    dxf.tag(0, "ENDSEC");
-    dxf.section("ENTITIES");
+    dxf.begin(includeBends ? bendLayer : QByteArray{}, options.bendColor);
     const auto frame = flatDxfFrame(flat);
     for (const auto &loop : flat.cutProfile->loops) {
         if (loop.radiusMm > 0 && std::isfinite(loop.radiusMm) && finite(loop.centre)) {
-            dxf.entity("CIRCLE", "CUT", "AcDbCircle");
-            dxf.xy(10, frame.map(loop.centre));
-            dxf.real(30, 0);
-            dxf.real(40, loop.radiusMm);
+            const auto centre = frame.map(loop.centre);
+            const auto radius = loop.radiusMm;
+            const PointMm minimum{centre.x - radius, centre.y - radius, 0};
+            const PointMm maximum{centre.x + radius, centre.y + radius, 0};
+            if (!finite(minimum) || !finite(maximum))
+                return QStringLiteral("Некорректный контур резки.");
+            dxf.include(minimum);
+            dxf.include(maximum);
+            dxf.entity("CIRCLE", cutLayer, "AcDbCircle");
+            dxf.circleGeometry(centre, radius);
             continue;
         }
         if (loop.vertices.size() < 2 || loop.vertices.size() > 200000 || loop.radiusMm != 0)
@@ -433,12 +687,8 @@ QString writeFlatDxf(const QString &path, const application::FlatPatternInfo &fl
             dxf.line(bendLayer, frame.map({line.x1(), line.y1(), 0}),
                      frame.map({line.x2(), line.y2(), 0}));
     }
-    dxf.tag(0, "ENDSEC");
-    dxf.tag(0, "EOF");
-
     QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) || file.write(dxf.bytes) != dxf.bytes.size() ||
-        !file.commit())
+    if (!file.open(QIODevice::WriteOnly) || !dxf.writeTo(file) || !file.commit())
         return QStringLiteral("Не удалось сохранить DXF. %1").arg(file.errorString());
     return {};
 }

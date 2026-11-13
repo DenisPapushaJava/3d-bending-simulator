@@ -16,7 +16,6 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
@@ -35,6 +34,7 @@
 #include <QListView>
 #include <QLocale>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
@@ -53,6 +53,15 @@ using namespace bending;
 void check(bool ok, const char *why) {
     if (!ok)
         throw std::runtime_error(why);
+}
+QByteArray unpaddedDxfTags(const QByteArray &bytes) {
+    const auto lines = bytes.split('\n');
+    QByteArray result;
+    for (qsizetype i = 0; i + 1 < lines.size(); i += 2) {
+        result += lines[i].trimmed() + '\n';
+        result += lines[i + 1].chopped(1) + '\n'; // Drop CR from the value line.
+    }
+    return result;
 }
 std::filesystem::path native(const QString &value) {
 #ifdef _WIN32
@@ -380,7 +389,7 @@ void checkDxfMeasurements() {
     check(ui::writeFlatDxf(exported.fileName(), exportInfo, {false, {}, 0}).isEmpty() &&
               exported.open(QIODevice::ReadOnly),
           "Cannot export the mixed cut profile");
-    const auto primitives = exported.readAll();
+    const auto primitives = unpaddedDxfTags(exported.readAll());
     check(primitives.count("\n0\nARC\n") == 3 && primitives.count("\n0\nCIRCLE\n") == 2 &&
               primitives.count("\n0\nLINE\n") == 8 &&
               primitives.count("\nAcDbArc\n50\n0\n51\n180\n") == 1 &&
@@ -460,7 +469,7 @@ void checkPlanarDxf(ui::MainWindow &window) {
               !dialog->findChild<QToolButton *>("flatDxfColor")->isEnabled() &&
               dialog->findChild<QPushButton *>("flatDxfMeasure")->isEnabled() &&
               dialog->findChild<QPushButton *>("flatDxfFit")->isEnabled() &&
-              dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->isEnabled(),
+              dialog->findChild<QPushButton *>("flatDxfSave")->isEnabled(),
           "Planar DXF preview or bending controls are in the wrong state");
     QTemporaryDir output;
     check(output.isValid(), "Cannot create planar DXF output folder");
@@ -468,8 +477,8 @@ void checkPlanarDxf(ui::MainWindow &window) {
     check(ui::writeFlatDxf(dxf.fileName(), controller.flatPattern()->info(), {}).isEmpty() &&
               dxf.open(QIODevice::ReadOnly),
           "Cannot write planar DXF");
-    const auto bytes = dxf.readAll();
-    check(bytes.contains("\nCUT\n") && !bytes.contains("\nBEND\n"),
+    const auto bytes = unpaddedDxfTags(dxf.readAll());
+    check(bytes.contains("\n8\n0\n100\nAcDbLine\n") && !bytes.contains("\nBEND\n"),
           "Planar DXF contains a bend layer");
     dialog->reject();
     QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -548,7 +557,11 @@ int main(int argc, char **argv) {
         check(measurementHint && !measurementHint->isVisible(),
               "DXF measurement hint is always shown");
         measure->click();
-        check(measurementHint->isVisible(), "DXF measurement mode did not show the shortcut hint");
+        check(measurementHint->isVisible() && measurementHint->text().contains("Ctrl") &&
+                  measurementHint->text().contains("Alt") &&
+                  measurementHint->text().contains("Shift") &&
+                  measurementHint->text().contains("Esc"),
+              "DXF measurement mode did not show all shortcut keys");
         for (int press = 0; press < 2; ++press) {
             QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
             QApplication::sendEvent(preview, &escape);
@@ -577,8 +590,7 @@ int main(int argc, char **argv) {
                                   return path && path->pen().color() == QColor(255, 127, 0);
                               }),
               "DXF colour selection did not update the bend preview");
-        auto *dxfButtons = dxfDialog->findChild<QDialogButtonBox *>();
-        auto *saveDxf = dxfButtons->button(QDialogButtonBox::Save);
+        auto *saveDxf = dxfDialog->findChild<QPushButton *>("flatDxfSave");
         auto *layer = dxfDialog->findChild<QLineEdit *>();
         check(saveDxf->isEnabled() && layer->text() == "BEND",
               "The legacy DXF layer default was not updated");
@@ -626,7 +638,7 @@ int main(int argc, char **argv) {
         QKeyEvent layerEscape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
         QApplication::sendEvent(layer, &layerEscape);
         check(dxfDialog->isVisible(), "Escape closed the DXF dialog outside measurement mode");
-        dxfButtons->button(QDialogButtonBox::Cancel)->click();
+        dxfDialog->findChild<QPushButton *>("flatDxfClose")->click();
         check(!dxfDialog->isVisible(), "The Close button did not close the DXF dialog");
         QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QTemporaryDir exportDir;
@@ -642,10 +654,36 @@ int main(int argc, char **argv) {
         QFile exported(dxfPath), cutOnly(cutOnlyPath);
         check(exported.open(QIODevice::ReadOnly) && cutOnly.open(QIODevice::ReadOnly),
               "Cannot read DXF outputs");
-        const auto dxf = exported.readAll(), cuts = cutOnly.readAll();
+        const auto exportedBytes = exported.readAll();
+        const auto dxf = unpaddedDxfTags(exportedBytes), cuts = unpaddedDxfTags(cutOnly.readAll());
+        check(exportedBytes.startsWith("  0\r\nSECTION\r\n") &&
+                  exportedBytes.count('\n') == exportedBytes.count("\r\n") &&
+                  dxf.contains("$ACADVER\n1\nAC1027\n") && dxf.contains("$EXTMIN\n10\n") &&
+                  dxf.contains("$EXTMAX\n10\n") && dxf.contains("0\nTABLE\n2\nDIMSTYLE\n") &&
+                  dxf.contains("0\nMATERIAL\n5\n") && !dxf.contains("\nCUT\n"),
+              "DXF did not use the text AutoCAD 2013 cutting format");
+        const auto checkModelSpace = [](const QByteArray &bytes, bool withBends) {
+            const auto model =
+                QRegularExpression(QStringLiteral("\n0\nBLOCK_RECORD\n5\n([0-9A-F]+)\n"
+                                                  "330\n[0-9A-F]+\n"
+                                                  "100\nAcDbSymbolTableRecord\n"
+                                                  "100\nAcDbBlockTableRecord\n"
+                                                  "2\n\\*Model_Space\n340\n([0-9A-F]+)\n"
+                                                  "70\n0\n280\n1\n281\n0\n"))
+                    .match(QString::fromLatin1(bytes));
+            check(model.hasMatch() && bytes.contains("9\n$HANDSEED\n5\n") &&
+                      bytes.contains("0\nSECTION\n2\nBLOCKS\n") &&
+                      bytes.contains("0\nSECTION\n2\nOBJECTS\n"),
+                  "DXF lacks model space or document structure");
+            const auto owner = "\n330\n" + model.captured(1).toLatin1() + "\n100\nAcDbEntity\n8\n";
+            check(bytes.contains("0\nLAYOUT\n5\n" + model.captured(2).toLatin1() + '\n') &&
+                      bytes.contains(owner + "0\n100\nAcDbLine\n") &&
+                      bytes.contains(owner + "BEND\n100\nAcDbLine\n") == withBends,
+                  "DXF model space references do not resolve");
+        };
+        checkModelSpace(dxf, true);
+        checkModelSpace(cuts, false);
         check(dxf.contains("$INSUNITS\n70\n4\n") && !dxf.contains("LWPOLYLINE") &&
-                  dxf.contains("AcDbEntity\n8\nBEND\n100\nAcDbLine") &&
-                  cuts.contains("AcDbEntity\n8\nCUT\n100\nAcDbLine") &&
                   !cuts.contains("\nBEND\n") && !dxf.contains("\nDIMENSION\n") &&
                   !dxf.contains("\nTEXT\n"),
               "DXF units or cut/bend separation is incorrect");
@@ -657,7 +695,7 @@ int main(int argc, char **argv) {
         invalid.cutProfile.reset();
         exported.close();
         check(!ui::writeFlatDxf(dxfPath, invalid, {}).isEmpty() &&
-                  exported.open(QIODevice::ReadOnly) && exported.readAll() == dxf,
+                  exported.open(QIODevice::ReadOnly) && exported.readAll() == exportedBytes,
               "An unconfirmed profile overwrote a valid export");
         const auto edit = c.session().editRevision();
         button->click();
@@ -921,7 +959,10 @@ int main(int argc, char **argv) {
         dxfButton->click();
         auto *liveDxf = window.findChild<QDialog *>("flatDxfDialog");
         check(liveDxf && liveDxf->isVisible(), "Cannot open DXF before editing the part");
-        auto *liveSave = liveDxf->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save);
+        auto *liveSave = liveDxf->findChild<QPushButton *>("flatDxfSave");
+        auto *openDxfFolder = liveDxf->findChild<QPushButton *>("flatDxfOpenFolder");
+        check(openDxfFolder && !openDxfFolder->isVisible(),
+              "DXF folder action appeared before a successful save");
         drawingAction->trigger();
         auto *livePdf = window.findChild<QDialog *>("bendingDrawingDialog");
         check(livePdf, "Cannot open PDF before editing the part");
@@ -952,7 +993,8 @@ int main(int argc, char **argv) {
               "Rule change left obsolete exports available");
         check(!liveDxf->findChild<QFileDialog *>("flatDxfFileDialog") &&
                   !livePdf->findChild<QFileDialog *>("drawingPdfFileDialog") &&
-                  !QFile::exists(stalePath) && !QFile::exists(stalePdfPath),
+                  !QFile::exists(stalePath) && !QFile::exists(stalePdfPath) &&
+                  !openDxfFolder->isVisible(),
               "Editing K did not dismiss both obsolete save dialogs");
         wait([&] { return c.flatPattern() && !c.hasWork(); });
         const auto updatedFlat = c.flatPattern();
@@ -964,27 +1006,143 @@ int main(int argc, char **argv) {
         livePdf->findChild<QPushButton *>("prepareDrawing")->click();
         wait([&] { return livePdfSave->isEnabled(); });
         check(drawingBuilder->prepared == updatedFlat, "PDF did not use the recalculated flat");
+        liveDxf->findChild<QCheckBox *>()->setChecked(false);
         liveSave->click();
         auto *newPicker = liveDxf->findChild<QFileDialog *>("flatDxfFileDialog");
         check(newPicker, "Cannot save the recalculated DXF");
-        const auto newPath = exportDir.filePath("updated.dxf");
+        const auto savedFolder = exportDir.filePath(QStringLiteral("Экспорт DXF"));
+        check(QDir().mkpath(savedFolder), "Cannot create the second export folder");
+        const auto newPath = QDir(savedFolder).filePath("updated.dxf");
         newPicker->selectFile(newPath);
         QMetaObject::invokeMethod(newPicker, "accept", Qt::DirectConnection);
         check(QFile::exists(newPath) && liveDxf->isVisible(),
               "Saving the current DXF failed or closed the comparison window");
+        check(openDxfFolder->isVisible() &&
+                  openDxfFolder->toolTip() == QDir::toNativeSeparators(newPath),
+              "DXF folder action did not use the actual destination");
         QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         liveSave->click();
         auto *reopenedPicker = liveDxf->findChild<QFileDialog *>("flatDxfFileDialog");
-        check(reopenedPicker && reopenedPicker->directory() == QDir(exportDir.path()),
+        check(reopenedPicker && reopenedPicker->directory() == QDir(savedFolder),
               "The next DXF save did not offer the last successful folder");
         reopenedPicker->reject();
+        check(openDxfFolder->isVisible(), "Cancelling a save hid the last successful destination");
+        liveDxf->findChild<QPushButton *>("flatDxfClose")->click();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        dxfButton->click();
+        liveDxf = window.findChild<QDialog *>("flatDxfDialog");
+        check(liveDxf && liveDxf->isVisible(), "Cannot reopen the DXF window");
+        liveSave = liveDxf->findChild<QPushButton *>("flatDxfSave");
+        openDxfFolder = liveDxf->findChild<QPushButton *>("flatDxfOpenFolder");
+        auto *liveStatus = liveDxf->findChild<QLabel *>("flatDxfStatus");
+        check(openDxfFolder->isVisible() &&
+                  openDxfFolder->toolTip() == QDir::toNativeSeparators(newPath) &&
+                  liveStatus->text() == QStringLiteral("DXF сохранён.") &&
+                  !liveDxf->findChild<QCheckBox *>()->isChecked(),
+              "Reopening the DXF window lost the saved file or export options");
+        const auto originalDxf = [&] {
+            QFile file(newPath);
+            check(file.open(QIODevice::ReadOnly), "Cannot read the exported DXF");
+            return file.readAll();
+        }();
+        const auto bundle = native(exportDir.filePath("portable.bend"));
+        c.saveProject(bundle, files);
+        wait([&] { return !c.hasWork(); });
+        check(c.saveError().isEmpty(), "Cannot save project with DXF");
+        QFile packed(qtPath(bundle));
+        check(packed.open(QIODevice::ReadOnly), "Cannot read the cached project");
+        auto staleRoot = project_fixture::compactRoot(packed.readAll());
+        packed.close();
+        auto inputs = staleRoot.value("parameters").toMap();
+        auto unfold = inputs.value("unfold").toMap();
+        unfold.insert(QStringLiteral("manualK"), .49);
+        inputs.insert(QStringLiteral("unfold"), unfold);
+        staleRoot.insert(QStringLiteral("parameters"), inputs);
+        QFile staleBundle(exportDir.filePath("stale-cache.bend"));
+        const auto staleBytes = project_fixture::compactBytes(staleRoot);
+        check(staleBundle.open(QIODevice::WriteOnly) &&
+                  staleBundle.write(staleBytes) == staleBytes.size(),
+              "Cannot write the project with stale DXF inputs");
+        staleBundle.close();
+        QTemporaryDir relocated;
+        check(relocated.isValid(), "Cannot create relocated project folder");
+        const auto relocatedProject = relocated.filePath("portable.bend");
+        const auto relocatedFolder = relocated.filePath(QStringLiteral("Экспорт DXF"));
+        const auto relocatedDxf = QDir(relocatedFolder).filePath("updated.dxf");
+        check(QFile::copy(qtPath(bundle), relocatedProject) && QDir().mkpath(relocatedFolder) &&
+                  QFile::copy(newPath, relocatedDxf),
+              "Cannot relocate the project and DXF");
+        c.closeDocument();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        c.open(native(staleBundle.fileName()));
+        wait([&] { return c.session().document() && !c.hasWork(); });
+        check(c.session().unfoldSettings().manualK == .49 && !c.dxfFlatPattern() && !c.dxfExport(),
+              "A changed project rule reused stale DXF data");
+        c.closeDocument();
+        const auto beforeRestore = builder->calls.load();
+        c.open(native(relocatedProject));
+        wait([&] { return c.session().document() && !c.hasWork(); });
+        check(c.dxfFlatPattern() && c.dxfExport() && c.dxfExport()->path == native(relocatedDxf) &&
+                  !c.flatPattern() && builder->calls == beforeRestore && dxfButton->isEnabled(),
+              "Restoring a project did not resolve its relative DXF without a CAD calculation");
+        auto *restoredPreview = window.findChild<QDialog *>("flatDxfDialog");
+        check(!restoredPreview, "Import kept a DXF window from the previous document");
+        dxfButton->click();
+        liveDxf = window.findChild<QDialog *>("flatDxfDialog");
+        check(liveDxf && liveDxf->isVisible(), "Cannot open restored DXF preview");
+        liveSave = liveDxf->findChild<QPushButton *>("flatDxfSave");
+        openDxfFolder = liveDxf->findChild<QPushButton *>("flatDxfOpenFolder");
+        liveStatus = liveDxf->findChild<QLabel *>("flatDxfStatus");
+        check(openDxfFolder->isVisible() && !liveDxf->findChild<QCheckBox *>()->isChecked(),
+              "The saved DXF action or cut-only setting did not survive reopening the project");
+        const auto repeatedDxf = relocated.filePath("repeated.dxf");
+        check(ui::writeFlatDxf(repeatedDxf, c.dxfFlatPattern()->info(), {false, {}, 0}).isEmpty(),
+              "Cannot re-export cached DXF");
+        QFile repeated(repeatedDxf);
+        check(repeated.open(QIODevice::ReadOnly) && repeated.readAll() == originalDxf &&
+                  builder->calls == beforeRestore,
+              "Re-export from the cache changed DXF or started a CAD calculation");
+        const auto originalMarked = relocated.filePath("original-marked.dxf");
+        const auto cachedMarked = relocated.filePath("cached-marked.dxf");
+        check(ui::writeFlatDxf(originalMarked, updatedFlat->info(), {}).isEmpty() &&
+                  ui::writeFlatDxf(cachedMarked, c.dxfFlatPattern()->info(), {}).isEmpty(),
+              "Cannot compare DXF with bend markings");
+        QFile originalWithBends(originalMarked), cachedWithBends(cachedMarked);
+        check(originalWithBends.open(QIODevice::ReadOnly) &&
+                  cachedWithBends.open(QIODevice::ReadOnly) &&
+                  originalWithBends.readAll() == cachedWithBends.readAll(),
+              "Cached DXF changed bend markings");
+        check(QFile::remove(relocatedDxf), "Cannot remove the saved DXF");
+        openDxfFolder->click();
+        check(liveStatus->text() == QStringLiteral("Сохранённый DXF не найден."),
+              "Opening the folder of a missing file did not show a message");
+        auto *warning = liveDxf->findChild<QMessageBox *>("flatDxfMissingFile");
+        check(warning && warning->isVisible() && warning->isModal() &&
+                  warning->standardButtons() == QMessageBox::Ok,
+              "Missing DXF did not show a modal confirmation");
+        warning->button(QMessageBox::Ok)->click();
+        liveDxf->findChild<QPushButton *>("flatDxfClose")->click();
+        QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        dxfButton->click();
+        liveDxf = window.findChild<QDialog *>("flatDxfDialog");
+        check(liveDxf && liveDxf->isVisible(), "Cannot reopen DXF after deleting the export");
+        liveSave = liveDxf->findChild<QPushButton *>("flatDxfSave");
+        openDxfFolder = liveDxf->findChild<QPushButton *>("flatDxfOpenFolder");
+        check(liveSave->isEnabled() && liveDxf->findChild<QLabel *>("flatDxfStatus")->text() ==
+                                           QStringLiteral("Сохранённый DXF не найден."),
+              "Reopening DXF reported a missing file as saved or prevented re-export");
+        check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .43, 1}) &&
+                  !c.dxfFlatPattern() && !c.dxfExport() && !liveSave->isEnabled(),
+              "Changing K left a saved DXF available");
+        check(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .42, 1}),
+              "Cannot restore test K after cache invalidation");
         const auto partRevision = c.session().revision();
         c.open(native(exportDir.filePath("missing.step")));
         wait([&] { return c.flatPattern() && !c.hasWork(); });
         check(c.session().error() && c.session().revision() == partRevision &&
                   window.findChild<QDialog *>("flatDxfDialog") == liveDxf &&
-                  liveSave->isEnabled() && c.flatPattern() != updatedFlat &&
-                  c.flatPattern()->info().settings.manualK == .42,
+                  liveSave->isEnabled() && !openDxfFolder->isVisible() &&
+                  c.flatPattern() != updatedFlat && c.flatPattern()->info().settings.manualK == .42,
               "A failed import did not restore DXF for the still-open part");
         QTemporaryDir dir;
         check(dir.isValid(), "No temp folder");

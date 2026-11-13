@@ -45,6 +45,9 @@ class ImportController final : public QObject {
     [[nodiscard]] bool isSaving() const;
     [[nodiscard]] QString saveError() const;
     [[nodiscard]] const application::DocumentSession &session() const;
+    [[nodiscard]] application::FlatPatternPtr dxfFlatPattern() const;
+    [[nodiscard]] const std::optional<application::DxfExportReference> &dxfExport() const;
+    void recordDxfExport(application::DxfExportReference);
     [[nodiscard]] bool hasWork() const;
     bool prepareToolProfile(application::ToolProfileInput,
                             std::shared_ptr<const application::ToolProfileImporter>,

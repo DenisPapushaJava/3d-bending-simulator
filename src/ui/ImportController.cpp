@@ -92,7 +92,12 @@ class ImportController::Impl {
                                         ImportErrorCode::PresentationFailed, error.what(), {}};
                                 }
                             }
+                            const auto revision = session.revision();
+                            auto *project = std::get_if<OpenedProject>(&result);
+                            auto restoredDxf = project ? std::move(project->dxf) : ProjectDxf{};
                             session.complete(request, std::move(result));
+                            if (session.revision() != revision)
+                                dxf = std::move(restoredDxf);
                         }
                         dispatch();
                         emit owner->stateChanged();
@@ -207,6 +212,7 @@ class ImportController::Impl {
     std::optional<DrawingRequest> drawingRequest;
     std::function<void(const FlatPatternResult *)> drawingAfterFlat;
     FlatPatternPtr flat;
+    ProjectDxf dxf;
     std::optional<FlatPatternError> flatError;
     std::optional<FlatPatternRequest> flatRequest;
     struct FlatJob {
@@ -241,6 +247,7 @@ class ImportController::Impl {
         flat.reset();
         flatError.reset();
         flatRequest.reset();
+        dxf = {};
     }
     void invalidateDrawing() {
         ++drawingId;
@@ -750,6 +757,7 @@ void ImportController::saveProject(std::filesystem::path path,
     const auto unfold = state->session.unfoldSettings();
     const auto bends = state->session.bends();
     const auto drawing = state->session.drawingSettings();
+    const ProjectDxf dxf{dxfFlatPattern(), state->dxf.exported};
     const auto drawingRevision = state->session.drawingRevision();
     const auto revision = state->session.editRevision();
     const auto id = ++state->saveId;
@@ -760,11 +768,11 @@ void ImportController::saveProject(std::filesystem::path path,
     state->writeError.clear();
     QMetaObject::invokeMethod(
         state->worker,
-        [state, document, manual, unfold, bends, drawing, drawingRevision, revision, id, stop,
+        [state, document, manual, unfold, bends, drawing, dxf, drawingRevision, revision, id, stop,
          path = std::move(path), writer = std::move(writer)] {
             std::optional<std::string> error;
             try {
-                error = writer->save(path, *document, manual, bends, stop, unfold, drawing);
+                error = writer->save(path, *document, manual, bends, stop, unfold, drawing, dxf);
             } catch (const std::exception &failure) {
                 error = failure.what();
             } catch (...) {
@@ -1488,6 +1496,20 @@ bool ImportController::prefetchFlatPattern(std::shared_ptr<const FlatPatternBuil
 }
 application::FlatPatternPtr ImportController::flatPattern() const {
     return impl_->flat;
+}
+application::FlatPatternPtr ImportController::dxfFlatPattern() const {
+    const auto &state = *impl_;
+    if (state.dxf.flat)
+        return state.dxf.flat;
+    if (state.flat && state.flat->info().cutProfile)
+        return state.flat;
+    return {};
+}
+const std::optional<application::DxfExportReference> &ImportController::dxfExport() const {
+    return impl_->dxf.exported;
+}
+void ImportController::recordDxfExport(application::DxfExportReference reference) {
+    impl_->dxf.exported = std::move(reference);
 }
 std::optional<application::FlatPatternError> ImportController::flatPatternError() const {
     return impl_->flatError;

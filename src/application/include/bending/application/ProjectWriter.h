@@ -2,6 +2,7 @@
 
 #include "bending/application/BendPreparation.h"
 #include "bending/application/ProjectDrawingSettings.h"
+#include "bending/application/ProjectDxf.h"
 #include "bending/core/UnfoldRule.h"
 
 #include <optional>
@@ -16,6 +17,7 @@ class ProjectWriter {
     save(const std::filesystem::path &path, const Document &document,
          std::optional<double> manualThicknessMm, const std::vector<BendPreparation> &bends,
          std::stop_token stop, core::UnfoldSettings unfold = {},
-         const std::optional<ProjectDrawingSettings> &drawing = {}) const = 0;
+         const std::optional<ProjectDrawingSettings> &drawing = {},
+         const ProjectDxf &dxf = {}) const = 0;
 };
 } // namespace bending::application
