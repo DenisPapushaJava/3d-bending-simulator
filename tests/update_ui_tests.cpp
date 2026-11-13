@@ -47,12 +47,13 @@ class Writer final : public application::ProjectWriter {
     save(const std::filesystem::path &path, const application::Document &document,
          std::optional<double> thickness, const std::vector<application::BendPreparation> &bends,
          std::stop_token stop, core::UnfoldSettings unfold,
-         const std::optional<application::ProjectDrawingSettings> &drawing) const override {
+         const std::optional<application::ProjectDrawingSettings> &drawing,
+         const application::ProjectDxf &dxf) const override {
         while (hold && !stop.stop_requested())
             QThread::msleep(1);
         if (fail)
             return "Controlled save failure";
-        return files.save(path, document, thickness, bends, stop, unfold, drawing);
+        return files.save(path, document, thickness, bends, stop, unfold, drawing, dxf);
     }
 };
 int main(int argc, char **argv) {

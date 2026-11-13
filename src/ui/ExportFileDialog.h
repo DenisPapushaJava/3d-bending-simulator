@@ -7,6 +7,11 @@
 #include <utility>
 
 namespace bending::ui {
+inline void setSaveDialogLabels(QFileDialog &dialog) {
+    dialog.setLabelText(QFileDialog::Accept, QStringLiteral("Сохранить"));
+    dialog.setLabelText(QFileDialog::Reject, QStringLiteral("Отмена"));
+}
+
 inline void closeExportFileDialogs(QWidget *owner, const QString &name) {
     for (auto *dialog : owner->findChildren<QDialog *>(name, Qt::FindDirectChildrenOnly))
         if (dialog->isVisible())
@@ -35,6 +40,7 @@ inline void chooseExportFile(QWidget *owner, const QString &name, const QString 
     picker->setNameFilter(filter);
     picker->setAcceptMode(QFileDialog::AcceptSave);
     picker->setFileMode(QFileDialog::AnyFile);
+    setSaveDialogLabels(*picker);
     picker->setDefaultSuffix(suffix);
     picker->selectFile(suggested.fileName());
     QObject::connect(

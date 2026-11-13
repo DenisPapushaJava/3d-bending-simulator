@@ -69,8 +69,8 @@ namespace {
 
 const Quantity_Color bendHighlight(1., 0., 1., Quantity_TOC_sRGB);
 const Quantity_Color bendHighlightAccent(1., .60, .94, Quantity_TOC_sRGB);
-constexpr double flatBendWidth = 5.;
-constexpr double selectedFlatBendWidth = 8.;
+constexpr double flatBendWidth = 5. / 3.;
+constexpr double selectedFlatBendWidth = 4.;
 
 QString failureText(const Standard_Failure &error) {
     const auto *message = error.GetMessageString();
@@ -845,7 +845,7 @@ class OcctCanvas final : public QWidget {
                     const auto inside = bends[i].direction > 0 ? 0u : 1u;
                     for (std::size_t side = 0; side < lines[i].size(); ++side) {
                         const auto &line = lines[i][side];
-                        candidate->SetCustomColor(line, bendHighlight);
+                        candidate->SetCustomColor(line, bendHighlightAccent);
                         candidate->SetCustomWidth(line, flatBendWidth);
                         const auto drawer = candidate->CustomAspects(line);
                         drawer->SetOwnLineAspects();
@@ -1591,7 +1591,7 @@ class OcctCanvas final : public QWidget {
         for (std::size_t i = 0; i < std::min(lines.size(), bends.size()); ++i) {
             const bool active = selected && bends[i].bendIndex == *selected;
             for (const auto &line : lines[i]) {
-                presentation_->SetCustomColor(line, active ? bendHighlightAccent : bendHighlight);
+                presentation_->SetCustomColor(line, active ? bendHighlight : bendHighlightAccent);
                 presentation_->SetCustomWidth(line, active ? selectedFlatBendWidth : flatBendWidth);
             }
         }

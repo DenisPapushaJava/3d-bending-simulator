@@ -1,5 +1,6 @@
 #include "bending/project/ProjectFiles.h"
 #include "ProjectDrawingJson.h"
+#include "ProjectDxfCbor.h"
 #include "ToolJson.h"
 
 #include <QCborMap>
@@ -21,6 +22,11 @@ using namespace application;
 constexpr qint64 maximumProjectBytes = 92 * 1024 * 1024;
 constexpr int compactProjectVersion = 20;
 const QByteArray projectSignature("BENDSIM\0", 8);
+QCborMap dxfInputs(const QCborMap &manifest) {
+    return {{QStringLiteral("source"),
+             manifest.value(QStringLiteral("source")).toMap().value(QStringLiteral("sha256"))},
+            {QStringLiteral("parameters"), manifest.value(QStringLiteral("parameters"))}};
+}
 QString qtPath(const std::filesystem::path &path) {
 #ifdef _WIN32
     return QString::fromStdWString(path.native());
@@ -340,6 +346,8 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     const bool compact = bytes.startsWith(projectSignature);
     QJsonObject root;
     QByteArray sourceBytes;
+    QCborMap cachedDxfInputs;
+    QCborValue cachedDxf;
     if (compact) {
         QCborParserError error;
         const auto payload = QByteArray::fromRawData(bytes.constData() + projectSignature.size(),
@@ -355,6 +363,9 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
             return invalid("Missing binary STEP snapshot");
         sourceBytes = data.toByteArray();
         manifest.insert(QStringLiteral("source"), source);
+        cachedDxf = manifest.take(QStringLiteral("dxf"));
+        if (cachedDxf.isMap())
+            cachedDxfInputs = dxfInputs(manifest);
         root = manifest.toJsonObject();
     } else {
         QJsonParseError error;
@@ -477,16 +488,19 @@ ImportResult ProjectFiles::load(const std::filesystem::path &path, std::stop_tok
     if (manual && rejected(*manual, document->metadata().thickness)) {
         return invalid("Saved thickness conflicts with embedded geometry");
     }
-    return OpenedProject{std::move(document), manual, absolute,
-                         std::move(bends),    unfold, std::move(drawing)};
+    auto dxf =
+        stop.stop_requested() ? ProjectDxf{} : readProjectDxf(cachedDxf, cachedDxfInputs, absolute);
+    return OpenedProject{std::move(document), manual,        absolute, std::move(bends), unfold,
+                         std::move(drawing),  std::move(dxf)};
 }
 
-std::optional<std::string>
-ProjectFiles::save(const std::filesystem::path &path, const Document &document,
-                   std::optional<double> manualThicknessMm,
-                   const std::vector<BendPreparation> &bends, std::stop_token stop,
-                   core::UnfoldSettings unfold,
-                   const std::optional<ProjectDrawingSettings> &drawing) const {
+std::optional<std::string> ProjectFiles::save(const std::filesystem::path &path,
+                                              const Document &document,
+                                              std::optional<double> manualThicknessMm,
+                                              const std::vector<BendPreparation> &bends,
+                                              std::stop_token stop, core::UnfoldSettings unfold,
+                                              const std::optional<ProjectDrawingSettings> &drawing,
+                                              const ProjectDxf &dxf) const {
     if (qtPath(path.extension()).compare(QStringLiteral(".bend"), Qt::CaseInsensitive) != 0) {
         return "Project filename must end with .bend";
     }
@@ -538,10 +552,17 @@ ProjectFiles::save(const std::filesystem::path &path, const Document &document,
         {QStringLiteral("toolAssignments"), assignments},
         {QStringLiteral("drawing"), drawingSettingsJson(drawing)}};
     auto manifest = QCborMap::fromJsonObject(root);
+    const auto cache = writeProjectDxf(dxf, dxfInputs(manifest), path);
+    if (!cache.isEmpty())
+        manifest.insert(QStringLiteral("dxf"), cache);
     auto model = manifest.value(QStringLiteral("source")).toMap();
     model.insert(QStringLiteral("data"), bytes);
     manifest.insert(QStringLiteral("source"), model);
-    const auto encoded = QCborValue(manifest).toCbor();
+    auto encoded = QCborValue(manifest).toCbor();
+    if (!cache.isEmpty() && encoded.size() > maximumProjectBytes - projectSignature.size()) {
+        manifest.remove(QStringLiteral("dxf"));
+        encoded = QCborValue(manifest).toCbor();
+    }
     if (encoded.size() > maximumProjectBytes - projectSignature.size())
         return "Project exceeds size limit";
     if (stop.stop_requested()) {
