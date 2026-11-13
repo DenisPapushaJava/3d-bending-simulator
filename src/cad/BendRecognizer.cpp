@@ -28,8 +28,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
 #include <numbers>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -482,6 +484,100 @@ bool preferWorkpieceReversed(const RecognizedBend &bend, const Patch &inner,
     }
 }
 
+bool splitStrokePair(const BendAnalysis &analysis, std::size_t first, std::size_t second,
+                     const Patch &a, const Patch &b) {
+    const auto &left = analysis.bends[first];
+    const auto &right = analysis.bends[second];
+    const double tolerance = analysis.lengthToleranceMm;
+    if (std::abs(left.angleRadians - right.angleRadians) > analysis.angleToleranceRadians ||
+        std::abs(left.innerRadiusMm - right.innerRadiusMm) > tolerance ||
+        std::abs(left.thicknessMm - right.thicknessMm) > tolerance || left.lengthMm <= tolerance ||
+        right.lengthMm <= tolerance)
+        return false;
+    const auto asPoint = [](PointMm p) { return gp_Pnt(p.x, p.y, p.z); };
+    const auto start = asPoint(left.axisStart), end = asPoint(left.axisEnd);
+    const gp_Vec axis = gp_Vec(start, end).Normalized();
+    const auto from = asPoint(right.axisStart), to = asPoint(right.axisEnd);
+    const gp_Lin line(start, gp_Dir(axis));
+    if (!line.Direction().IsEqual(gp_Dir(gp_Vec(from, to)), analysis.angleToleranceRadians) ||
+        line.Distance(from) > tolerance || line.Distance(to) > tolerance)
+        return false;
+    const double u = gp_Vec(start, from).Dot(axis), v = gp_Vec(start, to).Dot(axis);
+    if (!(std::max(u, v) < -tolerance || std::min(u, v) > start.Distance(end) + tolerance))
+        return false;
+    const auto sameWall = [&](std::size_t i, std::size_t j) {
+        return left.flangeFaces[2 * i] == right.flangeFaces[2 * j] &&
+               left.flangeFaces[2 * i + 1] == right.flangeFaces[2 * j + 1];
+    };
+    for (std::size_t i = 0; i < 2; ++i)
+        for (std::size_t j = 0; j < 2; ++j)
+            if (sameWall(i, j) &&
+                a.rails[i].radial.IsEqual(b.rails[j].radial, analysis.angleToleranceRadians) &&
+                a.rails[1 - i].radial.IsEqual(b.rails[1 - j].radial,
+                                              analysis.angleToleranceRadians) &&
+                a.rails[1 - i].plane.Distance(b.rails[1 - j].plane.Location()) <= tolerance)
+                return true;
+    return false;
+}
+
+void recognizeInterruptedStrokes(BendAnalysis &analysis, const std::vector<Patch> &patches,
+                                 const std::vector<std::size_t> &innerPatches,
+                                 std::stop_token stop) {
+    // Only compare zones incident on the same two skins of a wall. The final
+    // group must agree pairwise so an ambiguous bridge cannot join two strokes.
+    std::map<std::array<std::size_t, 2>, std::vector<std::size_t>> byWall;
+    for (std::size_t i = 0; i < analysis.bends.size(); ++i) {
+        const auto &faces = analysis.bends[i].flangeFaces;
+        byWall[{faces[0], faces[1]}].push_back(i);
+        byWall[{faces[2], faces[3]}].push_back(i);
+    }
+    std::vector<std::vector<std::size_t>> neighbours(analysis.bends.size());
+    for (const auto &entry : byWall) {
+        const auto &members = entry.second;
+        for (std::size_t i = 0; i < members.size(); ++i) {
+            if (stop.stop_requested())
+                return;
+            const auto a = members[i];
+            for (const auto b : std::span(members).subspan(i + 1))
+                if (splitStrokePair(analysis, a, b, patches[innerPatches[a]],
+                                    patches[innerPatches[b]])) {
+                    neighbours[a].push_back(b);
+                    neighbours[b].push_back(a);
+                }
+        }
+    }
+    for (auto &list : neighbours) {
+        std::sort(list.begin(), list.end());
+        list.erase(std::unique(list.begin(), list.end()), list.end());
+    }
+    for (std::size_t i = 0; i < neighbours.size(); ++i) {
+        if (stop.stop_requested())
+            return;
+        const auto &others = neighbours[i];
+        if (others.empty() || others.front() < i)
+            continue;
+        auto members = others;
+        members.insert(members.begin(), i);
+        if (!std::all_of(others.begin(), others.end(), [&](auto member) {
+                const auto &links = neighbours[member];
+                return links.size() == others.size() &&
+                       std::all_of(members.begin(), members.end(), [&](auto other) {
+                           return member == other ||
+                                  std::binary_search(links.begin(), links.end(), other);
+                       });
+            }))
+            continue;
+        const auto longest = std::max_element(members.begin(), members.end(), [&](auto a, auto b) {
+            return analysis.bends[a].lengthMm < analysis.bends[b].lengthMm;
+        });
+        const bool reversed = analysis.bends[*longest].preferWorkpieceReversed;
+        for (const auto member : members) {
+            analysis.bends[member].interruptedStroke = i + 1;
+            analysis.bends[member].preferWorkpieceReversed = reversed;
+        }
+    }
+}
+
 bool isThroughCutPlate(const TopoDS_Shape &shape, const TopTools_IndexedMapOfShape &faces,
                        const BendAnalysis &analysis, std::stop_token stop) {
     if (analysis.bends.empty() || !analysis.interiorContourDiagnostics.empty())
@@ -560,12 +656,10 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
     // analytic cylinders and flanges agree precisely. Keep their original
     // tolerances, but never let them inflate simulation comparisons past the
     // former 0.001 mm input / 0.01 mm comparison limit.
-    const double comparisonInput = purpose == BendRecognitionPurpose::Simulation
-                                       ? std::min(maximumToleranceMm, 0.001)
-                                       : maximumToleranceMm;
-    result.lengthToleranceMm =
-        std::max(1.0e-5, comparisonInput *
-                             (purpose == BendRecognitionPurpose::DrawingMeasurements ? 2.0 : 10.0));
+    const bool drawing = purpose == BendRecognitionPurpose::DrawingMeasurements;
+    const double comparisonInput =
+        drawing ? maximumToleranceMm : std::min(maximumToleranceMm, 0.001);
+    result.lengthToleranceMm = std::max(1.0e-5, comparisonInput * (drawing ? 2.0 : 10.0));
     if (stop.stop_requested()) {
         return result;
     }
@@ -624,6 +718,7 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
         }
         // Do not silently choose a partner if a patch has several matching surfaces.
         std::vector<std::vector<std::size_t>> partners(patches.size());
+        std::vector<std::size_t> innerPatches;
         for (std::size_t i = 0; i < patches.size(); ++i) {
             if (stop.stop_requested()) {
                 return BendAnalysis{};
@@ -644,13 +739,15 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
             const auto j = partners[i].front();
             if (partners[j].size() == 1) {
                 auto candidate = *match(patches[i], patches[j], result.lengthToleranceMm);
-                if (purpose == BendRecognitionPurpose::Simulation)
+                if (!drawing)
                     candidate.preferWorkpieceReversed = preferWorkpieceReversed(
                         candidate, patches[i], faces, result.lengthToleranceMm);
                 auto boundaries = patches[i].boundaryFaces;
                 boundaries.insert(boundaries.end(), patches[j].boundaryFaces.begin(),
                                   patches[j].boundaryFaces.end());
                 if (boundaries.empty()) {
+                    if (purpose == BendRecognitionPurpose::Simulation)
+                        innerPatches.push_back(i);
                     result.bends.push_back(std::move(candidate));
                 } else {
                     std::sort(boundaries.begin(), boundaries.end());
@@ -670,6 +767,8 @@ BendAnalysis recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm
         } catch (const Standard_Failure &) {
             // An inconclusive stock check leaves the existing bend analysis intact.
         }
+        if (purpose == BendRecognitionPurpose::Simulation && !result.bends.empty())
+            recognizeInterruptedStrokes(result, patches, innerPatches, stop);
         if (stop.stop_requested())
             return {};
         result.status = BendRecognitionStatus::Completed;

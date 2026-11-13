@@ -169,14 +169,18 @@ QJsonArray bendsJson(const std::vector<BendPreparation> &bends, QJsonArray &assi
                 assignments.append(assignmentJson(bend.catalogTools));
             }
         }
-        values.append(QJsonObject{{QStringLiteral("id"), QString::fromStdString(bend.id)},
-                                  {QStringLiteral("review"), reviewName(bend.review)},
-                                  {QStringLiteral("workpieceReversed"), bend.workpieceReversed},
-                                  {QStringLiteral("workpieceOffsetMm"), bend.workpieceOffsetMm},
-                                  {QStringLiteral("geometry"), geometry},
-                                  {QStringLiteral("target"), target},
-                                  {QStringLiteral("tools"), toolsJson(bend.tools)},
-                                  {QStringLiteral("catalogTools"), assignment}});
+        QJsonObject record{{QStringLiteral("id"), QString::fromStdString(bend.id)},
+                           {QStringLiteral("review"), reviewName(bend.review)},
+                           {QStringLiteral("workpieceReversed"), bend.workpieceReversed},
+                           {QStringLiteral("workpieceOffsetMm"), bend.workpieceOffsetMm},
+                           {QStringLiteral("geometry"), geometry},
+                           {QStringLiteral("target"), target},
+                           {QStringLiteral("tools"), toolsJson(bend.tools)},
+                           {QStringLiteral("catalogTools"), assignment}};
+        if (bend.strokePartition)
+            record.insert(QStringLiteral("strokePartition"),
+                          static_cast<int>(bend.strokePartition));
+        values.append(record);
     }
     return values;
 }
@@ -205,6 +209,13 @@ bool readBends(const QJsonValue &value, std::vector<BendPreparation> &bends, int
             (version < 17 && !offset.isUndefined()))
             return false;
         bend.workpieceOffsetMm = offset.toDouble(0);
+        const auto partition = object.value(QStringLiteral("strokePartition"));
+        if (!partition.isUndefined()) {
+            const int number = partition.toInt(-1);
+            if (version != compactProjectVersion || number < 1 || number > 512)
+                return false;
+            bend.strokePartition = static_cast<unsigned>(number);
+        }
         bend.id = object.value(QStringLiteral("id")).toString().toStdString();
         const auto review = object.value(QStringLiteral("review")).toString();
         if (review == QStringLiteral("automatic") && version >= 4) {

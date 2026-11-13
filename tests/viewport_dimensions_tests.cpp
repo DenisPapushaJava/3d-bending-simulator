@@ -87,6 +87,30 @@ int main(int argc, char **argv) {
                   !overview.labels.join(' ').contains(" · Y ") &&
                   !overview.labels.join(' ').contains(" · L "),
               "Overview must have overall sizes and compact IDs, not full callouts");
+        auto interrupted = info;
+        interrupted.bends.clear();
+        application::BendAnalysis interruptedAnalysis;
+        interruptedAnalysis.bends.resize(40);
+        for (std::size_t i = 0; i < interruptedAnalysis.bends.size(); ++i) {
+            auto segment = info.bends.front();
+            segment.bendIndex = i;
+            segment.start = {double(i) * 20, 20, 0};
+            segment.end = {double(i) * 20 + 15, 20, 0};
+            interrupted.bends.push_back(segment);
+            interruptedAnalysis.bends[i].interruptedStroke = 1;
+        }
+        std::vector<unsigned> partitions(40, 1);
+        std::fill(partitions.begin() + 35, partitions.end(), 2);
+        const auto combined =
+            viewer::flatPatternDimensions(interrupted, 14, layout, {}, 1, {}, &interruptedAnalysis);
+        const auto separated = viewer::flatPatternDimensions(interrupted, 14, layout, {}, 1, {},
+                                                             &interruptedAnalysis, partitions);
+        check(
+            combined.labels.filter(QStringLiteral("40 уч.")).size() == 1 &&
+                separated.labels.filter(QStringLiteral("35 уч.")).size() == 1 &&
+                separated.labels.filter(QRegularExpression(QStringLiteral(" · 5 уч\\.$"))).size() ==
+                    1,
+            "A long interrupted stroke expanded into IDs or lost its partition labels");
         const auto selectedAnnotations = viewer::flatPatternDimensions(info, 14, layout, 7, 1);
         const auto selected = selectedAnnotations.labels;
         const auto dimensions = [](const viewer::DimensionAnnotations &annotations) {

@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <memory>
+#include <span>
 
 namespace bending::ui {
 class ImportController final : public QObject {
@@ -30,15 +31,19 @@ class ImportController final : public QObject {
     void useAutomaticThickness();
     bool setBendWorkpieceOrientation(std::size_t recognizedIndex, bool reversed);
     bool setBendReview(std::size_t recognizedIndex, application::BendReview review);
+    bool setBendReview(std::span<const std::size_t> zones, application::BendReview review);
     bool setBendTools(std::size_t recognizedIndex, std::optional<core::PressTools> tools);
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
     bool setBendToolAssignments(const std::vector<application::BendToolUpdate> &updates);
+    bool editStrokes(std::uint64_t revision, std::uint64_t editRevision,
+                     std::span<const application::StrokeEdit> edits);
     // One transaction for included, assigned bends. A shared setup replaces their assignments;
     // without one, only orientation changes and each bend retains its own tools.
     bool setAllBendPunchOrientations(bool reversed,
                                      std::optional<core::PressTools> sharedTools = {},
                                      std::optional<core::ToolAssignment> sharedAssignment = {});
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
+    bool setBendTarget(std::span<const std::size_t> zones, std::optional<core::BendTarget> target);
     bool setDrawingSettings(std::uint64_t revision, application::ProjectDrawingSettings);
     void saveProject(std::filesystem::path path,
                      std::shared_ptr<const application::ProjectWriter> writer);

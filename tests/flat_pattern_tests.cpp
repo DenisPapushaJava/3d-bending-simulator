@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <iostream>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 #include <string_view>
 using namespace bending;
@@ -359,6 +360,10 @@ void splitLinkPattern(const std::filesystem::path &folder) {
     check(std::get<application::BendRouteError>(planner.buildRouteDraft(doc, draft, {})).code ==
               application::BendRouteErrorCode::InvalidInput,
           "A shared bend exposed a second independent draft step");
+    draft.operations.back().strokePartition = 1;
+    const auto invalidSplit = planner.buildRouteDraft(doc, draft, {});
+    check(std::holds_alternative<application::BendRouteError>(invalidSplit),
+          "An explicit split bypassed the shared wall constraint");
 
     const auto routeResult = planner.buildRoute(doc, route, {});
     if (const auto *error = std::get_if<application::BendRouteError>(&routeResult))
@@ -392,30 +397,72 @@ void splitLinkPattern(const std::filesystem::path &folder) {
 }
 
 void manySegmentsOfOneBend(const std::filesystem::path &folder) {
-    constexpr int slotCount = 32;
+    constexpr int slotCount = 59;
+    constexpr double stripLength = 120;
     constexpr double slotLength = 1;
     BRep_Builder builder;
     TopoDS_Compound reliefs;
     builder.MakeCompound(reliefs);
     for (int i = 0; i < slotCount; ++i) {
         const auto slot =
-            BRepPrimAPI_MakeBox(gp_Pnt(-3, -2, 2 + 2.4 * i), 12, 11, slotLength).Shape();
+            BRepPrimAPI_MakeBox(gp_Pnt(-3, -2, 1.5 + 2 * i), 12, 11, slotLength).Shape();
         builder.Add(reliefs, slot);
     }
-    BRepAlgoAPI_Cut cut(fixtures::bentStrip(), reliefs);
+    BRepAlgoAPI_Cut cut(fixtures::bentStrip(4, 2, std::numbers::pi / 2, stripLength), reliefs);
     check(cut.IsDone() && !cut.HasErrors(), "Split bend fixture cut failed");
     const auto document = load(cut.Shape(), folder / "many-segments.step");
+    const auto &analysis = document->metadata().bendAnalysis;
+    std::vector<std::size_t> indices(analysis.bends.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    const auto strokes = application::routeBendStrokes(analysis, indices);
+    check(strokes.size() == 1 && strokes.front().size() == slotCount + 1,
+          "A sixty-segment bend did not remain one displayed stroke");
     const auto flat = build(document, {core::SheetMaterial::MildSteel, .5, 1});
     const auto &info = flat->info();
     const auto &layout = cad::OcctFlatPatternAccess::layout(*flat);
     check(layout.walls.size() == 2 && info.bends.size() == slotCount + 1 && info.cutProfile &&
               info.cutProfile->loops.size() == slotCount + 1,
-          "Unfolding lost separate bend sectors or reliefs beyond the route limit");
+          "Unfolding lost separate bend sectors or reliefs");
     double length = 0;
     for (const auto &bend : info.bends)
         length += bend.lengthMm();
-    check(std::abs(length - (80 - slotCount * slotLength)) < 1.e-5,
+    check(std::abs(length - (stripLength - slotCount * slotLength)) < 1.e-5,
           "Bend sectors fill a relief or lose material");
+    std::cout << "Sixty-segment flat pattern passed" << std::endl;
+
+    application::RouteDraftRequest draft;
+    draft.step = 1;
+    application::BendRouteRequest route;
+    route.automatic = true;
+    for (const auto index : indices) {
+        const auto &bend = analysis.bends[index];
+        draft.operations.push_back({"B" + std::to_string(index + 1),
+                                    index,
+                                    {bend.angleRadians, bend.innerRadiusMm},
+                                    {},
+                                    {}});
+    }
+    route.operations = draft.operations;
+    cad::SingleBendPreviewBuilder planner;
+    const auto draftResult = planner.buildRouteDraft(document, draft, {});
+    if (const auto *error = std::get_if<application::BendRouteError>(&draftResult))
+        throw std::runtime_error("Sixty-segment draft: " + error->detail);
+    const auto preview = std::get<application::RouteDraftPtr>(draftResult)->visual;
+    check(preview->activeBendCount() == slotCount + 1 &&
+              std::abs(preview->model().widthMm - stripLength) < 1.e-5,
+          "The draft lost sectors or shortened the shared stroke");
+    std::cout << "Sixty-segment draft passed" << std::endl;
+
+    route.maximumTimeMs = 120000;
+    const auto routeResult = planner.buildRoute(document, route, {});
+    if (const auto *error = std::get_if<application::BendRouteError>(&routeResult))
+        throw std::runtime_error("Sixty-segment route: " + error->detail);
+    const auto checked = std::get<application::BendRoutePtr>(routeResult);
+    check(checked->steps.size() == 1 &&
+              checked->steps.front().additionalBends.size() == slotCount &&
+              checked->steps.front().preview->activeBendCount() == slotCount + 1 &&
+              checked->statistics.builtTransitions == 1,
+          "The automatic route did not evaluate all sixty sectors in one stroke");
 }
 
 void linearCutJoin() {
@@ -815,7 +862,8 @@ int main(int argc, char **argv) {
             check(writer.Write(argv[2]) == IFSelect_RetDone, "Tree write failed");
             return 0;
         }
-        if (argc > 1) {
+        const bool manySegments = argc == 2 && std::string_view(argv[1]) == "--many-segments";
+        if (argc > 1 && !manySegments) {
             auto d = application::resultDocument(
                 cad::StepImporter{}.load(std::filesystem::path(argv[1]), {}, {}));
             auto p = build(d);
@@ -835,6 +883,10 @@ int main(int argc, char **argv) {
                 std::filesystem::remove_all(p, e);
             }
         } cleanup{folder};
+        if (manySegments) {
+            manySegmentsOfOneBend(folder);
+            return 0;
+        }
         for (double angle :
              {std::numbers::pi / 4, std::numbers::pi / 2, 3 * std::numbers::pi / 4}) {
             const auto d = load(fixtures::bentStrip(4, 2, angle), folder / "angle.step");
@@ -856,7 +908,6 @@ int main(int argc, char **argv) {
         trayPatterns(folder);
         treePatterns(folder);
         cyclicReliefPattern(folder);
-        manySegmentsOfOneBend(folder);
         coplanarWallPattern(folder);
         splitLinkPattern(folder);
         linearCutJoin();

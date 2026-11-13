@@ -968,6 +968,34 @@ class OcctCanvas final : public QWidget {
                       revision);
     }
 
+    void highlightBendZones(const std::vector<std::size_t> &indices, quint64 revision) {
+        if (revision != revision_ || !document_ || indices.empty())
+            return;
+        const auto &bends = document_->metadata().bendAnalysis.bends;
+        FaceHighlights state;
+        for (const auto index : indices) {
+            if (index >= bends.size())
+                return;
+            const auto &bend = bends[index];
+            state.primary.insert(state.primary.end(), {bend.innerFace, bend.outerFace});
+            state.flanges.insert(state.flanges.end(), bend.flangeFaces.begin(),
+                                 bend.flangeFaces.end());
+        }
+        measureSelection_ = {};
+        state.bend = true;
+        state.measuredBend = bends[indices.front()];
+        if (document_->metadata().closedCutouts.status == application::ClosedCutoutStatus::Filled)
+            state.cutouts = document_->metadata().closedCutouts.boundaryFaces;
+        setHighlights(std::move(state), revision);
+    }
+    void setBendStrokePartitions(std::vector<unsigned> partitions, quint64 revision) {
+        if (revision != revision_)
+            return;
+        strokePartitions_ = std::move(partitions);
+        if (flat_)
+            refreshDimensions();
+    }
+
     void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
                                  quint64 revision) {
         const auto &bend = diagnostic.candidate;
@@ -1589,7 +1617,13 @@ class OcctCanvas final : public QWidget {
         const auto &lines = cad::OcctFlatPatternAccess::bendLines(*flat_);
         const auto &bends = flat_->info().bends;
         for (std::size_t i = 0; i < std::min(lines.size(), bends.size()); ++i) {
-            const bool active = selected && bends[i].bendIndex == *selected;
+            const auto &source = document_->metadata().bendAnalysis.bends;
+            const auto index = bends[i].bendIndex;
+            const bool active =
+                selected && (index == *selected || (index < source.size() &&
+                                                    std::binary_search(highlights_.primary.begin(),
+                                                                       highlights_.primary.end(),
+                                                                       source[index].innerFace)));
             for (const auto &line : lines[i]) {
                 presentation_->SetCustomColor(line, active ? bendHighlight : bendHighlightAccent);
                 presentation_->SetCustomWidth(line, active ? selectedFlatBendWidth : flatBendWidth);
@@ -1667,10 +1701,11 @@ class OcctCanvas final : public QWidget {
             if (dimensionsVisible_ && document_ && !reposition_) {
                 const auto layout = dimensionLayout();
                 dimensions_ =
-                    flat_ ? flatPatternDimensions(flat_->info(), 14.0 * devicePixelRatioF(), layout,
-                                                  selectedFlatBend(),
-                                                  -view_->Camera()->Direction().Z(),
-                                                  measureSelection_)
+                    flat_
+                        ? flatPatternDimensions(
+                              flat_->info(), 14.0 * devicePixelRatioF(), layout, selectedFlatBend(),
+                              -view_->Camera()->Direction().Z(), measureSelection_,
+                              &document_->metadata().bendAnalysis, strokePartitions_)
                     : preview_
                         ? previewDimensions(cad::OcctPreviewAccess::frame(*preview_, previewFrame_),
                                             preview_->model(), 14.0 * devicePixelRatioF(), layout,
@@ -1969,6 +2004,7 @@ class OcctCanvas final : public QWidget {
     MeasurementSelection measureSelection_;
     TopTools_IndexedMapOfShape edges_;
     application::DocumentPtr document_;
+    std::vector<unsigned> strokePartitions_;
     application::BendPreviewPtr preview_;
 
   public:
@@ -2428,6 +2464,14 @@ void ViewerWidget::highlightBend(const application::RecognizedBend &bend, quint6
     if (impl_->canvas) {
         impl_->canvas->highlightBend(bend, revision);
     }
+}
+void ViewerWidget::highlightBendZones(const std::vector<std::size_t> &indices, quint64 revision) {
+    if (impl_->canvas)
+        impl_->canvas->highlightBendZones(indices, revision);
+}
+void ViewerWidget::setBendStrokePartitions(std::vector<unsigned> partitions, quint64 revision) {
+    if (impl_->canvas)
+        impl_->canvas->setBendStrokePartitions(std::move(partitions), revision);
 }
 
 void ViewerWidget::highlightBendDiagnostic(

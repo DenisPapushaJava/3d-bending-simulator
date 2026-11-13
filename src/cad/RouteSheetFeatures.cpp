@@ -2,6 +2,8 @@
 #include "bending/application/BendRoute.h"
 #include "bending/cad/occt/FlatPatternAccess.h"
 #include <algorithm>
+#include <gp_Vec.hxx>
+#include <map>
 #include <optional>
 
 namespace bending::cad {
@@ -56,6 +58,58 @@ std::vector<std::size_t> profileRank(const WallGraph &graph, std::size_t bendCou
     return result;
 }
 } // namespace
+
+std::vector<ReverseTabHint> reverseTabHints(const SheetLayout &layout,
+                                            const application::BendAnalysis &analysis,
+                                            std::span<const application::FlatBend> flatBends) {
+    std::map<std::size_t, std::vector<const SheetBendRegion *>> groups;
+    for (const auto &region : layout.bends)
+        if (const auto group = analysis.bends[region.bendIndex].interruptedStroke)
+            groups[group].push_back(&region);
+
+    const auto point = [](application::PointMm p) { return gp_Pnt(p.x, p.y, p.z); };
+    std::vector<ReverseTabHint> result;
+    for (auto &[id, members] : groups) {
+        if (members.size() < 2)
+            continue;
+        const auto *first = members.front();
+        const auto reference = flatBends[first->bendIndex].centreLine();
+        const auto origin = point(reference[0]);
+        const gp_Dir axis(gp_Vec(origin, point(reference[1])));
+        const auto span = [&](std::size_t index) {
+            const auto line = flatBends[index].centreLine();
+            const double a = gp_Vec(origin, point(line[0])).Dot(gp_Vec(axis));
+            const double b = gp_Vec(origin, point(line[1])).Dot(gp_Vec(axis));
+            return std::array{std::min(a, b), std::max(a, b)};
+        };
+        if (std::any_of(members.begin(), members.end(),
+                        [&](const auto *m) { return m->parent != first->parent; }))
+            continue;
+        std::sort(members.begin(), members.end(), [&](const auto *a, const auto *b) {
+            return span(a->bendIndex)[0] < span(b->bendIndex)[0];
+        });
+        for (const auto &tab : layout.bends) {
+            const auto &bend = flatBends[tab.bendIndex];
+            const auto line = bend.centreLine();
+            if (tab.parent != first->parent ||
+                analysis.bends[tab.bendIndex].interruptedStroke == id ||
+                bend.direction == flatBends[first->bendIndex].direction ||
+                !axis.IsParallel(gp_Dir(gp_Vec(point(line[0]), point(line[1]))),
+                                 analysis.angleToleranceRadians))
+                continue;
+            const auto [low, high] = span(tab.bendIndex);
+            for (std::size_t i = 1; i < members.size(); ++i) {
+                const auto left = members[i - 1]->bendIndex;
+                const auto right = members[i]->bendIndex;
+                if (low >= span(left)[1] - analysis.lengthToleranceMm &&
+                    high <= span(right)[0] + analysis.lengthToleranceMm)
+                    result.push_back(
+                        {tab.bendIndex, (std::uint64_t{1} << left) | (std::uint64_t{1} << right)});
+            }
+        }
+    }
+    return result;
+}
 
 RouteSheetFeatures analyseRouteSheet(const SheetLayout &layout, std::size_t bendCount,
                                      double angleToleranceRadians, bool rankProfile,

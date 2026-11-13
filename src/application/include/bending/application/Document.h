@@ -49,6 +49,9 @@ struct RecognizedBend {
     std::optional<std::array<double, 2>> straightIntervalMm = std::nullopt;
     // Initial setup hint in the canonical bend-axis convention. Saved choices take precedence.
     bool preferWorkpieceReversed = false;
+    // Revision-local ID for interrupted bends proven to share a tangent wall.
+    // The original zones and their face identities stay independent.
+    std::size_t interruptedStroke = 0;
 };
 // A paired cylindrical sector interrupted by enclosed contours (hole or pocket).
 // Candidate measurements describe its outer boundary, not a supported bend.

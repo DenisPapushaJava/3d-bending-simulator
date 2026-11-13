@@ -13,6 +13,7 @@
 #include <functional>
 
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace bending::viewer {
@@ -53,8 +54,9 @@ documentDimensions(const application::DocumentMetadata &, const TopTools_Indexed
                                                      const simulation::SingleBend &,
                                                      double textHeight, const DimensionLayout &,
                                                      bool compact = false);
-[[nodiscard]] DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &,
-                                                         double textHeight, const DimensionLayout &,
-                                                         std::optional<std::size_t> selected,
-                                                         double facing, MeasurementSelection = {});
+[[nodiscard]] DimensionAnnotations
+flatPatternDimensions(const application::FlatPatternInfo &, double textHeight,
+                      const DimensionLayout &, std::optional<std::size_t> selected, double facing,
+                      MeasurementSelection = {}, const application::BendAnalysis * = nullptr,
+                      std::span<const unsigned> partitions = {});
 } // namespace bending::viewer

@@ -1,3 +1,4 @@
+#include "bending/application/DocumentSession.h"
 #include "bending/application/Thickness.h"
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
@@ -48,7 +49,7 @@ int main(int argc, char **argv) {
         require(manifest.open(QIODevice::ReadOnly), "Manifest missing");
         const auto parts =
             QJsonDocument::fromJson(manifest.readAll()).object().value("parts").toArray();
-        require(parts.size() == 5, "Starter examples not curated");
+        require(parts.size() == 6, "Starter examples not curated");
         require(QDir(directory).entryList({"*.step", "*.stp"}, QDir::Files).size() == parts.size(),
                 "Test fixtures leaked into runtime");
         const auto source = project::readStarterToolCatalog();
@@ -76,6 +77,25 @@ int main(int argc, char **argv) {
             const auto flat = std::get<application::FlatPatternPtr>(result);
             require(flat && flat->info().bends.size() == expected,
                     "Example flat pattern incomplete");
+            if (part.value("id") == "four-tabs") {
+                application::DocumentSession session;
+                const auto import = session.beginImport(native(directory + "/" + file));
+                require(session.complete(import, document), "Four-tab session could not open");
+                const auto indices = session.orderedBends();
+                const auto strokes = session.bendStrokes(indices);
+                require(strokes.size() == 1 && strokes.front().size() == 4,
+                        "Four tabs were not recognised as one stroke");
+                auto remainder = strokes.front();
+                while (remainder.size() > 1) {
+                    require(session.splitStroke(remainder, {remainder.back()}),
+                            "A four-tab flange could not be split");
+                    remainder.pop_back();
+                }
+                require(session.bendStrokes(indices).size() == 4 &&
+                            session.mergeStrokes(indices, indices.front()) &&
+                            session.bendStrokes(indices).size() == 1,
+                        "Four tabs did not round-trip between grouped and separate strokes");
+            }
             application::DrawingRequest request;
             request.unfoldSettings = settings;
             request.preparedFlatPattern = flat;

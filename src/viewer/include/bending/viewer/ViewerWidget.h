@@ -61,6 +61,8 @@ class ViewerWidget final : public QWidget {
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
     // Distinguishes the bend zone from its adjacent planar flanges.
     void highlightBend(const application::RecognizedBend &bend, quint64 revision);
+    void highlightBendZones(const std::vector<std::size_t> &indices, quint64 revision);
+    void setBendStrokePartitions(std::vector<unsigned> partitions, quint64 revision);
     void highlightPreviewBend(std::optional<std::size_t>, bool activeZone = false);
     void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
                                  quint64 revision);

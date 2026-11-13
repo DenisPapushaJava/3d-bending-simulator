@@ -9,14 +9,21 @@
 #include "bending/viewer/ViewerWidget.h"
 #include <QApplication>
 #include <QComboBox>
+#include <QContextMenuEvent>
+#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QLabel>
+#include <QListView>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <STEPControl_Writer.hxx>
 #include <iostream>
 #include <set>
@@ -85,6 +92,219 @@ int main(int argc, char **argv) {
         const std::size_t zones = tools ? 2 : 3, steps = tools ? 1 : 2;
         require(document && document->metadata().bendAnalysis.bends.size() == zones,
                 "Joint workflow lost original zones");
+        if (!tools) {
+            const auto &analysis = document->metadata().bendAnalysis;
+            const auto strokes =
+                application::routeBendStrokes(analysis, controller.session().orderedBends());
+            const auto grouped =
+                std::find_if(strokes.begin(), strokes.end(),
+                             [](const auto &stroke) { return stroke.size() == 2; });
+            require(strokes.size() == 2 && grouped != strokes.end(),
+                    "The relief did not group the two zones during import");
+            const auto &a = analysis.bends[(*grouped)[0]];
+            const auto &b = analysis.bends[(*grouped)[1]];
+            require(a.interruptedStroke && a.interruptedStroke == b.interruptedStroke &&
+                        std::abs(application::routeStrokeLengthMm(analysis, *grouped) - 120) < .001,
+                    "The interrupted stroke lost its full axial span");
+            auto *list = window.findChild<QListView *>("bendList");
+            require(list && list->model()->rowCount() == 2,
+                    "The part still lists separate zones of the interrupted stroke");
+            application::RouteDraftRequest draft;
+            for (const auto index : controller.session().orderedBends()) {
+                const auto *entry = controller.session().bend(index);
+                draft.operations.push_back(
+                    {entry->id, index, *controller.session().bendTarget(index), {}, {}});
+            }
+            draft.step = static_cast<std::size_t>(grouped - strokes.begin()) + 1;
+            const auto preview = builder->buildRouteDraft(document, draft, {});
+            if (const auto *error = std::get_if<application::BendRouteError>(&preview))
+                throw std::runtime_error(error->detail);
+            const auto &visual = std::get<application::RouteDraftPtr>(preview)->visual;
+            require(visual->activeBendCount() == 2 &&
+                        std::abs(visual->model().widthMm - 120) < .001,
+                    "The manual preview did not form the two zones in one stroke");
+            auto common = assignment;
+            common.punch.segments = common.die.segments = std::vector<core::ToolSegment>{{120, 1}};
+            common.punchAssembly = common.dieAssembly = core::ToolAssembly{{0}, 0};
+            application::BendRouteRequest early;
+            early.automatic = early.withTools = early.manualExtraction = true;
+            early.operations = draft.operations;
+            early.assemblySearch = application::RouteAssemblySearch{{}, 0, true};
+            for (auto &op : early.operations) {
+                op.assignment = common;
+                op.tools = core::toolParameters(common);
+                early.assemblySearch->bendIndices.push_back(op.bendIndex);
+            }
+            const auto earlyResult = builder->buildRoute(document, early, {});
+            if (const auto *error = std::get_if<application::BendRouteError>(&earlyResult))
+                throw std::runtime_error("Early joint route: " + error->detail);
+            const auto &earlyRoute = *std::get<application::BendRoutePtr>(earlyResult);
+            require(earlyRoute.statistics.usedCommonAssembly && earlyRoute.steps.size() == 2 &&
+                        earlyRoute.steps.front().additionalBends.size() == 1 &&
+                        earlyRoute.statistics.plannedDieWindows == 0,
+                    "The common assembly pass did not form the interrupted flange first");
+            auto inaccessible = common;
+            inaccessible.backgauge = core::BackgaugeSetup{};
+            inaccessible.backgauge->xMinMm = 700;
+            auto mirror = inaccessible;
+            mirror.punchReversed = !mirror.punchReversed;
+            common.punch.id += "-alternative";
+            early.toolVariants = {{inaccessible, {}}, {mirror, {}}, {common, {}}};
+            std::set<std::size_t> testedVariants;
+            early.onProgress = [&](const auto &progress) {
+                if (progress.phase == application::BendRoutePhase::Checking)
+                    testedVariants.insert(progress.variant);
+            };
+            cad::SingleBendPreviewBuilder catalogBuilder;
+            const auto catalogResult = catalogBuilder.buildRoute(document, early, {});
+            if (const auto *error = std::get_if<application::BendRouteError>(&catalogResult))
+                throw std::runtime_error("Early catalog route: " + error->detail);
+            const auto &catalogRoute = *std::get<application::BendRoutePtr>(catalogResult);
+            require(catalogRoute.selectedToolVariant == 2 && catalogRoute.steps.size() == 2 &&
+                        catalogRoute.steps.front().additionalBends.size() == 1 &&
+                        catalogRoute.statistics.usedCommonAssembly &&
+                        catalogRoute.statistics.commonAssemblyPasses == 2 &&
+                        catalogRoute.statistics.commonAssemblyChecks ==
+                            catalogRoute.evaluatedOperations &&
+                        catalogRoute.statistics.testedToolVariants == 2 &&
+                        testedVariants == std::set<std::size_t>{0, 2},
+                    "Catalog search did not reserve an early pass for a distinct common pair");
+            early.maximumChecks = 1;
+            const auto limited = catalogBuilder.buildRoute(document, early, {});
+            const auto *limitedError = std::get_if<application::BendRouteError>(&limited);
+            require(limitedError &&
+                        limitedError->code == application::BendRouteErrorCode::SearchLimit &&
+                        limitedError->evaluatedOperations == 1 &&
+                        limitedError->statistics.commonAssemblyPasses == 0,
+                    "Early catalog search bypassed the check budget");
+            list->setCurrentIndex(
+                list->model()->index(static_cast<int>(grouped - strokes.begin()), 0));
+            auto *openSegments = window.findChild<QPushButton *>("strokeSegments");
+            require(openSegments, "Stroke editor controls are missing");
+            const auto runEditor = [&](bool join, bool apply, bool fromRow = false,
+                                       bool all = false) {
+                bool previewed = false;
+                const auto interact = [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    if (!dialog)
+                        return;
+                    auto *together =
+                        dialog->findChild<QTreeWidget *>(QStringLiteral("combinedStrokes"));
+                    auto *separate =
+                        dialog->findChild<QTreeWidget *>(QStringLiteral("separateStrokes"));
+                    auto *commit =
+                        dialog->findChild<QPushButton *>(QStringLiteral("applyStrokeEdits"));
+                    if (together && separate && commit) {
+                        const auto before = controller.session().editRevision();
+                        bool acted = false;
+                        if (all) {
+                            auto *button = dialog->findChild<QPushButton *>(
+                                join ? "mergeAllStrokes" : "splitAllStrokes");
+                            if (button && button->isEnabled()) {
+                                button->click();
+                                acted = true;
+                            }
+                        } else if (!join && together->topLevelItemCount() == 1 &&
+                                   together->topLevelItem(0)->childCount() == 2) {
+                            auto *row = together->topLevelItem(0)->child(0);
+                            together->setCurrentItem(row);
+                            const auto pos = together->visualItemRect(row).center();
+                            QContextMenuEvent event(QContextMenuEvent::Keyboard, pos,
+                                                    together->viewport()->mapToGlobal(pos));
+                            QApplication::sendEvent(together->viewport(), &event);
+                            auto *menu = dialog->findChild<QMenu *>();
+                            auto *action = dialog->findChild<QAction *>("splitSelectedSegments");
+                            if (menu && menu->isVisible() && action && action->isEnabled()) {
+                                menu->hide();
+                                action->trigger();
+                                acted = true;
+                            }
+                        }
+                        if (acted) {
+                            previewed = together->topLevelItemCount() == (join ? 1 : 0) &&
+                                        separate->topLevelItemCount() == (join ? 0 : 2) &&
+                                        commit->isEnabled() &&
+                                        controller.session().editRevision() == before;
+                            if (apply && previewed) {
+                                commit->click();
+                                return;
+                            }
+                        }
+                    }
+                    dialog->reject();
+                };
+                if (fromRow) {
+                    const auto row = list->model()->index(grouped - strokes.begin(), 0);
+                    list->setCurrentIndex(list->model()->index(1 - row.row(), 0));
+                    const auto rect = list->visualRect(row);
+                    const QPoint point(rect.right() - 16, rect.center().y());
+                    for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+                        const auto buttons =
+                            type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton;
+                        QMouseEvent event(type, point, list->viewport()->mapToGlobal(point),
+                                          Qt::LeftButton, buttons, Qt::NoModifier);
+                        QApplication::sendEvent(list->viewport(), &event);
+                    }
+                    QTimer::singleShot(0, &window, interact);
+                    QCoreApplication::processEvents();
+                } else {
+                    QTimer::singleShot(0, &window, interact);
+                    openSegments->click();
+                }
+                return previewed;
+            };
+            const auto before = controller.session().editRevision();
+            require(runEditor(false, false, true) &&
+                        controller.session().editRevision() == before &&
+                        list->model()->rowCount() == 2,
+                    "Cancel published the staged split");
+            const bool choseSegment = runEditor(false, true, false, true);
+            require(
+                choseSegment && list->model()->rowCount() == 3 &&
+                    controller.session().bendStrokes(controller.session().orderedBends()).size() ==
+                        3,
+                "The stroke editor did not create two independent steps");
+            for (auto &op : draft.operations)
+                op.strokePartition = controller.session().bend(op.bendIndex)->strokePartition;
+            require(draft.operations[(*grouped)[0]].strokePartition != 0 &&
+                        draft.operations[(*grouped)[1]].strokePartition != 0,
+                    "The original and detached strokes are not both locked");
+            for (const auto index : *grouped) {
+                const auto position =
+                    std::find_if(draft.operations.begin(), draft.operations.end(),
+                                 [&](const auto &op) { return op.bendIndex == index; });
+                draft.step = static_cast<std::size_t>(position - draft.operations.begin()) + 1;
+                const auto result = builder->buildRouteDraft(document, draft, {});
+                if (const auto *error = std::get_if<application::BendRouteError>(&result))
+                    throw std::runtime_error(error->detail);
+                const auto &part = std::get<application::RouteDraftPtr>(result)->visual;
+                require(part->activeBendCount() == 1 &&
+                            std::abs(part->model().widthMm - analysis.bends[index].lengthMm) < .001,
+                        "Split preview reused the grouped motion or width");
+            }
+            const auto savedPath =
+                std::filesystem::path(temporary.path().toStdString()) / "split.bend";
+            require(!files->save(savedPath, *document, {}, controller.session().bends(), {}),
+                    "Could not save the partition");
+            application::DocumentSession reopened;
+            const auto opened = reopened.beginImport(savedPath);
+            require(reopened.complete(opened, files->load(savedPath, {}, {})) &&
+                        reopened.bendStrokes(reopened.orderedBends()).size() == 3,
+                    "Reopened project lost the independent steps");
+            application::BendRouteRequest splitRoute;
+            splitRoute.operations = draft.operations;
+            splitRoute.automatic = true;
+            const auto splitResult = builder->buildRoute(document, splitRoute, {});
+            require(std::holds_alternative<application::BendRoutePtr>(splitResult) &&
+                        std::get<application::BendRoutePtr>(splitResult)->steps.size() == 3,
+                    "Automatic search rejoined the manually separated strokes");
+            require(runEditor(true, true, false, true), "Could not merge all strokes");
+            require(
+                list->model()->rowCount() == 2 &&
+                    controller.session().bendStrokes(controller.session().orderedBends()).size() ==
+                        2,
+                "Restore did not recover the automatic grouping");
+        }
         const auto bytes = std::string(document->sourceStep());
         std::vector<application::BendToolUpdate> updates;
         application::BendRouteRequest request;
@@ -211,9 +431,9 @@ int main(int argc, char **argv) {
         if (tools) {
             auto *reverse = window.findChild<QToolButton *>("reverseWorkpiece");
             require(reverse && reverse->isEnabled(), "No joint workpiece orientation control");
-            const bool target = !reverse->isChecked();
             const auto members = route->steps[group].additionalBends;
             const auto primary = route->steps[group].bendIndex;
+            const bool target = !controller.session().bend(primary)->workpieceReversed;
             reverse->click();
             wait(controller);
             route = controller.bendRoute();

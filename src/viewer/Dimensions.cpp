@@ -518,7 +518,9 @@ MeasurementSelection flatMeasurementAt(const application::ModelMeasurements &dat
 DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &info, double height,
                                            const DimensionLayout &layout,
                                            std::optional<std::size_t> selected, double facing,
-                                           MeasurementSelection selection) {
+                                           MeasurementSelection selection,
+                                           const application::BendAnalysis *analysis,
+                                           std::span<const unsigned> partitions) {
     DimensionAnnotations result;
     const auto &hi = info.bounds.maximum;
     const double surfaceZ = facing < 0 ? info.bounds.minimum.z : hi.z;
@@ -534,12 +536,42 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
     const auto bendId = [](std::size_t index) {
         return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
     };
+    const auto strokeOf = [&](std::size_t index) {
+        const auto stroke = analysis && index < analysis->bends.size()
+                                ? analysis->bends[index].interruptedStroke
+                                : 0;
+        return std::pair{stroke, index < partitions.size() ? partitions[index] : 0u};
+    };
+    const auto captionFor = [](const QStringList &ids) {
+        return ids.size() > 3 ? QStringLiteral("%1 · %2 уч.").arg(ids.front()).arg(ids.size())
+                              : ids.join('/');
+    };
     if (info.measurements)
         selectedMeasurements(result, *info.measurements, selection, height, layout, true);
     const auto active = std::find_if(info.bends.begin(), info.bends.end(), [&](const auto &bend) {
         return selected && bend.bendIndex == *selected;
     });
     if (active != info.bends.end()) {
+        QStringList activeIds{bendId(active->bendIndex)};
+        double activeSpan = active->lengthMm();
+        if (const auto stroke = strokeOf(active->bendIndex); stroke.first) {
+            activeIds.clear();
+            double first = 0, last = 0;
+            const auto line = active->centreLine();
+            const auto origin = point(line[0]);
+            const auto axis = gp_Vec(origin, point(line[1])).Normalized();
+            for (const auto &segment : info.bends) {
+                if (strokeOf(segment.bendIndex) != stroke)
+                    continue;
+                activeIds << bendId(segment.bendIndex);
+                for (const auto p : segment.centreLine()) {
+                    const double coordinate = gp_Vec(origin, point(p)).Dot(axis);
+                    first = std::min(first, coordinate);
+                    last = std::max(last, coordinate);
+                }
+            }
+            activeSpan = last - first;
+        }
         const auto line = active->centreLine();
         const gp_Pnt anchor((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, surfaceZ);
         const auto direction = active->direction * (facing > 0 ? 1 : -1);
@@ -554,10 +586,10 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
         }
         callout(result, anchor, layout.up * 1.0,
                 QStringLiteral("%1 · %2 · %3° · R %4 · L %5 мм")
-                    .arg(bendId(active->bendIndex),
+                    .arg(captionFor(activeIds),
                          direction > 0 ? QStringLiteral("ВВЕРХ") : QStringLiteral("ВНИЗ"),
                          number(180 - active->turnRadians * 180 / std::numbers::pi),
-                         number(active->radiusMm), number(active->lengthMm())),
+                         number(active->radiusMm), number(activeSpan)),
                 height, layout.right, &layout);
     }
     // The overview identifies lines; distances appear only for the selected bend.
@@ -566,6 +598,7 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
         double coordinate;
         gp_Pnt anchor;
         QStringList ids;
+        std::pair<std::size_t, unsigned> stroke;
     };
     std::vector<Marker> markers;
     for (const auto &bend : info.bends) {
@@ -574,9 +607,13 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
                          : std::abs(line[0].x - line[1].x) < 1.e-5 ? 1
                                                                    : 2;
         const double coordinate = axis == 0 ? line[0].y : line[0].x;
+        const auto stroke = strokeOf(bend.bendIndex);
+        if (stroke.first && selected && strokeOf(*selected) == stroke)
+            continue;
         const auto group = std::find_if(markers.begin(), markers.end(), [&](const auto &marker) {
-            return axis != 2 && marker.axis == axis &&
-                   std::abs(marker.coordinate - coordinate) < 1.e-5;
+            return stroke.first ? marker.stroke == stroke
+                                : !marker.stroke.first && axis != 2 && marker.axis == axis &&
+                                      std::abs(marker.coordinate - coordinate) < 1.e-5;
         });
         if (group != markers.end())
             group->ids << bendId(bend.bendIndex);
@@ -585,7 +622,8 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
                 {axis,
                  coordinate,
                  gp_Pnt((line[0].x + line[1].x) / 2, (line[0].y + line[1].y) / 2, surfaceZ),
-                 {bendId(bend.bendIndex)}});
+                 {bendId(bend.bendIndex)},
+                 stroke});
     }
     QFont font(QStringLiteral("sans-serif"));
     font.setPixelSize(qRound(height));
@@ -597,7 +635,7 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
         if (selected && marker.ids.size() == 1 && marker.ids.front() == bendId(*selected))
             continue;
         const auto position = marker.anchor.Translated(layout.up * .3);
-        const auto caption = marker.ids.join('/');
+        const auto caption = captionFor(marker.ids);
         if (layout.project) {
             const auto screen = layout.project(position);
             const QRectF box(screen.x() - metrics.horizontalAdvance(caption) / 2 - 4,

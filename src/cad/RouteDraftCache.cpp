@@ -13,8 +13,13 @@ RouteDraftCache::Key RouteDraftCache::key(const RouteDraftRequest &request,
         for (const auto position : strokes[i])
             formed |= std::uint64_t{1} << request.operations[position].bendIndex;
     const bool partial = request.step != 0 && request.allowPartialEndSupport;
+    const auto &active = strokes[request.step ? request.step - 1 : 0];
+    std::uint64_t activeZones = 0;
+    for (const auto position : active)
+        activeZones |= std::uint64_t{1} << request.operations[position].bendIndex;
     return {formed,
-            request.operations[strokes[request.step ? request.step - 1 : 0].front()],
+            activeZones,
+            request.operations[active.front()],
             request.step == 0,
             request.withTools,
             partial,

@@ -72,10 +72,13 @@ class ProcessStepButton final : public QToolButton {
             painter.setPen(QPen(painter.pen().color(), 1.5, Qt::DashLine));
             painter.drawLine(QPointF(16, 4), QPointF(16, 28));
         } else {
-            painter.drawPolygon(QPolygonF{{5, 2}, {22, 2}, {29, 9}, {29, 31}, {5, 31}});
-            painter.drawPolyline(QPolygonF{{22, 2}, {22, 9}, {29, 9}});
-            painter.drawLine(QPointF(10, 16), QPointF(24, 16));
-            painter.drawLine(QPointF(10, 22), QPointF(24, 22));
+            painter.drawRect(QRectF(2, 5, 28, 22));
+            auto framePen = painter.pen();
+            framePen.setWidthF(1.4);
+            painter.setPen(framePen);
+            painter.drawRect(QRectF(6, 9, 20, 14));
+            painter.drawPolyline(QPolygonF{{15, 23}, {15, 18}, {26, 18}});
+            painter.drawLine(QPointF(21, 18), QPointF(21, 23));
         }
     }
 

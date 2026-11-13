@@ -35,6 +35,14 @@
       "thicknessMm": 2
     },
     {
+      "id": "four-tabs",
+      "file": "four-tabs-2mm.step",
+      "title": "Четыре полки на одной линии гиба",
+      "description": "4 участка · 2 мм — объединение и разделение ходов",
+      "bends": 4,
+      "thicknessMm": 2
+    },
+    {
       "id": "panel",
       "file": "wall-panel-1000mm.step",
       "title": "Стеновая панель · 16 гибов",

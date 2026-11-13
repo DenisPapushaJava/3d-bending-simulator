@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/BendRoute.h"
 #include "bending/application/DocumentImporter.h"
 
 #include <cstdint>
@@ -17,6 +18,12 @@ struct BendToolUpdate {
     std::size_t bendIndex;
     std::optional<core::PressTools> tools;
     std::optional<core::ToolAssignment> assignment;
+};
+
+struct StrokeEdit {
+    BendStroke zones;
+    BendStroke detached;
+    std::optional<std::size_t> setupSource; // A merge when present, a split otherwise.
 };
 
 // GUI-independent state machine. Its owner serializes calls; no Qt, SDK or worker ownership here.
@@ -45,6 +52,11 @@ class DocumentSession final {
     bool setBendToolAssignment(std::size_t recognizedIndex, core::ToolAssignment assignment);
     // Validate the entire batch before publishing it; a change advances one edit revision.
     bool setBendToolAssignments(const std::vector<BendToolUpdate> &updates);
+    [[nodiscard]] std::vector<BendStroke> bendStrokes(std::span<const std::size_t> order) const;
+    [[nodiscard]] bool canSplitStroke(std::span<const std::size_t> selected,
+                                      std::span<const std::size_t> remainder) const;
+    bool splitStroke(const BendStroke &stroke, const BendStroke &selected);
+    bool mergeStrokes(const BendStroke &zones, std::size_t setupSource);
     [[nodiscard]] std::optional<core::BendTarget> bendTarget(std::size_t recognizedIndex) const;
     bool setBendTarget(std::size_t recognizedIndex, std::optional<core::BendTarget> target);
     [[nodiscard]] std::vector<std::size_t> orderedBends() const;

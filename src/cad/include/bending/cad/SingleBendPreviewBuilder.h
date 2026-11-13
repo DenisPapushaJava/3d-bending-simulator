@@ -47,7 +47,8 @@ class SingleBendPreviewBuilder final : public application::SingleBendPreviewBuil
   private:
     application::BendRouteResult buildRouteImpl(application::DocumentPtr,
                                                 application::BendRouteRequest, std::stop_token,
-                                                unsigned pairedContinuationTimeMs) const;
+                                                unsigned pairedContinuationTimeMs,
+                                                bool earlyAssemblyOnly = false) const;
     application::BendPreviewResult cachedOperation(application::DocumentPtr, std::size_t,
                                                    core::BendTarget, bool reversed, std::stop_token,
                                                    core::PressTools, bool motion,

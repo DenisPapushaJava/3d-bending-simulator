@@ -608,17 +608,24 @@ void ImportController::useAutomaticThickness() {
     emit stateChanged();
 }
 bool ImportController::setBendReview(std::size_t recognizedIndex, BendReview review) {
-    if (impl_->stopping || hasWork()) {
+    return setBendReview(std::span(&recognizedIndex, 1), review);
+}
+bool ImportController::setBendReview(std::span<const std::size_t> zones, BendReview review) {
+    if (impl_->stopping || hasWork() || zones.empty()) {
         return false;
     }
     const auto before = impl_->session.editRevision();
-    const auto result = impl_->session.setBendReview(recognizedIndex, review);
-    if (before != impl_->session.editRevision()) {
+    auto candidate = impl_->session;
+    for (const auto index : zones)
+        if (!candidate.setBendReview(index, review))
+            return false;
+    if (before != candidate.editRevision()) {
+        impl_->session = std::move(candidate);
         impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
-    return result;
+    return true;
 }
 bool ImportController::setBendTools(std::size_t recognizedIndex,
                                     std::optional<core::PressTools> tools) {
@@ -721,17 +728,25 @@ bool ImportController::setAllBendPunchOrientations(
 }
 bool ImportController::setBendTarget(std::size_t recognizedIndex,
                                      std::optional<core::BendTarget> target) {
-    if (impl_->stopping || hasWork()) {
+    return setBendTarget(std::span(&recognizedIndex, 1), target);
+}
+bool ImportController::setBendTarget(std::span<const std::size_t> zones,
+                                     std::optional<core::BendTarget> target) {
+    if (impl_->stopping || hasWork() || zones.empty()) {
         return false;
     }
     const auto before = impl_->session.editRevision();
-    const auto result = impl_->session.setBendTarget(recognizedIndex, target);
-    if (before != impl_->session.editRevision()) {
+    auto candidate = impl_->session;
+    for (const auto index : zones)
+        if (!candidate.setBendTarget(index, target))
+            return false;
+    if (before != candidate.editRevision()) {
+        impl_->session = std::move(candidate);
         impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
-    return result;
+    return true;
 }
 bool ImportController::isSaving() const {
     return impl_->saving;
@@ -1069,6 +1084,23 @@ void ImportController::discardRouteDraft() {
     impl_->invalidateDraft();
     emit stateChanged();
 }
+bool ImportController::editStrokes(std::uint64_t revision, std::uint64_t editRevision,
+                                   std::span<const StrokeEdit> edits) {
+    auto &session = impl_->session;
+    if (impl_->stopping || hasWork() || edits.empty() || session.revision() != revision ||
+        session.editRevision() != editRevision)
+        return false;
+    auto candidate = session;
+    for (const auto &edit : edits)
+        if (!(edit.setupSource ? candidate.mergeStrokes(edit.zones, *edit.setupSource)
+                               : candidate.splitStroke(edit.zones, edit.detached)))
+            return false;
+    session = std::move(candidate);
+    impl_->invalidateRoute();
+    impl_->invalidatePreview();
+    emit stateChanged();
+    return true;
+}
 bool ImportController::prepareRouteDraft(RouteDraftRequest request,
                                          std::shared_ptr<const SingleBendPreviewBuilder> builder) {
     auto *s = impl_.get();
@@ -1078,8 +1110,7 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
     const auto &session = s->session;
     const auto indices = session.orderedBends();
     if (request.operations.size() != indices.size() ||
-        request.step >
-            routeBendStrokes(session.document()->metadata().bendAnalysis, indices).size() ||
+        request.step > session.bendStrokes(indices).size() ||
         indices.size() != session.document()->metadata().bendAnalysis.bends.size())
         return false;
     for (std::size_t i = 0; i < indices.size(); ++i) {
@@ -1088,6 +1119,7 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
         if (!entry || !included(entry->review) || op.bendIndex != indices[i] ||
             op.id != entry->id || op.workpieceReversed != entry->workpieceReversed ||
             op.workpieceOffsetMm != entry->workpieceOffsetMm ||
+            op.strokePartition != entry->strokePartition ||
             session.bendTarget(indices[i]) != std::optional{op.target})
             return false;
     }

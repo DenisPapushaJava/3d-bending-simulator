@@ -1,4 +1,5 @@
 #include "JointBends.h"
+#include "bending/application/FlatPattern.h"
 #include <algorithm>
 #include <cmath>
 #include <gp_Lin.hxx>
@@ -9,7 +10,7 @@
 namespace bending::cad {
 std::optional<application::RecognizedBend>
 jointBendEnvelope(const application::BendAnalysis &analysis, std::span<const std::size_t> indices) {
-    if (indices.size() < 2 || indices.size() > 32 ||
+    if (indices.size() < 2 || indices.size() > application::maximumSheetBends ||
         analysis.status != application::BendRecognitionStatus::Completed ||
         indices.front() >= analysis.bends.size() || !std::isfinite(analysis.lengthToleranceMm) ||
         analysis.lengthToleranceMm <= 0 || !std::isfinite(analysis.angleToleranceRadians) ||

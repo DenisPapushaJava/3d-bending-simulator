@@ -100,6 +100,8 @@ QString routeFailureReason(const application::BendRouteError &error) {
 namespace {
 const char *stepMime = "application/x-bending-route-step";
 QString stepZones(const application::BendRouteStep &step) {
+    if (step.additionalBends.size() > 2)
+        return QStringLiteral("Участков %1").arg(step.additionalBends.size() + 1);
     auto result = QStringLiteral("B%1").arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
     for (const auto &member : step.additionalBends)
         result += QStringLiteral(" + B%1").arg(member.bendIndex + 1, 2, 10, QLatin1Char('0'));
@@ -503,8 +505,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             indices.push_back(step.bendIndex);
         }
     } else if (session.document()) {
-        for (const auto &stroke : application::routeBendStrokes(
-                 session.document()->metadata().bendAnalysis, sourceIndices)) {
+        for (const auto &stroke : session.bendStrokes(sourceIndices)) {
             std::vector<std::string> group;
             for (const auto index : stroke)
                 if (const auto *b = session.bend(index))
@@ -572,9 +573,14 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         steps_[i]->setProperty("routePosition", static_cast<int>(i));
         steps_[i]->setProperty("routeId", i ? QString::fromStdString(ids_[i - 1]) : QString{});
         QStringList draftZones;
-        if (i && !route_)
-            for (const auto &id : draftGroups_[i - 1])
-                draftZones.push_back(QString::fromStdString(id));
+        if (i && !route_) {
+            const auto &group = draftGroups_[i - 1];
+            if (group.size() > 3)
+                draftZones.push_back(QStringLiteral("Участков %1").arg(group.size()));
+            else
+                for (const auto &id : group)
+                    draftZones.push_back(QString::fromStdString(id));
+        }
         steps_[i]->setToolTip(
             i ? (route_ ? QString{} : QStringLiteral("Черновик · ")) +
                     QStringLiteral("Шаг %1 · %2 · форма после гиба. Перетащите между шагами.")
@@ -598,8 +604,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     missingTool = index;
             }
         }
-    const bool ready = included && ids_.size() <= application::maximumSheetBends && !busy &&
-                       !preparingDraft && (mode_->currentIndex() == 0 || assigned);
+    const bool ready = included && sourceIndices.size() <= application::maximumSheetBends &&
+                       !busy && !preparingDraft && (mode_->currentIndex() == 0 || assigned);
     automatic_->setEnabled(ready);
     manual_->setEnabled(ready);
     mode_->setEnabled(!busy);
@@ -714,8 +720,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             draft->checkedToolPositions
                 ? QStringLiteral("Столкновения проверены по кадрам. Полный порядок не проверен.")
                 : QStringLiteral("Выберите инструмент для проверки столкновений.");
-    } else if (ids_.size() > application::maximumSheetBends)
-        message = QStringLiteral("Порядок поддерживает до %1 полных прямых гибов.")
+    } else if (sourceIndices.size() > application::maximumSheetBends)
+        message = QStringLiteral("Порядок поддерживает до %1 участков гиба.")
                       .arg(application::maximumSheetBends);
     else if (!included)
         message = QStringLiteral("Для полного порядка нужны все распознанные зоны детали.");

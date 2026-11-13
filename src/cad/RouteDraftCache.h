@@ -22,6 +22,7 @@ class RouteDraftCache final {
   private:
     struct Key {
         std::uint64_t formed;
+        std::uint64_t activeZones;
         application::RouteOperation active;
         bool blank, withTools;
         bool allowPartialEndSupport;

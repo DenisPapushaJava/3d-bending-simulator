@@ -57,7 +57,8 @@ OcctDocumentAccess::routeState(const CadDocument &original, TopoDS_Shape shape, 
                                std::vector<SheetSide> sides) {
     auto data = std::make_unique<CadDocument::Impl>();
     data->metadata = original.metadata();
-    data->metadata.bendAnalysis = recognizeBends(shape, data->metadata.maximumToleranceMm, stop);
+    data->metadata.bendAnalysis = recognizeBends(shape, data->metadata.maximumToleranceMm, stop,
+                                                 BendRecognitionPurpose::RouteState);
     data->metadata.toolShapeHints.clear(); // Source-only hints must not follow internal bend IDs.
     data->shape = std::move(shape);
     data->routeSkin = std::move(skin);
