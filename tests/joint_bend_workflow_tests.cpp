@@ -80,8 +80,11 @@ int main(int argc, char **argv) {
         }
         auto files = std::make_shared<project::ProjectFiles>();
         auto builder = std::make_shared<cad::SingleBendPreviewBuilder>();
+        auto secondDie = assignment.die;
+        secondDie.id = "another-die";
+        secondDie.code = "V16 second";
         ui::MainWindow window({"test", "test"}, files, files, builder,
-                              {assignment.punch, assignment.die});
+                              {assignment.punch, assignment.die, secondDie});
         window.setAutomaticPartInputPrompt(false);
         window.resize(1280, 850);
         window.show();
@@ -477,6 +480,14 @@ int main(int argc, char **argv) {
             }
         auto *edit = window.findChild<QPushButton *>("routeEditTool");
         require(edit && edit->isEnabled(), "Joint tool edit is disabled");
+        QTimer::singleShot(0, &window, [&] {
+            if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+                if (auto *advanced = dialog->findChild<QPushButton *>("routeToolAdvanced"))
+                    advanced->click();
+                else
+                    dialog->reject();
+            }
+        });
         edit->click();
         wait(controller);
         auto *scope = window.findChild<QComboBox *>("toolAssignmentScope");
@@ -496,6 +507,49 @@ int main(int argc, char **argv) {
             require(controller.session().bend(index)->tools->clearanceMm ==
                         (scoped.contains(index) ? 12 : 10),
                     "Joint tool edit changed a different step or only one member");
+        if (!tools) {
+            window.findChild<QToolButton *>("processStage2")->click();
+            wait(controller);
+            const auto order = controller.session().orderedBends();
+            const auto strokes = controller.session().bendStrokes(order);
+            const auto joint = std::find_if(strokes.begin(), strokes.end(),
+                                            [](const auto &stroke) { return stroke.size() > 1; });
+            require(joint != strokes.end(), "Manual scope lost the grouped operation");
+            const auto stepNumber = joint - strokes.begin() + 1;
+            auto *stepButton =
+                window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(stepNumber));
+            stepButton->click();
+            wait(controller);
+            const auto revision = controller.session().editRevision();
+            QTimer::singleShot(0, &window, [&] {
+                auto *dialog = window.findChild<QDialog *>("routeToolDialog");
+                if (!dialog)
+                    return;
+                QTimer::singleShot(0, dialog, [&] {
+                    if (auto *picker = dialog->findChild<QDialog *>("toolPickerPopup")) {
+                        if (auto *choice =
+                                picker->findChild<QToolButton *>("toolOption_another-die_0"))
+                            choice->click();
+                        if (picker->isVisible())
+                            picker->reject();
+                    }
+                });
+                dialog->findChild<QToolButton *>("routeToolDie")->click();
+                dialog->findChild<QPushButton *>("routeToolApply")->click();
+                if (dialog->isVisible())
+                    dialog->reject();
+            });
+            edit->click();
+            wait(controller);
+            require(controller.session().editRevision() == revision + 1 && stepButton->isChecked(),
+                    "Inline joint assignment lost its scope or was not atomic");
+            for (const auto index : order) {
+                const auto &tool = *controller.session().bend(index)->catalogTools;
+                require(tool.die == (scoped.contains(index) ? secondDie : assignment.die) &&
+                            tool.punch == assignment.punch,
+                        "Inline joint assignment changed its individual zones or the other tool");
+            }
+        }
         std::set<std::string> ids;
         for (const auto &step : route->steps) {
             ids.insert(step.id);

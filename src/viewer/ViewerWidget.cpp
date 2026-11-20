@@ -462,6 +462,8 @@ class OcctCanvas final : public QWidget {
     std::function<void()> onReady;
     std::function<void(quint64, int)> onSelection;
     std::function<void(quint64, int)> onBendSelection;
+    std::function<void(quint64, bool, int)> onToolPicked;
+    std::function<void(double)> onPlacementDragged;
     std::function<void()> onSurfaceChanged;
 
     QMenu *navigationMenu() const {
@@ -512,6 +514,7 @@ class OcctCanvas final : public QWidget {
 
     QString present(const TopoDS_Shape &shape, application::DocumentPtr document, quint64 revision,
                     bool diagnostic = false) {
+        setBendPlacement(false);
         finishReposition();
         const bool sameSource = document && document == document_ && revision == revision_;
         const bool wasDerived = preview_ || flat_;
@@ -649,6 +652,8 @@ class OcctCanvas final : public QWidget {
         if (revision != revision_ || !document_ || !preview || index >= preview->frameCount()) {
             return QStringLiteral("Неактуальный результат просмотра сгиба");
         }
+        if (editingPlacement_)
+            setBendPlacement(false);
         const auto &frame = cad::OcctPreviewAccess::frame(*preview, index);
         const bool entering = preview_ != preview;
         // A new immutable result is still the same workspace. Reframe only when entering
@@ -892,6 +897,7 @@ class OcctCanvas final : public QWidget {
     }
 
     void clearDocument(quint64 revision) {
+        setBendPlacement(false);
         finishReposition();
         guarded([&] {
             rigidScene_->clear();
@@ -1267,7 +1273,14 @@ class OcctCanvas final : public QWidget {
                     fitAll();
                     return;
                 }
-                if (flat_) {
+                if (preview_) {
+                    if (const auto picked = rigidScene_->detectedTool(); picked && onToolPicked) {
+                        onToolPicked(revision_, picked->first, picked->second);
+                    } else if (editingPlacement_ && context_->HasDetected() &&
+                               context_->DetectedInteractive() == presentation_) {
+                        startPlacementDrag();
+                    }
+                } else if (flat_) {
                     const auto *measures = flat_->info().measurements.get();
                     auto feature =
                         dimensionsVisible_ && measures &&
@@ -1362,7 +1375,15 @@ class OcctCanvas final : public QWidget {
     void mouseMoveEvent(QMouseEvent *event) override {
         const auto position = physicalPoint(event->position());
         guarded([&] {
-            if (event->buttons().testFlag(Qt::RightButton)) {
+            if (placementDrag_ && event->buttons().testFlag(Qt::LeftButton)) {
+                const QPointF movement = position - placementDrag_->start;
+                const double offset = placementDrag_->offset +
+                                      QPointF::dotProduct(movement, placementDrag_->axis) /
+                                          QPointF::dotProduct(placementDrag_->axis,
+                                                              placementDrag_->axis);
+                if (onPlacementDragged)
+                    onPlacementDragged(offset);
+            } else if (event->buttons().testFlag(Qt::RightButton)) {
                 if (pressOrbitLocked()) {
                     const auto camera = view_->Camera();
                     gp_Trsf orbit;
@@ -1389,7 +1410,14 @@ class OcctCanvas final : public QWidget {
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton)
+            placementDrag_.reset();
         event->accept();
+    }
+
+    void leaveEvent(QEvent *event) override {
+        guarded([&] { rigidScene_->clearToolHover(); });
+        QWidget::leaveEvent(event);
     }
 
     void wheelEvent(QWheelEvent *event) override {
@@ -1698,7 +1726,7 @@ class OcctCanvas final : public QWidget {
         }
         guarded([&] {
             removeDimensions();
-            if (dimensionsVisible_ && document_ && !reposition_) {
+            if (dimensionsVisible_ && document_ && !reposition_ && !editingPlacement_) {
                 const auto layout = dimensionLayout();
                 dimensions_ =
                     flat_
@@ -1883,6 +1911,8 @@ class OcctCanvas final : public QWidget {
     }
 
     void fail(const QString &message) {
+        editingPlacement_ = false;
+        placementDrag_.reset();
         repositionTimeline_.stop();
         reposition_.reset();
         draftReposition_ = false;
@@ -1896,6 +1926,8 @@ class OcctCanvas final : public QWidget {
     }
 
     void release() noexcept {
+        editingPlacement_ = false;
+        placementDrag_.reset();
         repositionTimeline_.stop();
         reposition_.reset();
         draftReposition_ = false;
@@ -1998,6 +2030,14 @@ class OcctCanvas final : public QWidget {
     Handle(AIS_ViewCube) navigationCube_;
     double cubeRatio_ = 0;
     bool animationRunning_ = false;
+    struct PlacementDrag {
+        QPoint start;
+        QPointF axis; // Physical pixels per millimetre along machine Z.
+        double offset;
+    };
+    std::optional<PlacementDrag> placementDrag_;
+    bool editingPlacement_ = false;
+    double placementDelta_ = 0;
     QLabel *dimensionsNotice_ = nullptr;
     DimensionAnnotations dimensions_;
     std::shared_ptr<const application::ModelMeasurements> measurements_;
@@ -2008,6 +2048,62 @@ class OcctCanvas final : public QWidget {
     application::BendPreviewPtr preview_;
 
   public:
+    void setBendToolPicking(bool enabled) {
+        if (ready_)
+            guarded([&] { rigidScene_->setToolPicking(enabled); });
+    }
+    void setBendPlacement(bool editing, double delta = 0) {
+        if (!ready_ || !preview_ || !preview_->toolSetup() || previewFrame_ != 0 ||
+            presentation_.IsNull())
+            editing = false;
+        if (!editing && !editingPlacement_)
+            return;
+        if (editing && editingPlacement_ && delta == placementDelta_)
+            return;
+        guarded([&] {
+            const bool changed = editingPlacement_ != editing;
+            editingPlacement_ = editing;
+            placementDelta_ = editing ? delta : 0.;
+            if (changed) {
+                placementDrag_.reset();
+                if (editing) {
+                    resetReposition();
+                    if (std::abs(view_->Camera()->Direction().Z()) > .92) {
+                        view_->SetProj(V3d_Xneg, true);
+                        view_->SetUp(0, 1, 0);
+                        fitPreview(*preview_, previewFrame_, false);
+                    }
+                    context_->Load(presentation_, 0);
+                    context_->Activate(presentation_, 0, false);
+                } else if (!presentation_.IsNull()) {
+                    context_->Deactivate(presentation_, 0);
+                }
+                if (auto *styled = dynamic_cast<CollisionPresentation *>(presentation_.get())) {
+                    styled->showEvidence(!editing);
+                    context_->Redisplay(presentation_, false);
+                }
+            }
+            if (!presentation_.IsNull()) {
+                gp_Trsf transform;
+                transform.SetTranslation(gp_Vec(0, 0, placementDelta_));
+                context_->SetLocation(presentation_, TopLoc_Location(transform));
+            }
+            if (changed) {
+                refreshDimensions();
+                refreshOrientation();
+            }
+            view_->Redraw();
+        });
+    }
+    void startPlacementDrag() {
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        const double z = preview_->toolSetup()->tools.lengthMm / 2 + placementDelta_;
+        view_->Convert(0, 0, z, x0, y0);
+        view_->Convert(0, 0, z + 100, x1, y1);
+        const QPointF axis((x1 - x0) / 100., (y1 - y0) / 100.);
+        if (QPointF::dotProduct(axis, axis) > .01)
+            placementDrag_ = PlacementDrag{lastPosition_, axis, placementDelta_};
+    }
     bool isRepositioning() const {
         return reposition_.has_value();
     }
@@ -2154,7 +2250,7 @@ class OcctCanvas final : public QWidget {
                                         : QStringLiteral("Стороны в этом состоянии недоступны"));
         nextEdge_->setVisible(mapped && !orientation.edges.empty());
         nextEdge_->setEnabled(orientation.edges.size() > 1);
-        if (ready_ && mapped && !orientation.edges.empty() && !reposition_) {
+        if (ready_ && mapped && !orientation.edges.empty() && !reposition_ && !editingPlacement_) {
             try {
                 sideMarkers_ =
                     sheetEdgeMarker(orientation.edges[edgeIndex_ % orientation.edges.size()],
@@ -2263,6 +2359,10 @@ ViewerWidget::ViewerWidget(QWidget *parent) : QWidget(parent), impl_(std::make_u
     impl_->canvas->onBendSelection = [this](quint64 revision, int index) {
         emit bendSelectionChanged(revision, index);
     };
+    impl_->canvas->onToolPicked = [this](quint64 revision, bool punch, int section) {
+        emit bendToolPicked(revision, punch, section);
+    };
+    impl_->canvas->onPlacementDragged = [this](double delta) { emit bendPlacementDragged(delta); };
     impl_->canvas->onSurfaceChanged = [this] { queueOverlayLayout(); };
     impl_->canvas->onError = [this, reportError](const QString &message) {
         // Switch pages after the native paint/input event has completed.
@@ -2410,6 +2510,15 @@ void ViewerWidget::refreshScene() {
 void ViewerWidget::setToolSegmentColors(ToolSegmentColors colors) {
     if (impl_->canvas)
         impl_->canvas->setToolSegmentColors(std::move(colors));
+}
+
+void ViewerWidget::setBendToolPicking(bool enabled) {
+    if (impl_->canvas)
+        impl_->canvas->setBendToolPicking(enabled);
+}
+void ViewerWidget::setBendPlacement(bool editing, double deltaMm) {
+    if (impl_->canvas)
+        impl_->canvas->setBendPlacement(editing, deltaMm);
 }
 
 void ViewerWidget::setOrientation(Orientation orientation) {

@@ -65,12 +65,14 @@ class ImportController final : public QObject {
                        std::optional<double> maximumEndSupportLossMm = 0);
     void discardBendPreview();
     bool prepareBendRoute(application::BendRouteRequest,
-                          std::shared_ptr<const application::SingleBendPreviewBuilder>);
+                          std::shared_ptr<const application::SingleBendPreviewBuilder>,
+                          bool keepPreviousPreview = false);
     void discardBendRoute();
     void discardToolChecks();
     bool setBendOrder(const std::vector<std::string> &);
     [[nodiscard]] application::BendRoutePtr bendRoute() const;
     [[nodiscard]] std::optional<application::BendRouteError> bendRouteError() const;
+    [[nodiscard]] const std::optional<application::BendRouteError> &placementCheckError() const;
     [[nodiscard]] bool isPreparingRoute() const;
     [[nodiscard]] std::optional<application::BendRouteProgress> bendRouteProgress() const;
     bool prepareRouteDraft(application::RouteDraftRequest,

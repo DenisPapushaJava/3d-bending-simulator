@@ -55,6 +55,9 @@ class ToolSelectionWidget final : public QWidget {
         return punchReversed_;
     }
     [[nodiscard]] QString optionIssue(const core::ToolPreset &, std::size_t groove) const;
+    [[nodiscard]] static QString profileIssue(const core::ToolPreset &, std::size_t groove,
+                                              std::optional<double> thicknessMm);
+    [[nodiscard]] core::ToolCatalog workshopCatalog() const;
     [[nodiscard]] QString geometryIssue() const;
     [[nodiscard]] QString lengthIssue() const;
     [[nodiscard]] static QString lengthIssue(const application::BendRouteToolLengthIssue &);

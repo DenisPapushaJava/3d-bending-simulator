@@ -194,11 +194,17 @@ class ImportController::Impl {
         if (const auto builder = routeBuilder.lock())
             builder->discardRouteCache();
     }
-    void invalidateRoute() {
-        invalidateDraft();
+    std::optional<BendRouteError> placementError;
+    void invalidateRoute(bool keepPreviousPreview = false) {
+        if (keepPreviousPreview)
+            cancelPrefetch();
+        else {
+            invalidateDraft();
+            route.reset();
+        }
         ++routeId;
-        route.reset();
         routeError.reset();
+        placementError.reset();
         routeProgress.reset();
         if (preparingRoute) {
             stop.request_stop();
@@ -1062,6 +1068,9 @@ BendRoutePtr ImportController::bendRoute() const {
 std::optional<BendRouteError> ImportController::bendRouteError() const {
     return impl_->routeError;
 }
+const std::optional<BendRouteError> &ImportController::placementCheckError() const {
+    return impl_->placementError;
+}
 bool ImportController::isPreparingRoute() const {
     return impl_->preparingRoute;
 }
@@ -1178,8 +1187,10 @@ bool ImportController::isPrefetchingRouteDraft() const {
     return impl_->activePrefetch || impl_->pendingPrefetch.has_value();
 }
 bool ImportController::prepareBendRoute(BendRouteRequest request,
-                                        std::shared_ptr<const SingleBendPreviewBuilder> builder) {
-    if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
+                                        std::shared_ptr<const SingleBendPreviewBuilder> builder,
+                                        bool keepPreviousPreview) {
+    if (impl_->stopping || hasWork() || !builder || !impl_->session.document() ||
+        (keepPreviousPreview && (request.automatic || !request.withTools)))
         return false;
     const auto &session = impl_->session;
     if (!prepareBendRouteRequest(session, request))
@@ -1189,8 +1200,9 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
         previous->discardRouteCache();
     s->routeBuilder = builder;
-    s->invalidateRoute();
-    s->invalidatePreview();
+    s->invalidateRoute(keepPreviousPreview);
+    if (!keepPreviousPreview)
+        s->invalidatePreview();
     const auto id = s->routeId, revision = session.revision(), edit = session.editRevision();
     const auto document = session.document();
     s->beginForeground();
@@ -1229,7 +1241,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     };
     QMetaObject::invokeMethod(
         s->worker,
-        [s, id, revision, edit, document, stop, request = std::move(request), builder]() mutable {
+        [s, id, revision, edit, document, stop, request = std::move(request), builder,
+         keepPreviousPreview]() mutable {
             BendRouteResult result = BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
             try {
                 if (!stop.stop_requested())
@@ -1241,7 +1254,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
             }
             QMetaObject::invokeMethod(
                 s->owner,
-                [s, id, revision, edit, stop, request = std::move(request),
+                [s, id, revision, edit, stop, request = std::move(request), keepPreviousPreview,
                  result = std::move(result)]() mutable {
                     s->running = s->preparingRoute = false;
                     if (s->stopping)
@@ -1249,17 +1262,22 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                     if (id == s->routeId && revision == s->session.revision() &&
                         edit == s->session.editRevision() && !stop.stop_requested() &&
                         !s->session.activeRequest()) {
+                        auto &failure = keepPreviousPreview ? s->placementError : s->routeError;
                         if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
                             if (applyBendRouteResult(s->session, std::move(request), *route)) {
+                                if (keepPreviousPreview) {
+                                    s->invalidateDraft();
+                                    s->invalidatePreview();
+                                }
                                 s->route = *route;
                                 s->routeRevision = revision;
                                 s->routeEditRevision = s->session.editRevision();
                             } else
-                                s->routeError = BendRouteError{BendRouteErrorCode::Failed,
-                                                               "Invalid route result"};
+                                failure = BendRouteError{BendRouteErrorCode::Failed,
+                                                         "Invalid route result"};
                         } else if (const auto &e = std::get<BendRouteError>(result);
                                    e.code != BendRouteErrorCode::Cancelled)
-                            s->routeError = e;
+                            failure = e;
                     }
                     s->dispatch();
                     emit s->owner->stateChanged();

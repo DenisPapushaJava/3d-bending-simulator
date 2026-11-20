@@ -661,6 +661,12 @@ std::size_t ToolSelectionWidget::selectedGroove() const {
     return static_cast<std::size_t>(std::max(0, groove_->currentIndex()));
 }
 QString ToolSelectionWidget::optionIssue(const core::ToolPreset &tool, std::size_t groove) const {
+    return profileIssue(tool, groove,
+                        selectionRequest_ ? std::optional{selectionRequest_->thicknessMm}
+                                          : std::nullopt);
+}
+QString ToolSelectionWidget::profileIssue(const core::ToolPreset &tool, std::size_t groove,
+                                          std::optional<double> thicknessMm) {
     if (tool.teaching)
         return QStringLiteral("Учебный инструмент исключён");
     if (!tool.drawing || !tool.drawing->millimeters || !core::validToolDrawing(*tool.drawing))
@@ -675,11 +681,10 @@ QString ToolSelectionWidget::optionIssue(const core::ToolPreset &tool, std::size
     if (tool.kind == core::ToolKind::Die) {
         if (groove >= tool.openingsMm.size())
             return QStringLiteral("Нужны параметры ручья");
-        if (selectionRequest_ &&
-            !core::standardAirBendOpening(selectionRequest_->thicknessMm, tool.openingsMm[groove]))
+        if (thicknessMm && !core::standardAirBendOpening(*thicknessMm, tool.openingsMm[groove]))
             return QStringLiteral("V %1: мало для t %2 мм")
                 .arg(tool.openingsMm[groove])
-                .arg(selectionRequest_->thicknessMm);
+                .arg(*thicknessMm);
     }
     return {};
 }
@@ -749,14 +754,15 @@ bool ToolSelectionWidget::chooseTool(const core::ToolPreset &tool, std::size_t g
     changed(tool.kind == core::ToolKind::Punch ? Change::Punch : Change::Die);
     return true;
 }
+core::ToolCatalog ToolSelectionWidget::workshopCatalog() const {
+    // The tail holds immutable project/previous-choice snapshots, not workshop stock.
+    return {catalog_.begin(), catalog_.begin() + workshopSize_};
+}
 void ToolSelectionWidget::showPicker(core::ToolKind kind, QWidget *anchor) {
     if (!isEnabled() || picker_)
         return;
-    // The tail holds immutable project/previous-choice snapshots, not workshop stock.
-    // Showing it alongside the workshop makes each edited profile look duplicated.
-    const core::ToolCatalog workshop(catalog_.begin(), catalog_.begin() + workshopSize_);
     ToolPickerPopup dialog(
-        workshop, kind, selectedTool(kind), selectedGroove(),
+        workshopCatalog(), kind, selectedTool(kind), selectedGroove(),
         [this](const auto &tool, auto groove) { return optionIssue(tool, groove); },
         profileImporter_ && static_cast<bool>(libraryStorage_), anchor, punchReversed_);
     picker_ = &dialog;

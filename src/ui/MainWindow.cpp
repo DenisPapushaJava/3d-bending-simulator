@@ -20,6 +20,7 @@
 #include "bending/viewer/ViewerWidget.h"
 
 #include "RoutePanel.h"
+#include "RouteToolDialog.h"
 #include "ToolSegmentColorPreferences.h"
 #include <QAction>
 #include <QApplication>
@@ -41,7 +42,6 @@
 #include <QListView>
 #include <QListWidget>
 #include <QLocale>
-#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
@@ -1437,13 +1437,18 @@ class MainWindow::Impl {
         playBend->setToolTip(context.isEmpty() ? action : action + QLatin1Char('\n') + context);
     }
     void startPlayback() {
+        viewer->setBendToolPicking(false);
+        moveWorkpiece->setEnabled(false);
         playback->start();
         refreshPlaybackAction();
     }
     void stopPlayback() {
+        const bool wasPlaying = playback->isActive();
         playback->stop();
         viewer->finishReposition();
         refreshPlaybackAction();
+        if (wasPlaying)
+            refreshPlacementEditor();
     }
     void advancePlaybackStep() {
         const QScopedValueRollback advancing(advancingPlayback, true);
@@ -1466,7 +1471,7 @@ class MainWindow::Impl {
                           draft->toolLengths->coversBend(playbackLengthAllowanceMm)));
     }
     void prefetchDraftStep() {
-        if (!viewingDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
+        if (!viewingDraft || viewingSource || placementEdit || propertyTabs->currentIndex() != 2 ||
             !previewDisplayError.isEmpty() || shortToolPlaybackBlocked())
             return;
         if (const auto draft = controller->routeDraft();
@@ -1501,9 +1506,10 @@ class MainWindow::Impl {
             preview && (preview->frameCount() > 1 || preview->unverifiedDraft() || viewingRoute);
         const bool awaiting = draftAutoPlay && viewingDraft && controller->isPreparingDraft();
         playBend->setEnabled(
-            awaiting || (animated && !lengthBlocked && !viewingSource && !controller->hasWork() &&
+            !placementEdit &&
+            (awaiting || (animated && !lengthBlocked && !viewingSource && !controller->hasWork() &&
                          previewDisplayError.isEmpty() && stageSetupIssue.isEmpty() &&
-                         !collisionAt(preview, static_cast<std::size_t>(bendFrame->value()))));
+                         !collisionAt(preview, static_cast<std::size_t>(bendFrame->value())))));
         playbackSpeedControls->setEnabled(playBend->isEnabled());
     }
     void setFrameText(const QString &text) {
@@ -1516,8 +1522,9 @@ class MainWindow::Impl {
         refreshPlaybackAction();
     }
     std::optional<std::size_t> selectedOperationIndex() const {
-        if (viewingRoute && controller->bendRoute() && routePanel->selected() > 0)
-            return controller->bendRoute()->steps[routePanel->operation()].bendIndex;
+        if (const auto route = controller->bendRoute(); viewingRoute && route &&
+            routePanel->selected() > 0 && routePanel->operation() < route->steps.size())
+            return route->steps[routePanel->operation()].bendIndex;
         if (controller->session().document() &&
             controller->session().document()->metadata().bendAnalysis.bends.size() > 1)
             return routePanel->selectedBend();
@@ -1558,6 +1565,281 @@ class MainWindow::Impl {
                 return std::move(strokes[index]);
         }
         return {};
+    }
+    void closePlacementEditor() {
+        placementEdit.reset();
+        viewer->setBendPlacement(false);
+    }
+    bool canPickSceneTool(const application::BendPreviewPtr &preview) const {
+        return propertyTabs->currentIndex() == 2 && !viewingSource && !wantFlat && preview &&
+               preview->toolSetup() && preview == displayedPreview && previewDisplayError.isEmpty();
+    }
+    bool canEditInstallation(const application::BendPreviewPtr &preview) const {
+        return canPickSceneTool(preview) && selectedOperationIndex().has_value();
+    }
+    void openRouteTools(std::optional<core::ToolKind> kind = {},
+                        std::optional<std::size_t> piece = {}) {
+        const auto &session = controller->session();
+        const auto document = session.document();
+        if (!document || propertyTabs->currentIndex() != 2 || controller->hasWork() ||
+            placementEdit || toolDraftChanged)
+            return;
+        const int step = routePanel->selected();
+        const bool all = step == 0;
+        const auto &analysis = document->metadata().bendAnalysis;
+        const auto order = session.orderedBends();
+        auto strokes = session.bendStrokes(order);
+        const auto route = controller->bendRoute();
+        if (viewingRoute && route) {
+            strokes.clear();
+            for (const auto &operation : route->steps) {
+                strokes.push_back({operation.bendIndex});
+                for (const auto &member : operation.additionalBends)
+                    strokes.back().push_back(member.bendIndex);
+            }
+        }
+        const auto operation = routePanel->operation();
+        if (operation >= strokes.size() || strokes[operation].empty())
+            return;
+        const auto representative = strokes[operation].front();
+        std::vector<std::size_t> scope;
+        double span = 0, thickness = 0;
+        for (std::size_t i = 0; i < strokes.size(); ++i) {
+            if (!all && i != operation)
+                continue;
+            for (const auto index : strokes[i])
+                if (included(session.bend(index)->review)) {
+                    scope.push_back(index);
+                    thickness = std::max(thickness, analysis.bends[index].thicknessMm);
+                }
+            span = std::max(span, application::routeStrokeLengthMm(analysis, strokes[i]));
+        }
+        if (scope.empty())
+            return;
+        const auto toTools = [](const auto &entry) -> RouteToolDialog::Changes {
+            if (!entry.catalogTools)
+                return {};
+            const auto &a = *entry.catalogTools;
+            return {RouteToolDialog::Tool{a.punch, a.punchAssembly, 0, a.punchReversed},
+                    RouteToolDialog::Tool{a.die, a.dieAssembly, a.groove}};
+        };
+        const auto displayed = toTools(*session.bend(representative));
+        std::array<bool, 2> mixed{};
+        for (const auto index : scope) {
+            const auto tools = toTools(*session.bend(index));
+            for (std::size_t i = 0; i < mixed.size(); ++i)
+                mixed[i] |= tools[i] != displayed[i];
+        }
+        const auto identity = std::pair{session.revision(), session.editRevision()};
+        const auto current = [&] {
+            return identity == std::pair{session.revision(), session.editRevision()} &&
+                   propertyTabs->currentIndex() == 2 && routePanel->selected() == step &&
+                   !controller->hasWork();
+        };
+        std::vector<application::BendToolUpdate> updates;
+        RouteToolDialog dialog(
+            window, all ? QStringLiteral("Все гибы") : QStringLiteral("Шаг %1").arg(step),
+            toolSelection->workshopCatalog(), displayed, mixed, span, thickness,
+            toolSelection->maximumSegmentGapMm(), true,
+            [&](const RouteToolDialog::Changes &changes) {
+                if (!current())
+                    return QStringLiteral("Деталь изменилась. Откройте оснастку заново.");
+                updates.clear();
+                updates.reserve(scope.size());
+                for (const auto index : scope) {
+                    const auto &entry = *session.bend(index);
+                    auto a = entry.catalogTools.value_or(core::ToolAssignment{});
+                    if (!entry.catalogTools && entry.tools) {
+                        a.clearanceMm = entry.tools->clearanceMm;
+                        a.machineModel = entry.tools->machineModel;
+                        a.backgauge = entry.tools->backgauge;
+                    }
+                    if (const auto &punch = changes[0]) {
+                        if (a.punch != punch->profile)
+                            a.punchReversed = punch->reversed;
+                        a.punch = punch->profile;
+                        a.punchAssembly = punch->assembly;
+                    }
+                    if (const auto &die = changes[1]) {
+                        a.die = die->profile;
+                        a.dieAssembly = die->assembly;
+                        a.groove = die->groove;
+                    }
+                    if (a.punch.id.empty() || a.die.id.empty())
+                        return QStringLiteral("Выберите пуансон и матрицу.");
+                    if (!core::hasLibraryProfile(a.punch) || !core::hasLibraryProfile(a.die))
+                        return QStringLiteral("Выберите рабочие профили из библиотеки.");
+                    if (!core::toolLength(a.punch, a.punchAssembly) ||
+                        !core::toolLength(a.die, a.dieAssembly))
+                        return QStringLiteral("Подберите секции.");
+                    a.useDrawingGeometry = true;
+                    const auto issue = ToolSelectionWidget::profileIssue(
+                        a.die, a.groove, analysis.bends[index].thicknessMm);
+                    if (!issue.isEmpty())
+                        return issue;
+                    const auto tools = core::toolParameters(a);
+                    if (!tools)
+                        return QStringLiteral("Проверьте параметры оснастки.");
+                    updates.push_back({index, tools, std::move(a)});
+                }
+                return QString{};
+            });
+        if (kind)
+            dialog.openFor(*kind, piece);
+        stopPlayback();
+        const auto decision = dialog.exec();
+        if (!current())
+            return;
+        if (decision == RouteToolDialog::Advanced) {
+            if (!all)
+                editRouteTool(representative);
+            else if (setToolContext(std::nullopt))
+                propertyTabs->setCurrentIndex(3);
+            return;
+        }
+        if (decision != QDialog::Accepted || updates.empty())
+            return;
+        beginPreviewReplacement();
+        if (!controller->setBendToolAssignments(updates) ||
+            session.editRevision() == identity.second)
+            return;
+        routePanel->select(step, false);
+        if (analysis.bends.size() > 1) {
+            prepareManualDraft();
+        } else {
+            viewingRoute = false;
+            viewingDraft = false;
+            viewingSource = false;
+            wantFlat = false;
+            if (controller->prepareBendPreview(representative, false, previewBuilder,
+                                               BendPreviewMode::ToolMotion,
+                                               toolSelection->maximumEndSupportLossMm()))
+                showPlaybackPanel();
+        }
+    }
+    double requestedPlacementOffset() const {
+        const double displayed = placementOffset->value();
+        return displayed == placementEdit->initialShown ? placementEdit->preview->workpieceOffsetMm()
+                                                         : displayed;
+    }
+    void refreshPlacementEditor() {
+        if (!placementControls)
+            return;
+        const auto &session = controller->session();
+        if (placementEdit && placementEdit->checking && !controller->isPreparingRoute()) {
+            if (const auto &failure = controller->placementCheckError()) {
+                placementEdit->checking = false;
+                const auto reason = routeFailureReason(*failure).trimmed();
+                placementStatus->setText(reason.isEmpty()
+                                             ? QStringLiteral("Положение не подтверждено.")
+                                             : reason);
+            } else if (controller->bendRoute() &&
+                       session.editRevision() != placementEdit->editRevision) {
+                acceptedPlacementBend = placementEdit->bend;
+                closePlacementEditor();
+                routePanel->setWithTools(true);
+                viewingRoute = true;
+                viewingDraft = false;
+                positionedPreview.reset();
+            } else {
+                closePlacementEditor();
+            }
+        }
+        const auto preview = scenePreview();
+        const bool available = canEditInstallation(preview);
+        if (placementEdit &&
+            (!available || placementEdit->preview != preview ||
+             placementEdit->revision != session.revision() ||
+             placementEdit->editRevision != session.editRevision() ||
+             selectedOperationIndex() != std::optional{placementEdit->bend} ||
+             bendFrame->value() != 0))
+            closePlacementEditor();
+        const bool idle = !controller->hasWork() && !playback->isActive();
+        viewer->setBendToolPicking(canPickSceneTool(preview) && idle && !placementEdit);
+        moveWorkpiece->setVisible(available && !placementEdit);
+        moveWorkpiece->setEnabled(idle);
+        placementControls->setVisible(placementEdit.has_value());
+        placementControls->setEnabled(idle);
+        if (!placementEdit)
+            return;
+        viewer->setBendPlacement(true, requestedPlacementOffset() - preview->workpieceOffsetMm());
+        checkPlacement->setEnabled(
+            idle && requestedPlacementOffset() != preview->workpieceOffsetMm());
+    }
+    void beginPlacementEdit() {
+        const auto preview = scenePreview();
+        const auto index = selectedOperationIndex();
+        if (!canEditInstallation(preview) || !index || controller->hasWork())
+            return;
+        stopPlayback();
+        controller->cancelRouteDraftPrefetch();
+        bendFrame->setValue(0);
+        showPreviewFrame();
+        if (displayedPreview != preview || displayedPreviewFrame != 0)
+            return;
+        const auto &session = controller->session();
+        placementEdit = PlacementEdit{session.revision(), session.editRevision(), *index, preview};
+        const double offset = preview->workpieceOffsetMm();
+        const double limit = std::min(
+            1.e6, std::max(std::abs(offset),
+                           (preview->model().widthMm + preview->toolSetup()->tools.lengthMm) / 2));
+        const QSignalBlocker block(placementOffset);
+        placementOffset->setRange(-limit, limit);
+        placementOffset->setValue(offset);
+        placementEdit->initialShown = placementOffset->value();
+        const auto halfRange =
+            axialPlacementHalfRange(preview->toolSetup()->tools, preview->model().widthMm);
+        placementLeft->setEnabled(halfRange > 0.001);
+        placementRight->setEnabled(halfRange > 0.001);
+        placementStatus->setText(QStringLiteral("Перетащите деталь вдоль инструмента."));
+        refreshPreview();
+        placementOffset->setFocus();
+    }
+    void checkEditedPlacement() {
+        if (!placementEdit || controller->hasWork() || placementEdit->checking)
+            return;
+        const auto &session = controller->session();
+        const auto &edit = *placementEdit;
+        if (session.revision() != edit.revision || session.editRevision() != edit.editRevision ||
+            scenePreview() != edit.preview || selectedOperationIndex() != std::optional{edit.bend})
+            return;
+        auto stroke = selectedJointBends();
+        if (stroke.empty())
+            stroke.push_back(edit.bend);
+        application::BendRouteRequest request;
+        request.withTools = true;
+        request.manualExtraction =
+            controller->bendRoute() ? controller->bendRoute()->manualExtraction
+                                    : viewingDraft || edit.preview->manualExtraction();
+        request.allowPartialEndSupport = true;
+        request.maximumEndSupportLossMm = viewingDraft ? toolSelection->maximumEndSupportLossMm()
+                                                      : edit.preview->endSupportLimitMm();
+        request.maximumChecks = 512;
+        request.maximumTimeMs = 120000;
+        const double proposedOffset = requestedPlacementOffset();
+        for (const auto index : session.orderedBends()) {
+            const auto *entry = session.bend(index);
+            const auto target = session.bendTarget(index);
+            if (!entry || !target || !entry->tools ||
+                !ToolSelectionWidget::assignmentIssue(entry->catalogTools).isEmpty()) {
+                placementStatus->setText(
+                    QStringLiteral("Для гиба B%1 нужна оснастка.").arg(index + 1));
+                return;
+            }
+            const double offset = std::find(stroke.begin(), stroke.end(), index) != stroke.end()
+                                      ? proposedOffset
+                                      : entry->workpieceOffsetMm;
+            request.operations.push_back({entry->id, index, *target, entry->tools,
+                                          entry->catalogTools, entry->workpieceReversed, offset,
+                                          entry->strokePartition});
+        }
+        lastRouteAutomatic = false;
+        placementEdit->checking = true;
+        placementStatus->setText(QStringLiteral("Проверяем установку…"));
+        if (!controller->prepareBendRoute(std::move(request), previewBuilder, true)) {
+            placementEdit->checking = false;
+            placementStatus->setText(QStringLiteral("Проверку установки не удалось запустить."));
+        }
     }
     void beginPreviewReplacement(bool preserveFrame = false) {
         manualDraftWarmup.stop();
@@ -1690,7 +1972,10 @@ class MainWindow::Impl {
         const bool preparing = controller->isPreparingDraft() || controller->isPreparingRoute() ||
                                controller->isPreparingPreview();
         QString result;
-        if (!stageSetupIssue.isEmpty() && !preparing)
+        if (placementEdit)
+            result = placementEdit->checking ? QStringLiteral("Проверяем установку…")
+                                             : QStringLiteral("Ручное положение · нужна проверка");
+        else if (!stageSetupIssue.isEmpty() && !preparing)
             result = stageSetupIssue;
         else if (controller->isPreparingDraft())
             result = QStringLiteral("Проверяем столкновения выбранного шага…");
@@ -1743,14 +2028,10 @@ class MainWindow::Impl {
                         result += QStringLiteral(" Допуск %1 мм на каждый.").arg(*limit, 0, 'f', 2);
                 }
         } else if (preview && preview->pressMotion())
-            result =
-                (preview->manualExtraction() ? QStringLiteral("Гибка проверена в модели.")
-                 : viewingRoute ? QStringLiteral("Порядок проверен в модели.")
-                                : QStringLiteral("Геометрическая проверка пройдена.")) +
-                (!preview->manualExtraction() && preview->machineModel() == core::MachineModel::None
-                     ? QStringLiteral("\nГибка — по кадрам, отвод пуансона — непрерывно.\n"
-                                      "Станок, держатели и перенос не проверены.")
-                     : QString{});
+            result = preview->manualExtraction()
+                         ? QStringLiteral("Гибка проверена до заданного угла.")
+                     : viewingRoute ? QStringLiteral("Порядок проверен в модели.")
+                                    : QStringLiteral("Геометрическая проверка пройдена.");
         else if (preview && preview->toolSetup())
             result = QStringLiteral("Начальная установка проверена.");
         else if (preview)
@@ -1797,11 +2078,6 @@ class MainWindow::Impl {
                 else if (status == application::BackgaugeStatus::Collision && !collision)
                     addSummary(QStringLiteral("Столкновение с задним упором."));
             }
-            if (preview->machineModel() != core::MachineModel::None)
-                addSummary(
-                    preview->floorChecked()
-                        ? QStringLiteral("Демонстрационный станок и пол проверены по кадрам.")
-                        : QStringLiteral("Демонстрационный станок. Пол не проверен."));
             if ((preview->machineModel() == core::MachineModel::DemoPressV2 ||
                  preview->machineModel() == core::MachineModel::DemoPressV3) &&
                 preview->usesDrawingPunch() && !preview->seatedPunchMount())
@@ -1906,6 +2182,7 @@ class MainWindow::Impl {
             bendMessages->setMessages(std::move(messages));
         }
         checkSummary->setText(result);
+        checkSummary->setVisible(!placementEdit);
         checkSummary->setStyleSheet(
             collision && !preparing
                 ? QStringLiteral("background:#FBE9E7;color:#8F2318;border-radius:4px;padding:10px;")
@@ -1976,23 +2253,17 @@ class MainWindow::Impl {
             if (index && *index < document->metadata().bendAnalysis.bends.size()) {
                 const auto &bend = document->metadata().bendAnalysis.bends[*index];
                 const auto target = session.bendTarget(*index);
-                const auto currentRoute = controller->bendRoute();
-                const auto currentPreview = scenePreview();
-                const auto operationCount =
-                    currentRoute ? currentRoute->steps.size() : session.orderedBends().size();
-                const auto length = currentPreview && currentPreview->activeBendCount() > 1
-                                        ? currentPreview->model().widthMm
+                const auto length = preview && preview->activeBendCount() > 1
+                                        ? preview->model().widthMm
                                         : bend.lengthMm;
-                operationSummary->setText(
-                    QStringLiteral("Гиб %1 из %2\n%3° · L %4 мм")
-                        .arg(document->metadata().bendAnalysis.bends.size() > 1
-                                 ? routePanel->selected()
-                                 : 1)
-                        .arg(operationCount)
-                        .arg(number((std::numbers::pi -
-                                     (target ? target->angleRadians : bend.angleRadians)) *
-                                    180 / std::numbers::pi),
-                             number(length)));
+                operationSummary->setText(QStringLiteral("Шаг %1 из %2 · %3° · %4 мм")
+                                              .arg(std::max(1, routePanel->selected()))
+                                              .arg(std::max(1, routePanel->stepCount()))
+                                              .arg(number((std::numbers::pi -
+                                                           (target ? target->angleRadians
+                                                                   : bend.angleRadians)) *
+                                                          180 / std::numbers::pi),
+                                                   number(length)));
                 if (const auto *entry = session.bend(*index); entry && entry->tools) {
                     const auto name = entry->catalogTools
                                           ? text(entry->catalogTools->punch.code) + " / " +
@@ -2001,10 +2272,23 @@ class MainWindow::Impl {
                     operationSummary->setText(operationSummary->text() +
                                               QStringLiteral("\n%1 · V %2 мм")
                                                   .arg(name, number(entry->tools->openingMm)));
+                    if (entry->workpieceOffsetMm != 0)
+                        operationSummary->setText(operationSummary->text() +
+                                                  QStringLiteral("\nСмещение %1 мм")
+                                                      .arg(number(entry->workpieceOffsetMm)));
                 }
-            } else
-                operationSummary->setText(
-                    QStringLiteral("Заготовка · гибов %1").arg(session.orderedBends().size()));
+            } else {
+                const int count = routePanel->stepCount();
+                const auto unit = count % 100 >= 11 && count % 100 <= 14
+                                      ? QStringLiteral("ходов")
+                                  : count % 10 == 1 ? QStringLiteral("ход")
+                                  : count % 10 >= 2 && count % 10 <= 4 ? QStringLiteral("хода")
+                                                                      : QStringLiteral("ходов");
+                operationSummary->setText(count > 0 ? QStringLiteral("Заготовка · %1 %2")
+                                                         .arg(count)
+                                                         .arg(unit)
+                                                   : QStringLiteral("Заготовка"));
+            }
         }
     }
     application::BendPreviewPtr scenePreview() const {
@@ -2173,6 +2457,9 @@ class MainWindow::Impl {
     void refreshPreview() {
         const auto &session = controller->session();
         const auto &document = session.document();
+        // Resolve the check before choosing which snapshot to present.
+        if (placementEdit && placementEdit->checking && !controller->isPreparingRoute())
+            refreshPlacementEditor();
         if (previewReplacement &&
             (previewReplacement->document != document ||
              previewReplacement->revision != session.revision() || viewingSource))
@@ -2230,8 +2517,6 @@ class MainWindow::Impl {
         assignBendTool->setVisible(toolDraftChanged);
         toolAssignmentStatus->setVisible(multiple && perBend);
         toolAssignmentStatus->setText(QStringLiteral("Переналадка между гибами не проверяется."));
-        routePanel->setVisible(propertyTabs->currentIndex() == 2 && document &&
-                               document->metadata().bendAnalysis.bends.size() > 1);
         const auto stagePreview = scenePreview();
         const bool singleCycle =
             !multiple && document &&
@@ -2245,6 +2530,18 @@ class MainWindow::Impl {
                             controller->isPreparingRoute(), toolSelection->parameters().has_value(),
                             controller->routeDraft(), controller->routeDraftError(),
                             controller->isPreparingDraft());
+        bool showAcceptedPlacement = false;
+        if (const auto bend = std::exchange(acceptedPlacementBend, std::nullopt)) {
+            if (const auto route = controller->bendRoute()) {
+                const auto step =
+                    std::find_if(route->steps.begin(), route->steps.end(),
+                                 [&](const auto &value) { return value.bendIndex == *bend; });
+                if (step != route->steps.end()) {
+                    routePanel->select(static_cast<int>(step - route->steps.begin()) + 1, false);
+                    showAcceptedPlacement = true;
+                }
+            }
+        }
         const auto row = selectedSourceBend();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
         const bool hasInteriorContours =
@@ -2519,7 +2816,8 @@ class MainWindow::Impl {
                                 }
                             }
                 }
-                bendFrame->setValue(restoreFrame   ? static_cast<int>(previewReplacement->frame)
+                bendFrame->setValue(showAcceptedPlacement ? 0
+                                    : restoreFrame ? static_cast<int>(previewReplacement->frame)
                                     : matchedAngle ? *matchedAngle
                                     : advancingPlayback           ? 0
                                     : draft && draft->toolLengths ? 0
@@ -2538,17 +2836,18 @@ class MainWindow::Impl {
             ((diagnostic && preview->frameCount() == 1) ||
              (!preview->unverifiedDraft() && preview->toolSetup() && !preview->pressMotion()));
         previewControls->setCurrentIndex(staticSetup ? 1 : 0);
-        kinematicsToggle->setVisible(!viewingDraft);
-        kinematicsPanel->setVisible(!viewingDraft && kinematicsToggle->isChecked());
+        kinematicsPanel->setVisible(!viewingDraft);
         playBend->setVisible(!staticSetup);
         playbackSpeedControls->setVisible(!staticSetup);
         showKinematics->setVisible(staticSetup && !diagnostic);
         showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
-        bendFrame->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
+        bendFrame->setEnabled(preview && !placementEdit && !viewingSource && !staticSetup &&
+                              !controller->hasWork() &&
                               !shortToolPlaybackBlocked() &&
                               !((viewingRoute || viewingDraft) && routePanel->selected() == 0) &&
                               previewDisplayError.isEmpty());
         refreshPlaybackAvailability(preview);
+        refreshPlacementEditor();
         returnToCad->setEnabled(preview || previewReplacement || controller->isPreparingPreview() ||
                                 controller->isPreparingDraft());
         if (!preview && !controller->isPreparingDraft())
@@ -2729,22 +3028,43 @@ class MainWindow::Impl {
         const bool failed = controller->bendPreviewError().has_value() || routeFailure ||
                             !previewDisplayError.isEmpty();
         refreshCheckResult();
+        const bool overview = blankSetupSelected() && (controller->bendRoute() || draft) &&
+                              routePanel->stepCount() > 0 && !viewingSource && !wantFlat;
+        firstBend->setVisible(overview && !placementEdit);
+        firstBend->setEnabled(!controller->hasWork());
+        routePanel->setVisible(propertyTabs->currentIndex() == 2 && multiple && !placementEdit);
+        singleRouteTool->setVisible(propertyTabs->currentIndex() == 2 && document && !multiple &&
+                                    row >= 0 && !placementEdit);
+        singleRouteTool->setEnabled(!controller->hasWork());
+        routePanel->advancedWidget()->setVisible(multiple);
+        const bool detailsAvailable = document != nullptr && !placementEdit;
+        bendDetailsToggle->setVisible(detailsAvailable);
+        bendDetails->setVisible(detailsAvailable && bendDetailsToggle->isChecked());
         routePanel->reportWidget()->setVisible(multiple);
         if (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled)
             previewStatus->setText(QStringLiteral("ПРИБЛИЖЕНИЕ: вырезы исключены из проверки.\n") +
                                    previewStatus->text());
-        checkScope->setText(preview && preview->usesDrawingTools()
-                                ? QStringLiteral("Пуансон: %1. Матрица: %2.")
-                                      .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
-                                                                       : QStringLiteral("условный"),
-                                           preview->usesDrawingDie() ? QStringLiteral("по DXF")
-                                                                     : QStringLiteral("условная"))
-                                : QStringLiteral("Геометрическая проверка."));
-        checkScope->setVisible(document != nullptr && !viewingDraft &&
-                               !(viewingRoute && controller->bendRoute()));
-        checkScope->setMinimumHeight(std::max(0, checkScope->heightForWidth(240)));
+        QStringList scope;
+        if (preview && preview->toolSetup()) {
+            if (!overview && preview->usesDrawingTools())
+                scope.push_back(
+                    QStringLiteral("Пуансон %1 · матрица %2")
+                        .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
+                                                        : QStringLiteral("условный"),
+                             preview->usesDrawingDie() ? QStringLiteral("по DXF")
+                                                      : QStringLiteral("условная")));
+            if (preview->machineModel() != core::MachineModel::None)
+                scope.push_back(preview->floorChecked()
+                                    ? QStringLiteral("Демонстрационный станок и пол проверены по кадрам.")
+                                    : QStringLiteral("Демонстрационный станок · пол не проверен."));
+            else if (preview->pressMotion())
+                scope.push_back(QStringLiteral("Станок и держатели не проверены."));
+        }
+        checkScope->setText(scope.join(QLatin1Char('\n')));
+        checkScope->setVisible(!scope.isEmpty());
+        previewStatus->setVisible(!(overview && controller->bendRoute()));
         checkBend->setEnabled(applyTools->isEnabled() && toolSelection->parameters().has_value());
-        checkBend->setVisible(!preview || preview->unverifiedDraft());
+        checkBend->setVisible((!preview || preview->unverifiedDraft()) && !placementEdit);
         const auto checkTitle = !lastRouteAutomatic ? QStringLiteral("Проверить мой порядок")
                                 : document && document->metadata().bendAnalysis.bends.size() > 1
                                     ? QStringLiteral("Проверить все гибы")
@@ -3328,6 +3648,20 @@ class MainWindow::Impl {
     }
     MainWindow *window;
     RoutePanel *routePanel = nullptr;
+    struct PlacementEdit {
+        std::uint64_t revision, editRevision;
+        std::size_t bend;
+        application::BendPreviewPtr preview;
+        double initialShown = 0;
+        bool checking = false;
+    };
+    std::optional<PlacementEdit> placementEdit;
+    std::optional<std::size_t> acceptedPlacementBend;
+    QWidget *placementControls = nullptr;
+    QPushButton *singleRouteTool = nullptr, *moveWorkpiece = nullptr, *checkPlacement = nullptr,
+                *placementLeft = nullptr, *placementRight = nullptr;
+    QLabel *placementStatus = nullptr;
+    QDoubleSpinBox *placementOffset = nullptr;
     QComboBox *toolAssignmentScope = nullptr;
     QPushButton *assignBendTool = nullptr;
     QLabel *toolAssignmentStatus = nullptr;
@@ -3405,7 +3739,9 @@ class MainWindow::Impl {
     QPushButton *preparePreview = nullptr;
     QLabel *previewStatus = nullptr;
     QLabel *checkSummary = nullptr;
-    QToolButton *kinematicsToggle = nullptr;
+    QToolButton *bendDetailsToggle = nullptr;
+    QWidget *bendDetails = nullptr;
+    QPushButton *firstBend = nullptr;
     QWidget *kinematicsPanel = nullptr;
     ToolSelectionWidget *toolSelection = nullptr;
     QPushButton *checkBend = nullptr;
@@ -4088,9 +4424,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->fixedSide = new QComboBox(operationPanel);
     impl_->fixedSide->setObjectName(QStringLiteral("fixedBendSide"));
     impl_->fixedSide->setAccessibleName(QStringLiteral("Неподвижная полка сгиба"));
-    impl_->fixedSide->addItems({QStringLiteral("Полка 1"), QStringLiteral("Полка 2")});
+    impl_->fixedSide->addItems({QStringLiteral("Полка 1 неподвижна"),
+                              QStringLiteral("Полка 2 неподвижна")});
 
-    impl_->preparePreview = new QPushButton(QStringLiteral("Подготовить просмотр"), operationPanel);
+    impl_->preparePreview = new QPushButton(QStringLiteral("Показать движение"), operationPanel);
     impl_->preparePreview->setObjectName(QStringLiteral("prepareBendPreview"));
 
     impl_->previewStatus = new QLabel(operationPanel);
@@ -4134,51 +4471,119 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->checkScope->setTextFormat(Qt::PlainText);
     impl_->checkScope->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     impl_->checkScope->setStyleSheet(QStringLiteral("color:#526171;font-size:12px;"));
-    operationLayout->addWidget(impl_->checkScope);
-    auto *reportToggle = new QToolButton(operationPanel);
-    reportToggle->setObjectName(QStringLiteral("checkReportToggle"));
-    reportToggle->setText(QStringLiteral("Подробности проверки ▸"));
+    auto *reportToggle = impl_->bendDetailsToggle = new QToolButton(operationPanel);
+    reportToggle->setObjectName(QStringLiteral("routeActionsToggle"));
+    reportToggle->setText(QStringLiteral("Дополнительно"));
+    reportToggle->setArrowType(Qt::RightArrow);
+    reportToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     reportToggle->setCheckable(true);
     reportToggle->setMinimumHeight(32);
-    operationLayout->addWidget(reportToggle);
-    auto *report = new QWidget(operationPanel);
+    auto *report = impl_->bendDetails = new QWidget(operationPanel);
     report->setObjectName("checkReportDetails");
     auto *reportLayout = new QVBoxLayout(report);
     reportLayout->setContentsMargins(0, 0, 0, 0);
-    operationLayout->removeWidget(impl_->checkScope);
+    reportLayout->addWidget(impl_->routePanel->advancedWidget());
     reportLayout->addWidget(impl_->checkScope);
     reportLayout->addWidget(impl_->previewStatus);
     reportLayout->addWidget(impl_->routePanel->reportWidget());
-    operationLayout->addWidget(report);
     report->hide();
-    connect(reportToggle, &QToolButton::toggled, report, &QWidget::setVisible);
+    connect(reportToggle, &QToolButton::toggled, report, [report, reportToggle](bool open) {
+        reportToggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        report->setVisible(open);
+    });
+    impl_->firstBend = new QPushButton(QStringLiteral("Показать первый гиб"), operationPanel);
+    impl_->firstBend->setObjectName(QStringLiteral("openFirstBend"));
+    impl_->firstBend->hide();
+    connect(impl_->firstBend, &QPushButton::clicked, this,
+            [this] { impl_->routePanel->select(1); });
+    operationLayout->addWidget(impl_->firstBend);
     operationLayout->addWidget(impl_->routePanel);
-    auto *kinematicHint = new QLabel(
-        QStringLiteral("Модель сохраняет толщину и длину средней поверхности. Это геометрическая "
-                       "кинематика.\n\n"
-                       "Здесь инструмент и контакт не участвуют. Начальная установка доступна на "
-                       "вкладке «Инструмент». Усилие и пружинение не рассчитываются. "
-                       "Это не технологическая развёртка для производства.\n\nВыбор полки и кадра "
-                       "относится к просмотру и не сохраняется в проекте."),
-        operationPanel);
-    kinematicHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    kinematicHint->setWordWrap(true);
-    auto *advancedToggle = new QToolButton(operationPanel);
-    impl_->kinematicsToggle = advancedToggle;
-    advancedToggle->setText(QStringLiteral("Движение без инструмента ▸"));
-    advancedToggle->setCheckable(true);
-    advancedToggle->setMinimumHeight(32);
-    auto *advanced = new QWidget(operationPanel);
+    impl_->singleRouteTool = new QPushButton(QStringLiteral("Инструмент…"), operationPanel);
+    impl_->singleRouteTool->setObjectName("singleRouteEditTool");
+    impl_->singleRouteTool->hide();
+    operationLayout->addWidget(impl_->singleRouteTool);
+    connect(impl_->singleRouteTool, &QPushButton::clicked, this,
+            [this] { impl_->openRouteTools(); });
+    impl_->moveWorkpiece = new QPushButton(QStringLiteral("Положение детали…"), operationPanel);
+    impl_->moveWorkpiece->setObjectName(QStringLiteral("moveBendWorkpiece"));
+    impl_->moveWorkpiece->hide();
+    operationLayout->addWidget(impl_->moveWorkpiece);
+    impl_->placementControls = new QWidget(operationPanel);
+    impl_->placementControls->setObjectName(QStringLiteral("bendPlacementEditor"));
+    auto *placementLayout = new QVBoxLayout(impl_->placementControls);
+    placementLayout->setContentsMargins(0, 0, 0, 0);
+    auto *offsetRow = new QHBoxLayout;
+    auto *offsetLabel = new QLabel(QStringLiteral("Смещение"), impl_->placementControls);
+    impl_->placementOffset = new QDoubleSpinBox(impl_->placementControls);
+    impl_->placementOffset->setObjectName(QStringLiteral("bendPlacementOffset"));
+    impl_->placementOffset->setAccessibleName(QStringLiteral("Смещение детали вдоль инструмента"));
+    impl_->placementOffset->setDecimals(3);
+    impl_->placementOffset->setSingleStep(0.5);
+    impl_->placementOffset->setSuffix(QStringLiteral(" мм"));
+    impl_->placementOffset->setKeyboardTracking(false);
+    offsetLabel->setBuddy(impl_->placementOffset);
+    offsetRow->addWidget(offsetLabel);
+    offsetRow->addWidget(impl_->placementOffset, 1);
+    placementLayout->addLayout(offsetRow);
+    auto *snapRow = new QHBoxLayout;
+    const std::array labels{QStringLiteral("Слева"), QStringLiteral("Центр"),
+                            QStringLiteral("Справа")};
+    for (int side = -1; side <= 1; ++side) {
+        auto *snap = new QPushButton(labels[side + 1], impl_->placementControls);
+        snap->setToolTip(QStringLiteral("Привязка по длине инструмента. Нужна проверка установки."));
+        if (side == -1)
+            impl_->placementLeft = snap;
+        if (side == 1)
+            impl_->placementRight = snap;
+        snapRow->addWidget(snap);
+        connect(snap, &QPushButton::clicked, this, [this, side] {
+            if (const auto &edit = impl_->placementEdit; edit && !edit->checking) {
+                const auto &preview = edit->preview;
+                impl_->placementOffset->setValue(
+                    side * axialPlacementHalfRange(preview->toolSetup()->tools,
+                                                   preview->model().widthMm));
+            }
+        });
+    }
+    placementLayout->addLayout(snapRow);
+    impl_->placementStatus = new QLabel(impl_->placementControls);
+    impl_->placementStatus->setWordWrap(true);
+    impl_->placementStatus->setTextFormat(Qt::PlainText);
+    placementLayout->addWidget(impl_->placementStatus);
+    impl_->checkPlacement =
+        new QPushButton(QStringLiteral("Проверить положение"), impl_->placementControls);
+    impl_->checkPlacement->setObjectName(QStringLiteral("checkBendPlacement"));
+    auto *cancelPlacement = new QPushButton(QStringLiteral("Отмена"), impl_->placementControls);
+    auto *placementActions = new QHBoxLayout;
+    placementActions->addWidget(cancelPlacement);
+    placementActions->addWidget(impl_->checkPlacement, 1);
+    placementLayout->addLayout(placementActions);
+    impl_->placementControls->hide();
+    operationLayout->addWidget(impl_->placementControls);
+    connect(impl_->moveWorkpiece, &QPushButton::clicked, this,
+            [this] { impl_->beginPlacementEdit(); });
+    connect(cancelPlacement, &QPushButton::clicked, this, [this] {
+        impl_->closePlacementEditor();
+        impl_->refreshPreview();
+    });
+    connect(impl_->checkPlacement, &QPushButton::clicked, this,
+            [this] { impl_->checkEditedPlacement(); });
+    connect(impl_->placementOffset, &QDoubleSpinBox::valueChanged, this, [this] {
+        if (const auto &edit = impl_->placementEdit; edit && !edit->checking) {
+            impl_->placementStatus->setText(QStringLiteral("Положение не проверено"));
+            impl_->refreshPlacementEditor();
+        }
+    });
+    auto *advanced = new QWidget(report);
     impl_->kinematicsPanel = advanced;
     auto *advancedLayout = new QVBoxLayout(advanced);
     advancedLayout->setContentsMargins(0, 0, 0, 0);
+    advancedLayout->addWidget(new QLabel(QStringLiteral("Просмотр без инструмента"), advanced));
     advancedLayout->addWidget(impl_->fixedSide);
     advancedLayout->addWidget(impl_->preparePreview);
-    advancedLayout->addWidget(kinematicHint);
-    reportLayout->addWidget(advancedToggle);
     reportLayout->addWidget(advanced);
-    advanced->hide();
-    connect(advancedToggle, &QToolButton::toggled, advanced, &QWidget::setVisible);
+    operationLayout->addWidget(reportToggle, 0, Qt::AlignLeft);
+    operationLayout->addWidget(report);
     operationLayout->addStretch();
     operationLayout->addWidget(impl_->checkBend);
     auto *operationPage = taskPage(operationPanel, impl_->checkBend, this);
@@ -4567,6 +4972,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->bendMessages = new BendMessagePanel(this);
     impl_->viewer->setTopLeftOverlay(impl_->bendMessages);
     impl_->routePanel->onSelect = [this](int step) {
+        if (impl_->placementEdit && !impl_->placementEdit->checking)
+            impl_->closePlacementEditor();
         const auto previous = impl_->controller->routeDraft();
         const bool manualAdvance = !impl_->playback->isActive() && previous && step > 0 &&
                                    static_cast<std::size_t>(step) == previous->request.step + 1;
@@ -4627,10 +5034,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         else
             impl_->refreshPreview();
     };
-    impl_->routePanel->onEditTool = [this](std::size_t index) { impl_->editRouteTool(index); };
+    impl_->routePanel->onEditTool = [this] { impl_->openRouteTools(); };
     impl_->routePanel->onExpandSearch = [this] {
         if (!impl_->checkedToolVariants.empty())
-            impl_->prepareCheckedToolSelection();
+            impl_->prepareCheckedToolSelection(impl_->checkedSectionsOnly);
         else
             impl_->prepareRoute(impl_->lastRouteAutomatic, impl_->routePanel->withTools(), true);
     };
@@ -4709,6 +5116,20 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             [this] { impl_->startDraftReposition(); });
     connect(impl_->viewer, &viewer::ViewerWidget::renderingChanged, this,
             [this](bool) { impl_->refresh(); });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendPlacementDragged, this, [this](double delta) {
+        if (const auto &edit = impl_->placementEdit; edit && !edit->checking)
+            impl_->placementOffset->setValue(edit->preview->workpieceOffsetMm() + delta);
+    });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendToolPicked, this,
+            [this](quint64 revision, bool punch, int section) {
+                const auto preview = impl_->scenePreview();
+                if (impl_->controller->session().revision() != revision ||
+                    !impl_->canPickSceneTool(preview) || impl_->playback->isActive())
+                    return;
+                impl_->openRouteTools(
+                    punch ? core::ToolKind::Punch : core::ToolKind::Die,
+                    section >= 0 ? std::optional{static_cast<std::size_t>(section)} : std::nullopt);
+            });
     connect(impl_->viewer, &viewer::ViewerWidget::bendSelectionChanged, this,
             [this](quint64 revision, int index) {
                 const auto &session = impl_->controller->session();

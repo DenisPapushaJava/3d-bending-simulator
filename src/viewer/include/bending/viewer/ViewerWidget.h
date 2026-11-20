@@ -52,6 +52,9 @@ class ViewerWidget final : public QWidget {
     [[nodiscard]] bool isRepositioning() const;
     void startDraftReposition(const application::RouteDraftPose &, quint64 documentRevision);
     void finishReposition();
+    void setBendToolPicking(bool enabled);
+    // Temporary translation of the shown sheet along machine Z, during installation editing.
+    void setBendPlacement(bool editing, double deltaMm = 0);
     [[nodiscard]] bool dimensionsVisible() const;
     void setOrientation(Orientation orientation);
     // Empty result means accepted. Geometry is prepared by the importer before publication.
@@ -80,6 +83,8 @@ class ViewerWidget final : public QWidget {
     void selectionChanged(quint64 documentRevision, int faceIndex);
     // Source bend index on the flat pattern, -1 clears selection; never a route step.
     void bendSelectionChanged(quint64 documentRevision, int bendIndex);
+    void bendToolPicked(quint64 documentRevision, bool punch, int section);
+    void bendPlacementDragged(double deltaMm);
 
   private:
     class Impl;

@@ -4,7 +4,9 @@
 #include <AIS_InteractiveContext.hxx>
 #include <Quantity_Color.hxx>
 #include <TopoDS_Shape.hxx>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bending::viewer {
@@ -34,6 +36,10 @@ class PreviewRigidScene final {
     void setStyle(int displayMode, bool boundaries);
     void refresh();
     void clear();
+    void setToolPicking(bool enabled);
+    void clearToolHover();
+    // First value selects the punch, second is the displayed section or -1.
+    [[nodiscard]] std::optional<std::pair<bool, int>> detectedTool() const;
 
   private:
     struct Entry {
@@ -45,5 +51,6 @@ class PreviewRigidScene final {
     std::vector<Entry> entries_;
     int displayMode_ = AIS_Shaded;
     bool boundaries_ = true;
+    bool toolPicking_ = false;
 };
 } // namespace bending::viewer

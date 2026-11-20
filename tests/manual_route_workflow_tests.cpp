@@ -15,6 +15,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
+#include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QEnterEvent>
 #include <QLabel>
@@ -98,7 +99,8 @@ void verifyFormingCheck(const QString &folder) {
             "Cannot write manual extraction fixture");
     auto files = std::make_shared<project::ProjectFiles>();
     auto builder = std::make_shared<Builder>();
-    const auto tools = tool_fixture::pair(16);
+    auto tools = tool_fixture::pair(16);
+    tools.punch.lengthMm = tools.die.lengthMm = 100;
     ui::MainWindow window({"test", "test"}, files, files, builder, {tools.punch, tools.die});
     window.setAutomaticPartInputPrompt(false);
     window.resize(1280, 850);
@@ -120,7 +122,43 @@ void verifyFormingCheck(const QString &folder) {
                 route->steps.size() == 1 && route->steps.front().preview->manualExtraction() &&
                 !route->steps.front().preview->punchRetraction(),
             "UI dropped the default forming-only request");
-    window.findChild<QPushButton *>("routeStep1")->click();
+    auto *first = window.findChild<QPushButton *>("openFirstBend");
+    auto *details = window.findChild<QToolButton *>("routeActionsToggle");
+    require(first && first->isVisible() && details && !details->isChecked() &&
+                !window.findChild<QWidget *>("checkReportDetails")->isVisible() &&
+                !window.findChild<QPushButton *>("prepareBendRoute")->isVisible(),
+            "Verified blank should offer the first bend and keep recalculation in details");
+    first->click();
+    require(!first->isVisible() && window.findChild<QPushButton *>("routeStep1")->isChecked(),
+            "First bend action did not activate the operation");
+    auto *move = window.findChild<QPushButton *>("moveBendWorkpiece");
+    auto *offset = window.findChild<QDoubleSpinBox *>("bendPlacementOffset");
+    auto *check = window.findChild<QPushButton *>("checkBendPlacement");
+    const auto revision = controller.session().editRevision();
+    const auto searches = builder->searches.load();
+    require(move && move->isVisible() && offset && check, "Placement controls are unavailable");
+    move->click();
+    require(offset->isVisible() && !check->isEnabled(), "Placement starts as a changed input");
+    offset->setValue(15);
+    require(check->isEnabled() && builder->searches == searches &&
+                controller.session().editRevision() == revision && controller.bendRoute() == route,
+            "Editing placement launched CAD or replaced the accepted route");
+    check->click();
+    wait([&] { return !controller.hasWork(); });
+    require(controller.placementCheckError() && controller.bendRoute() == route &&
+                controller.session().editRevision() == revision && offset->isVisible(),
+            "Rejected placement removed the verified route or mutated the project");
+    offset->setValue(2);
+    check->click();
+    wait([&] { return !controller.hasWork(); });
+    const auto moved = controller.bendRoute();
+    require(moved && moved != route && moved->steps.size() == 1 && moved->manualExtraction &&
+                moved->steps.front().preview->workpieceOffsetMm() == 2 &&
+                controller.session().bend(0)->workpieceOffsetMm == 2 && !offset->isVisible(),
+            "Checked placement was not applied as one project edit");
+    require(window.findChild<QPushButton *>("routeStep1")->isChecked() &&
+                window.findChild<QSlider *>("bendFrame")->value() == 0,
+            "Checked placement left the selected step or its initial frame");
     if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
         auto *viewer = window.findChild<viewer::ViewerWidget *>();
         wait([&] { return window.windowHandle() && window.windowHandle()->isExposed(); });
@@ -169,6 +207,11 @@ void verifySharedStroke(const QString &folder) {
     require(draft && draft->request.step == 1 && draft->visual->activeBendCount() == 2 &&
                 draft->checkedToolPositions == 21 && !draft->toolLengths,
             "Shared stroke draft did not publish the checked press positions");
+    window.findChild<QPushButton *>("routeStep0")->click();
+    wait([&] { return !controller.hasWork(); });
+    require(window.findChild<QLabel *>("selectedOperationSummary")->text() ==
+                QStringLiteral("Заготовка · 1 ход"),
+            "Blank overview counted bend segments instead of operations");
     controller.closeDocument();
     window.close();
 }
@@ -593,11 +636,12 @@ int main(int argc, char **argv) {
                 "Route commands or transport escaped the task panel and viewport");
         auto *mode = window.findChild<QComboBox *>("bendRouteMode");
         auto *more = window.findChild<QToolButton *>("routeActionsToggle");
-        require(more && !more->isChecked() && !mode->isVisible(),
+        require(more && !more->isChecked() && more->arrowType() == Qt::RightArrow &&
+                    !mode->isVisible(),
                 "Advanced route controls are permanently exposed");
         const auto inputEdit = controller.session().editRevision();
         more->click();
-        require(mode->isVisible() &&
+        require(mode->isVisible() && more->arrowType() == Qt::DownArrow &&
                     window.findChild<QPushButton *>("routeMoveEarlier")->isVisible() &&
                     window.findChild<QPushButton *>("routeUndo")->isVisible(),
                 "Expanded route actions lost reorder, history or scope controls");
@@ -705,7 +749,7 @@ int main(int argc, char **argv) {
                                                                    : i == indices[1] ? other
                                                                                      : pair),
                     "Zero orientation replaced an independent tool assignment");
-        auto *report = window.findChild<QToolButton *>("checkReportToggle");
+        auto *report = window.findChild<QToolButton *>("routeActionsToggle");
         report->click();
         require(window.findChild<QLabel *>("bendPreviewStatus")->isVisible() &&
                     window.findChild<QLabel *>("bendRouteStatus")->isVisible(),
@@ -891,6 +935,14 @@ x.XCloseDisplay(d)
             window.findChild<QPushButton *>("routeRedo")->click();
         wait([&] { return !controller.hasWork(); });
         require(order(controller) == expected && step(2)->isChecked(), "Redo failed");
+        QTimer::singleShot(0, &window, [&] {
+            if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+                if (auto *advanced = dialog->findChild<QPushButton *>("routeToolAdvanced"))
+                    advanced->click();
+                else
+                    dialog->reject();
+            }
+        });
         window.findChild<QPushButton *>("routeEditTool")->click();
         window.findChild<QToolButton *>("processStage2")->click();
         require(window.findChild<QPushButton *>("checkBend")

@@ -8,6 +8,7 @@ class QPushButton;
 class QComboBox;
 class QHBoxLayout;
 class QScrollArea;
+class QVBoxLayout;
 namespace bending::ui {
 [[nodiscard]] QString routeFailureReason(const application::BendRouteError &);
 class RoutePanel final : public QWidget {
@@ -43,12 +44,13 @@ class RoutePanel final : public QWidget {
     }
     [[nodiscard]] QString statusText() const;
     [[nodiscard]] QWidget *reportWidget() const;
+    [[nodiscard]] QWidget *advancedWidget() const { return advanced_; }
     std::function<void(bool automatic, bool withTools)> onPrepare;
     std::function<void(int)> onSelect;
     std::function<void(std::optional<std::size_t>)> onHover;
     std::function<bool(std::vector<std::string>, bool grouped)> onReorder;
     std::function<void()> onModeChanged;
-    std::function<void(std::size_t)> onEditTool;
+    std::function<void()> onEditTool;
     std::function<void()> onExpandSearch;
 
   private:
@@ -79,5 +81,7 @@ class RoutePanel final : public QWidget {
     QHBoxLayout *strip_;
     QWidget *stepStrip_;
     QScrollArea *stepScroll_;
+    QWidget *advanced_;
+    QVBoxLayout *primaryLayout_, *advancedLayout_;
 };
 } // namespace bending::ui

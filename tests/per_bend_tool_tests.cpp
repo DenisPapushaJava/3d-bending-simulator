@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QLabel>
@@ -20,6 +21,7 @@
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <STEPControl_Writer.hxx>
 #include <algorithm>
@@ -118,6 +120,15 @@ int main(int argc, char **argv) {
         require(!prepare->isEnabled() && !controller.hasWork(),
                 "Missing assignments started a search");
         window.findChild<QPushButton *>("routeStep1")->click();
+        wait([&] { return !controller.hasWork(); });
+        QTimer::singleShot(0, &window, [&] {
+            if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+                if (auto *advanced = dialog->findChild<QPushButton *>("routeToolAdvanced"))
+                    advanced->click();
+                else
+                    dialog->reject();
+            }
+        });
         window.findChild<QPushButton *>("routeEditTool")->click();
         wait([&] { return !controller.hasWork(); });
         auto *scope = window.findChild<QComboBox *>("toolAssignmentScope");
@@ -332,6 +343,88 @@ int main(int argc, char **argv) {
                 require(controller.session().bend(i)->catalogTools == common,
                         "Global quick selection retained a local exception to the same pair");
             require(!controller.hasWork(), "Quick assignment unexpectedly started a CAD search");
+
+            window.findChild<QToolButton *>("processStage2")->click();
+            wait([&] { return !controller.hasWork(); });
+            const auto choosePunch = [&](int step, const core::ToolPreset &profile, bool apply) {
+                const auto stepButton =
+                    window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(step));
+                stepButton->click();
+                wait([&] { return !controller.hasWork(); });
+                const auto revision = controller.session().editRevision();
+                const auto draft = controller.routeDraft();
+                bool selected = false;
+                QTimer::singleShot(0, &window, [&] {
+                    auto *dialog = window.findChild<QDialog *>("routeToolDialog");
+                    if (!dialog)
+                        return;
+                    auto *label = dialog->findChild<QLabel *>("routeToolScope");
+                    auto *card = dialog->findChild<QToolButton *>("routeToolPunch");
+                    auto *confirm = dialog->findChild<QPushButton *>("routeToolApply");
+                    if (!label || !card || !confirm || confirm->isEnabled() ||
+                        label->text() != (step == 0 ? QStringLiteral("Все гибы")
+                                                    : QStringLiteral("Шаг %1").arg(step))) {
+                        dialog->reject();
+                        return;
+                    }
+                    if (const auto output = qEnvironmentVariable("BENDING_INLINE_TOOL_SNAPSHOT");
+                        step == 0 && !output.isEmpty())
+                        dialog->grab().save(output);
+                    QTimer::singleShot(0, dialog, [&] {
+                        auto *picker = dialog->findChild<QDialog *>("toolPickerPopup");
+                        if (!picker)
+                            return;
+                        auto *option = picker->findChild<QToolButton *>(
+                            QStringLiteral("toolOption_%1_0")
+                                .arg(QString::fromStdString(profile.id)));
+                        if (option && option->isEnabled())
+                            option->click();
+                        else
+                            picker->reject();
+                    });
+                    card->click();
+                    selected = confirm->isEnabled() && controller.routeDraft() == draft &&
+                               controller.session().editRevision() == revision &&
+                               !controller.hasWork();
+                    if (selected && apply)
+                        confirm->click();
+                    if (dialog->isVisible())
+                        dialog->reject();
+                });
+                window.findChild<QPushButton *>("routeEditTool")->click();
+                wait([&] { return !controller.hasWork(); });
+                require(selected && stepButton->isChecked() &&
+                            window.findChild<QPushButton *>("routeEditTool")->isVisible(),
+                        "Inline tool selection did not retain the scope, step or bending stage");
+                require(controller.session().editRevision() == revision + (apply ? 1 : 0),
+                        "Inline tool editing did not publish exactly one accepted revision");
+            };
+            const auto &replacement = common.punch == pair.punch ? other.punch : pair.punch;
+            const auto first = controller.session().orderedBends().front();
+            const auto firstSetup = *controller.session().bend(first);
+            choosePunch(1, replacement, false);
+            require(controller.session().bend(first)->catalogTools == firstSetup.catalogTools,
+                    "Cancelling the inline picker changed the assignment");
+            choosePunch(1, replacement, true);
+            for (const auto i : controller.session().orderedBends()) {
+                const auto &entry = *controller.session().bend(i);
+                require(entry.catalogTools->punch == (i == first ? replacement : common.punch) &&
+                            entry.catalogTools->die == common.die &&
+                            entry.catalogTools->groove == common.groove &&
+                            entry.catalogTools->dieAssembly == common.dieAssembly,
+                        "Changing a punch at one step changed the die or another step");
+            }
+            choosePunch(0, pair.punch, true);
+            for (const auto i : controller.session().orderedBends()) {
+                const auto &entry = *controller.session().bend(i);
+                require(entry.catalogTools->punch == pair.punch &&
+                            entry.catalogTools->punchAssembly ==
+                                std::optional{core::ToolAssembly{{0, 0}, 0}} &&
+                            entry.catalogTools->die == common.die &&
+                            entry.catalogTools->dieAssembly == common.dieAssembly &&
+                            !controller.bendRoute(),
+                        "A global punch edit failed to use stock for the longest stroke");
+            }
         }
         controller.shutdown();
         if (!sample) {
