@@ -252,10 +252,14 @@ int main(int argc, char **argv) {
         require(c.bendPreview() && c.bendPreview()->usesDrawingPunch() &&
                     c.bendPreview()->usesDrawingDie(),
                 "Complete real pair was replaced with generated geometry");
-        const auto scope = window.findChild<QLabel *>("bendCheckScope")->text();
-        require(scope.contains(QStringLiteral("Пуансон: по DXF")) &&
-                    scope.contains(QStringLiteral("Матрица: по DXF")),
-                "Real scope hidden");
+        auto *scope = window.findChild<QLabel *>("bendCheckScope");
+        auto *details = window.findChild<QToolButton *>("routeActionsToggle");
+        require(scope && details && !scope->isVisible(), "Technical scope should start collapsed");
+        details->click();
+        require(scope->isVisible() && scope->text().contains(QStringLiteral("Пуансон по DXF")) &&
+                    scope->text().contains(QStringLiteral("матрица по DXF")),
+                "Real scope missing from details");
+        details->click();
         if (graphics && args.contains("--snapshot"))
             require(viewer->captureImage(true).save(args.at(args.indexOf("--snapshot") + 1) +
                                                     "-wide.png"),
