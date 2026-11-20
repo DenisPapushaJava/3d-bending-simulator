@@ -601,7 +601,7 @@ void testBendWorkflow(bool graphics) {
     window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/channel-2mm.step"));
     waitUntil(finished);
     require(list->model()->rowCount() == 2 &&
-                summary->text().contains(QStringLiteral("зон сгиба: 2")),
+                summary->text().contains(QStringLiteral("Найдено гибов: 2")),
             "Recognized bends not listed");
     if (graphics) {
         waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
