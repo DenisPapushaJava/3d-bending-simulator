@@ -1,4 +1,4 @@
-#include "bending/core/ToolGeometry.h"
+#include "ToolGeometryInternal.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -75,21 +75,6 @@ std::optional<std::size_t> punchNose(const ToolDrawing &p,
             noses.push_back(i);
     }
     return noses.size() == 1 ? std::optional{noses.front()} : std::nullopt;
-}
-std::optional<ToolGeometry> punchGeometry(const ToolPreset &punch) {
-    if (!validToolPreset(punch) || !punch.parametersConfirmed || punch.kind != ToolKind::Punch ||
-        !punch.drawing)
-        return {};
-    const auto index =
-        punchNose(*punch.drawing, DetectedPunchProfile{punch.angleRadians, *punch.noseRadiusMm});
-    if (!index)
-        return {};
-    const auto &nose = punch.drawing->edges[*index];
-    ToolGeometry geometry{};
-    geometry.punchTip = {nose.center->x, nose.center->y - radius(nose)};
-    geometry.noseEdge = *index;
-    geometry.hasPunch = true;
-    return geometry;
 }
 std::optional<std::array<double, 2>> horizontalInterval(const ToolDrawing &drawing, double y,
                                                         bool single = true) {
@@ -190,6 +175,35 @@ std::optional<DetectedPunchProfile> detectPunchProfile(const ToolDrawing &drawin
     const auto &nose = drawing.edges[*index];
     return DetectedPunchProfile{pi - std::abs(nose.sweepRadians), radius(nose)};
 }
+std::optional<ToolGeometry> workingPunchGeometry(const ToolPreset &punch) {
+    if (!validToolPreset(punch) || !punch.parametersConfirmed || punch.kind != ToolKind::Punch ||
+        !punch.drawing)
+        return {};
+    const auto index =
+        punchNose(*punch.drawing, DetectedPunchProfile{punch.angleRadians, *punch.noseRadiusMm});
+    if (!index)
+        return {};
+    const auto &nose = punch.drawing->edges[*index];
+    ToolGeometry geometry{};
+    geometry.punchTip = {nose.center->x, nose.center->y - radius(nose)};
+    geometry.noseEdge = *index;
+    geometry.hasPunch = true;
+    return geometry;
+}
+std::optional<ToolGeometry> workingDieGeometry(const ToolPreset &die, std::size_t groove,
+                                               const ToolDrawing &drawing) {
+    if (!drawing.millimeters)
+        return {};
+    const auto settings = dieGroove(die, groove);
+    auto candidates = dieFeatures(drawing);
+    std::erase_if(candidates, [&](const auto &candidate) {
+        return std::abs(candidate.opening - die.openingsMm[groove]) > tolerance ||
+               std::abs(candidate.angle - settings->angleRadians) > 1.e-6;
+    });
+    if (candidates.size() != 1)
+        return {};
+    return candidates.front().geometry;
+}
 std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
     if (!validToolPreset(a.punch) || !validToolPreset(a.die) || !a.punch.parametersConfirmed ||
         !a.die.parametersConfirmed || a.punch.kind != ToolKind::Punch ||
@@ -197,7 +211,7 @@ std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
         return {};
     ToolGeometry geometry{};
     if (a.punch.drawing) {
-        const auto punch = punchGeometry(a.punch);
+        const auto punch = workingPunchGeometry(a.punch);
         if (!punch)
             return {};
         geometry = *punch;
@@ -205,20 +219,14 @@ std::optional<ToolGeometry> drawingToolGeometry(const ToolAssignment &a) {
     if (!a.die.drawing)
         return geometry.hasPunch ? std::optional{geometry} : std::nullopt;
     const auto drawing = activeDieDrawing(a.die, a.groove);
-    if (!drawing || !drawing->millimeters)
+    if (!drawing)
         return {};
-    const auto settings = dieGroove(a.die, a.groove);
-    auto candidates = dieFeatures(*drawing);
-    std::erase_if(candidates, [&](const auto &candidate) {
-        return std::abs(candidate.opening - a.die.openingsMm[a.groove]) > tolerance ||
-               std::abs(candidate.angle - settings->angleRadians) > 1.e-6;
-    });
-    if (candidates.size() != 1)
-        return {};
-    auto result = candidates.front().geometry;
-    result.punchTip = geometry.punchTip;
-    result.noseEdge = geometry.noseEdge;
-    result.hasPunch = geometry.hasPunch;
+    auto result = workingDieGeometry(a.die, a.groove, *drawing);
+    if (result) {
+        result->punchTip = geometry.punchTip;
+        result->noseEdge = geometry.noseEdge;
+        result->hasPunch = geometry.hasPunch;
+    }
     return result;
 }
 bool hasCompleteDrawingToolGeometry(const ToolAssignment &assignment) {
@@ -298,7 +306,7 @@ std::optional<PunchMount> punchMountReference(const ToolAssignment &assignment) 
     return punchMount(*assignment.punch.drawing, geometry->punchTip, assignment.punchReversed);
 }
 std::optional<bool> defaultPunchOrientation(const ToolPreset &punch) {
-    const auto geometry = punchGeometry(punch);
+    const auto geometry = workingPunchGeometry(punch);
     if (!geometry)
         return {};
     const auto &drawing = *punch.drawing;

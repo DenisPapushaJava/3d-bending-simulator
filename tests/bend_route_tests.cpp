@@ -117,13 +117,27 @@ int main(int argc, char **argv) {
                             p->pressState(40)->phase == simulation::PressPhase::Bending &&
                             cad::OcctPreviewAccess::retractionSweep(*p).IsNull(),
                         "Forming scope claimed or animated a verified return");
-                for (std::size_t frame = 0; frame < 41; ++frame)
-                    require(p->pressState(frame)->phase == strict->pressState(frame)->phase &&
-                                std::abs(p->pressState(frame)->punchTipYmm -
-                                         strict->pressState(frame)->punchTipYmm) < 1e-9 &&
-                                std::abs(p->pressState(frame)->section.angleRadians -
-                                         strict->pressState(frame)->section.angleRadians) < 1e-9,
+                for (std::size_t frame = 0; frame < 41; ++frame) {
+                    const auto *state = p->pressState(frame);
+                    const auto *referenceState = strict->pressState(frame);
+                    require(state && referenceState && state->phase == referenceState->phase &&
+                                std::abs(state->punchTipYmm - referenceState->punchTipYmm) < 1e-9 &&
+                                std::abs(state->section.angleRadians -
+                                         referenceState->section.angleRadians) < 1e-9,
                             "Manual scope rescaled or skipped a forming sample");
+                    const auto &actual = cad::OcctPreviewAccess::frame(*p, frame);
+                    const auto &reference = cad::OcctPreviewAccess::frame(*strict, frame);
+                    require(!actual.displayShape.IsNull() && !p->collisionAtFrame(frame) &&
+                                !p->machineCollisionAtFrame(frame),
+                            "Forming sample lost its geometry or successful checks");
+                    for (std::size_t side = 0; side < actual.materialTransforms.size(); ++side)
+                        for (int row = 1; row <= 3; ++row)
+                            for (int column = 1; column <= 4; ++column)
+                                require(std::abs(actual.materialTransforms[side].Value(row, column) -
+                                                 reference.materialTransforms[side].Value(row, column)) <
+                                            1e-9,
+                                        "Forming sample was published at a different position");
+                }
             }
             const auto repeated = builder.buildRoute(document, forming, {});
             const auto *hit = std::get_if<application::BendRoutePtr>(&repeated);

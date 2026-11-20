@@ -27,7 +27,7 @@ class MachineAssembly {
           TopoDS_Shape *confirmedOverlap = nullptr);
     [[nodiscard]] static std::vector<MachineCollisionEvidence>
     collisions(const PreviewFrame &, double toleranceMm, std::stop_token,
-               RigidClearanceCache * = nullptr);
+               RigidClearanceCache * = nullptr, const TopoDS_Shape *equivalentPunch = nullptr);
     [[nodiscard]] static std::vector<MachineCollisionEvidence>
     backgaugeCollisions(const PreviewFrame &, double toleranceMm, std::stop_token,
                         RigidClearanceCache * = nullptr);

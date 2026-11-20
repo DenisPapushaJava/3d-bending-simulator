@@ -61,5 +61,6 @@ struct ToolSelectionResult {
                                         const ToolPreset &punch, const ToolPreset &die,
                                         std::size_t groove);
 [[nodiscard]] ToolSelectionResult selectTools(const ToolCatalog &catalog,
-                                              const ToolSelectionRequest &request);
+                                              const ToolSelectionRequest &request,
+                                              std::stop_token stop = {});
 } // namespace bending::core

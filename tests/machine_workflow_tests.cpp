@@ -275,8 +275,15 @@ int main(int argc, char **argv) {
                 "Returning to a checked combination rebuilt CAD or lost the frame");
         preview = controller.bendPreview();
         auto *summary = window.findChild<QLabel *>("bendCheckSummary");
-        require(summary && summary->text().contains("Демонстрационный станок"),
-                "Demo scope not visible beside result");
+        auto *scope = window.findChild<QLabel *>("bendCheckScope");
+        auto *details = window.findChild<QToolButton *>("routeActionsToggle");
+        require(summary && scope && details && !scope->isVisible() &&
+                    !summary->text().contains("Демонстрационный станок"),
+                "Technical scope is duplicated in the main status");
+        details->click();
+        require(scope->isVisible() && scope->text().contains("Демонстрационный станок"),
+                "Demo scope missing from the shared details");
+        details->click();
         auto *visible = viewer->navigationMenu()
                             ? viewer->navigationMenu()->findChild<QAction *>("showMachine")
                             : nullptr;

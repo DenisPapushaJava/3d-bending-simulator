@@ -10,41 +10,45 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
+#include <optional>
 #include <vector>
 
 namespace bending::cad {
-// Exact geometry bounds, enlarged by native tolerances and the Boolean fuzzy value.
-// An overlapping/unknown box never certifies a collision or clearance.
-inline bool boundedDisjoint(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance) {
-    if (a.IsNull() || b.IsNull() || !std::isfinite(tolerance) || tolerance < 0)
-        return false;
+// Exact geometry bounds enlarged by native tolerances and the consuming query's tolerance.
+inline std::optional<Bnd_Box> conservativeGeometryBounds(const TopoDS_Shape &shape,
+                                                        double tolerance) {
+    if (shape.IsNull() || !std::isfinite(tolerance) || tolerance < 0)
+        return {};
     try {
-        Bnd_Box first, second;
-        BRepBndLib::AddOptimal(a, first, false, false);
-        BRepBndLib::AddOptimal(b, second, false, false);
-        if (first.IsVoid() || second.IsVoid() || first.IsOpen() || second.IsOpen())
-            return false;
-        const auto margin = [&](const TopoDS_Shape &s) {
-            // AddOptimal alone does not enclose every loose vertex tolerance on OCCT 7.6.
-            double native = 0;
-            for (const auto kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
-                const double value = BRep_Tool::MaxTolerance(s, kind);
-                if (!std::isfinite(value) || value < 0)
-                    return std::numeric_limits<double>::infinity();
-                native = std::max(native, value);
-            }
-            return tolerance + Precision::Confusion() + native;
-        };
-        const double firstMargin = margin(a), secondMargin = margin(b);
-        if (!std::isfinite(firstMargin) || !std::isfinite(secondMargin))
-            return false;
-        first.Enlarge(firstMargin);
-        second.Enlarge(secondMargin);
-        return first.IsOut(second);
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(shape, box, false, false);
+        if (box.IsVoid() || box.IsOpen())
+            return {};
+        // AddOptimal alone does not enclose every loose vertex tolerance on OCCT 7.6.
+        double native = 0;
+        for (const auto kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            const double value = BRep_Tool::MaxTolerance(shape, kind);
+            if (!std::isfinite(value) || value < 0)
+                return {};
+            native = std::max(native, value);
+        }
+        const double margin = tolerance + Precision::Confusion() + native;
+        if (!std::isfinite(margin))
+            return {};
+        box.Enlarge(margin);
+        return box;
     } catch (const Standard_Failure &) {
-        return false;
+        return {};
     }
+}
+
+// An overlapping or unknown box leaves the exact collision query in place.
+inline bool boundedDisjoint(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolerance) {
+    const auto first = conservativeGeometryBounds(a, tolerance);
+    if (!first)
+        return false;
+    const auto second = conservativeGeometryBounds(b, tolerance);
+    return second && first->IsOut(*second);
 }
 
 // Per-operation memo of already checked clear rigid pairs. No collision is cached:

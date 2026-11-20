@@ -405,15 +405,29 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
     // displayed angle. Preserve all rail memberships; never cache across operations.
     WholePartSkin result;
     const std::array<TopoDS_Shape, 3> bodies{flanges[0], sector, flanges[1]};
-    std::array<std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>>, 3> classifiers;
+    const double classificationTolerance = tolerance * 10;
+    struct BoundedClassifier {
+        std::unique_ptr<BRepClass3d_SolidClassifier> classifier;
+        std::optional<Bnd_Box> bounds;
+    };
+    std::array<std::vector<BoundedClassifier>, 3> classifiers;
     for (std::size_t r = 0; r < bodies.size(); ++r) {
         TopTools_IndexedMapOfShape solids;
         TopExp::MapShapes(bodies[r], TopAbs_SOLID, solids);
         if (solids.IsEmpty())
             throw std::runtime_error("A material region has no solids");
-        for (int i = 1; i <= solids.Extent(); ++i)
-            classifiers[r].push_back(std::make_unique<BRepClass3d_SolidClassifier>(solids(i)));
+        for (int i = 1; i <= solids.Extent(); ++i) {
+            if (stop.stop_requested())
+                return {};
+            const auto &solid = solids(i);
+            classifiers[r].push_back({std::make_unique<BRepClass3d_SolidClassifier>(solid),
+                                      conservativeGeometryBounds(solid, classificationTolerance)});
+        }
     }
+    // Meshes duplicate nodes at face seams. Their source coordinates and all
+    // three candidate bodies are fixed throughout this mapping.
+    constexpr std::size_t maximumMemoizedNodes = 16384;
+    std::map<std::array<double, 3>, unsigned> memberships;
     std::map<std::array<double, 3>, unsigned> boundaryMemberships;
     std::optional<SkinBoundaryLookup> boundaryLookup;
     // The intermediate mesh may contain seams from several remapped bend zones.
@@ -446,52 +460,50 @@ WholePartSkin prepareWholePartSkin(const TopoDS_Shape &source,
             if ((n & 255) == 0 && stop.stop_requested())
                 return {};
             const auto point = original->Node(n).Transformed(location.Transformation());
+            const std::array coordinates{point.X(), point.Y(), point.Z()};
+            if (std::any_of(coordinates.begin(), coordinates.end(),
+                            [](double value) { return !std::isfinite(value); }))
+                throw std::runtime_error("Non-finite source skin node");
             unsigned regions = 0;
-            for (std::size_t r = 0; r < 3; ++r) {
-                bool contained = false;
-                for (const auto &classifier : classifiers[r]) {
-                    classifier->Perform(point, tolerance * 10);
-                    if (classifier->State() == TopAbs_IN || classifier->State() == TopAbs_ON) {
-                        contained = true;
-                        break;
+            if (const auto found = memberships.find(coordinates); found != memberships.end()) {
+                regions = found->second;
+            } else {
+                for (std::size_t r = 0; r < bodies.size(); ++r)
+                    for (const auto &[classifier, bounds] : classifiers[r]) {
+                        if (bounds && bounds->IsOut(point))
+                            continue;
+                        classifier->Perform(point, classificationTolerance);
+                        if (classifier->State() == TopAbs_IN || classifier->State() == TopAbs_ON) {
+                            regions |= 1u << r;
+                            break;
+                        }
                     }
-                }
-                if (!contained)
-                    continue;
-                regions |= 1u << r;
-                ++votes[r];
-            }
-            if (!regions) {
-                // At approximate shared end curves the solid classifier can
-                // report OUT even for an exact boundary point. A bounded
-                // distance query proves ON without increasing the tolerance.
-                // The complete solid reconstruction was checked before this
-                // display-skin mapping; this never replaces collision checks.
-                const std::array coordinates{point.X(), point.Y(), point.Z()};
-                if (std::any_of(coordinates.begin(), coordinates.end(),
-                                [](double value) { return !std::isfinite(value); }))
-                    throw std::runtime_error("Non-finite source skin node");
-                if (const auto found = boundaryMemberships.find(coordinates);
-                    found != boundaryMemberships.end()) {
-                    regions = found->second;
-                } else {
-                    if (boundaryMemberships.size() >= maximumBoundaryQueries)
-                        throw std::runtime_error("Source skin boundary-query budget exceeded");
-                    if (!boundaryLookup)
-                        boundaryLookup.emplace(bodies, tolerance);
-                    regions = boundaryLookup->membership(point, stop);
-                    boundaryMemberships.emplace(coordinates, regions);
+                if (!regions) {
+                    // At approximate shared end curves, retain the exact distance
+                    // fallback and its separate budget for unique boundary points.
+                    if (const auto boundary = boundaryMemberships.find(coordinates);
+                        boundary != boundaryMemberships.end()) {
+                        regions = boundary->second;
+                    } else {
+                        if (boundaryMemberships.size() >= maximumBoundaryQueries)
+                            throw std::runtime_error("Source skin boundary-query budget exceeded");
+                        if (!boundaryLookup)
+                            boundaryLookup.emplace(bodies, tolerance);
+                        regions = boundaryLookup->membership(point, stop);
+                        boundaryMemberships.emplace(coordinates, regions);
+                    }
                 }
                 if (stop.stop_requested())
                     return {};
-                for (std::size_t r = 0; r < bodies.size(); ++r) {
-                    if (regions & (1u << r))
-                        ++votes[r];
-                }
+                if (!regions)
+                    throw std::runtime_error(
+                        "Source skin is outside the two checked components and bend");
+                if (memberships.size() < maximumMemoizedNodes)
+                    memberships.emplace(coordinates, regions);
             }
-            if (!regions)
-                throw std::runtime_error(
-                    "Source skin is outside the two checked components and bend");
+            for (std::size_t r = 0; r < bodies.size(); ++r)
+                if (regions & (1u << r))
+                    ++votes[r];
             skin.nodes.push_back({point, regions});
         }
         skin.region =
@@ -824,6 +836,18 @@ bool disjointVolumes(const TopoDS_Shape &a, const TopoDS_Shape &b, double tolera
     if (overlap && valid && amount > budget)
         *overlap = common.Shape();
     return valid && amount <= budget;
+}
+bool joinsStraightPunchSections(const core::ToolAssignment &tools) {
+    if (!tools.punchAssembly || !tools.punch.segments || tools.punchAssembly->pieces.size() < 2 ||
+        core::maximumAssemblyGap(*tools.punchAssembly) != 0)
+        return false;
+    const auto &stock = *tools.punch.segments;
+    return std::all_of(tools.punchAssembly->pieces.begin(), tools.punchAssembly->pieces.end(),
+                       [&stock](std::size_t row) {
+                           return row < stock.size() &&
+                                  stock[row].shape == core::SegmentShape::Straight &&
+                                  !stock[row].horn;
+                       });
 }
 } // namespace
 TopoDS_Shape makeRouteSector(const simulation::SingleBend &m, const gp_Ax3 &axes, double p) {
@@ -1541,6 +1565,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
         }
         std::array<TopoDS_Shape, 2> initialTools;
         std::array<std::vector<ToolDisplaySegment>, 2> initialSegments;
+        TopoDS_Shape continuousPunch;
         if (preview->setup) {
             const bool useDrawing = realTools && realTools->useDrawingGeometry;
             initialTools = makeTools(
@@ -1552,6 +1577,10 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                 for (std::size_t i = 0; i < 2; ++i)
                     if (!drawn[i].IsNull())
                         initialTools[i] = drawn[i];
+                // The original extrusion occupies the union of straight, touching sections.
+                if (withMotion && manualExtraction && !drawn[1].IsNull() &&
+                    joinsStraightPunchSections(*realTools))
+                    continuousPunch = orientPunch(drawn[1], *toolParameters);
             }
             if (realTools) {
                 initialTools[0] =
@@ -1615,7 +1644,8 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
              withMotion, manualExtraction, toolGeometry, nonRadialEnds,
              realTools = std::move(realTools), machine = std::move(machine), initialTools,
              initialSegments = std::move(initialSegments), flangeSides, innerSide, referenceFlange,
-             displaySource, displaySides, workpiece, workpieceReuse, requestedReversed, tolerance](
+             displaySource, displaySides, workpiece, workpieceReuse, requestedReversed, tolerance,
+             continuousPunch](
                 double workpieceOffsetMm, std::stop_token placementStop, bool prepareDiagnostic,
                 BackgaugeSearchStatistics *gaugeStatistics) -> BendPreviewResult {
             const auto ensureSkin = [&]() -> bool {
@@ -1909,6 +1939,7 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                 if (placedPreview->setup) {
                     frame.tools = initialTools;
                     frame.toolSegments = initialSegments;
+                    TopoDS_Shape collisionPunch;
                     if (withMotion) {
                         gp_Trsf translation;
                         translation.SetTranslation(gp_Vec(0,
@@ -1918,6 +1949,8 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                                                           0));
                         const TopLoc_Location location(translation);
                         frame.tools[1] = initialTools[1].Moved(location);
+                        if (!prepareDiagnostic && !continuousPunch.IsNull())
+                            collisionPunch = continuousPunch.Moved(location);
                         for (auto &segment : frame.toolSegments[1])
                             segment.shape = segment.shape.Moved(location);
                     }
@@ -1929,15 +1962,17 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
                         frame.machine = machine->at(lift);
                         frame.floor = machine->floor();
                     }
+                    const auto &punch = collisionPunch.IsNull() ? frame.tools[1] : collisionPunch;
                     const auto machineHits = MachineAssembly::collisions(
-                        frame, tolerance, placementStop, &rigidClearances);
+                        frame, tolerance, placementStop, &rigidClearances,
+                        collisionPunch.IsNull() ? nullptr : &collisionPunch);
                     const auto machineConflict = machineHits.empty()
                                                      ? std::optional<MachineCollision>{}
                                                      : std::optional{machineHits.front().pair};
                     const std::array<std::pair<TopoDS_Shape, TopoDS_Shape>, 3> pairs{
                         {{frame.shape, frame.tools[0]},
-                         {frame.shape, frame.tools[1]},
-                         {frame.tools[0], frame.tools[1]}}};
+                         {frame.shape, punch},
+                         {frame.tools[0], punch}}};
                     std::array<bool, 3> toolHits{};
                     std::vector<CollisionEvidence> evidence;
                     for (std::size_t pair = 0; pair < pairs.size(); ++pair) {
