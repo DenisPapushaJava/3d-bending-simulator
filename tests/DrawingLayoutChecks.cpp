@@ -551,8 +551,8 @@ void worker() {
     const auto gui = QThread::currentThread();
     ui::DrawingLayoutController controller(
         nullptr,
-        [&](auto source, const auto &, auto, std::stop_token, auto,
-            auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
+        [&](auto source, const auto &, auto, std::stop_token, auto, auto,
+            int) -> std::shared_ptr<const ui::DrawingSheetPlan> {
             outsideGui = QThread::currentThread() != gui;
             if (++calls == 1) {
                 entered = true;
@@ -592,7 +592,7 @@ void worker() {
 
     entered = false;
     auto stopping = std::make_unique<ui::DrawingLayoutController>(
-        nullptr, [&](auto source, const auto &, auto, std::stop_token stop, auto, auto) {
+        nullptr, [&](auto source, const auto &, auto, std::stop_token stop, auto, auto, int) {
             entered = true;
             std::mutex mutex;
             std::unique_lock lock(mutex);
@@ -616,8 +616,8 @@ void worker() {
     require(published == 0, "Destroyed layout controller delivered a late result");
     QString error;
     ui::DrawingLayoutController failing(nullptr,
-                                        [](auto, const auto &, auto, auto, auto,
-                                           auto) -> std::shared_ptr<const ui::DrawingSheetPlan> {
+                                        [](auto, const auto &, auto, auto, auto, auto,
+                                           int) -> std::shared_ptr<const ui::DrawingSheetPlan> {
                                             throw ui::DrawingLayoutInterrupted(
                                                 ui::DrawingLayoutInterruption::LimitExceeded,
                                                 "Test budget exhausted");

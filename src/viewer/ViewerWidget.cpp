@@ -938,6 +938,13 @@ class OcctCanvas final : public QWidget {
     bool dimensionsVisible() const {
         return dimensionsVisible_;
     }
+    void setDimensionDecimals(int decimals) {
+        if (dimensionDecimals_ == decimals)
+            return;
+        dimensionDecimals_ = decimals;
+        if (dimensionsVisible_)
+            refreshDimensions();
+    }
     void setDimensionsVisible(bool visible) {
         if (dimensionsVisible_ == visible) {
             return;
@@ -1687,6 +1694,7 @@ class OcctCanvas final : public QWidget {
         const auto up = gp_Vec(ux, uy, uz).Normalized() * separation;
         const auto right = up.Crossed(gp_Vec(dx, dy, dz)).Normalized() * separation;
         DimensionLayout layout{right, up, {}, {}, {}};
+        layout.decimals = dimensionDecimals_;
         layout.project = [this](const gp_Pnt &point) {
             int x, y;
             view_->Convert(point.X(), point.Y(), point.Z(), x, y);
@@ -1965,6 +1973,7 @@ class OcctCanvas final : public QWidget {
     FaceHighlights highlights_;
     bool cutoutsVisible_ = true;
     bool dimensionsVisible_ = false;
+    int dimensionDecimals_ = application::defaultDimensionDecimalPlaces;
     QToolButton *dimensionsButton_ = nullptr;
     QAction *dimensionsAction_ = nullptr;
     QMenu *navigationMenu_ = nullptr;
@@ -2559,6 +2568,10 @@ void ViewerWidget::setDimensionsVisible(bool visible) {
     if (impl_->canvas) {
         impl_->canvas->setDimensionsVisible(visible);
     }
+}
+void ViewerWidget::setDimensionDecimals(int decimals) {
+    if (impl_->canvas && application::validDimensionDecimalPlaces(decimals))
+        impl_->canvas->setDimensionDecimals(decimals);
 }
 bool ViewerWidget::dimensionsVisible() const {
     return impl_->canvas && impl_->canvas->dimensionsVisible();

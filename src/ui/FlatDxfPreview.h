@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bending/application/FlatPattern.h"
+#include "bending/application/MeasurementDisplay.h"
 #include <QGraphicsView>
 #include <array>
 #include <optional>
@@ -15,6 +16,7 @@ class FlatDxfPreview final : public QGraphicsView {
     void setPattern(application::FlatPatternPtr pattern);
     void setBends(bool visible, const QColor &color);
     void setMeasuring(bool enabled);
+    void setDimensionDecimals(int decimals);
     void fitDrawing();
     QSizeF drawingSize() const {
         return drawingBounds_.size();
@@ -51,11 +53,11 @@ class FlatDxfPreview final : public QGraphicsView {
     };
     struct Dimension {
         QLineF line;
-        QString text;
-        QString deltaX{};
-        QString deltaY{};
+        QString prefix;
+        bool showComponents = false;
         std::optional<Curve> arc{};
         std::array<PickKind, 2> pointKinds{PickKind::ContourPoint, PickKind::ContourPoint};
+        std::optional<double> valueMm = {};
     };
 
     static Curve curve(const application::FlatCutVertex &start, const application::PointMm &end);
@@ -65,6 +67,8 @@ class FlatDxfPreview final : public QGraphicsView {
     Dimension between(const Pick &first, const Pick &second) const;
     void clearMeasurement();
     void selectAt(const QPoint &position, Qt::KeyboardModifiers modifiers);
+    [[nodiscard]] std::array<QString, 3> dimensionText(const Dimension &) const;
+    void publishMeasurement();
     void drawQuickDimensions(QPainter &painter) const;
     void drawDimensionLabel(QPainter &painter, const Dimension &dimension, QPointF anchor,
                             const QRectF &arcBounds) const;
@@ -82,6 +86,7 @@ class FlatDxfPreview final : public QGraphicsView {
     std::optional<Dimension> dimension_;
     std::array<std::optional<Dimension>, 2> quickDimensions_;
     double fitScale_ = 1;
+    int dimensionDecimals_ = application::defaultDimensionDecimalPlaces;
     bool fitted_ = true;
     bool measuring_ = false;
 };

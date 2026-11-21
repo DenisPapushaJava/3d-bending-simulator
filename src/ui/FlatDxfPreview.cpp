@@ -6,7 +6,6 @@
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
 #include <QKeyEvent>
-#include <QLocale>
 #include <QPainter>
 #include <QScrollBar>
 #include <QWheelEvent>
@@ -44,9 +43,6 @@ QPointF project(QPointF point, QLineF line) {
                : line.p1();
 }
 
-QString mm(double value) {
-    return QLocale().toString(value, 'f', 2) + QStringLiteral(" мм");
-}
 
 QPen cosmeticPen(const QColor &color, double width) {
     QPen pen(color, width);
@@ -382,12 +378,10 @@ FlatDxfPreview::quickDimensionsAt(QPointF point) const {
             (circle || onSweep(angle(delta), edge.start, edge.sweep))) {
             const auto ray = delta * (radius / distance);
             radialDistance = rimDistance;
-            radial = Dimension{QLineF(circle ? centre - ray : centre, centre + ray),
-                               (circle ? QStringLiteral("Ø") : QStringLiteral("R")) +
-                                   mm(circle ? 2 * radius : radius),
-                               {},
-                               {},
-                               edge};
+            radial = Dimension{.line = QLineF(circle ? centre - ray : centre, centre + ray),
+                               .prefix = circle ? QStringLiteral("Ø") : QStringLiteral("R"),
+                               .arc = edge,
+                               .valueMm = circle ? 2 * radius : radius};
         }
         const std::array center{centre.x(), centre.y()};
         for (std::size_t axis = 0; axis < 2; ++axis) {
@@ -431,11 +425,9 @@ FlatDxfPreview::quickDimensionsAt(QPointF point) const {
         for (const auto &line : bendLines_)
             intersectLine(line);
     if (std::isfinite(low[0]) && std::isfinite(high[0]))
-        result[0] = Dimension{QLineF(low[0], point.y(), high[0], point.y()),
-                              QStringLiteral("X %1").arg(mm(high[0] - low[0]))};
+        result[0] = Dimension{QLineF(low[0], point.y(), high[0], point.y()), QStringLiteral("X ")};
     if (std::isfinite(low[1]) && std::isfinite(high[1]))
-        result[1] = Dimension{QLineF(point.x(), low[1], point.x(), high[1]),
-                              QStringLiteral("Y %1").arg(mm(high[1] - low[1]))};
+        result[1] = Dimension{QLineF(point.x(), low[1], point.x(), high[1]), QStringLiteral("Y ")};
     return result;
 }
 
@@ -456,11 +448,9 @@ FlatDxfPreview::Dimension FlatDxfPreview::between(const Pick &a, const Pick &b) 
         const auto &point = edgeA ? b : a;
         const auto &edge = edgeA ? a : b;
         const QLineF line(point.point, project(point.point, edge.edge));
-        const auto distance = mm(line.length());
-        const auto text = point.kind == PickKind::FreePoint
-                              ? QStringLiteral("До линии ≈ %1").arg(distance)
-                              : QStringLiteral("До линии %1").arg(distance);
-        return {line, text, {}, {}, {}, {point.kind, PickKind::ContourPoint}};
+        const auto prefix = point.kind == PickKind::FreePoint ? QStringLiteral("До линии ≈ ")
+                                                              : QStringLiteral("До линии ");
+        return {line, prefix, false, {}, {point.kind, PickKind::ContourPoint}};
     }
     if (edgeA && edgeB) {
         const auto directionA = a.edge.unitVector(), directionB = b.edge.unitVector();
@@ -475,7 +465,7 @@ FlatDxfPreview::Dimension FlatDxfPreview::between(const Pick &a, const Pick &b) 
                 const auto point =
                     a.edge.p1() + u * std::clamp(dot(a.point - a.edge.p1(), u), low, high);
                 const QLineF line(point, project(point, b.edge));
-                return {line, QStringLiteral("Между линиями %1").arg(mm(line.length()))};
+                return {line, QStringLiteral("Между линиями ")};
             }
         }
     }
@@ -483,12 +473,7 @@ FlatDxfPreview::Dimension FlatDxfPreview::between(const Pick &a, const Pick &b) 
     const auto prefix = a.kind == PickKind::FreePoint || b.kind == PickKind::FreePoint
                             ? QStringLiteral("≈ ")
                             : QString{};
-    return {line,
-            prefix + mm(line.length()),
-            QStringLiteral("ΔX %1").arg(mm(std::abs(line.dx()))),
-            QStringLiteral("ΔY %1").arg(mm(std::abs(line.dy()))),
-            {},
-            {a.kind, b.kind}};
+    return {line, prefix, true, {}, {a.kind, b.kind}};
 }
 
 void FlatDxfPreview::clearMeasurement() {
@@ -515,32 +500,57 @@ void FlatDxfPreview::selectAt(const QPoint &position, Qt::KeyboardModifiers modi
         first_.reset();
     } else if (pick.kind == PickKind::Circle) {
         const auto radial = pick.point - pick.centre;
-        dimension_ = Dimension{QLineF(pick.centre - radial, pick.centre + radial),
-                               QStringLiteral("Ø%1").arg(mm(2 * pick.radius))};
+        dimension_ = Dimension{.line = QLineF(pick.centre - radial, pick.centre + radial),
+                               .prefix = QStringLiteral("Ø"),
+                               .valueMm = 2 * pick.radius};
     } else if (pick.kind == PickKind::Arc) {
-        dimension_ = Dimension{QLineF(pick.centre, pick.point),
-                               QStringLiteral("R%1").arg(mm(pick.radius)),
-                               {},
-                               {},
-                               pick.arc};
+        dimension_ = Dimension{.line = QLineF(pick.centre, pick.point),
+                               .prefix = QStringLiteral("R"),
+                               .arc = pick.arc,
+                               .valueMm = pick.radius};
     } else {
         dimension_.reset();
         first_ = pick;
     }
-    if (!dimension_) {
+    if (!dimension_)
         emit measurementChanged(QStringLiteral("Выберите вторую точку или линию"));
-    } else if (dimension_->deltaX.isEmpty()) {
-        emit measurementChanged(dimension_->text);
-    } else {
-        const auto colors = axisColors(palette().base().color());
-        emit measurementChanged(QStringLiteral("<nobr>%1 · <span style=\"color:%2\">%3</span> · "
-                                               "<span style=\"color:%4\">%5</span></nobr>")
-                                    .arg(dimension_->text, colors.x.name(), dimension_->deltaX,
-                                         colors.y.name(), dimension_->deltaY));
-    }
+    else
+        publishMeasurement();
     viewport()->update();
 }
-
+std::array<QString, 3> FlatDxfPreview::dimensionText(const Dimension &dimension) const {
+    const auto mm = [this](double value) {
+        return QString::fromStdString(application::formatMeasurement(value, dimensionDecimals_)) +
+               QStringLiteral(" мм");
+    };
+    std::array<QString, 3> parts{dimension.prefix +
+                                 mm(dimension.valueMm.value_or(dimension.line.length()))};
+    if (dimension.showComponents) {
+        parts[1] = QStringLiteral("ΔX ") + mm(std::abs(dimension.line.dx()));
+        parts[2] = QStringLiteral("ΔY ") + mm(std::abs(dimension.line.dy()));
+    }
+    return parts;
+}
+void FlatDxfPreview::publishMeasurement() {
+    const auto parts = dimensionText(*dimension_);
+    if (!dimension_->showComponents) {
+        emit measurementChanged(parts[0]);
+        return;
+    }
+    const auto colors = axisColors(palette().base().color());
+    emit measurementChanged(
+        QStringLiteral("<nobr>%1 · <span style=\"color:%2\">%3</span> · "
+                       "<span style=\"color:%4\">%5</span></nobr>")
+            .arg(parts[0], colors.x.name(), parts[1], colors.y.name(), parts[2]));
+}
+void FlatDxfPreview::setDimensionDecimals(int decimals) {
+    if (dimensionDecimals_ == decimals)
+        return;
+    dimensionDecimals_ = decimals;
+    if (dimension_)
+        publishMeasurement();
+    viewport()->update();
+}
 void FlatDxfPreview::drawDimensionLabel(QPainter &painter, const Dimension &dimension,
                                         QPointF anchor, const QRectF &arcBounds) const {
     painter.setFont(font());
@@ -548,10 +558,10 @@ void FlatDxfPreview::drawDimensionLabel(QPainter &painter, const Dimension &dime
     const auto ink = painter.pen().color();
     const auto colors = axisColors(palette().base().color());
     const auto separator = QStringLiteral(" · ");
-    const std::array parts{dimension.text, separator, dimension.deltaX, separator,
-                           dimension.deltaY};
+    const auto labels = dimensionText(dimension);
+    const std::array parts{labels[0], separator, labels[1], separator, labels[2]};
     const std::array<QColor, 5> inks{ink, ink, colors.x, ink, colors.y};
-    const std::size_t count = dimension.deltaX.isEmpty() ? 1 : parts.size();
+    const std::size_t count = dimension.showComponents ? parts.size() : 1;
     std::array<qreal, parts.size()> widths{};
     qreal width = 14;
     for (std::size_t i = 0; i < count; ++i) {

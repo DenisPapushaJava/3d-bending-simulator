@@ -47,6 +47,7 @@ class ViewerWidget final : public QWidget {
     void fitAll();
     void setCutoutsVisible(bool visible);
     void setDimensionsVisible(bool visible);
+    void setDimensionDecimals(int decimals);
     // Presentation hint only: animation keeps the active angle and hides detailed dimensions.
     void setAnimationRunning(bool running);
     [[nodiscard]] bool isRepositioning() const;

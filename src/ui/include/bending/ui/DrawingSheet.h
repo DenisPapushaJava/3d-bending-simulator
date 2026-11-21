@@ -1,9 +1,11 @@
 #pragma once
+#include "bending/application/MeasurementDisplay.h"
 #include "bending/application/ProjectDrawingSettings.h"
 #include <QImage>
 #include <QLineF>
 #include <QRectF>
 #include <QString>
+#include <QStringList>
 #include <chrono>
 #include <stdexcept>
 #include <stop_token>
@@ -22,6 +24,8 @@ struct DrawingViewChoice {
     DrawingViewKey key;
     bool visible = true;
     std::optional<double> scale = {}; // Standard paper scale; projections share it.
+    int paperQuarterTurns = 0;
+    bool operator==(const DrawingViewChoice &) const = default;
 };
 using application::DrawingFlatSide;
 using application::DrawingPaperFormat;
@@ -56,6 +60,7 @@ struct DrawingPlacedView {
     std::size_t omittedDimensions = 0;
     std::vector<DrawingDimensionId> retainedDimensions = {}; // Optional dimensions in fallback.
     bool smallOptionalText = false;
+    int paperQuarterTurns = 0;
 };
 struct DrawingLayoutLimits {
     std::chrono::milliseconds maximumTime{30000};
@@ -78,6 +83,7 @@ struct DrawingSheetPlan {
     DrawingFlatSide flatSide = DrawingFlatSide::Automatic;
     std::vector<DrawingPlacedView> views;
     int pages = 0;
+    int dimensionDecimals = application::defaultDimensionDecimalPlaces;
     application::DrawingMeasurementCoverage coverage;
     std::size_t dimensionProbes = 0;
     std::size_t recordingBytes = 0;
@@ -85,6 +91,13 @@ struct DrawingSheetPlan {
     DrawingPaperFormat paperFormat = DrawingPaperFormat::A3;
     std::size_t omittedDimensions = 0;
 };
+struct DrawingToolRow {
+    QString punch, die;
+    double openingMm;
+    QStringList strokes;
+};
+using DrawingToolRows = std::shared_ptr<const std::vector<DrawingToolRow>>;
+
 struct DrawingTitle {
     QString name;
     QString designation;
@@ -93,6 +106,8 @@ struct DrawingTitle {
     std::optional<int> quantity;
     DrawingLayout layout = DrawingLayout::Classical;
     std::shared_ptr<const DrawingSheetPlan> plan = {};
+    bool shadeIsometric = true;
+    DrawingToolRows toolRows = {};
 };
 class DrawingSheet final {
   public:
@@ -114,7 +129,8 @@ class DrawingSheet final {
     [[nodiscard]] static std::shared_ptr<const DrawingSheetPlan>
     compose(application::BendingDrawingPtr, const std::vector<DrawingViewChoice> &,
             DrawingFlatSide = DrawingFlatSide::Automatic, std::stop_token = {},
-            DrawingLayoutLimits = {}, DrawingPaperFormat = DrawingPaperFormat::A3);
+            DrawingLayoutLimits = {}, DrawingPaperFormat = DrawingPaperFormat::A3,
+            int dimensionDecimals = application::defaultDimensionDecimalPlaces);
     [[nodiscard]] static int pageCount(const application::BendingDrawing &drawing,
                                        const DrawingTitle &title = {});
     [[nodiscard]] static application::DrawingMeasurementCoverage

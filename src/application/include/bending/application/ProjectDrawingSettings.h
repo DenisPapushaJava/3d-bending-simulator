@@ -13,6 +13,9 @@ enum class DrawingViewKind {
     Flat = 5,
     Isometric = 6
 };
+[[nodiscard]] constexpr bool supportsPaperViewRotation(DrawingViewKind kind) {
+    return kind == DrawingViewKind::Isometric || kind == DrawingViewKind::Flat;
+}
 enum class DrawingFlatSide { Automatic = 0, First = 1, Opposite = 2 };
 enum class DrawingPaperFormat { A4 = 0, A3 = 1 };
 
@@ -30,6 +33,7 @@ struct ProjectDrawingView {
     DrawingViewIdentity identity;
     bool visible;
     std::optional<double> scale;
+    int paperQuarterTurns = 0; // Clockwise on the sheet.
     bool operator==(const ProjectDrawingView &) const = default;
 };
 
@@ -44,6 +48,8 @@ struct ProjectDrawingSettings {
     std::vector<DrawingSectionEdit> sectionEdits;
     std::vector<ProjectDrawingView> views;
     DrawingPaperFormat paperFormat = DrawingPaperFormat::A4;
+    bool shadeIsometric = true;
+    bool showBendTools = false;
     bool operator==(const ProjectDrawingSettings &) const = default;
 };
 

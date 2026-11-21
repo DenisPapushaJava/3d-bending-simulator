@@ -1,9 +1,11 @@
 #include "ToolFixtures.h"
 #include "bending/application/BendRoute.h"
 #include "bending/application/DocumentSession.h"
+#include "bending/application/MeasurementDisplay.h"
 #include "bending/application/SingleBendPreview.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <numbers>
@@ -33,6 +35,27 @@ class TestDocument final : public Document {
     DocumentMetadata metadata_{};
     std::vector<FaceInfo> faces_;
 };
+void testMeasurementDisplay() {
+    require(formatMeasurement(27.4499, 0) == "27" && formatMeasurement(27.4499) == "27,4" &&
+                formatMeasurement(27.4499, 2) == "27,45" &&
+                formatMeasurement(27.4499, 3) == "27,45",
+            "Measurement did not round once to the requested number of places");
+    require(formatMeasurement(27.05) == "27,1" && formatMeasurement(-27.05) == "-27,1" &&
+                formatMeasurement(1.15) == "1,2" && formatMeasurement(2.5, 0) == "3" &&
+                formatMeasurement(2.675, 2) == "2,68" &&
+                formatMeasurement(std::nextafter(1.15, 0.)) == "1,1",
+            "Decimal halfway rounding is wrong");
+    require(formatMeasurement(-.004, 2) == "0" && formatMeasurement(-0., 3) == "0" &&
+                formatMeasurement(9.9995, 3) == "10" && formatMeasurement(1e-20, 0) == "0" &&
+                formatMeasurement(1.e10, 1) == "10000000000" &&
+                roundedMeasurement(2.675, 2) == 2.68 && !validDimensionDecimalPlaces(4),
+            "Measurement zeros, carry or exponent handling is wrong");
+    for (int decimals = 0; decimals <= 3; ++decimals)
+        require(formatMeasurement(120, decimals) == "120",
+                "Trimming fractional zeros removed an integer digit");
+    require(formatMeasurement(12.05, 3) == "12,05" && formatMeasurement(12.005, 3) == "12,005",
+            "Trimming removed an interior fractional zero");
+}
 void testAssemblyResult() {
     auto original = tool_fixture::pair(16);
     original.punch.segments = original.die.segments =
@@ -502,6 +525,7 @@ void testEndSupportReports() {
 } // namespace
 int main() {
     try {
+        testMeasurementDisplay();
         testAssemblyResult();
         testSession();
         testProjectState();

@@ -3,6 +3,7 @@
 #include "bending/application/Document.h"
 #include "bending/application/FlatPattern.h"
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <stop_token>
 #include <utility>
@@ -109,6 +110,7 @@ struct DrawingView {
     std::vector<std::vector<std::size_t>> obroundOpeningRows;  // Indices in openingAxes.
     std::vector<DrawingContourCorners> contourCorners;
     std::vector<DrawingViewArrow> viewArrows;
+    std::vector<std::array<DrawingPoint, 2>> bendBoundaries = {}; // Visible isometric intervals.
 };
 struct DrawingBend {
     double turnRadians;
@@ -207,8 +209,14 @@ struct DrawingFlatPattern {
     std::vector<std::vector<std::size_t>> repeatedBendGroups;
     std::size_t dimensionsWithoutWitnesses = 0;
 };
+struct DrawingIsometricFill {
+    int width;
+    int height;
+    std::vector<std::uint32_t> pixels; // Top-down 0xAARRGGBB, aligned to isometric view bounds.
+};
 struct BendingDrawing {
     std::array<DrawingView, 4> views; // Front, top, left: first-angle projection; isometric.
+    std::optional<DrawingIsometricFill> isometricFill = {};
     std::vector<DrawingBend> bends;
     std::size_t baseFace = 0;
     bool automaticBase = true;

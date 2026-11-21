@@ -169,7 +169,7 @@ int main(int argc, char **argv) {
                                                              ->lengthMm,
                             "The tool sizing fixture must select the shorter bend");
                     require(
-                        window.findChild<QLabel *>("toolAssemblySummary")->text().contains("80.00"),
+                        window.findChild<QLabel *>("toolAssemblySummary")->text().contains("80 мм"),
                         "The common tool request ignored the longer bend");
                 }
             }
@@ -205,11 +205,11 @@ int main(int argc, char **argv) {
             const auto status = window.findChild<QLabel *>("bendRouteStatus")->text();
             require(error && error->toolLengths && error->evaluatedOperations == 0 &&
                         !controller.bendRoute() && !controller.bendPreview() &&
-                        status.contains("80.00") && status.contains("40.00") &&
+                        status.contains("80 мм") && status.contains("40 мм") &&
                         !status.contains(QStringLiteral("порядок не найден")) &&
                         window.findChild<QLabel *>("bendCheckSummary")
                             ->text()
-                            .contains(QStringLiteral("80.00")) &&
+                            .contains(QStringLiteral("80 мм")) &&
                         window.findChild<QPushButton *>("resolveCheckProblem")->isVisible(),
                     "The short-tool diagnostic lacks lengths or pretends a geometry search failed");
             QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);

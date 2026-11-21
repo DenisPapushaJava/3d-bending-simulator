@@ -4,6 +4,7 @@
 #include "ExportFileDialog.h"
 #include "FlatDxfDialog.h"
 #include "MaterialPresets.h"
+#include "MeasurementText.h"
 #include "PartInputDialog.h"
 #include "ProcessNavigationBar.h"
 #include "StrokeSegmentsDialog.h"
@@ -38,6 +39,7 @@
 #include <QHBoxLayout>
 #include <QHelpEvent>
 #include <QIcon>
+#include <QInputDialog>
 #include <QLabel>
 #include <QListView>
 #include <QListWidget>
@@ -327,8 +329,39 @@ QString fileDropPath(const QMimeData *mime, bool inspectFile) {
         return {};
     return !inspectFile || file.isFile() ? file.filePath() : QString{};
 }
-QString number(double value) {
+QString compactValue(double value) {
     return QLocale::system().toString(value, 'g', 8);
+}
+QString number(double value) {
+    return measurementText(value);
+}
+QString partStageStatus(const DocumentSession &session, std::size_t bends) {
+    const auto &document = session.document();
+    if (!document)
+        return QStringLiteral("Открыть STEP");
+    const auto &metadata = document->metadata();
+    QString result;
+    if (bends == 0) {
+        result = isPlanarCutCandidate(metadata.bendAnalysis) ? QStringLiteral("Без гибов")
+                                                             : QStringLiteral("Гибы не распознаны");
+    } else {
+        const auto ending = bends % 10;
+        const bool teens = bends % 100 >= 11 && bends % 100 <= 14;
+        const auto unit = !teens && ending == 1                  ? QStringLiteral("гиб")
+                          : !teens && ending >= 2 && ending <= 4 ? QStringLiteral("гиба")
+                                                                 : QStringLiteral("гибов");
+        result = QStringLiteral("%1 %2").arg(bends).arg(unit);
+    }
+    const auto &manual = session.manualThicknessMm();
+    const auto thickness = manual ? manual : suggestThickness(metadata.thickness);
+    if (thickness)
+        result += QStringLiteral(" · %1 мм").arg(nonzeroMeasurementText(*thickness));
+    if (const auto &drawing = session.drawingSettings(); drawing) {
+        const auto grade = text(drawing->material).simplified();
+        if (!grade.isEmpty())
+            result += QStringLiteral(" · ") + grade;
+    }
+    return result;
 }
 QString surfaceName(SurfaceKind kind) {
     switch (kind) {
@@ -474,7 +507,7 @@ class MainWindow::Impl {
                              number(metadata.volumeMm3))
                         .arg(metadata.faceCount)
                         .arg(units.join(QStringLiteral(", ")),
-                             number(metadata.maximumToleranceMm)));
+                             compactValue(metadata.maximumToleranceMm)));
                 window->setWindowTitle(displayPath(metadata.sourcePath.filename()) +
                                        QStringLiteral(" — ") + title);
             } else {
@@ -1279,8 +1312,7 @@ class MainWindow::Impl {
             const auto &info = flat->info();
             status = QStringLiteral(
                          "Расчётная развёртка %1 × %2 мм · t %3 · гибов %4\nСвободная гибка · %5")
-                         .arg(QLocale::system().toString(info.bounds.maximum.x, 'f', 2),
-                              QLocale::system().toString(info.bounds.maximum.y, 'f', 2),
+                         .arg(number(info.bounds.maximum.x), number(info.bounds.maximum.y),
                               number(info.thicknessMm))
                          .arg(bendRows.size())
                          .arg(settings.manualK ? QStringLiteral("K задан вручную")
@@ -1297,7 +1329,7 @@ class MainWindow::Impl {
             for (const auto &b : info.bends)
                 details += QStringLiteral("\nB%1: Ri %2 · K %3 · BA %4 мм · L %5 мм")
                                .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
-                               .arg(number(b.radiusMm), number(b.k), number(b.allowanceMm),
+                               .arg(number(b.radiusMm), compactValue(b.k), number(b.allowanceMm),
                                     number(b.lengthMm()));
             flatStatus->setToolTip(details);
             if (checkFlatStatus)
@@ -1358,9 +1390,7 @@ class MainWindow::Impl {
         partPrimary->setText(document ? QStringLiteral("К инструменту →")
                                       : QStringLiteral("Открыть деталь…"));
         const auto bendCount = document ? document->metadata().bendAnalysis.bends.size() : 0;
-        processNavigation->setStageStatus(
-            0, document ? QStringLiteral("Найдено сгибов: %1").arg(bendRows.size())
-                        : QStringLiteral("Открыть STEP"));
+        processNavigation->setStageStatus(0, partStageStatus(session, bendRows.size()));
         if (document && bendCount > 1 && !toolContextId.empty()) {
             const auto assigned =
                 std::count_if(bendRows.begin(), bendRows.end(), [&](const auto &stroke) {
@@ -2019,13 +2049,13 @@ class MainWindow::Impl {
                         continue;
                     if (preview->activeBendCount() > 1)
                         result += QStringLiteral("\nУчасток %1–%2 мм:")
-                                      .arg(interval.fromMm, 0, 'f', 2)
-                                      .arg(interval.fromMm + s.bendLengthMm, 0, 'f', 2);
+                                      .arg(number(interval.fromMm))
+                                      .arg(number(interval.fromMm + s.bendLengthMm));
                     result += QStringLiteral("\nНехватка опоры у торцов: %1 / %2 мм.")
-                                  .arg(s.supportedFromMm, 0, 'f', 2)
-                                  .arg(s.bendLengthMm - s.supportedToMm, 0, 'f', 2);
+                                  .arg(nonzeroMeasurementText(s.supportedFromMm))
+                                  .arg(nonzeroMeasurementText(s.bendLengthMm - s.supportedToMm));
                     if (const auto limit = preview->endSupportLimitMm())
-                        result += QStringLiteral(" Допуск %1 мм на каждый.").arg(*limit, 0, 'f', 2);
+                        result += QStringLiteral(" Допуск %1 мм на каждый.").arg(number(*limit));
                 }
         } else if (preview && preview->pressMotion())
             result = preview->manualExtraction()
@@ -2063,10 +2093,10 @@ class MainWindow::Impl {
             QStringList unsupported;
             if (missing[1] > 1.e-5)
                 unsupported
-                    << QStringLiteral("пуансон %1 мм").arg(QLocale().toString(missing[1], 'f', 2));
+                    << QStringLiteral("пуансон %1 мм").arg(nonzeroMeasurementText(missing[1]));
             if (missing[0] > 1.e-5)
                 unsupported
-                    << QStringLiteral("матрица %1 мм").arg(QLocale().toString(missing[0], 'f', 2));
+                    << QStringLiteral("матрица %1 мм").arg(nonzeroMeasurementText(missing[0]));
             if (!unsupported.isEmpty()) {
                 supportDetail = unsupported.join(QStringLiteral(" · "));
                 addSummary(QStringLiteral("Без оснастки по линии гиба: %1.").arg(supportDetail));
@@ -2443,14 +2473,14 @@ class MainWindow::Impl {
                          QLocale::system().toString(progressValue * 100.0, 'f', 0),
                          QLocale::system().toString(
                              state->section.angleRadians * 180.0 / std::numbers::pi, 'f', 1),
-                         QLocale::system().toString(state->punchTravelMm, 'f', 1)));
+                         number(state->punchTravelMm)));
             return;
         }
         setFrameText(approximation +
                      (preview->toolSetup()
                           ? QStringLiteral("Начальное положение · статичный просмотр")
                           : QStringLiteral("%1% · поворот %2°")
-                                .arg(number(progressValue * 100.0),
+                                .arg(compactValue(progressValue * 100.0),
                                      number(progressValue * preview->model().angleRadians * 180.0 /
                                             std::numbers::pi))));
     }
@@ -3856,6 +3886,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         QStringLiteral("3D Bending Simulator · %1").arg(text(runtime.applicationVersion));
     resize(1440, 900);
     impl_->viewer = new viewer::ViewerWidget(this);
+    impl_->viewer->setDimensionDecimals(dimensionDecimalPlaces());
     impl_->viewer->setToolSegmentColors(toolSegmentColors());
     auto *workspace = new QWidget(this);
     auto *workspaceLayout = new QVBoxLayout(workspace);
@@ -4872,7 +4903,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     });
     const auto updatePlaybackSpeed = [this](int step) {
         const double multiplier = 1.0 + static_cast<double>(step) / 4.0;
-        const auto value = number(multiplier) + QStringLiteral("×");
+        const auto value = compactValue(multiplier) + QStringLiteral("×");
         impl_->playback->setInterval(qRound(50.0 / multiplier));
         impl_->playbackSpeedValue->setText(value);
         const auto description = QStringLiteral("Скорость показа %1. Диапазон 1×–10×, шаг 0,25×. "
@@ -5174,6 +5205,38 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *materials = settingsMenu->addAction(QStringLiteral("Материалы…"));
     materials->setObjectName(QStringLiteral("materialPresetsAction"));
     connect(materials, &QAction::triggered, this, [this] { editMaterialPresets(this); });
+    auto *precision = settingsMenu->addAction(QStringLiteral("Точность размеров…"));
+    precision->setObjectName(QStringLiteral("dimensionPrecisionAction"));
+    connect(precision, &QAction::triggered, this, [this] {
+        const int current = dimensionDecimalPlaces();
+        const QStringList formats{QStringLiteral("0"), QStringLiteral("0,0"),
+                                  QStringLiteral("0,00"), QStringLiteral("0,000")};
+        QInputDialog dialog(this);
+        dialog.setObjectName(QStringLiteral("dimensionPrecisionDialog"));
+        dialog.setWindowTitle(QStringLiteral("Точность размеров"));
+        dialog.setLabelText(QStringLiteral("Максимум знаков после запятой"));
+        dialog.setComboBoxItems(formats);
+        dialog.setComboBoxEditable(false);
+        dialog.setTextValue(formats[current]);
+        dialog.setOkButtonText(QStringLiteral("Сохранить"));
+        dialog.setCancelButtonText(QStringLiteral("Отмена"));
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const int decimals = formats.indexOf(dialog.textValue());
+        if (decimals == current)
+            return;
+        if (!setDimensionDecimalPlaces(decimals)) {
+            QMessageBox::warning(this, QStringLiteral("Настройки"),
+                                 QStringLiteral("Не удалось сохранить точность размеров."));
+            return;
+        }
+        impl_->viewer->setDimensionDecimals(decimals);
+        if (impl_->drawingDialog)
+            impl_->drawingDialog->setDimensionDecimals(decimals);
+        if (impl_->flatDxfDialog)
+            impl_->flatDxfDialog->setDimensionDecimals(decimals);
+        impl_->refresh();
+    });
     auto *help = menuBar()->addMenu(QStringLiteral("Справка"));
     auto *navigationHelp = help->addAction(QStringLiteral("Управление сценой"));
     navigationHelp->setShortcut(QKeySequence::HelpContents);

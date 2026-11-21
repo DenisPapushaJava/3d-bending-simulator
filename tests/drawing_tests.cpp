@@ -3,7 +3,9 @@
 #include "DrawingPaginationChecks.h"
 #include "DrawingRepeats.h"
 #include "DrawingSectionOrientationChecks.h"
+#include "DrawingSheetInternal.h"
 #include "ProfileFixtures.h"
+#include "ToolFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "bending/cad/FlatPatternBuilder.h"
@@ -25,6 +27,7 @@
 #include <BRep_Tool.hxx>
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -34,6 +37,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -96,11 +100,14 @@ std::filesystem::path native(const QString &p) {
     return std::filesystem::path(p.toUtf8().constData());
 #endif
 }
-application::DocumentPtr load(const TopoDS_Shape &shape, const QString &path) {
+void writeStep(const TopoDS_Shape &shape, const QString &path) {
     STEPControl_Writer writer;
     require(writer.Transfer(shape, STEPControl_AsIs) == IFSelect_RetDone, "STEP transfer failed");
     require(writer.Write(path.toUtf8().constData()) == IFSelect_RetDone,
             "STEP fixture write failed");
+}
+application::DocumentPtr load(const TopoDS_Shape &shape, const QString &path) {
+    writeStep(shape, path);
     auto loaded = cad::StepImporter{}.load(native(path), {}, {});
     const auto result = application::resultDocument(loaded);
     require(result != nullptr, "Fixture import failed");
@@ -168,12 +175,34 @@ void drawingMeasurements(const QString &folder) {
                          mixedDoc->metadata().bendAnalysis.bends[0].lengthMm) < 1e-5 &&
                 mixedDoc->metadata().bendAnalysis.bends.size() == 2,
             "Drawing-only additions lost or replaced a strictly recognized zone");
-    const auto excessive = build(load(withVertexGap(.025), folder + "/excessive.step"));
+    const auto unsupportedPath = folder + "/excessive.step";
+    const auto excessive = build(load(withVertexGap(.025), unsupportedPath));
     require(excessive->bends.empty() && !excessive->drawingOnlyRecognition &&
                 excessive->bendRecognitionStatus ==
                     application::BendRecognitionStatus::Unsupported &&
                 !ui::DrawingSheet::preview(*excessive, {}).isNull(),
             "Drawing measurements accepted excessive source tolerance");
+    ui::MainWindow window({"test", "test"}, std::make_shared<cad::StepImporter>());
+    window.setAutomaticPartInputPrompt(false);
+    window.show();
+    const auto *partStage = window.findChild<QToolButton *>("processStage0");
+    require(partStage, "Missing part navigation card");
+    const auto &controller = window.importController();
+    window.openStep(unsupportedPath);
+    wait([&] { return !controller.hasWork(); });
+    require(partStage->accessibleName().startsWith(QStringLiteral("Деталь · Гибы не распознаны")),
+            "The part card reported unsupported bends as a part without bends");
+
+    const QString thinPath = folder + "/thin-sheet.step";
+    writeStep(BRepPrimAPI_MakeBox(100., 80., .4).Shape(), thinPath);
+    const int previousPrecision = ui::dimensionDecimalPlaces();
+    require(ui::setDimensionDecimalPlaces(0), "Cannot set integer display precision");
+    window.openStep(thinPath);
+    wait([&] { return !controller.hasWork(); });
+    require(partStage->accessibleName() == QStringLiteral("Деталь · Без гибов · < 1 мм") &&
+                partStage->toolTip().contains(QStringLiteral("&lt; 1 мм")),
+            "The part card lost the positive thickness at integer precision");
+    require(ui::setDimensionDecimalPlaces(previousPrecision), "Cannot restore display precision");
 }
 void holePositions(const QString &folder) {
     TopoDS_Shape plate = BRepPrimAPI_MakeBox(300, 120, 6).Shape();
@@ -1897,6 +1926,331 @@ void dimensionLayout(const QString &folder) {
             "Dimension layout changed the source measurements");
     verifyRecordedDimensions(*drawing, *title.plan);
 }
+void isometricAppearance(const QString &folder) {
+    const std::array models{std::pair{QStringLiteral("angle"), fixtures::bentStrip(8, 6)},
+                            std::pair{QStringLiteral("tray"), fixtures::tray()},
+                            std::pair{QStringLiteral("opening"), fixtures::bendWithZoneOpening()}};
+    const auto output = qEnvironmentVariable("BENDING_ISOMETRIC_OUTPUT");
+    for (const auto &[name, shape] : models) {
+        application::DrawingRequest request;
+        request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+        request.reverseView = name == QStringLiteral("opening");
+        const auto drawing = build(load(shape, folder + "/" + name + ".step"), request);
+        const auto &fill = drawing->isometricFill;
+        const auto &boundaries = drawing->views[3].bendBoundaries;
+        std::cout << "Isometric " << name.toStdString() << " boundaries=" << boundaries.size()
+                  << " fill=" << bool(fill) << '\n';
+        require(fill &&
+                    std::any_of(fill->pixels.begin(), fill->pixels.end(),
+                                [](auto pixel) { return pixel != 0; }) &&
+                    std::find(fill->pixels.begin(), fill->pixels.end(), 0u) != fill->pixels.end(),
+                "Isometric fill failed to preserve the body and its transparent surroundings");
+        require(!boundaries.empty(), "Isometric view has no visible bend boundaries");
+        require(std::none_of(drawing->views.begin(), drawing->views.begin() + 3,
+                             [](const auto &v) { return !v.bendBoundaries.empty(); }),
+                "Isometric boundaries leaked into measured projections");
+        const auto choices = ui::DrawingSheet::defaultViews(*drawing);
+        ui::DrawingTitle title;
+        title.plan =
+            ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+        require(std::any_of(title.plan->views.begin(), title.plan->views.end(),
+                            [](const auto &item) {
+                                return item.key.kind == ui::DrawingViewKind::Isometric &&
+                                       item.page == 0;
+                            }),
+                "Missing compact A4 isometric view");
+        const auto shaded = ui::DrawingSheet::preview(*drawing, title);
+        if (!output.isEmpty())
+            require(ui::DrawingSheet::writePdf(output + "/" + name + "-shaded.pdf", *drawing, title)
+                        .isEmpty(),
+                    "Could not export the shaded A4 sample");
+        title.shadeIsometric = false;
+        const auto lines = ui::DrawingSheet::preview(*drawing, title);
+        require(!shaded.isNull() && !lines.isNull() && shaded.size() == lines.size() &&
+                    shaded != lines,
+                "Isometric fill toggle did not change the existing plan rendering");
+        if (!output.isEmpty())
+            require(ui::DrawingSheet::writePdf(output + "/" + name + "-lines.pdf", *drawing, title)
+                        .isEmpty(),
+                    "Could not export the line-only A4 sample");
+    }
+}
+void paperViewRotation(const QString &folder) {
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto drawing =
+        build(load(fixtures::bendWithZoneOpening(), folder + "/paper-rotation.step"), request);
+    require(drawing->flatPattern && drawing->isometricFill, "Missing views for paper rotation");
+    const ui::DrawingViewKey flat{ui::DrawingViewKind::Flat}, iso{ui::DrawingViewKind::Isometric};
+    std::vector<ui::DrawingViewChoice> choices{{flat, true, .25}, {iso, true, .25}};
+    const auto side = ui::DrawingFlatSide::Opposite;
+    const auto output = qEnvironmentVariable("BENDING_PAPER_ROTATION_OUTPUT");
+    ui::drawing::LayoutContext baseline({}, {});
+    baseline.choices = &choices;
+    baseline.flatSide = side;
+    const auto &flatBase = baseline.view(*drawing, flat);
+    const auto &isoBase = baseline.view(*drawing, iso);
+    const auto mid = [](const auto &view) {
+        return QPointF((view.minimum.x + view.maximum.x) / 2,
+                       (view.minimum.y + view.maximum.y) / 2);
+    };
+    const auto raster = [&](int turns) {
+        QImage image(256, 256, QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        ui::drawing::paintIsometricFill(painter, *drawing, QPointF(128, 128), .25, turns);
+        painter.end();
+        return image;
+    };
+    const auto originalFill = raster(0);
+    for (int turns = 0; turns < 4; ++turns) {
+        choices[0].paperQuarterTurns = turns;
+        choices[1].paperQuarterTurns = (4 - turns) % 4;
+        ui::drawing::LayoutContext context({}, {});
+        context.choices = &choices;
+        context.flatSide = side;
+        for (const auto &choice : choices) {
+            const auto &before = choice.key == flat ? flatBase : isoBase;
+            const auto &after = context.view(*drawing, choice.key);
+            const auto t = QTransform().rotate(-90 * choice.paperQuarterTurns);
+            require(before.paths.size() == after.paths.size(), "Rotation lost drawing paths");
+            for (std::size_t i = 0; i < before.paths.size(); ++i) {
+                const auto &a = before.paths[i].points;
+                const auto &b = after.paths[i].points;
+                require(a.size() == b.size(), "Rotation lost contour or opening vertices");
+                for (std::size_t j = 0; j < a.size(); ++j) {
+                    const auto delta = QPointF(b[j].x, b[j].y) - mid(after) -
+                                       t.map(QPointF(a[j].x, a[j].y) - mid(before));
+                    require(std::hypot(delta.x(), delta.y()) < 1.e-7,
+                            "Paper rotation placed a contour point incorrectly");
+                }
+            }
+        }
+        const auto &blank = context.view(*drawing, flat);
+        require(blank.dimensions.size() == flatBase.dimensions.size() &&
+                    std::equal(blank.dimensions.begin(), blank.dimensions.end(),
+                               flatBase.dimensions.begin(),
+                               [](const auto &a, const auto &b) {
+                                   return a.valueMm == b.valueMm && a.witnesses && b.witnesses;
+                               }),
+                "Paper rotation lost measured flat dimensions or witnesses");
+        const auto expectedFill = originalFill.transformed(QTransform().rotate(90 * turns));
+        require(raster(turns) == expectedFill, "Isometric fill does not follow the paper turn");
+        ui::DrawingTitle title;
+        title.plan =
+            ui::DrawingSheet::compose(drawing, choices, side, {}, {}, ui::DrawingPaperFormat::A4);
+        require(title.plan->flatSide == side && !title.plan->views.empty(),
+                "Paper rotation changed the selected side or lost the layout");
+        for (const auto &at : title.plan->views) {
+            require(at.recording && at.scale == .25 &&
+                        at.paperQuarterTurns == choices[at.key == flat ? 0 : 1].paperQuarterTurns,
+                    "Rotation changed the fixed scale or was lost in the sheet plan");
+            if (at.key == flat)
+                require(std::count_if(at.dimensions.begin(), at.dimensions.end(),
+                                      [](const auto &d) {
+                                          return d.source == ui::DrawingDimensionSource::Overall;
+                                      }) == 2,
+                        "Rotated PDF blank lost its two overall dimensions");
+        }
+        const auto pdf =
+            (output.isEmpty() ? folder : output) + QStringLiteral("/views-%1.pdf").arg(turns * 90);
+        require(ui::DrawingSheet::writePdf(pdf, *drawing, title).isEmpty(),
+                "PDF export lost a rotated view");
+    }
+}
+void toolNotesOnPaper(const QString &folder) {
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, .45, 1};
+    const auto drawing = build(load(fixtures::channel(), folder + "/tool-notes.step"), request);
+    auto choices = ui::DrawingSheet::defaultViews(*drawing);
+    ui::DrawingTitle title;
+    title.name = QStringLiteral("Пример оснастки");
+    title.plan =
+        ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+    const auto plain = ui::DrawingSheet::preview(*drawing, title);
+    const auto drawingPages = title.plan->pages;
+    const ui::DrawingToolRow first{
+        QStringLiteral("ST1405S"), QStringLiteral("2067-1"), 22, {QStringLiteral("1: B01")}};
+    const ui::DrawingToolRow second{
+        QStringLiteral("1063"), QStringLiteral("2067-1"), 35, {QStringLiteral("2: B02")}};
+    const auto output = qEnvironmentVariable("BENDING_TOOL_NOTES_OUTPUT");
+    const auto write = [&](const QString &name) {
+        const auto pdf = (output.isEmpty() ? folder : output) + "/" + name + ".pdf";
+        require(ui::DrawingSheet::writePdf(pdf, *drawing, title).isEmpty(),
+                "Cannot export tool notes in PDF");
+    };
+    title.toolRows = std::make_shared<const std::vector<ui::DrawingToolRow>>(std::vector{first});
+    require(ui::DrawingSheet::pageCount(*drawing, title) == drawingPages &&
+                ui::DrawingSheet::preview(*drawing, title) != plain,
+            "Common tooling did not fit on the first drawing sheet");
+    write(QStringLiteral("common"));
+    title.toolRows =
+        std::make_shared<const std::vector<ui::DrawingToolRow>>(std::vector{first, second});
+    require(ui::DrawingSheet::pageCount(*drawing, title) == drawingPages + 1 &&
+                !ui::DrawingSheet::preview(*drawing, title, drawingPages).isNull(),
+            "Tool table overlapped the isometric view or lost its continuation");
+    write(QStringLiteral("per-stroke"));
+    std::erase_if(choices, [](const auto &choice) {
+        return choice.key.kind == ui::DrawingViewKind::Isometric;
+    });
+    title.plan =
+        ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+    require(ui::DrawingSheet::pageCount(*drawing, title) == title.plan->pages,
+            "Small tool table did not use the free area on the first sheet");
+    write(QStringLiteral("inset"));
+    std::vector<ui::DrawingToolRow> longTable;
+    for (int i = 1; i <= 60; ++i)
+        longTable.push_back({QString(114, QLatin1Char('W')) + QString::number(i),
+                             second.die,
+                             35,
+                             {QStringLiteral("%1: B%1").arg(i, 2, 10, QLatin1Char('0'))}});
+    title.toolRows = std::make_shared<const std::vector<ui::DrawingToolRow>>(std::move(longTable));
+    const auto longNotes = ui::drawing::prepareToolPaperNotes(title);
+    require(longNotes.extraPages() > 1 &&
+                ui::drawing::toolNoteOnPage(longNotes, *title.plan, 0) ==
+                    QStringLiteral("Оснастка по ходам · листы %1-%2")
+                        .arg(title.plan->pages + 1)
+                        .arg(title.plan->pages + longNotes.extraPages()),
+            "Long tooling table lost its continuation sheet range");
+    write(QStringLiteral("long-table"));
+
+    auto pagedChoices = ui::DrawingSheet::defaultViews(*drawing);
+    for (auto &choice : pagedChoices)
+        if (choice.key.kind == ui::DrawingViewKind::Projection)
+            choice.scale = .5;
+    title.plan =
+        ui::DrawingSheet::compose(drawing, pagedChoices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+    const auto sheetOf = [&](ui::DrawingViewKind kind) {
+        const auto view = std::find_if(title.plan->views.begin(), title.plan->views.end(),
+                                       [kind](const auto &at) { return at.key.kind == kind; });
+        require(view != title.plan->views.end(), "Missing view in paginated tooling fixture");
+        return view->page;
+    };
+    const int sectionPage = sheetOf(ui::DrawingViewKind::Section);
+    const int flatPage = sheetOf(ui::DrawingViewKind::Flat);
+    require(sectionPage > 0 && flatPage > 0 && sectionPage != flatPage,
+            "Tool note fixture must place its section and flat on their own sheets");
+    const auto header = [&](int page) {
+        const auto preview = ui::DrawingSheet::preview(*drawing, title, page);
+        const auto paper = ui::DrawingSheet::paperSizeMm(title.plan->paperFormat);
+        return preview.copy(0, 0, preview.width(),
+                            static_cast<int>(22 * preview.width() / paper.width()));
+    };
+    title.toolRows.reset();
+    const auto firstHeader = header(0);
+    const auto sectionHeader = header(sectionPage);
+    const auto flatHeader = header(flatPage);
+    title.toolRows = std::make_shared<const std::vector<ui::DrawingToolRow>>(std::vector{first});
+    require(header(0) != firstHeader && header(sectionPage) == header(0) &&
+                header(flatPage) == flatHeader &&
+                ui::DrawingSheet::pageCount(*drawing, title) == title.plan->pages,
+            "Common tooling must repeat on the section sheet and skip the flat sheet");
+    write(QStringLiteral("common-paged"));
+    title.execution = QString(60, QChar(u'Ш'));
+    const auto commonNotes = ui::drawing::prepareToolPaperNotes(title);
+    require(ui::DrawingSheet::pageCount(*drawing, title) == title.plan->pages &&
+                ui::drawing::toolNoteOnPage(commonNotes, *title.plan, sectionPage) ==
+                    QStringLiteral("Оснастка · пуансон ST1405S · матрица 2067-1 · V22 мм"),
+            "Wrapped drawing parameters moved common tooling to a table");
+    write(QStringLiteral("common-paged-long-header"));
+    title.execution.clear();
+    title.toolRows =
+        std::make_shared<const std::vector<ui::DrawingToolRow>>(std::vector{first, second});
+    const auto tableNotes = ui::drawing::prepareToolPaperNotes(title);
+    const auto tableReference =
+        QStringLiteral("Оснастка по ходам · лист %1").arg(title.plan->pages + 1);
+    require(header(0) != firstHeader && header(sectionPage) == header(0) &&
+                header(flatPage) == flatHeader && tableNotes.extraPages() == 1 &&
+                ui::drawing::toolNoteOnPage(tableNotes, *title.plan, 0) == tableReference &&
+                ui::drawing::toolNoteOnPage(tableNotes, *title.plan, sectionPage) == tableReference &&
+                ui::drawing::toolNoteOnPage(tableNotes, *title.plan, flatPage).isEmpty(),
+            "The tool table reference must point to the appendix from the first and section sheets");
+    write(QStringLiteral("per-stroke-paged"));
+    title.execution = QString(60, QChar(u'Ш'));
+    write(QStringLiteral("per-stroke-paged-long-header"));
+
+    title.execution.clear();
+    title.plan = ui::DrawingSheet::compose(drawing, ui::DrawingSheet::defaultViews(*drawing), {},
+                                           {}, {}, ui::DrawingPaperFormat::A3);
+    title.toolRows = std::make_shared<const std::vector<ui::DrawingToolRow>>(std::vector{first});
+    write(QStringLiteral("common-a3"));
+}
+void toolNotesWorkflow(const QString &folder) {
+    const auto source = folder + "/verified-tools.step";
+    load(fixtures::bentStrip(4, 2, std::numbers::pi / 2, 300, true, 60), source);
+    auto importer = std::make_shared<cad::StepImporter>();
+    ui::MainWindow window({"test", "test"}, importer);
+    window.setAutomaticPartInputPrompt(false);
+    window.setDrawingBuilder(std::make_shared<cad::BendingDrawingBuilder>());
+    window.show();
+    window.openStep(source);
+    auto &c = window.importController();
+    wait([&] { return !c.hasWork(); });
+    require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .45, 1}),
+            "Cannot set material for tooling notes");
+    auto *entry = window.findChild<QToolButton *>("drawingStageButton");
+    require(entry && entry->isEnabled(), "Cannot open tooling-note drawing");
+    entry->click();
+    auto *dialog = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(dialog, "Missing tooling-note drawing dialog");
+    auto *exportPdf = dialog->findChild<QPushButton *>("exportDrawingPdf");
+    auto *check = dialog->findChild<QCheckBox *>("drawingShowBendTools");
+    auto *hint = dialog->findChild<QLabel *>("drawingBendToolsHint");
+    auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
+    auto *requisites = dialog->findChild<QToolButton *>("drawingTitleOptions");
+    auto *material = dialog->findChild<QComboBox *>("drawingMaterialChoices");
+    auto *quantity = dialog->findChild<QSpinBox *>("drawingQuantity");
+    require(exportPdf && check && hint && preview && requisites && material && quantity,
+            "Tooling options or drawing footer are missing");
+    wait([&] { return exportPdf->isEnabled(); });
+    const auto y = [&](const QWidget *widget) { return widget->mapTo(dialog, QPoint{}).y(); };
+    const auto compactFooter = [&] {
+        return y(check) < y(material) && y(material) < y(quantity) &&
+               y(material) - (y(check) + check->height()) <= check->fontMetrics().height();
+    };
+    require(!requisites->isChecked() && check->isVisible() && !check->isChecked() &&
+                compactFooter(),
+            "The unchecked tooling option must be above material and quantity");
+    const auto drawing = c.drawing();
+    check->setChecked(true);
+    require(hint->isVisible() && exportPdf->isEnabled() &&
+                c.session().drawingSettings()->showBendTools && c.drawing() == drawing,
+            "No-route tooling request blocked an ordinary drawing");
+    const auto plain = preview->pixmap().toImage();
+
+    auto assignment = tool_fixture::tangPair();
+    assignment.machineModel = core::MachineModel::DemoPressV3;
+    assignment.punch.lengthMm = assignment.die.lengthMm = 300;
+    assignment.backgauge.emplace();
+    require(c.setBendToolAssignment(0, assignment) && hint->isVisible() &&
+                preview->pixmap().toImage() == plain,
+            "Tool selection appeared before route acceptance");
+    application::BendRouteRequest route;
+    route.withTools = true;
+    route.automatic = true;
+    route.operations.push_back({c.session().bend(0)->id, 0, *c.session().bendTarget(0),
+                                core::toolParameters(assignment), assignment});
+    require(c.prepareBendRoute(route, std::make_shared<cad::SingleBendPreviewBuilder>()),
+            "Cannot start checking the tooling-note route");
+    wait([&] { return !c.hasWork(); });
+    if (const auto error = c.bendRouteError())
+        throw std::runtime_error(error->detail);
+    wait([&] { return exportPdf->isEnabled(); });
+    require(c.bendRoute() && !hint->isVisible() && c.drawing() == drawing &&
+                preview->pixmap().toImage() != plain,
+            "Accepted tooling did not appear on the unchanged drawing");
+    wait(compactFooter);
+    const auto snapshot = qEnvironmentVariable("BENDING_TOOL_NOTES_SNAPSHOT");
+    if (!snapshot.isEmpty())
+        require(dialog->grab().save(snapshot), "Cannot capture accepted tooling in preview");
+    assignment.punch.id += "-changed";
+    assignment.punch.code += "-changed";
+    require(c.setBendToolAssignment(0, assignment) && !c.bendRoute() && hint->isVisible() &&
+                exportPdf->isEnabled() && preview->pixmap().toImage() == plain,
+            "Stale tooling remained in the drawing after an assignment change");
+    c.closeDocument();
+    window.close();
+}
 void composition(const QString &folder) {
     dimensionLayout(folder);
     application::DrawingRequest request;
@@ -2775,6 +3129,8 @@ void workflow(const QString &folder) {
                                      : sample);
     wait([&] { return !c.hasWork(); });
     require(c.session().document() != nullptr, "Workflow import failed");
+    auto *partStage = window.findChild<QToolButton *>("processStage0");
+    require(partStage, "Missing part navigation card");
     const auto manualK =
         QApplication::arguments().contains(QStringLiteral("--workspace-sample-only"))
             ? std::optional<double>{.45}
@@ -2846,6 +3202,58 @@ void workflow(const QString &folder) {
     if (!initialSnapshot.isEmpty())
         require(dialog->grab().save(initialSnapshot + ".default.png"),
                 "Cannot save default drawing workspace");
+    if (QApplication::arguments().contains(QStringLiteral("--precision-workflow-only"))) {
+        auto *action = window.findChild<QAction *>("dimensionPrecisionAction");
+        auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
+        auto *views = dialog->findChild<QListWidget *>("drawingViews");
+        require(action && preview && views && ui::dimensionDecimalPlaces() == 1,
+                "Dimension precision is missing or did not default to tenths");
+        const auto choices = ui::DrawingSheet::defaultViews(*c.drawing());
+        const auto flat = std::find_if(choices.begin(), choices.end(), [](const auto &choice) {
+            return choice.key.kind == ui::DrawingViewKind::Flat;
+        });
+        require(flat != choices.end(), "Precision fixture is missing its fractional flat size");
+        views->setCurrentRow(static_cast<int>(flat - choices.begin()));
+        const auto ordinary = preview->pixmap().toImage();
+        const auto drawing = c.drawing();
+        bool chosen = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto *input = window.findChild<QInputDialog *>("dimensionPrecisionDialog");
+            if (!input)
+                return;
+            chosen = input->comboBoxItems() == QStringList({"0", "0,0", "0,00", "0,000"}) &&
+                     input->textValue() == QStringLiteral("0,0");
+            input->setTextValue(QStringLiteral("0,000"));
+            input->accept();
+        });
+        action->trigger();
+        require(chosen && ui::dimensionDecimalPlaces() == 3 && !exportButton->isEnabled(),
+                "Dimension setting did not invalidate the old paper layout");
+        wait([&] { return exportButton->isEnabled(); });
+        require(ordinary != preview->pixmap().toImage() && c.drawing() == drawing &&
+                    c.session().editRevision() == revision,
+                "PDF dimensions did not update or re-ran the CAD calculation");
+        const auto preferencesFile = ui::preferences()->fileName();
+        ui::setPreferencesFile(preferencesFile);
+        require(ui::dimensionDecimalPlaces() == 3, "Dimension precision was lost on reload");
+        const auto output = qEnvironmentVariable("BENDING_PRECISION_OUTPUT");
+        if (!output.isEmpty()) {
+            for (int decimals = 0; decimals <= 3; ++decimals) {
+                ui::DrawingTitle title;
+                title.plan = ui::DrawingSheet::compose(drawing, choices, {}, {}, {},
+                                                       ui::DrawingPaperFormat::A4, decimals);
+                require(title.plan->dimensionDecimals == decimals &&
+                            ui::DrawingSheet::writePdf(
+                                output + QStringLiteral("/dimensions-%1.pdf").arg(decimals),
+                                *drawing, title)
+                                .isEmpty(),
+                        "Could not export the selected decimal precision");
+            }
+        }
+        c.closeDocument();
+        window.close();
+        return;
+    }
     if (QApplication::arguments().contains(QStringLiteral("--reference-controls-only"))) {
         auto *views = dialog->findChild<QListWidget *>("drawingViews");
         auto *image = dialog->findChild<QLabel *>("drawingPreviewImage");
@@ -2932,6 +3340,74 @@ void workflow(const QString &folder) {
             "The A4 plan lost its format or drawing views");
     const auto a4Preview = ui::DrawingSheet::preview(*paperSource, a4Title, 0, 594);
     require(a4Preview.size() == QSize(594, 420), "The A4 preview used the wrong paper size");
+    auto *paperViews = dialog->findChild<QListWidget *>("drawingViews");
+    auto *fillControl = dialog->findChild<QCheckBox *>("drawingIsometricFill");
+    auto *previewImage = dialog->findChild<QLabel *>("drawingPreviewImage");
+    const auto paperChoices = ui::DrawingSheet::defaultViews(*paperSource);
+    const auto iso = std::find_if(paperChoices.begin(), paperChoices.end(), [](const auto &choice) {
+        return choice.key.kind == ui::DrawingViewKind::Isometric;
+    });
+    require(paperViews && fillControl && previewImage && iso != paperChoices.end() &&
+                !fillControl->isVisible(),
+            "Isometric fill option appeared outside the isometric view");
+    paperViews->setCurrentRow(static_cast<int>(iso - paperChoices.begin()));
+    require(fillControl->isVisible() && fillControl->isChecked(),
+            "Isometric fill option is missing or disabled by default");
+    const auto shadedImage = previewImage->pixmap().toImage();
+    fillControl->click();
+    require(exportButton->isEnabled() && c.drawing() == paperSource && !c.hasWork() &&
+                !c.session().drawingSettings()->shadeIsometric &&
+                shadedImage != previewImage->pixmap().toImage(),
+            "Toggling isometric fill did not only repaint the completed layout");
+    fillControl->click();
+    require(previewImage->pixmap().toImage() == shadedImage && exportButton->isEnabled(),
+            "Restoring the fill changed the completed drawing");
+    auto *rotation = dialog->findChild<QWidget *>("drawingViewRotation");
+    auto *angle = dialog->findChild<QLabel *>("drawingViewAngle");
+    auto *left = dialog->findChild<QToolButton *>("drawingViewRotateLeft");
+    auto *right = dialog->findChild<QToolButton *>("drawingViewRotateRight");
+    require(rotation && angle && left && right && rotation->isVisible() && angle->text() == "0°" &&
+                !left->icon().isNull() && !right->icon().isNull(),
+            "Isometric paper-rotation controls are missing");
+    right->click();
+    require(angle->text() == "90°" && !exportButton->isEnabled(),
+            "Isometric rotation did not invalidate the old PDF plan");
+    wait([&] { return exportButton->isEnabled(); });
+    require(c.drawing() == paperSource && c.session().editRevision() == revision && !c.hasWork() &&
+                previewImage->pixmap().toImage() != shadedImage,
+            "Isometric rotation did not recompose using the original CAD snapshot");
+    const auto flatChoice =
+        std::find_if(paperChoices.begin(), paperChoices.end(), [](const auto &choice) {
+            return choice.key.kind == ui::DrawingViewKind::Flat;
+        });
+    require(flatChoice != paperChoices.end(), "Missing flat view in rotation workflow");
+    paperViews->setCurrentRow(static_cast<int>(flatChoice - paperChoices.begin()));
+    require(rotation->isVisible() && angle->text() == "0°",
+            "Flat view inherited the isometric angle");
+    left->click();
+    wait([&] { return exportButton->isEnabled(); });
+    const auto &turned = c.session().drawingSettings()->views;
+    const auto savedTurns = [&](ui::DrawingViewKind kind) {
+        const auto found = std::find_if(turned.begin(), turned.end(), [kind](const auto &view) {
+            return view.identity.kind == kind;
+        });
+        return found == turned.end() ? -1 : found->paperQuarterTurns;
+    };
+    require(angle->text() == "270°" && savedTurns(ui::DrawingViewKind::Isometric) == 1 &&
+                savedTurns(ui::DrawingViewKind::Flat) == 3 && c.drawing() == paperSource,
+            "Independent paper rotations were not kept in drawing settings");
+    if (QApplication::arguments().contains(QStringLiteral("--paper-rotation-ui-only"))) {
+        if (!initialSnapshot.isEmpty())
+            require(dialog->grab().save(initialSnapshot), "Cannot capture the rotation controls");
+        return;
+    }
+    right->click();
+    paperViews->setCurrentRow(static_cast<int>(iso - paperChoices.begin()));
+    left->click();
+    wait([&] { return exportButton->isEnabled(); });
+    require(angle->text() == "0°", "Reverse paper turn did not reach the initial angle");
+    paperViews->setCurrentRow(0);
+    require(!rotation->isVisible(), "Paper rotation appeared on a linked projection");
     const auto a4Path = folder + "/a4.pdf";
     require(ui::DrawingSheet::writePdf(a4Path, *paperSource, a4Title).isEmpty(),
             "Cannot export A4 PDF");
@@ -2957,7 +3433,6 @@ void workflow(const QString &folder) {
     paperA3->click();
     require(exportButton->isEnabled() && c.drawing() == paperSource && !c.hasWork(),
             "Returning to A3 did not reuse the completed sheet plan");
-    auto *paperViews = dialog->findChild<QListWidget *>("drawingViews");
     auto *topView = paperViews->item(1);
     topView->setCheckState(Qt::Unchecked);
     paperA4->click();
@@ -2987,15 +3462,27 @@ void workflow(const QString &folder) {
                 material->findText(QStringLiteral("09Г2С")) > 0 &&
                 material->findText(QStringLiteral("AISI 304")) < 0,
             "The drawing did not default to the selected material category");
+    auto *partStatus = partStage->findChild<QLabel *>("processStepStatus");
+    require(partStatus && !partStatus->text().isEmpty(), "Missing part card subtitle");
+    const auto partSubtitle = partStatus->text();
+    const auto partSummary = partStage->accessibleName();
     const auto beforeMaterialEdit = c.drawing();
     material->setCurrentIndex(material->findText(QStringLiteral("Ст3")));
     require(c.session().drawingSettings() &&
                 c.session().drawingSettings()->material == QStringLiteral("Ст3").toStdString() &&
                 c.drawing() == beforeMaterialEdit && !c.hasWork(),
             "A drawing designation did not persist or restarted CAD");
+    wait([&] { return partStage->accessibleName() == partSummary + QStringLiteral(" · Ст3"); });
+    const auto longGrade = QStringLiteral("Эталонная марка листовой стали специальной поставки");
+    material->setEditText(longGrade);
+    wait([&] { return partStage->accessibleName().endsWith(longGrade); });
+    require(partStatus->text().startsWith(partSubtitle + QStringLiteral(" · ")) &&
+                partStatus->text().endsWith(QChar(0x2026)) && partStage->toolTip().contains(longGrade),
+            "A long grade hid the part data or was lost in the tooltip");
     material->setCurrentIndex(0);
     require(c.session().drawingSettings()->material.empty(),
             "Returning to the material category retained an explicit designation");
+    wait([&] { return partStage->accessibleName() == partSummary; });
     auto *qty = dialog->findChild<QSpinBox *>("drawingQuantity");
     qty->setValue(37);
     const auto oldDrawing = c.drawing();
@@ -3202,10 +3689,11 @@ void workflow(const QString &folder) {
     const auto selectedPage = page->value();
     const auto totalPages = page->maximum();
     dialog->resize(1500, 950);
-    const auto expandedPaper = fittedPaper();
-    require(expandedPaper.width() > originalPaper.width() &&
-                expandedPaper.height() > originalPaper.height(),
-            "Expanding the window did not enlarge the paper and its sharp raster");
+    wait([&] {
+        return preview->width() > originalPaper.width() &&
+               preview->height() > originalPaper.height();
+    });
+    fittedPaper();
     if (!snapshot.isEmpty())
         require(dialog->grab().save(snapshot + ".expanded.png"),
                 "Cannot save the expanded preview snapshot");
@@ -3213,10 +3701,11 @@ void workflow(const QString &folder) {
     auto *titleOptions = dialog->findChild<QToolButton *>("drawingTitleOptions");
     require(titleOptions, "Missing title-block editor disclosure");
     titleOptions->setChecked(true);
-    const auto compactPaper = fittedPaper();
-    require(compactPaper.width() < originalPaper.width() &&
-                compactPaper.height() < originalPaper.height(),
-            "Shrinking the window did not reduce the paper and its sharp raster");
+    wait([&] {
+        return preview->width() < originalPaper.width() &&
+               preview->height() < originalPaper.height();
+    });
+    fittedPaper();
     require(page->value() == selectedPage && page->maximum() == totalPages,
             "Window resizing changed the selected page or page count");
     auto *name = dialog->findChild<QLineEdit *>("drawingName");
@@ -3457,6 +3946,10 @@ void workflow(const QString &folder) {
     });
     require(reopened->findChild<QToolButton *>("drawingPaperA4")->isChecked(),
             "Reopened preview did not reset a previously saved A3 to A4");
+    auto *reopenedMaterial = reopened->findChild<QComboBox *>("drawingMaterialChoices");
+    require(reopenedMaterial, "Missing material choices in reopened drawing");
+    reopenedMaterial->setCurrentIndex(reopenedMaterial->findText(QStringLiteral("Ст3")));
+    wait([&] { return partStage->accessibleName() == partSummary + QStringLiteral(" · Ст3"); });
     require(c.setUnfoldSettings({core::SheetMaterial::MildSteel, .5, 1}) && !c.drawing(),
             "Material rule change retained an obsolete PDF snapshot");
     require(reopened->findChild<QLabel *>("drawingPreviewImage")->pixmap().isNull() &&
@@ -3469,6 +3962,13 @@ void workflow(const QString &folder) {
     require(reopened.isNull(), "Closing a busy preview did not delete the window");
     wait([&] { return !c.hasWork(); });
     require(!c.drawing(), "Closing a busy preview published its cancelled sheet");
+    require(c.setUnfoldSettings({core::SheetMaterial::StainlessSteel, .5, 1}),
+            "Cannot change the material category for the part card");
+    require(c.session().drawingSettings() && c.session().drawingSettings()->material.empty(),
+            "Changing material category retained an explicit grade");
+    wait([&] { return partStage->accessibleName() == partSummary; });
+    require(!partStage->toolTip().contains(QStringLiteral("Ст3")),
+            "The previous grade stayed in the part card tooltip");
     action->trigger();
     QPointer<QDialog> last = window.findChild<QDialog *>("bendingDrawingDialog");
     require(last, "Cannot reopen the cancelled preview");
@@ -3495,6 +3995,30 @@ int main(int argc, char **argv) {
     try {
         if (app.arguments().contains(QStringLiteral("--references-only"))) {
             drawingReferenceChecks();
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--precision-workflow-only"))) {
+            workflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--tool-notes-only"))) {
+            toolNotesOnPaper(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--tool-notes-workflow-only"))) {
+            toolNotesWorkflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--paper-rotation-only"))) {
+            paperViewRotation(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--paper-rotation-ui-only"))) {
+            workflow(temp.path());
+            return 0;
+        }
+        if (app.arguments().contains(QStringLiteral("--isometric-only"))) {
+            isometricAppearance(temp.path());
             return 0;
         }
         if (app.arguments().contains(QStringLiteral("--window-placement-only"))) {
@@ -3585,6 +4109,10 @@ int main(int argc, char **argv) {
         flatDrawing(temp.path());
         drawingLayoutChecks();
         composition(temp.path());
+        isometricAppearance(temp.path());
+        paperViewRotation(temp.path());
+        toolNotesOnPaper(temp.path());
+        toolNotesWorkflow(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());
         obliqueSectionFallback(temp.path());

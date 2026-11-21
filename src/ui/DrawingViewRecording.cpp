@@ -35,7 +35,7 @@ void recordViews(DrawingSheetPlan &plan, LayoutContext &context) {
                 QByteArray(picture.data(), picture.size()), at.key, at.page, at.area, at.centre,
                 at.scale, plan.flatSide, at.compactDimensions, at.sheetLinks,
                 at.essentialDimensions, at.omittedDimensions, at.retainedDimensions,
-                at.smallOptionalText});
+                at.smallOptionalText, at.paperQuarterTurns});
         }
     }
 }
@@ -48,7 +48,8 @@ void paintRecorded(QPainter &painter, const DrawingPlacedView &at, DrawingFlatSi
         record->essentialDimensions != at.essentialDimensions ||
         record->omittedDimensions != at.omittedDimensions ||
         record->retainedDimensions != at.retainedDimensions ||
-        record->smallOptionalText != at.smallOptionalText)
+        record->smallOptionalText != at.smallOptionalText ||
+        record->paperQuarterTurns != at.paperQuarterTurns)
         throw std::runtime_error("Устаревшее изображение вида. Повторите компоновку.");
     // QPicture playback keeps vector paths and text in the PDF. Each replay owns
     // its stream cursor; immutable commands can be shared by preview/export.

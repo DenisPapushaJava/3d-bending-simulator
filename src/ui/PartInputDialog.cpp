@@ -1,5 +1,6 @@
 #include "PartInputDialog.h"
 #include "MaterialPresets.h"
+#include "MeasurementText.h"
 #include "bending/ui/ImportController.h"
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -35,7 +36,7 @@ class ThicknessInput final : public QDoubleSpinBox {
     }
 };
 QString mm(double v) {
-    return QLocale().toString(v, 'f', 2);
+    return measurementText(v);
 }
 QString factorText(double k) {
     return QLocale().toString(k, 'g', QLocale::FloatingPointShortest);

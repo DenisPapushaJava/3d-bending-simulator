@@ -1,4 +1,5 @@
 #include "StrokeSegmentsDialog.h"
+#include "MeasurementText.h"
 
 #include <QContextMenuEvent>
 #include <QDialogButtonBox>
@@ -7,7 +8,6 @@
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
-#include <QLocale>
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -331,7 +331,7 @@ bool StrokeSegmentsDialog::edit(const DocumentSession &session, std::size_t bend
     StrokeChange change{session, {}};
     std::vector<BendStroke> strokes;
     std::vector<std::size_t> groupBySegment;
-    const auto number = [](double value) { return QLocale().toString(value, 'g', 7); };
+    const auto number = [](double value) { return measurementText(value); };
     const auto id = [](auto index) {
         return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
     };

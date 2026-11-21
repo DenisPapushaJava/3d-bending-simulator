@@ -259,13 +259,13 @@ int main(int argc, char **argv) {
             require(!dialog->findChild<QDoubleSpinBox *>("importToolAngle") &&
                         !dialog->findChild<QDoubleSpinBox *>("importToolRadius") &&
                         !dialog->findChild<QLineEdit *>("importToolOpenings") &&
-                        measurements->text().contains("R 0.8") &&
-                        measurements->text().contains("45.000"),
+                        measurements->text().contains("R 0,8") &&
+                        measurements->text().contains("45 мм"),
                     "DXF dimensions became editable or were not measured");
             require(dialog->findChild<QToolButton *>("toolImportAdvancedToggle")->isChecked(),
                     "Unknown units were hidden in collapsed settings");
             dialog->findChild<QComboBox *>("importToolUnits")->setCurrentIndex(2);
-            require(measurements->text().contains("R 20.32"),
+            require(measurements->text().contains("R 20,3"),
                     "DXF unit change retained a stale nose radius");
             dialog->findChild<QComboBox *>("importToolUnits")->setCurrentIndex(1);
             QMimeData foreign;

@@ -1,4 +1,5 @@
 #include "RouteToolDialog.h"
+#include "MeasurementText.h"
 
 #include "ToolAssemblyDialog.h"
 #include "ToolContourButton.h"
@@ -8,7 +9,6 @@
 
 #include <QDialogButtonBox>
 #include <QLabel>
-#include <QLocale>
 #include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -163,12 +163,12 @@ void RouteToolDialog::refreshRow(std::size_t i) {
         if (row.mixed && !changes_[i])
             summary += QStringLiteral("разные по шагам");
         else if (const auto length = core::toolLength(current->profile, current->assembly)) {
-            summary += QStringLiteral("%1 мм").arg(QLocale().toString(*length, 'f', 2));
+            summary += QStringLiteral("%1 мм").arg(measurementText(*length));
             if (current->assembly)
                 summary += QStringLiteral(" · секций %1").arg(current->assembly->pieces.size());
             if (*length + 0.005 < span_)
                 summary += QStringLiteral("\nКороче линии гиба на %1 мм")
-                               .arg(QLocale().toString(span_ - *length, 'f', 2));
+                               .arg(measurementText(span_ - *length));
         } else
             summary += QStringLiteral("подберите секции");
     } else

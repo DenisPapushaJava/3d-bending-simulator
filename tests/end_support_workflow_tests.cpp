@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
         if (controller.bendPreviewError())
             throw std::runtime_error(controller.bendPreviewError()->detail);
         require(controller.bendPreview() && controller.bendPreview()->hasPartialEndSupport() &&
-                    summary->text().contains("8.00") &&
+                    (summary->text().contains("8 мм") || summary->text().contains("8 /")) &&
                     summary->text().contains(QStringLiteral("возможна деформация")) &&
                     !controller.bendPreview()->endSupportLimitMm() &&
                     summary->styleSheet().contains("#FFF2CC"),

@@ -2,6 +2,7 @@
 
 #include "bending/application/Document.h"
 #include "bending/application/FlatPattern.h"
+#include "bending/application/MeasurementDisplay.h"
 #include "bending/cad/occt/PreviewAccess.h"
 
 #include <AIS_InteractiveObject.hxx>
@@ -30,6 +31,8 @@ struct DimensionLayout {
     QRectF viewport;
     std::vector<QRectF> excluded;
     std::function<gp_Pnt(QPointF, const gp_Pnt &)> unproject = {};
+    int decimals = application::defaultDimensionDecimalPlaces;
+    [[nodiscard]] QString measurementText(double value) const;
 };
 enum class MeasurementKind { None, Opening, Face, Edge };
 struct MeasurementSelection {

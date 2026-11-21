@@ -1,4 +1,5 @@
 #include "ToolImportDialog.h"
+#include "MeasurementText.h"
 #include "ToolDrawingWidget.h"
 #include "bending/core/ToolGeometry.h"
 #include "bending/ui/ImportController.h"
@@ -526,20 +527,21 @@ void ToolImportDialog::updatePreview() {
     }
     QString measurements;
     if (measuredPunch_)
-        measurements = QStringLiteral("Угол %1° · R %2 мм")
-                           .arg(measuredPunch_->angleRadians * 180 / std::numbers::pi, 0, 'g', 6)
-                           .arg(measuredPunch_->noseRadiusMm, 0, 'g', 6);
+        measurements =
+            QStringLiteral("Угол %1° · R %2 мм")
+                .arg(measurementText(measuredPunch_->angleRadians * 180 / std::numbers::pi))
+                .arg(measurementText(measuredPunch_->noseRadiusMm));
     else if (row >= 0 && static_cast<std::size_t>(row) < grooveSettings_.size())
-        measurements = QStringLiteral("V %1 мм · угол %2°")
-                           .arg(measuredOpenings_[static_cast<std::size_t>(row)], 0, 'g', 6)
-                           .arg(grooveSettings_[static_cast<std::size_t>(row)].angleRadians * 180 /
-                                    std::numbers::pi,
-                                0, 'g', 6);
+        measurements =
+            QStringLiteral("V %1 мм · угол %2°")
+                .arg(measurementText(measuredOpenings_[static_cast<std::size_t>(row)]))
+                .arg(measurementText(grooveSettings_[static_cast<std::size_t>(row)].angleRadians *
+                                     180 / std::numbers::pi));
     if (previewSize_)
         measurements += (measurements.isEmpty() ? QString{} : QStringLiteral("\n")) +
                         QStringLiteral("Сечение %1 × %2 мм")
-                            .arg(previewSize_->widthMm, 0, 'f', 3)
-                            .arg(previewSize_->heightMm, 0, 'f', 3);
+                            .arg(measurementText(previewSize_->widthMm),
+                                 measurementText(previewSize_->heightMm));
     sizeLabel_->setText(measurements.isEmpty() ? QStringLiteral("Размеры из DXF") : measurements);
     const auto t = preset();
     saveButton_->setEnabled(!busy_ && t.has_value());

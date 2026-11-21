@@ -12,7 +12,6 @@
 
 #include <QFont>
 #include <QFontMetricsF>
-#include <QLocale>
 #include <QPolygonF>
 
 #include <algorithm>
@@ -21,24 +20,13 @@
 #include <unordered_set>
 
 namespace bending::viewer {
+QString DimensionLayout::measurementText(double value) const {
+    return QString::fromStdString(application::formatMeasurement(value, decimals));
+}
 namespace {
 const Quantity_Color dimensionColor(0.76, 0.87, 0.94, Quantity_TOC_sRGB);
 const Quantity_Color bendColor(1.0, 0.79, 0.32, Quantity_TOC_sRGB);
 
-QString number(double value) {
-    const auto locale = QLocale::system();
-    if (std::abs(value) > 0.0 && std::abs(value) < 0.01) {
-        return locale.toString(value, 'g', 3);
-    }
-    auto result = locale.toString(value, 'f', 2);
-    while (result.endsWith(QLatin1Char('0'))) {
-        result.chop(1);
-    }
-    if (result.endsWith(locale.decimalPoint())) {
-        result.chop(locale.decimalPoint().size());
-    }
-    return result;
-}
 TCollection_ExtendedString extended(const QString &value) {
     return {value.toUtf8().constData(), true};
 }
@@ -161,11 +149,13 @@ void callout(DimensionAnnotations &result, const gp_Pnt &anchor, const gp_Vec &o
     append(result, label);
     result.labels.append(caption);
 }
-QString bendCaption(double angle, std::optional<double> radius, double thickness) {
+QString bendCaption(double angle, std::optional<double> radius, double thickness,
+                    const DimensionLayout &layout) {
     return QStringLiteral("Угол %1° · %2 · t %3 мм")
-        .arg(number(180.0 - angle * 180.0 / std::numbers::pi),
-             radius ? QStringLiteral("R %1 мм").arg(number(*radius)) : QStringLiteral("плоско"),
-             number(thickness));
+        .arg(layout.measurementText(180.0 - angle * 180.0 / std::numbers::pi),
+             radius ? QStringLiteral("R %1 мм").arg(layout.measurementText(*radius))
+                    : QStringLiteral("плоско"),
+             layout.measurementText(thickness));
 }
 void selectedMeasurements(DimensionAnnotations &result, const application::ModelMeasurements &data,
                           MeasurementSelection selection, double height,
@@ -181,18 +171,19 @@ void selectedMeasurements(DimensionAnnotations &result, const application::Model
         const auto center = point(opening->center);
         const auto major = gp_Vec(opening->major.x, opening->major.y, opening->major.z);
         const auto minor = gp_Vec(opening->minor.x, opening->minor.y, opening->minor.z);
-        const auto caption =
-            opening->circular ? QStringLiteral("Отверстие · ⌀%1 мм").arg(number(opening->lengthMm))
-                              : QStringLiteral("Вырез · %1 × %2 мм")
-                                    .arg(number(opening->lengthMm), number(opening->widthMm));
+        const auto caption = opening->circular ? QStringLiteral("Отверстие · ⌀%1 мм")
+                                                     .arg(layout.measurementText(opening->lengthMm))
+                                               : QStringLiteral("Вырез · %1 × %2 мм")
+                                                     .arg(layout.measurementText(opening->lengthMm),
+                                                          layout.measurementText(opening->widthMm));
         callout(result, center, layout.up * 1.0, caption, height, layout.right, &layout);
         if (!opening->circular) {
             length(result, center.Translated(-major), center.Translated(major), layout.up,
-                   QStringLiteral("Длина %1 мм").arg(number(opening->lengthMm)), height, bendColor,
-                   &layout);
+                   QStringLiteral("Длина %1 мм").arg(layout.measurementText(opening->lengthMm)),
+                   height, bendColor, &layout);
             length(result, center.Translated(-minor), center.Translated(minor), layout.right,
-                   QStringLiteral("Ширина %1 мм").arg(number(opening->widthMm)), height, bendColor,
-                   &layout);
+                   QStringLiteral("Ширина %1 мм").arg(layout.measurementText(opening->widthMm)),
+                   height, bendColor, &layout);
         }
         std::vector<MeasuredSpan> locations = opening->locations;
         if (!selection.bases.empty()) {
@@ -231,11 +222,12 @@ void selectedMeasurements(DimensionAnnotations &result, const application::Model
             }
         }
         for (std::size_t i = 0; i < locations.size(); ++i)
-            length(
-                result, point(locations[i].first), point(locations[i].second),
-                (i ? layout.right : -layout.up) * 1.2,
-                QStringLiteral("До базы %1 · %2 мм").arg(i + 1).arg(number(locations[i].valueMm)),
-                height, bendColor, &layout);
+            length(result, point(locations[i].first), point(locations[i].second),
+                   (i ? layout.right : -layout.up) * 1.2,
+                   QStringLiteral("До базы %1 · %2 мм")
+                       .arg(i + 1)
+                       .arg(layout.measurementText(locations[i].valueMm)),
+                   height, bendColor, &layout);
         if (opening->outline.size() > 2) {
             BRepBuilderAPI_MakePolygon polygon;
             for (const auto &p : opening->outline)
@@ -258,7 +250,7 @@ void selectedMeasurements(DimensionAnnotations &result, const application::Model
                     .arg(face->planar ? (flat ? QStringLiteral("Плоский участок")
                                               : QStringLiteral("Плоская грань"))
                                       : QStringLiteral("Поверхность"),
-                         number(face->areaMm2)),
+                         layout.measurementText(face->areaMm2)),
                 height, {}, &layout);
         if (flat && face->outline.size() > 2) {
             BRepBuilderAPI_MakePolygon boundary;
@@ -273,10 +265,11 @@ void selectedMeasurements(DimensionAnnotations &result, const application::Model
             }
         }
         for (std::size_t i = 0; i < face->sizes.size(); ++i)
-            length(result, point(face->sizes[i].first), point(face->sizes[i].second),
-                   (i ? layout.right : -layout.up) * 1.8,
-                   QStringLiteral("Грань %1 мм").arg(number(face->sizes[i].valueMm)), height,
-                   bendColor, &layout);
+            length(
+                result, point(face->sizes[i].first), point(face->sizes[i].second),
+                (i ? layout.right : -layout.up) * 1.8,
+                QStringLiteral("Грань %1 мм").arg(layout.measurementText(face->sizes[i].valueMm)),
+                height, bendColor, &layout);
     } else if (selection.kind == MeasurementKind::Edge) {
         const auto edge = std::find_if(data.edges.begin(), data.edges.end(),
                                        [&](const auto &v) { return v.id == selection.id; });
@@ -284,13 +277,14 @@ void selectedMeasurements(DimensionAnnotations &result, const application::Model
             return;
         if (edge->straight)
             length(result, point(edge->first), point(edge->second), layout.up * 1.0,
-                   QStringLiteral("Ребро %1 мм").arg(number(edge->lengthMm)), height, bendColor,
-                   &layout);
+                   QStringLiteral("Ребро %1 мм").arg(layout.measurementText(edge->lengthMm)),
+                   height, bendColor, &layout);
         else
             callout(result, point(edge->first), layout.up * 1.0,
-                    (edge->radiusMm ? QStringLiteral("R %1 мм · ").arg(number(*edge->radiusMm))
-                                    : QString{}) +
-                        QStringLiteral("Длина %1 мм").arg(number(edge->lengthMm)),
+                    (edge->radiusMm
+                         ? QStringLiteral("R %1 мм · ").arg(layout.measurementText(*edge->radiusMm))
+                         : QString{}) +
+                        QStringLiteral("Длина %1 мм").arg(layout.measurementText(edge->lengthMm)),
                     height, layout.right, &layout);
     }
 }
@@ -367,11 +361,14 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
     }
     {
         length(result, point(lo), {hi.x, lo.y, lo.z}, {0, -gap, 0},
-               QStringLiteral("X %1 мм").arg(number(hi.x - lo.x)), height, dimensionColor, &layout);
+               QStringLiteral("X %1 мм").arg(layout.measurementText(hi.x - lo.x)), height,
+               dimensionColor, &layout);
         length(result, point(lo), {lo.x, hi.y, lo.z}, {-gap, 0, 0},
-               QStringLiteral("Y %1 мм").arg(number(hi.y - lo.y)), height, dimensionColor, &layout);
+               QStringLiteral("Y %1 мм").arg(layout.measurementText(hi.y - lo.y)), height,
+               dimensionColor, &layout);
         length(result, {hi.x, hi.y, lo.z}, point(hi), {gap, 0, 0},
-               QStringLiteral("Z %1 мм").arg(number(hi.z - lo.z)), height, dimensionColor, &layout);
+               QStringLiteral("Z %1 мм").arg(layout.measurementText(hi.z - lo.z)), height,
+               dimensionColor, &layout);
     }
     if (measurements) {
         struct FlangeGroup {
@@ -411,11 +408,12 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
         }
         for (const auto &group : groups) {
             const auto &span = *group.span;
-            const auto caption = group.walls.size() == 1
-                                     ? QStringLiteral("Полка %1 мм").arg(number(span.valueMm))
-                                     : QStringLiteral("Полки %1 мм · %2 шт.")
-                                           .arg(number(span.valueMm))
-                                           .arg(group.walls.size());
+            const auto caption =
+                group.walls.size() == 1
+                    ? QStringLiteral("Полка %1 мм").arg(layout.measurementText(span.valueMm))
+                    : QStringLiteral("Полки %1 мм · %2 шт.")
+                          .arg(layout.measurementText(span.valueMm))
+                          .arg(group.walls.size());
             length(result, point(span.first), point(span.second), -layout.up * .7, caption, height,
                    dimensionColor, &layout);
         }
@@ -443,11 +441,11 @@ DimensionAnnotations documentDimensions(const application::DocumentMetadata &met
     side -= axis * (side.Dot(axis) / axis.SquareMagnitude());
     if (side.SquareMagnitude() < 1.e-14)
         side = layout.up;
-    length(result, start, end, side, caption.arg(number(bend->lengthMm)), height, bendColor,
-           &layout);
+    length(result, start, end, side, caption.arg(layout.measurementText(bend->lengthMm)), height,
+           bendColor, &layout);
     callout(result, anchor, layout.up * 1.0,
-            bendCaption(bend->angleRadians, bend->innerRadiusMm, bend->thicknessMm), height, {},
-            &layout);
+            bendCaption(bend->angleRadians, bend->innerRadiusMm, bend->thicknessMm, layout), height,
+            {}, &layout);
     return result;
 }
 
@@ -526,9 +524,11 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
     const double surfaceZ = facing < 0 ? info.bounds.minimum.z : hi.z;
     const auto gap = std::max(hi.x, hi.y) * .12;
     length(result, {0, 0, surfaceZ}, {hi.x, 0, surfaceZ}, {0, -gap, 0},
-           QStringLiteral("Ширина %1 мм").arg(number(hi.x)), height, dimensionColor, &layout);
+           QStringLiteral("Ширина %1 мм").arg(layout.measurementText(hi.x)), height, dimensionColor,
+           &layout);
     length(result, {0, 0, surfaceZ}, {0, hi.y, surfaceZ}, {-gap, 0, 0},
-           QStringLiteral("Развёртка %1 мм").arg(number(hi.y)), height, dimensionColor, &layout);
+           QStringLiteral("Развёртка %1 мм").arg(layout.measurementText(hi.y)), height,
+           dimensionColor, &layout);
     // Directions are relative to the physical flat side facing the viewer. Do not
     // pretend that a nearly edge-on sheet has readable bend annotations.
     if (std::abs(facing) < .15)
@@ -581,15 +581,17 @@ DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &i
                 along.Reverse();
             const auto offset = -along.Normalized() * layout.right.Magnitude() * .7;
             length(result, (*span)[0], (*span)[1], offset,
-                   QStringLiteral("%1 мм").arg(number((*span)[0].Distance((*span)[1]))), height,
-                   bendColor, &layout);
+                   QStringLiteral("%1 мм").arg(
+                       layout.measurementText((*span)[0].Distance((*span)[1]))),
+                   height, bendColor, &layout);
         }
         callout(result, anchor, layout.up * 1.0,
                 QStringLiteral("%1 · %2 · %3° · R %4 · L %5 мм")
                     .arg(captionFor(activeIds),
                          direction > 0 ? QStringLiteral("ВВЕРХ") : QStringLiteral("ВНИЗ"),
-                         number(180 - active->turnRadians * 180 / std::numbers::pi),
-                         number(active->radiusMm), number(activeSpan)),
+                         layout.measurementText(180 - active->turnRadians * 180 / std::numbers::pi),
+                         layout.measurementText(active->radiusMm),
+                         layout.measurementText(activeSpan)),
                 height, layout.right, &layout);
     }
     // The overview identifies lines; distances appear only for the selected bend.
@@ -674,30 +676,33 @@ DimensionAnnotations previewDimensions(const cad::PreviewFrame &frame,
         const auto first = p[0].Distance(p[1]), second = p[1].Distance(p[2]);
         if (std::abs(first - second) < 1.e-6)
             length(result, p[0], p[1], -layout.up * .9,
-                   QStringLiteral("Полки %1 мм · 2 шт.").arg(number(first)), height, dimensionColor,
-                   &layout);
+                   QStringLiteral("Полки %1 мм · 2 шт.").arg(layout.measurementText(first)), height,
+                   dimensionColor, &layout);
         else {
             length(result, p[0], p[1], -layout.right * .9 - layout.up * .3,
-                   QStringLiteral("Полка 1 · %1 мм").arg(number(first)), height, dimensionColor,
-                   &layout);
+                   QStringLiteral("Полка 1 · %1 мм").arg(layout.measurementText(first)), height,
+                   dimensionColor, &layout);
             length(result, p[1], p[2], layout.right * .9 - layout.up * .3,
-                   QStringLiteral("Полка 2 · %1 мм").arg(number(second)), height, dimensionColor,
-                   &layout);
+                   QStringLiteral("Полка 2 · %1 мм").arg(layout.measurementText(second)), height,
+                   dimensionColor, &layout);
         }
     } else if (anchors.blankEnds) {
         const auto &p = *anchors.blankEnds;
         length(result, p[0], p[1], -layout.up * 1.0,
-               QStringLiteral("Габарит %1 мм").arg(number(p[0].Distance(p[1]))), height,
-               dimensionColor, &layout);
+               QStringLiteral("Габарит %1 мм").arg(layout.measurementText(p[0].Distance(p[1]))),
+               height, dimensionColor, &layout);
     }
     length(result, anchors.fixed[1], anchors.fixed[1].Translated(anchors.widthVector),
-           -layout.up * 1.0, QStringLiteral("Охват по оси %1 мм").arg(number(model.widthMm)),
-           height, dimensionColor, &layout);
-    callout(result, anchors.bendMiddle, layout.up * 1.0,
-            compact ? QStringLiteral("Угол %1°")
-                          .arg(number(180 - anchors.angleRadians * 180 / std::numbers::pi))
-                    : bendCaption(anchors.angleRadians, anchors.innerRadiusMm, model.thicknessMm),
-            height, {}, &layout);
+           -layout.up * 1.0,
+           QStringLiteral("Охват по оси %1 мм").arg(layout.measurementText(model.widthMm)), height,
+           dimensionColor, &layout);
+    callout(
+        result, anchors.bendMiddle, layout.up * 1.0,
+        compact
+            ? QStringLiteral("Угол %1°")
+                  .arg(layout.measurementText(180 - anchors.angleRadians * 180 / std::numbers::pi))
+            : bendCaption(anchors.angleRadians, anchors.innerRadiusMm, model.thicknessMm, layout),
+        height, {}, &layout);
     return result;
 }
 } // namespace bending::viewer

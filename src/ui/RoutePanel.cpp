@@ -1,4 +1,5 @@
 #include "RoutePanel.h"
+#include "MeasurementText.h"
 #include "bending/application/SingleBendPreview.h"
 #include "bending/core/BendSequence.h"
 #include <QApplication>
@@ -31,9 +32,9 @@ QString routeFailureReason(const application::BendRouteError &error) {
         const auto &lengths = *error.toolLengths;
         message += QStringLiteral(" Нужно %1 мм; пуансон %2 мм, матрица %3 мм. "
                                   "Подберите секции на этапе «Инструмент».")
-                       .arg(lengths.bendLengthMm, 0, 'f', 2)
-                       .arg(lengths.punchLengthMm, 0, 'f', 2)
-                       .arg(lengths.dieLengthMm, 0, 'f', 2);
+                       .arg(measurementText(lengths.bendLengthMm))
+                       .arg(measurementText(lengths.punchLengthMm))
+                       .arg(measurementText(lengths.dieLengthMm));
     }
     if (error.operationError) {
         using Code = application::BendPreviewErrorCode;
@@ -656,18 +657,18 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                 if (support.supportedFromMm == 0 && support.supportedToMm == support.bendLengthMm)
                     continue;
                 message += QStringLiteral("Участок %1–%2 мм: материал под опорой %3–%4 из %5 мм. ")
-                               .arg(interval.fromMm, 0, 'f', 2)
-                               .arg(interval.fromMm + support.bendLengthMm, 0, 'f', 2)
-                               .arg(support.supportedFromMm, 0, 'f', 2)
-                               .arg(support.supportedToMm, 0, 'f', 2)
+                               .arg(measurementText(interval.fromMm))
+                               .arg(measurementText(interval.fromMm + support.bendLengthMm))
+                               .arg(measurementText(support.supportedFromMm))
+                               .arg(measurementText(support.supportedToMm))
                                .arg(support.bendLengthMm, 0, 'f', 2);
             }
         if (selected_ > 0 && route_->withTools) {
             const auto *entry = session.bend(route_->steps[operation()].bendIndex);
             if (entry && entry->tools)
                 message += QStringLiteral("Пуансон %1 мм, матрица %2 мм. ")
-                               .arg(core::punchLengthMm(*entry->tools), 0, 'f', 1)
-                               .arg(entry->tools->lengthMm, 0, 'f', 1);
+                               .arg(measurementText(core::punchLengthMm(*entry->tools)))
+                               .arg(measurementText(entry->tools->lengthMm));
             if (operation() > 0) {
                 const auto *previous = session.bend(route_->steps[operation() - 1].bendIndex);
                 if (entry && previous &&

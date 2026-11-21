@@ -1,4 +1,5 @@
 #include "ToolSelectionWidget.h"
+#include "MeasurementText.h"
 #include "ToolAssemblyDialog.h"
 #include "ToolLibraryDialog.h"
 #include "ToolPickerPopup.h"
@@ -21,7 +22,6 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
-#include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -577,9 +577,7 @@ QString ToolSelectionWidget::lengthIssue(const application::BendRouteToolLengthI
     const auto append = [&](const QString &name, double length) {
         const double missing = lengths.bendLengthMm - length;
         if (missing > 0) {
-            const auto value = missing < .01
-                                   ? QStringLiteral("< %1").arg(QLocale().toString(.01, 'f', 2))
-                                   : QLocale().toString(missing, 'f', 2);
+            const auto value = nonzeroMeasurementText(missing);
             issues << QStringLiteral("%1: не хватает %2 мм").arg(name, value);
         }
     };
@@ -600,7 +598,7 @@ QString ToolSelectionWidget::lengthIssue() const {
                 std::min(lengths.punchLengthMm, lengths.dieLengthMm) + lengthToleranceMm_ >=
                     *minimum)
                 return QStringLiteral("Рабочая длина от %1 мм. Проём проверяется в симуляции.")
-                    .arg(*minimum, 0, 'f', 2);
+                    .arg(measurementText(*minimum));
         }
     return lengths.coversBend(lengthToleranceMm_) ? QString{} : lengthIssue(lengths);
 }
@@ -916,7 +914,7 @@ void ToolSelectionWidget::updateDetails() {
     QStringList assemblyLines;
     if (allBends_ && selectionRequest_)
         assemblyLines << QStringLiteral("Для всех гибов: длина инструмента не менее %1 мм.")
-                             .arg(selectionRequest_->bendLengthMm, 0, 'f', 2);
+                             .arg(measurementText(selectionRequest_->bendLengthMm));
     const auto describe = [&](const core::ToolPreset *tool,
                               const std::optional<core::ToolAssembly> &a, const QString &name) {
         if (!tool)
@@ -991,13 +989,14 @@ void ToolSelectionWidget::updateDetails() {
     details_->setText(QStringLiteral("%1\n%2° · R %3 мм · L %4 мм\n\n%5\nV %6 мм · %7° · L %8 "
                                      "мм")
                           .arg(title(p))
-                          .arg(p.angleRadians * 180 / std::numbers::pi)
-                          .arg(*p.noseRadiusMm)
-                          .arg(*core::toolLength(p, a->punchAssembly))
+                          .arg(measurementText(p.angleRadians * 180 / std::numbers::pi))
+                          .arg(measurementText(*p.noseRadiusMm))
+                          .arg(measurementText(*core::toolLength(p, a->punchAssembly)))
                           .arg(title(d))
-                          .arg(d.openingsMm[a->groove])
-                          .arg(core::dieGroove(d, a->groove)->angleRadians * 180 / std::numbers::pi)
-                          .arg(*core::toolLength(d, a->dieAssembly)));
+                          .arg(measurementText(d.openingsMm[a->groove]))
+                          .arg(measurementText(core::dieGroove(d, a->groove)->angleRadians * 180 /
+                                               std::numbers::pi))
+                          .arg(measurementText(*core::toolLength(d, a->dieAssembly))));
     details_->setMinimumHeight(details_->heightForWidth(240));
     sources_->setText(text(p.source + "\n" + p.notes + "\n\n" + d.source + "\n" + d.notes));
     sources_->setMinimumHeight(sources_->heightForWidth(240));
@@ -1018,13 +1017,13 @@ QString ToolSelectionWidget::summary() const {
     if (const auto a = assignment()) {
         return text(a->punch.code + " / " + a->die.code) +
                QStringLiteral(" · V %1 мм%2")
-                   .arg(tools->openingMm)
+                   .arg(measurementText(tools->openingMm))
                    .arg(a->punch.teaching || a->die.teaching ? QStringLiteral(" · учебная пара")
                                                              : QString{});
     }
     return QStringLiteral("Вручную · V %1 мм · R %2 мм")
-        .arg(tools->openingMm)
-        .arg(tools->noseRadiusMm);
+        .arg(measurementText(tools->openingMm))
+        .arg(measurementText(tools->noseRadiusMm));
 }
 QString ToolSelectionWidget::shortSummary() const {
     const auto tools = parameters();
@@ -1034,7 +1033,7 @@ QString ToolSelectionWidget::shortSummary() const {
     return (a && (a->punch.teaching || a->die.teaching) ? QStringLiteral("Учебная пара")
             : a                                         ? text(a->die.code)
                                                         : QStringLiteral("Вручную")) +
-           QStringLiteral(" · V %1").arg(tools->openingMm);
+           QStringLiteral(" · V %1").arg(measurementText(tools->openingMm));
 }
 void ToolSelectionWidget::rememberChoice() {
     const auto a = assignment();
@@ -1188,7 +1187,7 @@ void ToolSelectionWidget::recommend() {
                       .arg(result.candidates.size());
         if (allBends_)
             message += QStringLiteral(" Общая пара для всех гибов; длина не менее %1 мм.")
-                           .arg(request.bendLengthMm, 0, 'f', 2);
+                           .arg(measurementText(request.bendLengthMm));
     }
     recommendation_->setText(message);
     if (result.segmentSearchLimited)
@@ -1251,7 +1250,7 @@ QString ToolSelectionWidget::fitSelectedAssemblies() {
         case core::SegmentPlanStatus::InsufficientStock:
             if (compact && i == 0 && compactPunchMaximumMm_)
                 issues << names[i] + QStringLiteral(": нет сборки для проёма (до %1 мм с зазором).")
-                                         .arg(*compactPunchMaximumMm_, 0, 'f', 2);
+                                         .arg(measurementText(*compactPunchMaximumMm_));
             else if (compact)
                 issues << names[i] + QStringLiteral(": нет непрерывной сборки в заданной длине.");
             else if (const auto *tool = preset(i == 0 ? punch_ : die_); tool && !tool->segments)
@@ -1274,7 +1273,7 @@ QString ToolSelectionWidget::fitSelectedAssemblies() {
     const double length = selectionRequest_->bendLengthMm;
     const double minimum = compactSectionMinimumMm_.value_or(length);
     const auto lengthLabel =
-        compact ? QStringLiteral("Для опоры нужно не менее %1 мм.").arg(minimum, 0, 'f', 2)
+        compact ? QStringLiteral("Для опоры нужно не менее %1 мм.").arg(measurementText(minimum))
                 : QStringLiteral("Длина гиба %1 мм.").arg(length);
     QString message;
     QString notice;
@@ -1304,10 +1303,10 @@ QString ToolSelectionWidget::fitSelectedAssemblies() {
                 const auto &plan = plans[i];
                 if (plan.lengthMm + lengthToleranceMm_ < length)
                     warnings << names[i] + QStringLiteral(": короче линии гиба на %1 мм.")
-                                               .arg(length - plan.lengthMm, 0, 'f', 2);
+                                               .arg(nonzeroMeasurementText(length - plan.lengthMm));
                 if (plan.assembly.gapMm > 0)
                     warnings << names[i] + QStringLiteral(": зазор %1 мм между секциями.")
-                                               .arg(plan.assembly.gapMm, 0, 'f', 3);
+                                               .arg(nonzeroMeasurementText(plan.assembly.gapMm));
             }
             const bool diagnostic = std::any_of(plans.begin(), plans.end(), [&](const auto &p) {
                 return p.lengthMm + lengthToleranceMm_ < minimum || p.assembly.gapMm > 0;

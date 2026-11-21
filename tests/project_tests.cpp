@@ -81,9 +81,12 @@ void testProject() {
     drawing.allowBreaks = false;
     drawing.flatSide = DrawingFlatSide::Opposite;
     drawing.paperFormat = DrawingPaperFormat::A3;
+    drawing.shadeIsometric = false;
+    drawing.showBendTools = true;
     drawing.sectionEdits = {{{0, 2}, .376, true}};
     drawing.views = {{{DrawingViewKind::Section, 0, {{0, 2}}}, false, .5},
-                     {{DrawingViewKind::Isometric, 0}, true, {}}};
+                     {{DrawingViewKind::Isometric, 0}, true, {}, 1},
+                     {{DrawingViewKind::Flat, 0}, true, .25, 3}};
     require(!files.save(nativePath(destination), *document, 2.0, {}, {}, {}, drawing),
             "Cannot save project");
     require(QFile::remove(source), "Cannot remove original source");
@@ -106,6 +109,12 @@ void testProject() {
     require(compact.value("source").toMap().value("data").toByteArray() == originalBytes,
             "STEP is not stored as the original bytes");
     auto badDrawing = drawing;
+    badDrawing.views.front().paperQuarterTurns = 1;
+    require(!validProjectDrawingSettings(badDrawing), "Connected view accepted a paper rotation");
+    badDrawing = drawing;
+    badDrawing.views.back().paperQuarterTurns = 4;
+    require(!validProjectDrawingSettings(badDrawing), "Out-of-range paper rotation accepted");
+    badDrawing = drawing;
     badDrawing.sectionEdits.front().fraction = 1;
     require(files.save(nativePath(moved), *document, {}, {}, {}, {}, badDrawing) &&
                 read(moved) == originalProject,

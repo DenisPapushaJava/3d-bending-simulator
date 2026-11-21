@@ -407,6 +407,9 @@ void testProjectWorkflow(bool graphics) {
     auto *label = window.findChild<QLabel *>(QStringLiteral("thicknessProperties"));
     require(label && label->text().contains(QStringLiteral("определена по геометрии")),
             "Automatic thickness not shown");
+    auto *partStage = window.findChild<QToolButton *>("processStage0");
+    require(partStage && partStage->accessibleName() == QStringLiteral("Деталь · Без гибов · 2 мм"),
+            "Part card did not display the detected thickness");
     if (graphics) {
         waitUntil([&] { return viewer->isReady(); });
         const auto automaticHighlight = viewer->captureImage();
@@ -567,14 +570,21 @@ void testInitialThickness(bool graphics, const QString &path, double expected) {
             require(image.save(output), "Cannot save initial thickness snapshot");
         }
     }
+    const auto *partStage = window.findChild<QToolButton *>("processStage0");
+    const auto proposalSuffix = QStringLiteral(" · %1 мм").arg(expected);
+    require(partStage && partStage->accessibleName().endsWith(proposalSuffix),
+            "The part card did not display the proposed thickness");
     // Applying an unverified manual override and resetting it must restore the local proposal.
     input->setValue(expected + 1.0);
     window.findChild<QPushButton *>(QStringLiteral("applyThickness"))->click();
     require(controller.session().manualThicknessMm() == expected + 1.0,
             "Manual override not applied");
+    require(partStage->accessibleName().endsWith(QStringLiteral(" · %1 мм").arg(expected + 1.0)),
+            "The part card did not update to the manual thickness");
     window.findChild<QPushButton *>(QStringLiteral("automaticThickness"))->click();
     require(!controller.session().manualThicknessMm() &&
-                std::abs(input->value() - expected) < 1.0e-5 && pairs->currentIndex() == 0,
+                std::abs(input->value() - expected) < 1.0e-5 && pairs->currentIndex() == 0 &&
+                partStage->accessibleName().endsWith(proposalSuffix),
             "Reset did not restore proposed thickness and surfaces");
     controller.closeDocument();
     require(input->value() == 0.0 && pairs->count() == 0,
