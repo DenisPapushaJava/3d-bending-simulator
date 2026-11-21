@@ -292,7 +292,9 @@ int main(int argc, char **argv) {
                             .contains(QStringLiteral("всех включённых гибов")) &&
                         window.findChild<QLabel *>("toolAssemblySummary")
                             ->text()
-                            .contains(QString::number(maximum, 'f', 2)),
+                            .contains(
+                                QStringLiteral("Для всех гибов: длина инструмента не менее %1 мм.")
+                                    .arg(maximum)),
                     "Shared fitting did not use the longest included bend");
             for (std::size_t i = 0; i < assignments.size(); ++i)
                 require(controller.session().bend(i)->catalogTools == assignments[i],

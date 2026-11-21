@@ -130,14 +130,15 @@ int main(int argc, char **argv) {
         require(cad::OcctPreviewAccess::frame(*preview, 0).floor.has_value(),
                 "Applied floor scope was not passed to the checker");
         auto *blankStep = window.findChild<QPushButton *>("routeStep0");
-        auto *formedStep = window.findChild<QPushButton *>("routeStep1");
+        auto *bendStep = window.findChild<QPushButton *>("routeStep1");
         auto *cycleFrame = window.findChild<QSlider *>("bendFrame");
-        require(blankStep && formedStep && blankStep->isVisible() && formedStep->isEnabled(),
+        require(blankStep && bendStep && blankStep->isVisible() && bendStep->isEnabled(),
                 "Single-bend cycle has no 0/1 navigation");
-        formedStep->click();
-        require(cycleFrame->value() == 60 && controller.bendPreview() == preview &&
-                    !controller.hasWork(),
-                "Selecting formed single bend rebuilt or replaced the checked cycle");
+        bendStep->click();
+        require(bendStep->isChecked() && cycleFrame->value() == 0 &&
+                    controller.bendPreview() == preview && !controller.hasWork(),
+                "Selecting the single bend did not open its checked initial frame");
+        cycleFrame->setValue(30);
         blankStep->click();
         require(cycleFrame->value() == 0 && controller.bendPreview() == preview &&
                     !controller.hasWork(),
