@@ -59,6 +59,10 @@ class CadPreview : public SingleBendPreview {
     std::span<const BendSupportInterval> endSupportIntervals() const noexcept override {
         return supportIntervals;
     }
+    std::vector<std::array<double, 2>> draftAxialIntervals;
+    std::span<const std::array<double, 2>> draftAxialBendIntervalsMm() const noexcept override {
+        return draftAxialIntervals;
+    }
     std::size_t otherBends = 0;
     std::size_t otherFormedBends() const noexcept override {
         return otherBends;

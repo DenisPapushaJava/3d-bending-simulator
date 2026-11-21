@@ -44,7 +44,9 @@ class RoutePanel final : public QWidget {
     }
     [[nodiscard]] QString statusText() const;
     [[nodiscard]] QWidget *reportWidget() const;
-    [[nodiscard]] QWidget *advancedWidget() const { return advanced_; }
+    [[nodiscard]] QWidget *advancedWidget() const {
+        return advanced_;
+    }
     std::function<void(bool automatic, bool withTools)> onPrepare;
     std::function<void(int)> onSelect;
     std::function<void(std::optional<std::size_t>)> onHover;

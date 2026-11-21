@@ -16,7 +16,7 @@ class ToolPresentation final : public AIS_ColoredShape {
     using AIS_ColoredShape::AIS_ColoredShape;
 
   protected:
-    void ComputeSelection(const Handle(SelectMgr_Selection) &selection, int mode) override {
+    void ComputeSelection(const Handle(SelectMgr_Selection) & selection, int mode) override {
         AIS_ColoredShape::ComputeSelection(selection, mode);
         if (mode != AIS_Shape::SelectionMode(TopAbs_FACE))
             return;
@@ -71,10 +71,10 @@ void PreviewRigidScene::apply(const Entry &entry, int mode, bool boundaries) {
         context_->SetDisplayMode(object, mode, false);
     if (entry.body.visible) {
         if (!context_->IsDisplayed(object))
-            context_->Display(object, mode,
-                              toolPicking_ && isTool(entry.body.id)
-                                  ? AIS_Shape::SelectionMode(TopAbs_FACE) : -1,
-                              false);
+            context_->Display(
+                object, mode,
+                toolPicking_ && isTool(entry.body.id) ? AIS_Shape::SelectionMode(TopAbs_FACE) : -1,
+                false);
         if (boundaryChange)
             context_->Redisplay(object, false);
     } else if (context_->IsDisplayed(object)) {

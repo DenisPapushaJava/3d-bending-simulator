@@ -4,9 +4,11 @@
 #include <QImage>
 #include <QWidget>
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 class QMenu;
@@ -55,7 +57,9 @@ class ViewerWidget final : public QWidget {
     void finishReposition();
     void setBendToolPicking(bool enabled);
     // Temporary translation of the shown sheet along machine Z, during installation editing.
-    void setBendPlacement(bool editing, double deltaMm = 0);
+    void setBendPlacementHandle(bool enabled, const QString &notice = {});
+    void setBendPlacement(bool editing, double deltaMm = 0,
+                          std::span<const std::array<double, 2>> uncovered = {});
     [[nodiscard]] bool dimensionsVisible() const;
     void setOrientation(Orientation orientation);
     // Empty result means accepted. Geometry is prepared by the importer before publication.
@@ -85,7 +89,10 @@ class ViewerWidget final : public QWidget {
     // Source bend index on the flat pattern, -1 clears selection; never a route step.
     void bendSelectionChanged(quint64 documentRevision, int bendIndex);
     void bendToolPicked(quint64 documentRevision, bool punch, int section);
+    void bendPlacementDragStarted();
     void bendPlacementDragged(double deltaMm);
+    void bendPlacementDragFinished();
+    void bendPlacementDragCancelled();
 
   private:
     class Impl;

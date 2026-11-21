@@ -78,6 +78,12 @@ class SingleBendPreview {
     endSupportIntervals() const noexcept {
         return {};
     }
+    // Draft material spans along the active stroke before offset, in increasing order.
+    // They describe geometry only. Checked previews expose the spans in endSupportIntervals.
+    [[nodiscard]] virtual std::span<const std::array<double, 2>>
+    draftAxialBendIntervalsMm() const noexcept {
+        return {};
+    }
     // Present only when shorter continuous tools cover the complete measured core.
     [[nodiscard]] virtual std::optional<std::array<double, 2>> axialToolCoreMm() const noexcept {
         return {};

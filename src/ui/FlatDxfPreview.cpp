@@ -43,7 +43,6 @@ QPointF project(QPointF point, QLineF line) {
                : line.p1();
 }
 
-
 QPen cosmeticPen(const QColor &color, double width) {
     QPen pen(color, width);
     pen.setCosmetic(true);

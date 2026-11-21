@@ -656,6 +656,8 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
     prepareBackgauge(*visual, analysis.lengthToleranceMm, stop);
     if (withTools && visual->gauging)
         result->checkedToolPositions += visual->gauging->addedRetractionPositions;
+    std::sort(intervals.begin(), intervals.end());
+    visual->draftAxialIntervals = std::move(intervals);
     result->visual = visual;
     cancelled(stop);
     return result;

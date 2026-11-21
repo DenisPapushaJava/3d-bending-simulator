@@ -324,9 +324,8 @@ int main(int argc, char **argv) {
         std::vector<QImage> images;
         for (int index = 0; index <= count; ++index) {
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(index))->click();
-            require(controller.bendRoute() == route && !controller.hasWork() &&
-                        frame->value() == (index ? frame->maximum() : 0),
-                    "Stage navigation recalculated or retained a different frame");
+            require(controller.bendRoute() == route && !controller.hasWork() && frame->value() == 0,
+                    "Stage navigation recalculated or skipped the initial frame");
             if (index == 0)
                 require(!frame->isEnabled(), "The blank stage exposes a bending slider");
             else if (QApplication::platformName() != "offscreen")
@@ -343,9 +342,8 @@ int main(int argc, char **argv) {
         }
         for (int index : {0, count, 1, count}) {
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(index))->click();
-            require(controller.bendRoute() == route && !controller.hasWork() &&
-                        frame->value() == (index ? frame->maximum() : 0),
-                    "Arbitrary navigation recalculated or showed the end of another step");
+            require(controller.bendRoute() == route && !controller.hasWork() && frame->value() == 0,
+                    "Arbitrary navigation recalculated or failed to open the step at its setup");
         }
         if (viewerWidget->isReady()) {
             auto *play = window.findChild<QPushButton *>("playBend");

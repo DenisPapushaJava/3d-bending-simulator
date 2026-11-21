@@ -16,7 +16,7 @@
 namespace bending::cad {
 // Exact geometry bounds enlarged by native tolerances and the consuming query's tolerance.
 inline std::optional<Bnd_Box> conservativeGeometryBounds(const TopoDS_Shape &shape,
-                                                        double tolerance) {
+                                                         double tolerance) {
     if (shape.IsNull() || !std::isfinite(tolerance) || tolerance < 0)
         return {};
     try {

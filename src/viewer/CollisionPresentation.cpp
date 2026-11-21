@@ -45,7 +45,8 @@ void CollisionPresentation::Compute(const Handle(PrsMgr_PresentationManager) & m
                                     const Handle(Prs3d_Presentation) & presentation,
                                     Standard_Integer mode) {
     AIS_ColoredShape::Compute(manager, presentation, mode);
-    if (!evidenceVisible_ || (patches_.empty() && floorContacts_.IsNull() && gaugeContacts_.IsNull()))
+    if (!evidenceVisible_ ||
+        (patches_.empty() && floorContacts_.IsNull() && gaugeContacts_.IsNull()))
         return;
     Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d;
     aspect->SetInteriorStyle(Aspect_IS_SOLID);

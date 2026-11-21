@@ -24,6 +24,7 @@ class ImportController final : public QObject {
                      Presenter presenter, QObject *parent = nullptr);
     ~ImportController() override;
     void open(std::filesystem::path path);
+    // Cancelling a placement check preserves the last verified route.
     void cancel();
     void closeDocument();
     void shutdown();
@@ -113,6 +114,7 @@ class ImportController final : public QObject {
     void routeDraftPoseChanged();
 
   private:
+    void cancelDocumentWork();
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -1645,9 +1645,9 @@ prepareBendOperation(DocumentPtr document, std::size_t bendIndex, core::BendTarg
              realTools = std::move(realTools), machine = std::move(machine), initialTools,
              initialSegments = std::move(initialSegments), flangeSides, innerSide, referenceFlange,
              displaySource, displaySides, workpiece, workpieceReuse, requestedReversed, tolerance,
-             continuousPunch](
-                double workpieceOffsetMm, std::stop_token placementStop, bool prepareDiagnostic,
-                BackgaugeSearchStatistics *gaugeStatistics) -> BendPreviewResult {
+             continuousPunch](double workpieceOffsetMm, std::stop_token placementStop,
+                              bool prepareDiagnostic,
+                              BackgaugeSearchStatistics *gaugeStatistics) -> BendPreviewResult {
             const auto ensureSkin = [&]() -> bool {
                 if (!workpiece->display->skin) {
                     auto skin =

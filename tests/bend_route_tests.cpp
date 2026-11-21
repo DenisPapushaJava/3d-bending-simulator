@@ -133,8 +133,9 @@ int main(int argc, char **argv) {
                     for (std::size_t side = 0; side < actual.materialTransforms.size(); ++side)
                         for (int row = 1; row <= 3; ++row)
                             for (int column = 1; column <= 4; ++column)
-                                require(std::abs(actual.materialTransforms[side].Value(row, column) -
-                                                 reference.materialTransforms[side].Value(row, column)) <
+                                require(std::abs(
+                                            actual.materialTransforms[side].Value(row, column) -
+                                            reference.materialTransforms[side].Value(row, column)) <
                                             1e-9,
                                         "Forming sample was published at a different position");
                 }

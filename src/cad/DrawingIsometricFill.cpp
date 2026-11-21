@@ -77,7 +77,8 @@ makeDrawingIsometricFill(const TopoDS_Shape &shape, const gp_Ax2 &frame,
             double illumination = 0.;
             if (smoothShading) {
                 const gp_Vec fromAxis(cylinderOrigin, worldPoint);
-                const gp_Vec radial = fromAxis - cylinderDirection * fromAxis.Dot(cylinderDirection);
+                const gp_Vec radial =
+                    fromAxis - cylinderDirection * fromAxis.Dot(cylinderDirection);
                 const double length = radial.Magnitude();
                 smoothShading = std::isfinite(length) && length > 1.e-10;
                 if (smoothShading)
@@ -139,10 +140,10 @@ makeDrawingIsometricFill(const TopoDS_Shape &shape, const gp_Ax2 &frame,
                     const auto index = static_cast<std::size_t>(y) * width + x;
                     if (z > depth[index]) {
                         depth[index] = z;
-                        fill.pixels[index] =
-                            smoothShading ? shadeColor(a.illumination + wb * illuminationB +
-                                                       wc * illuminationC)
-                                          : color;
+                        fill.pixels[index] = smoothShading
+                                                 ? shadeColor(a.illumination + wb * illuminationB +
+                                                              wc * illuminationC)
+                                                 : color;
                     }
                 }
         }

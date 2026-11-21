@@ -1,3 +1,4 @@
+#include "BendPlacementCoverage.h"
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
 #include "bending/application/WorkpiecePlacement.h"
@@ -15,11 +16,11 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
-#include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QEnterEvent>
+#include <QKeyEvent>
 #include <QLabel>
-#include <QLocale>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QProcess>
 #include <QPushButton>
@@ -91,6 +92,134 @@ std::vector<std::string> order(const ui::ImportController &c) {
         ids.push_back(c.session().bend(i)->id);
     return ids;
 }
+void verifyPlacementCoverage() {
+    ui::BendPlacementCoverage coverage;
+    coverage.bendMaterial = {{0, 40}, {60, 100}};
+    coverage.workingSections[0] = {{0, 40}, {60, 100}};
+    coverage.workingSections[1] = {{0, 100}};
+    require(coverage.at(0).uncovered.empty(),
+            "An empty part interval above a tool gap was painted as unsupported");
+    const auto moved = coverage.at(5);
+    require(moved.missingMm == std::array{10., 5.} &&
+                moved.uncovered ==
+                    std::vector<ui::PlacementInterval>{{40, 45}, {100, 105}, {100, 105}},
+            "Axial feedback lost a gap or measured the wrong tooling reach");
+}
+void verifyDirectPlacement(ui::MainWindow &window, const std::shared_ptr<Builder> &builder) {
+    auto *viewer = window.findChild<viewer::ViewerWidget *>();
+    if (QApplication::platformName() == QStringLiteral("offscreen"))
+        return;
+    wait([&] { return viewer && viewer->isReady(); });
+    viewer->setOrientation(viewer::ViewerWidget::Orientation::Front);
+    auto *handle = viewer->findChild<QLabel *>("bendPlacementHandle");
+    auto *canvas = viewer->findChild<QWidget *>("cadCanvas");
+    auto *frame = window.findChild<QSlider *>("bendFrame");
+    require(handle && canvas && frame, "The placement controls in the viewport are unavailable");
+    wait([&] { return !viewer->isRepositioning(); });
+    require(frame->value() == 0 && handle->isVisible(),
+            "The selected initial setup lacks a direct placement handle");
+    frame->setValue(1);
+    require(!handle->isVisible(), "The placement handle stayed visible during forming");
+    frame->setValue(0);
+    require(handle->isVisible(), "Returning to the initial frame lost the placement handle");
+
+    auto &controller = window.importController();
+    const auto route = controller.bendRoute();
+    const auto rev = controller.session().editRevision();
+    const auto searches = builder->searches.load();
+    QPoint start;
+    const auto mouse = [&](QEvent::Type type, int dx, Qt::MouseButton button,
+                           Qt::MouseButtons buttons) {
+        const auto global = start + QPoint(dx, 0);
+        QMouseEvent event(type, handle->mapFromGlobal(global), global, button, buttons,
+                          Qt::NoModifier);
+        QApplication::sendEvent(handle, &event);
+    };
+    const auto press = [&] {
+        start = handle->mapToGlobal(handle->rect().center());
+        mouse(QEvent::MouseButtonPress, 0, Qt::LeftButton, Qt::LeftButton);
+    };
+    const auto move = [&](int dx) { mouse(QEvent::MouseMove, dx, Qt::NoButton, Qt::LeftButton); };
+    const auto release = [&](int dx) {
+        mouse(QEvent::MouseButtonRelease, dx, Qt::LeftButton, Qt::NoButton);
+    };
+    press();
+    release(0);
+    require(builder->searches == searches, "Clicking the handle launched a check");
+    viewer->setOrientation(viewer::ViewerWidget::Orientation::Right);
+    require(handle->isVisible(), "There is no placement handle in the end-on view");
+    press();
+    move(220);
+    require(handle->text().contains(QStringLiteral("Вне матрицы")) && !controller.hasWork() &&
+                builder->searches == searches && controller.bendRoute() == route &&
+                controller.session().editRevision() == rev,
+            "Dragging failed to show the uncovered bend without launching a check");
+    if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
+        require(viewer->captureImage(true).save(output + "-direct-placement.png"),
+                "Cannot capture direct placement feedback");
+    }
+    QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &escape);
+    release(220);
+    require(handle->text() == QStringLiteral("↔") && builder->searches == searches &&
+                controller.bendRoute() == route,
+            "Escape or a late mouse release changed the checked setup");
+    press();
+    move(220);
+    move(0);
+    release(0);
+    require(builder->searches == searches && controller.bendRoute() == route,
+            "Dragging back to the current setup launched a check");
+    press();
+    move(220);
+    release(220);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.placementCheckError() && controller.bendRoute() == route &&
+                controller.session().editRevision() == rev && builder->searches == searches + 1 &&
+                handle->isVisible() && handle->text() != QStringLiteral("↔"),
+            "A failed drag did not restore the previous checked installation");
+    press();
+    move(12);
+    release(12);
+    wait([&] { return !controller.hasWork(); });
+    const auto accepted = controller.bendRoute();
+    const double chosen = controller.session().bend(0)->workpieceOffsetMm;
+    require(accepted && accepted != route && accepted->manualExtraction &&
+                accepted->steps.front().preview->workpieceOffsetMm() == chosen &&
+                chosen != route->steps.front().preview->workpieceOffsetMm() &&
+                std::abs(chosen) < 10. && builder->searches == searches + 2 &&
+                window.findChild<QPushButton *>("routeStep1")->isChecked() && frame->value() == 0,
+            "Releasing a valid drag did not check and apply the position once");
+
+    const auto acceptedRevision = controller.session().editRevision();
+    auto *cancel = window.findChild<QAction *>("cancelImportAction");
+    auto *partStage = window.findChild<QToolButton *>("processStage0");
+    auto *bendStage = window.findChild<QToolButton *>("processStage2");
+    require(cancel && partStage && bendStage, "Placement cancellation controls are missing");
+    for (bool leaveSimulation : {false, true}) {
+        press();
+        move(-12);
+        release(-12);
+        require(cancel->isEnabled() && controller.isPreparingRoute(),
+                "The placement check cannot be cancelled");
+        if (leaveSimulation) {
+            partStage->click();
+            require(partStage->isChecked() && !handle->isVisible() &&
+                        controller.isPreparingRoute() && controller.bendRoute() == accepted,
+                    "Leaving the simulation did not keep the active check and the previous route");
+        }
+        cancel->trigger();
+        wait([&] { return !controller.hasWork(); });
+        require(controller.bendRoute() == accepted &&
+                    controller.session().editRevision() == acceptedRevision &&
+                    controller.session().bend(0)->workpieceOffsetMm == chosen,
+                "Cancelling a placement check discarded or changed the verified route");
+    }
+    bendStage->click();
+    require(controller.bendRoute() == accepted && handle->isVisible() && frame->value() == 0 &&
+                !controller.hasWork(),
+            "Returning to the simulation did not restore the verified setup");
+}
 void verifyFormingCheck(const QString &folder) {
     const auto path = folder + "/single.step";
     STEPControl_Writer writer;
@@ -129,36 +258,13 @@ void verifyFormingCheck(const QString &folder) {
                 !window.findChild<QPushButton *>("prepareBendRoute")->isVisible(),
             "Verified blank should offer the first bend and keep recalculation in details");
     first->click();
-    require(!first->isVisible() && window.findChild<QPushButton *>("routeStep1")->isChecked(),
-            "First bend action did not activate the operation");
-    auto *move = window.findChild<QPushButton *>("moveBendWorkpiece");
-    auto *offset = window.findChild<QDoubleSpinBox *>("bendPlacementOffset");
-    auto *check = window.findChild<QPushButton *>("checkBendPlacement");
-    const auto revision = controller.session().editRevision();
-    const auto searches = builder->searches.load();
-    require(move && move->isVisible() && offset && check, "Placement controls are unavailable");
-    move->click();
-    require(offset->isVisible() && !check->isEnabled(), "Placement starts as a changed input");
-    offset->setValue(15);
-    require(check->isEnabled() && builder->searches == searches &&
-                controller.session().editRevision() == revision && controller.bendRoute() == route,
-            "Editing placement launched CAD or replaced the accepted route");
-    check->click();
-    wait([&] { return !controller.hasWork(); });
-    require(controller.placementCheckError() && controller.bendRoute() == route &&
-                controller.session().editRevision() == revision && offset->isVisible(),
-            "Rejected placement removed the verified route or mutated the project");
-    offset->setValue(2);
-    check->click();
-    wait([&] { return !controller.hasWork(); });
-    const auto moved = controller.bendRoute();
-    require(moved && moved != route && moved->steps.size() == 1 && moved->manualExtraction &&
-                moved->steps.front().preview->workpieceOffsetMm() == 2 &&
-                controller.session().bend(0)->workpieceOffsetMm == 2 && !offset->isVisible(),
-            "Checked placement was not applied as one project edit");
-    require(window.findChild<QPushButton *>("routeStep1")->isChecked() &&
+    require(!first->isVisible() && window.findChild<QPushButton *>("routeStep1")->isChecked() &&
                 window.findChild<QSlider *>("bendFrame")->value() == 0,
-            "Checked placement left the selected step or its initial frame");
+            "First bend action did not activate the operation at its initial position");
+    require(!window.findChild<QWidget *>("moveBendWorkpiece") &&
+                !window.findChild<QWidget *>("bendPlacementEditor"),
+            "The operation panel still contains the old placement editor");
+    verifyDirectPlacement(window, builder);
     if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT"); !output.isEmpty()) {
         auto *viewer = window.findChild<viewer::ViewerWidget *>();
         wait([&] { return window.windowHandle() && window.windowHandle()->isExposed(); });
@@ -184,6 +290,8 @@ void verifySharedStroke(const QString &folder) {
     auto files = std::make_shared<project::ProjectFiles>();
     auto builder = std::make_shared<Builder>();
     auto tools = tool_fixture::pair(16);
+    tools.die.segments = std::vector<core::ToolSegment>{{30, 2}};
+    tools.dieAssembly = core::ToolAssembly{{0, 0}, 20};
     ui::MainWindow window({"test", "test"}, files, files, builder, {tools.punch, tools.die});
     window.setAutomaticPartInputPrompt(false);
     window.show();
@@ -207,6 +315,19 @@ void verifySharedStroke(const QString &folder) {
     require(draft && draft->request.step == 1 && draft->visual->activeBendCount() == 2 &&
                 draft->checkedToolPositions == 21 && !draft->toolLengths,
             "Shared stroke draft did not publish the checked press positions");
+    const auto coverage = ui::BendPlacementCoverage::prepare(*draft->visual, &tools);
+    const auto centered = coverage.at(0);
+    const auto shifted = coverage.at(5);
+    if (coverage.bendMaterial.size() != 2 || coverage.workingSections[0].size() != 2 ||
+        !centered.uncovered.empty() || std::abs(shifted.missingMm[0] - 10.) >= 1.e-5 ||
+        std::abs(shifted.missingMm[1] - 5.) >= 1.e-5)
+        throw std::runtime_error("Unexpected coverage of segmented die (material intervals " +
+                                 std::to_string(coverage.bendMaterial.size()) + ", die intervals " +
+                                 std::to_string(coverage.workingSections[0].size()) +
+                                 ", missing at center " + std::to_string(centered.missingMm[0]) +
+                                 "/" + std::to_string(centered.missingMm[1]) +
+                                 ", missing after shift " + std::to_string(shifted.missingMm[0]) +
+                                 "/" + std::to_string(shifted.missingMm[1]) + ")");
     window.findChild<QPushButton *>("routeStep0")->click();
     wait([&] { return !controller.hasWork(); });
     require(window.findChild<QLabel *>("selectedOperationSummary")->text() ==
@@ -436,7 +557,7 @@ void verifyToolStageTransitions(const QString &folder) {
                 c.routeDraft()->toolLengths->coversBend(.5) &&
                 window.findChild<QLabel *>("bendCheckSummary")
                     ->text()
-                    .contains(QLocale().toString(.31, 'f', 2) + QStringLiteral(" мм")),
+                    .contains(QStringLiteral("не хватает 0,3 мм")),
             "Minor shortfall disappeared or retained excessive precision");
     step(1);
     slider->setValue(slider->maximum() - 1);
@@ -546,6 +667,11 @@ int main(int argc, char **argv) {
     require(folder.isValid(), "Temporary directory failed");
     ui::setPreferencesFile(folder.path() + "/settings.ini");
     try {
+        if (app.arguments().contains(QStringLiteral("--placement-only"))) {
+            verifyPlacementCoverage();
+            verifyFormingCheck(folder.path());
+            return 0;
+        }
         STEPControl_Writer writer;
         require(writer.Transfer(fixtures::tray(), STEPControl_AsIs) == IFSelect_RetDone &&
                     writer.Write((folder.path() + "/source.step").toUtf8().constData()) ==
@@ -765,16 +891,15 @@ int main(int argc, char **argv) {
         const auto originalScene = viewer->captureImage(false);
         const auto draftsBefore = builder->drafts.load();
         step(1)->click();
-        require(!controller.hasWork() && builder->drafts == draftsBefore &&
-                    slider->value() == slider->maximum(),
-                "Reselecting a ready step queued a redundant CAD job or lost its endpoint");
+        require(!controller.hasWork() && builder->drafts == draftsBefore && slider->value() == 0,
+                "Reselecting a ready step queued CAD or failed to return to its setup");
         unsigned presentations = 0;
         const auto connection = QObject::connect(viewer, &viewer::ViewerWidget::selectionChanged,
                                                  viewer, [&](quint64, int) { ++presentations; });
         step(1)->click();
         QObject::disconnect(connection);
         require(presentations == 0 && builder->drafts == draftsBefore,
-                "Reselecting the displayed endpoint rebuilt CAD or its presentation");
+                "Reselecting the displayed setup rebuilt CAD or its presentation");
         slider->setValue(10);
         require(reverse && reverse->isEnabled(), "Manual punch orientation control missing");
         const auto searchesBefore = builder->searches.load();
@@ -827,9 +952,12 @@ int main(int argc, char **argv) {
         require(beforeStepChange.isNull() || viewer->captureImage(false) == beforeStepChange,
                 "Step selection flashed the source part while preparing the new state");
         wait([&] { return !controller.hasWork(); });
-        require(controller.routeDraft() && controller.routeDraft()->request.step == 4 &&
-                    slider->value() == slider->maximum(),
-                "Step does not show the formed prefix endpoint");
+        const auto fourth = controller.routeDraft();
+        const auto *setup = fourth ? fourth->visual->pressState(0) : nullptr;
+        require(fourth && fourth->request.step == 4 && slider->value() == 0 &&
+                    fourth->visual->otherFormedBends() == 3 && setup &&
+                    std::abs(setup->section.angleRadians) < 1.e-9,
+                "Step does not show its open bend with the previous three already formed");
         const auto beforeFailure = viewer->captureImage(false);
         builder->fail = true;
         step(3)->click();
@@ -992,7 +1120,7 @@ x.XCloseDisplay(d)
         step(3)->click();
         step(2)->click();
         require(!controller.hasWork() && builder->drafts == readyDrafts && builder->searches == 1 &&
-                    slider->value() == slider->maximum() &&
+                    slider->value() == 0 &&
                     (checkedStep.isNull() || viewer->captureImage(false) == checkedStep),
                 "Ready route steps rebuilt CAD or reset the scene camera");
         window.findChild<QPushButton *>("routeMoveEarlier")->click();
@@ -1221,6 +1349,7 @@ x.XCloseDisplay(d)
                 "Closed document accepted a late draft");
         window.close();
         verifyToolStageTransitions(folder.path());
+        verifyPlacementCoverage();
         verifyFormingCheck(folder.path());
         verifySharedStroke(folder.path());
         verifyCompactDraftPublication(folder.path());

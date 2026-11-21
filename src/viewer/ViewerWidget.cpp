@@ -20,13 +20,17 @@
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
 #include <Font_NameOfFont.hxx>
+#include <Graphic3d_ArrayOfSegments.hxx>
 #include <Graphic3d_Camera.hxx>
+#include <Graphic3d_Group.hxx>
 #include <Graphic3d_TransformPers.hxx>
+#include <Graphic3d_ZLayerId.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_Caps.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
+#include <Prs3d_Presentation.hxx>
 #include <Prs3d_TextAspect.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -41,6 +45,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -51,6 +56,7 @@
 #include <QPointer>
 #include <QResizeEvent>
 #include <QStackedLayout>
+#include <QStyleHints>
 #include <QTimeLine>
 #include <QTimer>
 #include <QToolButton>
@@ -151,6 +157,42 @@ MachineAppearance machineAppearance(const cad::MachineDisplayComponent &componen
     }
     throw std::logic_error("Unknown machine display role");
 }
+
+// Presentation only. The placement guide is rebuilt from numeric intervals.
+class PlacementCoverage final : public AIS_InteractiveObject {
+  public:
+    PlacementCoverage() {
+        SetInfiniteState(true);
+        SetZLayer(Graphic3d_ZLayerId_Topmost);
+    }
+
+    void setIntervals(double height, std::span<const std::array<double, 2>> intervals) {
+        height_ = height;
+        intervals_.assign(intervals.begin(), intervals.end());
+    }
+
+  private:
+    void Compute(const Handle(PrsMgr_PresentationManager) &,
+                 const Handle(Prs3d_Presentation) & presentation, Standard_Integer) override {
+        if (intervals_.empty())
+            return;
+        Handle(Graphic3d_ArrayOfSegments) segments =
+            new Graphic3d_ArrayOfSegments(static_cast<int>(intervals_.size() * 2));
+        for (const auto &[from, to] : intervals_) {
+            segments->AddVertex(0., height_, from);
+            segments->AddVertex(0., height_, to);
+        }
+        const auto group = presentation->NewGroup();
+        const Quantity_Color orange(.93, .53, .15, Quantity_TOC_sRGB);
+        const Handle(Prs3d_LineAspect) style = new Prs3d_LineAspect(orange, Aspect_TOL_SOLID, 3.);
+        group->SetPrimitivesAspect(style->Aspect());
+        group->AddPrimitiveArray(segments);
+    }
+    void ComputeSelection(const Handle(SelectMgr_Selection) &, Standard_Integer) override {}
+
+    double height_ = 0;
+    std::vector<std::array<double, 2>> intervals_;
+};
 
 class OcctCanvas final : public QWidget {
     enum class CameraSpace : std::size_t { Cad, Flat, Kinematic, Press };
@@ -443,6 +485,20 @@ class OcctCanvas final : public QWidget {
         dimensionsNotice_->setStyleSheet(QStringLiteral(
             "QLabel { background: #fff3d6; color: #6b4b15; padding: 8px; border-radius: 5px; }"));
         dimensionsNotice_->hide();
+        placementHandle_ = new QLabel(this);
+        placementHandle_->setObjectName(QStringLiteral("bendPlacementHandle"));
+        placementHandle_->setAccessibleName(QStringLiteral("Сдвинуть деталь вдоль инструмента"));
+        placementHandle_->setAttribute(Qt::WA_NativeWindow);
+        placementHandle_->installEventFilter(this);
+        placementHandle_->setMouseTracking(true);
+        placementHandle_->setToolTip(QStringLiteral("Потяните вдоль инструмента"));
+        placementHandle_->setAlignment(Qt::AlignCenter);
+        placementHandle_->setTextFormat(Qt::PlainText);
+        placementHandle_->setWordWrap(true);
+        placementHandle_->setStyleSheet(
+            QStringLiteral("QLabel{background:#F4F7F9;color:#1C2938;border:1px solid #087F83;"
+                           "border-radius:5px;padding:4px 9px;}"));
+        placementHandle_->hide();
         orbitLockAction_->setEnabled(false);
         connect(orbitLockAction_, &QAction::toggled, this, [this](bool locked) {
             if (locked && pressOrbitLocked())
@@ -463,6 +519,7 @@ class OcctCanvas final : public QWidget {
     std::function<void(quint64, int)> onSelection;
     std::function<void(quint64, int)> onBendSelection;
     std::function<void(quint64, bool, int)> onToolPicked;
+    std::function<void()> onPlacementStarted, onPlacementFinished, onPlacementCancelled;
     std::function<void(double)> onPlacementDragged;
     std::function<void()> onSurfaceChanged;
 
@@ -1210,13 +1267,43 @@ class OcctCanvas final : public QWidget {
                 painter.drawPixmap(sideLegend_->pos(), sideLegend_->grab());
             if (repositionLabel_->isVisible())
                 painter.drawPixmap(repositionLabel_->pos(), repositionLabel_->grab());
+            if (placementHandle_->isVisible())
+                painter.drawPixmap(placementHandle_->pos(), placementHandle_->grab());
         }
         return result;
     }
 
   protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (watched == placementHandle_) {
+            switch (event->type()) {
+            case QEvent::MouseButtonPress:
+            case QEvent::MouseButtonRelease:
+            case QEvent::MouseMove: {
+                const auto *mouse = static_cast<QMouseEvent *>(event);
+                QMouseEvent mapped(mouse->type(), mapFromGlobal(mouse->globalPosition()),
+                                   mouse->globalPosition(), mouse->button(), mouse->buttons(),
+                                   mouse->modifiers(), mouse->pointingDevice());
+                return this->event(&mapped);
+            }
+            case QEvent::UngrabMouse:
+                cancelDirectPlacementDrag();
+                break;
+            default:
+                break;
+            }
+        }
+        return QWidget::eventFilter(watched, event);
+    }
     bool event(QEvent *event) override {
         const bool handled = QWidget::event(event);
+        if (event->type() == QEvent::ShortcutOverride && directPlacementPress_ &&
+            static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
+            event->accept();
+            return true;
+        }
+        if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::UngrabMouse)
+            cancelDirectPlacementDrag();
         if (event->type() == QEvent::WinIdChange && ready_) {
             restoreCamera_ = new Graphic3d_Camera(view_->Camera());
             restoreRevision_ = revision_;
@@ -1266,6 +1353,13 @@ class OcctCanvas final : public QWidget {
     void mousePressEvent(QMouseEvent *event) override {
         setFocus();
         lastPosition_ = physicalPoint(event->position());
+        if (event->button() == Qt::LeftButton && placementHandleEnabled_ &&
+            placementHandle_->isVisible() &&
+            placementHandle_->geometry().contains(event->position().toPoint())) {
+            directPlacementPress_ = lastPosition_;
+            event->accept();
+            return;
+        }
         guarded([&] {
             if (event->button() == Qt::RightButton) {
                 if (!pressOrbitLocked())
@@ -1281,12 +1375,8 @@ class OcctCanvas final : public QWidget {
                     return;
                 }
                 if (preview_) {
-                    if (const auto picked = rigidScene_->detectedTool(); picked && onToolPicked) {
+                    if (const auto picked = rigidScene_->detectedTool(); picked && onToolPicked)
                         onToolPicked(revision_, picked->first, picked->second);
-                    } else if (editingPlacement_ && context_->HasDetected() &&
-                               context_->DetectedInteractive() == presentation_) {
-                        startPlacementDrag();
-                    }
                 } else if (flat_) {
                     const auto *measures = flat_->info().measurements.get();
                     auto feature =
@@ -1382,15 +1472,23 @@ class OcctCanvas final : public QWidget {
     void mouseMoveEvent(QMouseEvent *event) override {
         const auto position = physicalPoint(event->position());
         guarded([&] {
+            if (directPlacementPress_ && !placementDrag_ &&
+                event->buttons().testFlag(Qt::LeftButton) &&
+                (position - *directPlacementPress_).manhattanLength() >=
+                    QGuiApplication::styleHints()->startDragDistance() * devicePixelRatioF()) {
+                const auto start = *directPlacementPress_;
+                if (onPlacementStarted)
+                    onPlacementStarted();
+                if (editingPlacement_)
+                    startPlacementDrag(start);
+                if (!placementDrag_)
+                    cancelDirectPlacementDrag();
+            }
             if (placementDrag_ && event->buttons().testFlag(Qt::LeftButton)) {
-                const QPointF movement = position - placementDrag_->start;
-                const double offset = placementDrag_->offset +
-                                      QPointF::dotProduct(movement, placementDrag_->axis) /
-                                          QPointF::dotProduct(placementDrag_->axis,
-                                                              placementDrag_->axis);
-                if (onPlacementDragged)
-                    onPlacementDragged(offset);
-            } else if (event->buttons().testFlag(Qt::RightButton)) {
+                updatePlacementDrag(position);
+                return; // Applying the new offset already redraws the scene.
+            }
+            if (event->buttons().testFlag(Qt::RightButton)) {
                 if (pressOrbitLocked()) {
                     const auto camera = view_->Camera();
                     gp_Trsf orbit;
@@ -1404,7 +1502,14 @@ class OcctCanvas final : public QWidget {
             } else if (event->buttons().testFlag(Qt::MiddleButton)) {
                 view_->Pan(position.x() - lastPosition_.x(), lastPosition_.y() - position.y());
             } else if (event->buttons() == Qt::NoButton) {
-                context_->MoveTo(position.x(), position.y(), view_, false);
+                if (placementHandleEnabled_ && placementHandle_->isVisible() &&
+                    placementHandle_->geometry().contains(event->position().toPoint())) {
+                    setCursor(Qt::SizeHorCursor);
+                    rigidScene_->clearToolHover();
+                } else {
+                    unsetCursor();
+                    context_->MoveTo(position.x(), position.y(), view_, false);
+                }
             }
             if (event->buttons().testFlag(Qt::RightButton) ||
                 event->buttons().testFlag(Qt::MiddleButton)) {
@@ -1417,8 +1522,15 @@ class OcctCanvas final : public QWidget {
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override {
-        if (event->button() == Qt::LeftButton)
+        if (event->button() == Qt::LeftButton) {
+            const bool finished = directPlacementPress_ && placementDrag_;
+            if (finished)
+                updatePlacementDrag(physicalPoint(event->position()));
+            directPlacementPress_.reset();
             placementDrag_.reset();
+            if (finished && onPlacementFinished)
+                onPlacementFinished();
+        }
         event->accept();
     }
 
@@ -1428,6 +1540,10 @@ class OcctCanvas final : public QWidget {
     }
 
     void wheelEvent(QWheelEvent *event) override {
+        if (directPlacementPress_) {
+            event->accept();
+            return;
+        }
         guarded([&] {
             const double steps =
                 qBound(-8.0, static_cast<double>(event->angleDelta().y()) / 120.0, 8.0);
@@ -1439,7 +1555,10 @@ class OcctCanvas final : public QWidget {
     }
 
     void keyPressEvent(QKeyEvent *event) override {
-        if (event->key() == Qt::Key_Escape && dimensionsVisible_ && !preview_) {
+        if (event->key() == Qt::Key_Escape && directPlacementPress_) {
+            cancelDirectPlacementDrag();
+            event->accept();
+        } else if (event->key() == Qt::Key_Escape && dimensionsVisible_ && !preview_) {
             selectMeasurement({});
             event->accept();
         } else if (event->key() == Qt::Key_F) {
@@ -1727,6 +1846,7 @@ class OcctCanvas final : public QWidget {
         guarded([&] {
             if (updateFlatBendSide())
                 context_->Redisplay(presentation_, false);
+            positionPlacementHandle();
         });
         if (!dimensionsVisible_ && dimensions_.objects.empty()) {
             updateDimensionButton();
@@ -1920,7 +2040,10 @@ class OcctCanvas final : public QWidget {
 
     void fail(const QString &message) {
         editingPlacement_ = false;
+        placementHandleEnabled_ = false;
+        directPlacementPress_.reset();
         placementDrag_.reset();
+        placementHandle_->hide();
         repositionTimeline_.stop();
         reposition_.reset();
         draftReposition_ = false;
@@ -1935,7 +2058,10 @@ class OcctCanvas final : public QWidget {
 
     void release() noexcept {
         editingPlacement_ = false;
+        placementHandleEnabled_ = false;
+        directPlacementPress_.reset();
         placementDrag_.reset();
+        placementHandle_->hide();
         repositionTimeline_.stop();
         reposition_.reset();
         draftReposition_ = false;
@@ -1952,6 +2078,7 @@ class OcctCanvas final : public QWidget {
         presentation_.Nullify();
         evidence_.Nullify();
         support_.Nullify();
+        placementCoverage_.Nullify();
         dimensions_ = {};
         navigationCube_.Nullify();
         context_.Nullify();
@@ -2045,6 +2172,11 @@ class OcctCanvas final : public QWidget {
         double offset;
     };
     std::optional<PlacementDrag> placementDrag_;
+    std::optional<QPoint> directPlacementPress_;
+    QLabel *placementHandle_ = nullptr;
+    bool placementHandleEnabled_ = false;
+    bool placementHandleHasNotice_ = false;
+    Handle(PlacementCoverage) placementCoverage_;
     bool editingPlacement_ = false;
     double placementDelta_ = 0;
     QLabel *dimensionsNotice_ = nullptr;
@@ -2061,7 +2193,21 @@ class OcctCanvas final : public QWidget {
         if (ready_)
             guarded([&] { rigidScene_->setToolPicking(enabled); });
     }
-    void setBendPlacement(bool editing, double delta = 0) {
+    void setBendPlacementHandle(bool enabled, const QString &notice) {
+        placementHandleEnabled_ = enabled;
+        placementHandleHasNotice_ = !notice.isEmpty();
+        placementHandle_->setCursor(enabled ? Qt::SizeHorCursor : Qt::ArrowCursor);
+        const auto label = enabled ? QStringLiteral("↔") : QString{};
+        placementHandle_->setText(enabled && !notice.isEmpty()
+                                      ? label + QStringLiteral("  ") + notice
+                                  : enabled ? label
+                                            : notice);
+        if (!enabled && !editingPlacement_)
+            directPlacementPress_.reset();
+        guarded([&] { positionPlacementHandle(); });
+    }
+    void setBendPlacement(bool editing, double delta = 0,
+                          std::span<const std::array<double, 2>> uncovered = {}) {
         if (!ready_ || !preview_ || !preview_->toolSetup() || previewFrame_ != 0 ||
             presentation_.IsNull())
             editing = false;
@@ -2075,17 +2221,16 @@ class OcctCanvas final : public QWidget {
             placementDelta_ = editing ? delta : 0.;
             if (changed) {
                 placementDrag_.reset();
+                if (!editing)
+                    directPlacementPress_.reset();
                 if (editing) {
                     resetReposition();
-                    if (std::abs(view_->Camera()->Direction().Z()) > .92) {
+                    if (std::abs(view_->Camera()->Direction().Z()) > .92 ||
+                        placementAxis().isNull()) {
                         view_->SetProj(V3d_Xneg, true);
                         view_->SetUp(0, 1, 0);
                         fitPreview(*preview_, previewFrame_, false);
                     }
-                    context_->Load(presentation_, 0);
-                    context_->Activate(presentation_, 0, false);
-                } else if (!presentation_.IsNull()) {
-                    context_->Deactivate(presentation_, 0);
                 }
                 if (auto *styled = dynamic_cast<CollisionPresentation *>(presentation_.get())) {
                     styled->showEvidence(!editing);
@@ -2097,6 +2242,18 @@ class OcctCanvas final : public QWidget {
                 transform.SetTranslation(gp_Vec(0, 0, placementDelta_));
                 context_->SetLocation(presentation_, TopLoc_Location(transform));
             }
+            if (!uncovered.empty() && editing) {
+                if (placementCoverage_.IsNull())
+                    placementCoverage_ = new PlacementCoverage;
+                placementCoverage_->setIntervals(preview_->model().thicknessMm, uncovered);
+                if (context_->IsDisplayed(placementCoverage_))
+                    context_->Redisplay(placementCoverage_, false);
+                else
+                    context_->Display(placementCoverage_, 0, -1, false);
+            } else if (!placementCoverage_.IsNull()) {
+                context_->Remove(placementCoverage_, false);
+                placementCoverage_.Nullify();
+            }
             if (changed) {
                 refreshDimensions();
                 refreshOrientation();
@@ -2104,14 +2261,62 @@ class OcctCanvas final : public QWidget {
             view_->Redraw();
         });
     }
-    void startPlacementDrag() {
+    QPointF placementAxis() const {
         int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-        const double z = preview_->toolSetup()->tools.lengthMm / 2 + placementDelta_;
-        view_->Convert(0, 0, z, x0, y0);
-        view_->Convert(0, 0, z + 100, x1, y1);
-        const QPointF axis((x1 - x0) / 100., (y1 - y0) / 100.);
-        if (QPointF::dotProduct(axis, axis) > .01)
-            placementDrag_ = PlacementDrag{lastPosition_, axis, placementDelta_};
+        const double z = preview_->toolSetup()->tools.lengthMm / 2 + preview_->workpieceOffsetMm() +
+                         placementDelta_;
+        const double y = preview_->model().thicknessMm;
+        view_->Convert(0, y, z, x0, y0);
+        const double span = std::max(100., preview_->model().widthMm);
+        view_->Convert(0, y, z + span, x1, y1);
+        return {(x1 - x0) / span, (y1 - y0) / span};
+    }
+    void startPlacementDrag(QPoint start) {
+        const auto axis = placementAxis();
+        if (!axis.isNull())
+            placementDrag_ = PlacementDrag{start, axis, placementDelta_};
+    }
+    void updatePlacementDrag(QPoint position) {
+        if (!placementDrag_ || !onPlacementDragged)
+            return;
+        const auto &drag = *placementDrag_;
+        const QPointF movement = position - drag.start;
+        onPlacementDragged(drag.offset + QPointF::dotProduct(movement, drag.axis) /
+                                             QPointF::dotProduct(drag.axis, drag.axis));
+    }
+    void cancelDirectPlacementDrag() {
+        if (!directPlacementPress_)
+            return;
+        directPlacementPress_.reset();
+        placementDrag_.reset();
+        if (onPlacementCancelled)
+            onPlacementCancelled();
+    }
+    void positionPlacementHandle() {
+        if ((!placementHandleEnabled_ && !placementHandleHasNotice_) || !preview_ ||
+            !preview_->toolSetup() || previewFrame_ != 0 || animationRunning_ || reposition_) {
+            placementHandle_->hide();
+            return;
+        }
+        int x = 0, y = 0;
+        const double z = preview_->toolSetup()->tools.lengthMm / 2 + preview_->workpieceOffsetMm() +
+                         placementDelta_;
+        view_->Convert(0., preview_->model().thicknessMm, z, x, y);
+        const double ratio = devicePixelRatioF();
+        const auto metrics = placementHandle_->fontMetrics();
+        int longestLine = 0;
+        for (const auto &line : placementHandle_->text().split(QLatin1Char('\n')))
+            longestLine = std::max(longestLine, metrics.horizontalAdvance(line));
+        const int w = std::clamp(longestLine + 22, 32, std::clamp(width() - 24, 32, 310));
+        const int h = placementHandle_->heightForWidth(w);
+        placementHandle_->resize(w, h);
+        const int bottom =
+            bottomOverlay_ && bottomOverlay_->isVisible() ? bottomOverlay_->y() : height();
+        placementHandle_->move(
+            std::clamp(qRound(x / ratio) - w / 2, 6, std::max(6, width() - w - 6)),
+            std::clamp(qRound(y / ratio) - h - 14, 6, std::max(6, bottom - h - 6)));
+        placementHandle_->show();
+        placementHandle_->raise();
     }
     bool isRepositioning() const {
         return reposition_.has_value();
@@ -2371,7 +2576,10 @@ ViewerWidget::ViewerWidget(QWidget *parent) : QWidget(parent), impl_(std::make_u
     impl_->canvas->onToolPicked = [this](quint64 revision, bool punch, int section) {
         emit bendToolPicked(revision, punch, section);
     };
+    impl_->canvas->onPlacementStarted = [this] { emit bendPlacementDragStarted(); };
     impl_->canvas->onPlacementDragged = [this](double delta) { emit bendPlacementDragged(delta); };
+    impl_->canvas->onPlacementFinished = [this] { emit bendPlacementDragFinished(); };
+    impl_->canvas->onPlacementCancelled = [this] { emit bendPlacementDragCancelled(); };
     impl_->canvas->onSurfaceChanged = [this] { queueOverlayLayout(); };
     impl_->canvas->onError = [this, reportError](const QString &message) {
         // Switch pages after the native paint/input event has completed.
@@ -2525,9 +2733,14 @@ void ViewerWidget::setBendToolPicking(bool enabled) {
     if (impl_->canvas)
         impl_->canvas->setBendToolPicking(enabled);
 }
-void ViewerWidget::setBendPlacement(bool editing, double deltaMm) {
+void ViewerWidget::setBendPlacementHandle(bool enabled, const QString &notice) {
     if (impl_->canvas)
-        impl_->canvas->setBendPlacement(editing, deltaMm);
+        impl_->canvas->setBendPlacementHandle(enabled, notice);
+}
+void ViewerWidget::setBendPlacement(bool editing, double deltaMm,
+                                    std::span<const std::array<double, 2>> uncovered) {
+    if (impl_->canvas)
+        impl_->canvas->setBendPlacement(editing, deltaMm, uncovered);
 }
 
 void ViewerWidget::setOrientation(Orientation orientation) {

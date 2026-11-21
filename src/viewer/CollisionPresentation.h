@@ -11,7 +11,9 @@ class CollisionPresentation final : public AIS_ColoredShape {
                           bool machineVisible, bool floorVisible,
                           const std::vector<gp_Pnt> &floorContacts,
                           const std::vector<gp_Pnt> &backgaugeContacts);
-    void showEvidence(bool visible) { evidenceVisible_ = visible; }
+    void showEvidence(bool visible) {
+        evidenceVisible_ = visible;
+    }
 
   protected:
     void Compute(const Handle(PrsMgr_PresentationManager) &, const Handle(Prs3d_Presentation) &,

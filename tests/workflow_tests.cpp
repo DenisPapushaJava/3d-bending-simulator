@@ -2203,6 +2203,18 @@ void testGuidedWorkflow(bool graphics) {
                 core::punchLengthMm(*controller.session().bend(0)->tools) == 525 &&
                 !controller.session().bend(0)->target,
             "Guided check lost catalogue snapshot/separate lengths");
+    auto *blankStep = window.findChild<QPushButton *>("routeStep0");
+    auto *firstStep = window.findChild<QPushButton *>("routeStep1");
+    require(blankStep && firstStep, "Single bend is missing its step buttons");
+    firstStep->click();
+    require(firstStep->isChecked() && slider->value() == 0,
+            "Single bend skipped the initial setup or selected the blank");
+    slider->setValue(10);
+    blankStep->click();
+    require(blankStep->isChecked() && slider->value() == 0 &&
+                controller.bendPreview() == guidedPreview && !controller.hasWork(),
+            "Returning to the blank replaced or recalculated the single bend");
+    firstStep->click();
     slider->setValue(24);
     if (graphics) {
         const auto preview = controller.bendPreview();

@@ -2106,11 +2106,10 @@ void toolNotesOnPaper(const QString &folder) {
                              {QStringLiteral("%1: B%1").arg(i, 2, 10, QLatin1Char('0'))}});
     title.toolRows = std::make_shared<const std::vector<ui::DrawingToolRow>>(std::move(longTable));
     const auto longNotes = ui::drawing::prepareToolPaperNotes(title);
-    require(longNotes.extraPages() > 1 &&
-                ui::drawing::toolNoteOnPage(longNotes, *title.plan, 0) ==
-                    QStringLiteral("Оснастка по ходам · листы %1-%2")
-                        .arg(title.plan->pages + 1)
-                        .arg(title.plan->pages + longNotes.extraPages()),
+    require(longNotes.extraPages() > 1 && ui::drawing::toolNoteOnPage(longNotes, *title.plan, 0) ==
+                                              QStringLiteral("Оснастка по ходам · листы %1-%2")
+                                                  .arg(title.plan->pages + 1)
+                                                  .arg(title.plan->pages + longNotes.extraPages()),
             "Long tooling table lost its continuation sheet range");
     write(QStringLiteral("long-table"));
 
@@ -2159,12 +2158,13 @@ void toolNotesOnPaper(const QString &folder) {
     const auto tableNotes = ui::drawing::prepareToolPaperNotes(title);
     const auto tableReference =
         QStringLiteral("Оснастка по ходам · лист %1").arg(title.plan->pages + 1);
-    require(header(0) != firstHeader && header(sectionPage) == header(0) &&
-                header(flatPage) == flatHeader && tableNotes.extraPages() == 1 &&
-                ui::drawing::toolNoteOnPage(tableNotes, *title.plan, 0) == tableReference &&
-                ui::drawing::toolNoteOnPage(tableNotes, *title.plan, sectionPage) == tableReference &&
-                ui::drawing::toolNoteOnPage(tableNotes, *title.plan, flatPage).isEmpty(),
-            "The tool table reference must point to the appendix from the first and section sheets");
+    require(
+        header(0) != firstHeader && header(sectionPage) == header(0) &&
+            header(flatPage) == flatHeader && tableNotes.extraPages() == 1 &&
+            ui::drawing::toolNoteOnPage(tableNotes, *title.plan, 0) == tableReference &&
+            ui::drawing::toolNoteOnPage(tableNotes, *title.plan, sectionPage) == tableReference &&
+            ui::drawing::toolNoteOnPage(tableNotes, *title.plan, flatPage).isEmpty(),
+        "The tool table reference must point to the appendix from the first and section sheets");
     write(QStringLiteral("per-stroke-paged"));
     title.execution = QString(60, QChar(u'Ш'));
     write(QStringLiteral("per-stroke-paged-long-header"));
@@ -3477,7 +3477,8 @@ void workflow(const QString &folder) {
     material->setEditText(longGrade);
     wait([&] { return partStage->accessibleName().endsWith(longGrade); });
     require(partStatus->text().startsWith(partSubtitle + QStringLiteral(" · ")) &&
-                partStatus->text().endsWith(QChar(0x2026)) && partStage->toolTip().contains(longGrade),
+                partStatus->text().endsWith(QChar(0x2026)) &&
+                partStage->toolTip().contains(longGrade),
             "A long grade hid the part data or was lost in the tooltip");
     material->setCurrentIndex(0);
     require(c.session().drawingSettings()->material.empty(),

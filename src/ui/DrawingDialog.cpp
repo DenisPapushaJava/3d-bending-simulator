@@ -1051,7 +1051,7 @@ class DrawingDialog::Impl {
                 qFuzzyCompare(current.devicePixelRatioF(), ratio))
                 return;
             auto raster = drawing::previewPlannedPage(drawing, drawingTitle, tools,
-                                                        page->value() - 1, pixels);
+                                                      page->value() - 1, pixels);
             const int selectedRow = views->currentRow();
             if (plan && selectedRow >= 0 &&
                 static_cast<std::size_t>(selectedRow) < choices.size()) {

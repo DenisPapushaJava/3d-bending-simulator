@@ -164,8 +164,7 @@ int main(int argc, char **argv) {
               "Moving a large step lost identity or collision checks");
         panel->select(0);
         wait([&] { return !c.hasWork(); });
-        check(c.routeDraft() && c.routeDraft()->request.step == 0 &&
-                  !moveEarlier->isEnabled() &&
+        check(c.routeDraft() && c.routeDraft()->request.step == 0 && !moveEarlier->isEnabled() &&
                   builder->searches == 0,
               "Flat step became reorderable");
         const bool fastPrefetch = app.arguments().contains("--audit-prefetch-fast");

@@ -130,7 +130,8 @@ class ImportController::Impl {
     std::optional<BendRouteError> routeError;
     std::optional<BendRouteProgress> routeProgress;
     std::uint64_t routeId = 0, routeRevision = 0, routeEditRevision = 0;
-    bool preparingRoute = false;
+    enum class RouteTask { None, BuildRoute, CheckPlacement };
+    RouteTask routeTask = RouteTask::None;
     RouteDraftPtr draft;
     std::optional<BendRouteError> draftError;
     std::optional<RouteDraftPose> draftPose;
@@ -206,9 +207,9 @@ class ImportController::Impl {
         routeError.reset();
         placementError.reset();
         routeProgress.reset();
-        if (preparingRoute) {
+        if (routeTask != RouteTask::None) {
             stop.request_stop();
-            preparingRoute = false;
+            routeTask = RouteTask::None;
         }
     }
     BendingDrawingPtr drawing;
@@ -495,6 +496,14 @@ void ImportController::open(std::filesystem::path path) {
 }
 
 void ImportController::cancel() {
+    if (impl_->routeTask == Impl::RouteTask::CheckPlacement) {
+        impl_->stop.request_stop();
+        return;
+    }
+    cancelDocumentWork();
+}
+
+void ImportController::cancelDocumentWork() {
     impl_->stop.request_stop();
     impl_->discardRouteCache();
     impl_->invalidateRoute();
@@ -510,7 +519,7 @@ void ImportController::cancel() {
 
 void ImportController::closeDocument() {
     impl_->invalidateFlat();
-    cancel();
+    cancelDocumentWork();
     impl_->presenter({}, impl_->session.revision() + 1);
     impl_->session.close();
     emit stateChanged();
@@ -1072,7 +1081,7 @@ const std::optional<BendRouteError> &ImportController::placementCheckError() con
     return impl_->placementError;
 }
 bool ImportController::isPreparingRoute() const {
-    return impl_->preparingRoute;
+    return impl_->routeTask != Impl::RouteTask::None;
 }
 std::optional<BendRouteProgress> ImportController::bendRouteProgress() const {
     return impl_->routeProgress;
@@ -1207,7 +1216,9 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     const auto document = session.document();
     s->beginForeground();
     const auto stop = s->stop.get_token();
-    s->running = s->preparingRoute = true;
+    s->running = true;
+    s->routeTask =
+        keepPreviousPreview ? Impl::RouteTask::CheckPlacement : Impl::RouteTask::BuildRoute;
     s->routeProgress = BendRouteProgress{};
     struct ProgressGate {
         std::chrono::steady_clock::time_point sent = {};
@@ -1230,7 +1241,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                 if (!owner)
                     return;
                 auto *state = owner->impl_.get();
-                if (state->preparingRoute && state->routeId == id &&
+                if (state->routeTask != Impl::RouteTask::None && state->routeId == id &&
                     state->session.revision() == revision &&
                     state->session.editRevision() == edit && !stop.stop_requested()) {
                     state->routeProgress = progress;
@@ -1256,7 +1267,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                 s->owner,
                 [s, id, revision, edit, stop, request = std::move(request), keepPreviousPreview,
                  result = std::move(result)]() mutable {
-                    s->running = s->preparingRoute = false;
+                    s->running = false;
+                    s->routeTask = Impl::RouteTask::None;
                     if (s->stopping)
                         return;
                     if (id == s->routeId && revision == s->session.revision() &&
