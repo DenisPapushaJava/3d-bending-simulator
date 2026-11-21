@@ -1,11 +1,15 @@
 #include "bending/ui/Preferences.h"
 #include "ToolSegmentColorPreferences.h"
+#include "bending/application/MeasurementDisplay.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <optional>
 namespace bending::ui {
 namespace {
 QString file;
+std::optional<int> displayedDecimals;
+constexpr auto dimensionDecimalsKey = "display/dimensionDecimals";
 QString libraryRoot(const QSettings &settings) {
 #ifdef _WIN32
     // A native Windows QSettings name is a registry key, not a writable folder.
@@ -17,10 +21,35 @@ QString libraryRoot(const QSettings &settings) {
 } // namespace
 void setPreferencesFile(const QString &path) {
     file = path;
+    displayedDecimals.reset();
 }
 std::unique_ptr<QSettings> preferences() {
     return file.isEmpty() ? std::make_unique<QSettings>()
                           : std::make_unique<QSettings>(file, QSettings::IniFormat);
+}
+int dimensionDecimalPlaces() {
+    if (!displayedDecimals) {
+        bool ok = false;
+        const int stored = preferences()
+                               ->value(QLatin1String(dimensionDecimalsKey),
+                                       application::defaultDimensionDecimalPlaces)
+                               .toInt(&ok);
+        displayedDecimals = ok && application::validDimensionDecimalPlaces(stored)
+                                ? stored
+                                : application::defaultDimensionDecimalPlaces;
+    }
+    return *displayedDecimals;
+}
+bool setDimensionDecimalPlaces(int decimals) {
+    if (!application::validDimensionDecimalPlaces(decimals))
+        return false;
+    auto settings = preferences();
+    settings->setValue(QLatin1String(dimensionDecimalsKey), decimals);
+    settings->sync();
+    if (settings->status() != QSettings::NoError)
+        return false;
+    displayedDecimals = decimals;
+    return true;
 }
 QString toolCatalogPath() {
     const auto settings = preferences();

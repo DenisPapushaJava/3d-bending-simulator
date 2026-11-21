@@ -2,6 +2,7 @@
 #include "ExportFileDialog.h"
 #include "FlatDxfExport.h"
 #include "FlatDxfPreview.h"
+#include "MeasurementText.h"
 #include "PreviewIcons.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/Preferences.h"
@@ -18,7 +19,6 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QLocale>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -77,6 +77,21 @@ QIcon swatch(const QColor &color) {
 }
 } // namespace
 
+void FlatDxfDialog::setDimensionDecimals(int decimals) {
+    if (dimensionDecimals_ == decimals)
+        return;
+    dimensionDecimals_ = decimals;
+    preview_->setDimensionDecimals(decimals);
+    refreshSize();
+}
+void FlatDxfDialog::refreshSize() {
+    const auto dimensions = preview_->drawingSize();
+    size_->setText(!dimensions.isEmpty()
+                       ? QStringLiteral("%1 × %2 мм")
+                             .arg(measurementText(dimensions.width(), dimensionDecimals_),
+                                  measurementText(dimensions.height(), dimensionDecimals_))
+                       : QString{});
+}
 void FlatDxfDialog::keyPressEvent(QKeyEvent *event) {
     if (event->key() == Qt::Key_Escape) {
         event->accept();
@@ -88,7 +103,7 @@ void FlatDxfDialog::keyPressEvent(QKeyEvent *event) {
 FlatDxfDialog::FlatDxfDialog(ImportController &controller,
                              std::shared_ptr<const application::FlatPatternBuilder> builder,
                              const QString &modelPath, QWidget *parent)
-    : QDialog(parent) {
+    : QDialog(parent), dimensionDecimals_(dimensionDecimalPlaces()) {
     setObjectName(QStringLiteral("flatDxfDialog"));
     const auto &session = controller.session();
     const auto document = session.document();
@@ -123,7 +138,8 @@ FlatDxfDialog::FlatDxfDialog(ImportController &controller,
     tools->addWidget(fit);
     tools->addWidget(measure);
     tools->addStretch();
-    auto *preview = new FlatDxfPreview(this);
+    auto *preview = preview_ = new FlatDxfPreview(this);
+    preview->setDimensionDecimals(dimensionDecimals_);
     canvas->addWidget(preview, 1);
     auto *measurement = new QLabel(this);
     measurement->setObjectName(QStringLiteral("flatDxfMeasurement"));
@@ -180,7 +196,7 @@ FlatDxfDialog::FlatDxfDialog(ImportController &controller,
             status->setText(QStringLiteral("DXF сохранён."));
         }
     });
-    auto *size = new QLabel(this);
+    auto *size = size_ = new QLabel(this);
     size->setWordWrap(true);
     layout->addRow(size);
 
@@ -285,7 +301,7 @@ FlatDxfDialog::FlatDxfDialog(ImportController &controller,
     const auto options = [=] {
         return FlatDxfOptions{bends->isChecked(), layer->text().trimmed(), colors->checkedId()};
     };
-    const auto refresh = [=, &controller] {
+    const auto refresh = [=, &controller, this] {
         const auto flat = current();
         const auto profile = flat ? flat->info().cutProfile : nullptr;
         const auto selected = options();
@@ -305,12 +321,7 @@ FlatDxfDialog::FlatDxfDialog(ImportController &controller,
         measure->setEnabled(bool(profile));
         if (!profile)
             measure->setChecked(false);
-        const auto dimensions = preview->drawingSize();
-        const QLocale locale;
-        size->setText(profile ? QStringLiteral("%1 × %2 мм")
-                                    .arg(locale.toString(dimensions.width(), 'f', 2),
-                                         locale.toString(dimensions.height(), 'f', 2))
-                              : QString{});
+        refreshSize();
         save->setEnabled(profile && validLayer);
         layer->setEnabled(useBends);
         color->setEnabled(useBends);

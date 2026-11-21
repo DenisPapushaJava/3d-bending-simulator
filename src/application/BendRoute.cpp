@@ -44,20 +44,29 @@ bool compatibleStrokeZones(const BendAnalysis &analysis, std::size_t first, std:
 }
 } // namespace
 std::vector<BendStroke> routeBendStrokes(const BendAnalysis &analysis,
-                                         std::span<const std::size_t> order) {
+                                         std::span<const std::size_t> order, bool includeSplitWalls,
+                                         std::span<const unsigned> partitions) {
     using Walls = std::array<std::array<std::size_t, 2>, 2>;
     std::map<Walls, std::size_t> strokesByWallPair;
+    std::map<std::pair<std::size_t, unsigned>, std::size_t> interruptedStrokes;
     std::vector<BendStroke> strokes;
     for (const auto index : order) {
         auto position = strokes.size();
         if (index < analysis.bends.size()) {
-            const auto &faces = analysis.bends[index].flangeFaces;
+            const auto &bend = analysis.bends[index];
+            const auto &faces = bend.flangeFaces;
             Walls walls{{{faces[0], faces[1]}, {faces[2], faces[3]}}};
             for (auto &wall : walls)
                 std::sort(wall.begin(), wall.end());
             std::sort(walls.begin(), walls.end());
-            if (walls[0][0] && walls[0][0] != walls[0][1] && walls[1][0] != walls[1][1] &&
-                walls[0] != walls[1]) {
+            if (includeSplitWalls && bend.interruptedStroke) {
+                const auto partition = index < partitions.size() ? partitions[index] : 0;
+                const auto [found, inserted] = interruptedStrokes.try_emplace(
+                    std::pair{bend.interruptedStroke, partition}, position);
+                if (!inserted)
+                    position = found->second;
+            } else if (walls[0][0] && walls[0][0] != walls[0][1] && walls[1][0] != walls[1][1] &&
+                       walls[0] != walls[1]) {
                 const auto [found, inserted] = strokesByWallPair.try_emplace(walls, position);
                 if (!inserted && std::all_of(strokes[found->second].begin(),
                                              strokes[found->second].end(), [&](auto member) {
@@ -74,12 +83,16 @@ std::vector<BendStroke> routeBendStrokes(const BendAnalysis &analysis,
     return strokes;
 }
 std::vector<BendStroke> routeDraftStrokes(const RouteDraftRequest &request,
-                                          const BendAnalysis &analysis) {
+                                          const BendAnalysis &analysis, bool includeSplitWalls) {
     std::vector<std::size_t> order;
+    std::vector<unsigned> partitions(analysis.bends.size());
     order.reserve(request.operations.size());
-    for (const auto &op : request.operations)
+    for (const auto &op : request.operations) {
         order.push_back(op.bendIndex);
-    auto strokes = routeBendStrokes(analysis, order);
+        if (op.bendIndex < partitions.size())
+            partitions[op.bendIndex] = op.strokePartition;
+    }
+    auto strokes = routeBendStrokes(analysis, order, includeSplitWalls, partitions);
     // Draft consumers refer to positions in the request, which can be reordered.
     std::vector<std::size_t> positions(analysis.bends.size(), order.size());
     for (std::size_t i = 0; i < order.size(); ++i)

@@ -197,6 +197,25 @@ int main() {
             selectTools({drawn.punch, drawn.die, wide.die}, {6, std::numbers::pi / 2, 8, 40});
         require(choice.candidates.size() == 1 && choice.candidates[0].die == 2,
                 "6 mm selection did not exclude V12/prefer available V50");
+        auto boundary = tool_fixture::pair(30);
+        boundary.die.id = "die-v30";
+        boundary.punch.segments = boundary.die.segments = std::vector<ToolSegment>{{20, 2}};
+        const ToolCatalog boundaryStock{boundary.punch, drawn.die, boundary.die};
+        ToolSelectionRequest boundaryRequest{6, std::numbers::pi / 2, 8, 41, 1};
+        const auto withGap = selectTools(boundaryStock, boundaryRequest);
+        require(withGap.candidates.size() == 1 && withGap.candidates.front().die == 2 &&
+                    withGap.candidates.front().punchAssembly &&
+                    withGap.candidates.front().dieAssembly &&
+                    withGap.candidates.front().punchAssembly->gapMm == 1 &&
+                    withGap.candidates.front().dieAssembly->gapMm == 1,
+                "Early screening rejected V30 or an allowed section gap");
+        boundaryRequest.maximumSegmentGapMm = 0;
+        require(selectTools(boundaryStock, boundaryRequest).candidates.empty(),
+                "Insufficient stock covered the requested length");
+        std::stop_source stopped;
+        stopped.request_stop();
+        require(!selectTools(boundaryStock, boundaryRequest, stopped.get_token()).validRequest,
+                "Cancelled selection published a result");
         auto partial = drawn;
         partial.die.drawing.reset();
         auto mixed = drawingToolGeometry(partial);

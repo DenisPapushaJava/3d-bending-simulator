@@ -74,6 +74,19 @@ int main() {
                     toolProfileSize(*relief.die.drawing)->widthMm == 60 &&
                     toolShapeRisk(relief, request.shapeHints, 2) == 0,
                 "Full contour relief was replaced by a width threshold");
+        // Edit only the contour, keeping identity, checksum and working parameters.
+        auto edited = relief;
+        auto &editedEdges = edited.die.drawing->edges;
+        editedEdges.resize(6);
+        const auto start = editedEdges.front().start;
+        const std::array<DrawingPoint, 5> outer{{{30, 0}, {30, -40}, {-30, -40}, {-30, 0}, start}};
+        for (std::size_t i = 1; i < outer.size(); ++i)
+            editedEdges.push_back({outer[i - 1], outer[i], {}, 0});
+        const auto editedRanking = selectTools({edited.punch, edited.die}, request);
+        require(!editedRanking.candidates.empty() && editedRanking.candidates[0].shapeRisk &&
+                    *editedRanking.candidates[0].shapeRisk > 0 &&
+                    toolShapeRisk(relief, request.shapeHints, 2) == 0,
+                "Edited contour became indistinguishable from the cached original");
         auto hook = tool_fixture::hook();
         auto straight = hook;
         straight.punch = tool_fixture::pair(16).punch;
@@ -81,6 +94,24 @@ int main() {
         require(toolShapeRisk(hook, upper, 2) && toolShapeRisk(straight, upper, 2) &&
                     *toolShapeRisk(hook, upper, 2) < *toolShapeRisk(straight, upper, 2),
                 "Upper flange did not distinguish punch relief");
+        straight.punch.id = "a-straight";
+        hook.punch.id = "z-hook";
+        const ToolCatalog punchCatalog{straight.punch, hook.punch, hook.die};
+        const auto punchBase = selectTools(punchCatalog, plainRequest);
+        auto punchRequest = plainRequest;
+        punchRequest.shapeHints = upper;
+        const auto punchRanked = selectTools(punchCatalog, punchRequest);
+        require(punchBase.candidates.size() == 2 && punchBase.candidates.front().punch == 0 &&
+                    punchRanked.candidates.size() == 2 && punchRanked.candidates.front().punch == 1,
+                "Expected the relieved punch first with both profiles still available");
+        for (const auto &candidate : punchRanked.candidates) {
+            auto pair = candidate.punch == 0 ? straight : hook;
+            const auto normal = toolShapeRisk(pair, upper, 2);
+            pair.punchReversed = true;
+            const auto reversed = toolShapeRisk(pair, upper, 2);
+            require(normal && reversed && candidate.shapeRisk == std::min(*normal, *reversed),
+                    "Shared masks changed the risk of a punch orientation");
+        }
         auto shifted = widePair;
         for (auto *drawing : {&*shifted.punch.drawing, &*shifted.die.drawing})
             for (auto &edge : drawing->edges) {

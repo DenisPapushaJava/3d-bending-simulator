@@ -8,7 +8,7 @@
 #include <variant>
 
 namespace bending::application {
-inline constexpr std::size_t maximumSheetBends = 32;
+inline constexpr std::size_t maximumSheetBends = 60;
 // Unfolding can keep several separate sectors for one connection between walls.
 inline constexpr std::size_t maximumFlatBendSegments = 64;
 [[nodiscard]] inline bool isPlanarCutCandidate(const BendAnalysis &analysis) noexcept {

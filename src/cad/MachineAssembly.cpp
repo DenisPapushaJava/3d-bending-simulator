@@ -204,10 +204,10 @@ std::vector<MachineDisplayComponent> MachineAssembly::at(double lift) const {
     return result;
 }
 namespace {
-std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &frame, double tolerance,
-                                                        std::stop_token stop, bool firstOnly,
-                                                        RigidClearanceCache *cache = nullptr,
-                                                        bool gaugesOnly = false) {
+std::vector<MachineCollisionEvidence>
+collectCollisions(const PreviewFrame &frame, double tolerance, std::stop_token stop, bool firstOnly,
+                  RigidClearanceCache *cache = nullptr, bool gaugesOnly = false,
+                  const TopoDS_Shape *equivalentPunch = nullptr) {
     std::vector<MachineCollisionEvidence> result;
     std::optional<Bnd_Box> sheetBounds;
     if (frame.floor && !gaugesOnly) {
@@ -222,7 +222,8 @@ std::vector<MachineCollisionEvidence> collectCollisions(const PreviewFrame &fram
     }
     if (frame.machine.empty())
         return result;
-    std::vector<TopoDS_Shape> shapes{frame.shape, frame.tools[0], frame.tools[1]};
+    std::vector<TopoDS_Shape> shapes{frame.shape, frame.tools[0],
+                                     equivalentPunch ? *equivalentPunch : frame.tools[1]};
     shapes.reserve(frame.machine.size() + 3);
     for (const auto &c : frame.machine)
         shapes.push_back(c.shape);
@@ -302,11 +303,10 @@ std::optional<application::MachineCollision> MachineAssembly::check(const Previe
         *overlap = hits.empty() ? TopoDS_Shape{} : hits.front().overlap;
     return hits.empty() ? std::nullopt : std::optional{hits.front().pair};
 }
-std::vector<MachineCollisionEvidence> MachineAssembly::collisions(const PreviewFrame &frame,
-                                                                  double tolerance,
-                                                                  std::stop_token stop,
-                                                                  RigidClearanceCache *cache) {
-    return collectCollisions(frame, tolerance, stop, false, cache);
+std::vector<MachineCollisionEvidence>
+MachineAssembly::collisions(const PreviewFrame &frame, double tolerance, std::stop_token stop,
+                            RigidClearanceCache *cache, const TopoDS_Shape *equivalentPunch) {
+    return collectCollisions(frame, tolerance, stop, false, cache, false, equivalentPunch);
 }
 std::vector<MachineCollisionEvidence>
 MachineAssembly::backgaugeCollisions(const PreviewFrame &frame, double tolerance,

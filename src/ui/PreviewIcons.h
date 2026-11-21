@@ -64,6 +64,24 @@ inline QIcon paper(const QString &label) {
     });
 }
 
+inline QIcon rotate90(bool clockwise) {
+    return detail::make([clockwise](QPainter &painter) {
+        if (!clockwise) {
+            painter.translate(24, 0);
+            painter.scale(-1, 1);
+        }
+        QPainterPath arrow;
+        arrow.moveTo(18, 17);
+        arrow.cubicTo(14, 22, 6, 20, 4, 14);
+        arrow.cubicTo(1, 6, 11, 1, 17, 6);
+        arrow.lineTo(20, 9);
+        arrow.moveTo(20, 4);
+        arrow.lineTo(20, 9);
+        arrow.lineTo(15, 9);
+        painter.drawPath(arrow);
+    });
+}
+
 inline QIcon ruler() {
     return detail::make([](QPainter &painter) {
         painter.translate(12, 12);

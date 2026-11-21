@@ -1,7 +1,7 @@
 #include "ToolContourButton.h"
+#include "MeasurementText.h"
 #include "ToolDrawingPath.h"
 #include <QKeyEvent>
-#include <QLocale>
 #include <QPainter>
 #include <QStyleOptionToolButton>
 #include <QStylePainter>
@@ -10,7 +10,7 @@
 namespace bending::ui {
 namespace {
 QString number(double value) {
-    return QLocale().toString(value, 'g', 6);
+    return measurementText(value);
 }
 } // namespace
 ToolContourButton::ToolContourButton(core::ToolKind kind, QWidget *parent, bool compact)
@@ -33,8 +33,11 @@ ToolContourButton::ToolContourButton(core::ToolKind kind, QWidget *parent, bool 
 }
 void ToolContourButton::setTool(std::optional<core::ToolPreset> tool, std::size_t groove,
                                 bool reversed) {
-    if (tool_ == tool && groove_ == groove && reversed_ == reversed && !heading_.isEmpty())
+    const int decimals = dimensionDecimalPlaces();
+    if (tool_ == tool && groove_ == groove && reversed_ == reversed &&
+        dimensionDecimals_ == decimals && !heading_.isEmpty())
         return;
+    dimensionDecimals_ = decimals;
     tool_ = std::move(tool);
     groove_ = groove;
     reversed_ = reversed;

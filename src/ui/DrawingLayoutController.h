@@ -12,11 +12,12 @@ class DrawingLayoutController final : public QObject {
   public:
     using Composer = std::function<std::shared_ptr<const DrawingSheetPlan>(
         application::BendingDrawingPtr, const std::vector<DrawingViewChoice> &, DrawingFlatSide,
-        std::stop_token, DrawingLayoutLimits, DrawingPaperFormat)>;
+        std::stop_token, DrawingLayoutLimits, DrawingPaperFormat, int)>;
     explicit DrawingLayoutController(QObject *parent = nullptr, Composer composer = {});
     ~DrawingLayoutController() override;
     void request(application::BendingDrawingPtr, std::vector<DrawingViewChoice>, DrawingFlatSide,
-                 DrawingLayoutLimits = {}, DrawingPaperFormat = DrawingPaperFormat::A3);
+                 DrawingLayoutLimits = {}, DrawingPaperFormat = DrawingPaperFormat::A3,
+                 int dimensionDecimals = application::defaultDimensionDecimalPlaces);
     void cancel();
     [[nodiscard]] bool busy() const {
         return running_ || pending_.has_value();
@@ -33,6 +34,7 @@ class DrawingLayoutController final : public QObject {
         DrawingFlatSide side;
         DrawingLayoutLimits limits;
         DrawingPaperFormat paperFormat;
+        int dimensionDecimals;
         std::stop_source stop;
         std::uint64_t generation;
     };

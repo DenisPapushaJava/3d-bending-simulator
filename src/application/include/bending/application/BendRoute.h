@@ -23,6 +23,7 @@ struct RouteOperation {
     std::optional<core::ToolAssignment> assignment;
     bool workpieceReversed = false;
     double workpieceOffsetMm = 0;
+    unsigned strokePartition = 0;
     bool operator==(const RouteOperation &) const = default;
 };
 struct RouteToolVariant {
@@ -199,11 +200,12 @@ struct BendRouteError {
     std::optional<double> invariantGaugeSpanMm = {}; // Proven common-axis upper bound only.
 };
 using BendRouteResult = std::variant<BendRoutePtr, BendRouteError>;
-// Shared source faces identify a candidate common stroke. The CAD layout must
-// confirm the wall link and the separated coaxial zones before simulating it.
+// Source topology identifies a candidate common stroke. CAD still checks its motion.
 using BendStroke = std::vector<std::size_t>;
 [[nodiscard]] std::vector<BendStroke> routeBendStrokes(const BendAnalysis &,
-                                                       std::span<const std::size_t> order);
+                                                       std::span<const std::size_t> order,
+                                                       bool includeSplitWalls = true,
+                                                       std::span<const unsigned> partitions = {});
 [[nodiscard]] double routeStrokeLengthMm(const BendAnalysis &, const BendStroke &);
 // Display-only prefix. Its visual has unverifiedDraft()==true and cannot certify a route.
 struct RouteDraftRequest {
@@ -215,8 +217,8 @@ struct RouteDraftRequest {
     std::optional<double> maximumEndSupportLossMm = {};
     bool operator==(const RouteDraftRequest &) const = default;
 };
-[[nodiscard]] std::vector<BendStroke> routeDraftStrokes(const RouteDraftRequest &,
-                                                        const BendAnalysis &);
+[[nodiscard]] std::vector<BendStroke>
+routeDraftStrokes(const RouteDraftRequest &, const BendAnalysis &, bool includeSplitWalls = true);
 // Axial coverage for a short continuous installation in diagnostic playback.
 // This does not establish die support, collisions or return motion.
 [[nodiscard]] std::optional<BendEndSupport> compactDraftCoverage(const RouteDraftRequest &,

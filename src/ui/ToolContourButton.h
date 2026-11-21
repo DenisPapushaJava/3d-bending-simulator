@@ -22,6 +22,7 @@ class ToolContourButton final : public QToolButton {
     std::size_t groove_ = 0;
     bool reversed_ = false;
     QPainterPath path_;
+    int dimensionDecimals_ = -1;
     QString heading_, dimensions_, issue_;
 };
 } // namespace bending::ui

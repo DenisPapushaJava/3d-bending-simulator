@@ -5,7 +5,7 @@
 #include <stop_token>
 
 namespace bending::cad {
-enum class BendRecognitionPurpose { Simulation, DrawingMeasurements };
+enum class BendRecognitionPurpose { Simulation, DrawingMeasurements, RouteState };
 [[nodiscard]] application::BendAnalysis
 recognizeBends(const TopoDS_Shape &shape, double maximumToleranceMm, std::stop_token stop,
                BendRecognitionPurpose purpose = BendRecognitionPurpose::Simulation);

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <set>
 #include <utility>
 
@@ -17,7 +18,8 @@ bool matchesSession(const DocumentSession &session, const BendRouteRequest &requ
     for (const auto &op : request.operations) {
         const auto *entry = session.bend(op.bendIndex);
         if (!validWorkpieceOffset(op.workpieceOffsetMm) || !entry || !included(entry->review) ||
-            entry->id != op.id || session.bendTarget(op.bendIndex) != std::optional{op.target} ||
+            entry->id != op.id || entry->strokePartition != op.strokePartition ||
+            session.bendTarget(op.bendIndex) != std::optional{op.target} ||
             !seen.insert(op.bendIndex).second ||
             (request.withTools &&
              (!op.tools || !core::validPressTools(*op.tools) ||
@@ -65,6 +67,10 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                  route->steps.size() <= request.operations.size();
     std::set<std::string> ids;
     std::vector<std::string> order;
+    std::map<unsigned, std::size_t> partitionSizes;
+    for (const auto &op : request.operations)
+        if (op.strokePartition)
+            ++partitionSizes[op.strokePartition];
     bool partialEndSupport = false;
     if (valid)
         for (const auto &step : route->steps) {
@@ -72,6 +78,8 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                 request.operations.begin(), request.operations.end(),
                 [&](const auto &op) { return step.id == op.id && step.bendIndex == op.bendIndex; });
             const auto &p = step.preview;
+            if (found != request.operations.end() && found->strokePartition)
+                valid &= step.additionalBends.size() + 1 == partitionSizes[found->strokePartition];
             std::vector<std::string> memberIds;
             for (const auto &member : step.additionalBends) {
                 const auto input = std::find_if(
@@ -89,7 +97,9 @@ bool applyBendRouteResult(DocumentSession &session, BendRouteRequest request,
                              (request.allowWorkpieceRotation ||
                               input->workpieceReversed == member.workpieceReversed);
                 if (found != request.operations.end())
-                    valid &= std::abs(member.target.angleRadians - found->target.angleRadians) <=
+                    valid &= (input != request.operations.end() &&
+                              input->strokePartition == found->strokePartition) &&
+                             std::abs(member.target.angleRadians - found->target.angleRadians) <=
                                  document->metadata().bendAnalysis.angleToleranceRadians &&
                              std::abs(member.target.innerRadiusMm - found->target.innerRadiusMm) <=
                                  document->metadata().bendAnalysis.lengthToleranceMm &&

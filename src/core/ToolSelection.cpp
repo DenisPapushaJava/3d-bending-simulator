@@ -1,4 +1,4 @@
-#include "bending/core/ToolSelection.h"
+#include "ToolShapeRanking.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,20 +16,33 @@ bool validRequest(const ToolSelectionRequest &r) {
            r.bendLengthMm <= 100000 && std::isfinite(r.maximumSegmentGapMm) &&
            r.maximumSegmentGapMm >= 0 && r.maximumSegmentGapMm <= 1000;
 }
-ToolRejection screenValidTools(const ToolSelectionRequest &r, const ToolPreset &p,
-                               const ToolPreset &d, std::size_t groove) {
+constexpr double lengthTolerance = 1e-5;
+// Overestimate stock deliberately: both horn rows and every allowed seam can
+// contribute. The section planner still decides what can actually be assembled.
+double maximumStockSpan(const std::vector<ToolSegment> &stock, double maximumGap) {
+    double material = 0;
+    std::size_t pieces = 0;
+    for (const auto &segment : stock)
+        if (usableToolSegment(segment)) {
+            material += std::ceil(segment.lengthMm * 1000) / 1000 * segment.quantity;
+            pieces += segment.quantity;
+        }
+    return pieces ? material + (pieces - 1) * (std::ceil(maximumGap * 1000) / 1000) : 0;
+}
+ToolRejection screenProfiles(const ToolSelectionRequest &r, const ToolPreset &p,
+                             const ToolPreset &d, std::size_t groove,
+                             std::optional<double> assembledLength = {}) {
     if (!p.parametersConfirmed || !d.parametersConfirmed || p.kind != ToolKind::Punch ||
         d.kind != ToolKind::Die || groove >= d.openingsMm.size())
         return ToolRejection::MissingData;
     if (p.teaching || d.teaching)
         return ToolRejection::Teaching;
-    constexpr double tolerance = 1e-5;
-    if (std::min(p.lengthMm, d.lengthMm) + tolerance < r.bendLengthMm)
+    if (assembledLength && *assembledLength + lengthTolerance < r.bendLengthMm)
         return ToolRejection::TooShort;
     if (r.bendAngleRadians + std::max(p.angleRadians, dieGroove(d, groove)->angleRadians) >
         std::numbers::pi + 1e-12)
         return ToolRejection::Angle;
-    if (*p.noseRadiusMm > r.innerRadiusMm - tolerance)
+    if (*p.noseRadiusMm > r.innerRadiusMm - lengthTolerance)
         return ToolRejection::Radius;
     if (!standardAirBendOpening(r.thicknessMm, d.openingsMm[groove]))
         return ToolRejection::NarrowOpening;
@@ -65,38 +78,52 @@ ToolRejection screenTools(const ToolSelectionRequest &r, const ToolPreset &p, co
                 return ToolRejection::TooShort;
             t.lengthMm = plan.lengthMm;
         }
-    return screenValidTools(r, pair[0], pair[1], groove);
+    return screenProfiles(r, pair[0], pair[1], groove,
+                          std::min(pair[0].lengthMm, pair[1].lengthMm));
 }
-ToolSelectionResult selectTools(const ToolCatalog &catalog, const ToolSelectionRequest &r) {
+ToolSelectionResult selectTools(const ToolCatalog &catalog, const ToolSelectionRequest &r,
+                                std::stop_token stop) {
     ToolSelectionResult result;
-    result.validRequest = validRequest(r) && validToolCatalog(catalog);
+    result.validRequest = !stop.stop_requested() && validRequest(r) && validToolCatalog(catalog);
     if (!result.validRequest)
         return result;
-    auto assembled = catalog;
-    // Share one immutable plan per profile across candidate pairs, not a copy per pair.
-    std::vector<std::shared_ptr<const ToolAssembly>> assemblies(catalog.size());
+    // Plan each eligible profile on demand and share that plan across pairs and grooves.
+    struct Coverage {
+        double lengthMm;
+        std::shared_ptr<const ToolAssembly> assembly;
+    };
+    std::vector<std::optional<Coverage>> coverage(catalog.size());
     const auto stocked = std::count_if(catalog.begin(), catalog.end(), [](const auto &t) {
         return t.segments && std::any_of(t.segments->begin(), t.segments->end(), [](const auto &s) {
                    return s.quantity && usableToolSegment(s);
                });
     });
     const auto budget = 200000 / std::max<std::size_t>(1, static_cast<std::size_t>(stocked));
-    for (std::size_t i = 0; i < catalog.size(); ++i)
-        if (catalog[i].segments) {
-            SegmentPlan plan;
-            if (catalog[i].kind == ToolKind::Punch) {
-                const auto family = planPunchAssemblies(*catalog[i].segments, r.bendLengthMm,
-                                                        budget, r.maximumSegmentGapMm);
-                result.segmentSearchLimited |= family.status == SegmentPlanStatus::SearchLimit;
-                plan = family.best();
-            } else
-                plan = planToolSegments(*catalog[i].segments, r.bendLengthMm, budget,
-                                        r.maximumSegmentGapMm);
-            result.segmentSearchLimited |= plan.status == SegmentPlanStatus::SearchLimit;
-            assembled[i].lengthMm = plan.status == SegmentPlanStatus::Complete ? plan.lengthMm : 0;
-            if (plan.status == SegmentPlanStatus::Complete)
-                assemblies[i] = std::make_shared<const ToolAssembly>(plan.assembly);
-        }
+    const auto cover = [&](std::size_t i) -> const Coverage & {
+        auto &cached = coverage[i];
+        if (cached)
+            return *cached;
+        const auto &tool = catalog[i];
+        if (!tool.segments)
+            return cached.emplace(Coverage{tool.lengthMm, {}});
+        if (maximumStockSpan(*tool.segments, r.maximumSegmentGapMm) + lengthTolerance <
+            r.bendLengthMm)
+            return cached.emplace(Coverage{0, {}});
+        SegmentPlan plan;
+        if (tool.kind == ToolKind::Punch) {
+            const auto family = planPunchAssemblies(*tool.segments, r.bendLengthMm, budget,
+                                                    r.maximumSegmentGapMm, stop);
+            result.segmentSearchLimited |= family.status == SegmentPlanStatus::SearchLimit;
+            plan = family.best();
+        } else
+            plan = planToolSegments(*tool.segments, r.bendLengthMm, budget, r.maximumSegmentGapMm,
+                                    stop);
+        result.segmentSearchLimited |= plan.status == SegmentPlanStatus::SearchLimit;
+        if (plan.status == SegmentPlanStatus::Complete)
+            return cached.emplace(Coverage{
+                plan.lengthMm, std::make_shared<const ToolAssembly>(std::move(plan.assembly))});
+        return cached.emplace(Coverage{0, {}});
+    };
     for (const auto &t : catalog)
         if (!t.parametersConfirmed)
             ++result.missingData;
@@ -107,7 +134,11 @@ ToolSelectionResult selectTools(const ToolCatalog &catalog, const ToolSelectionR
             if (catalog[d].kind != ToolKind::Die)
                 continue;
             for (std::size_t g = 0; g < catalog[d].openingsMm.size(); ++g) {
-                if (screenValidTools(r, assembled[p], assembled[d], g) != ToolRejection::None) {
+                if (stop.stop_requested())
+                    return {};
+                if (screenProfiles(r, catalog[p], catalog[d], g) != ToolRejection::None ||
+                    cover(p).lengthMm + lengthTolerance < r.bendLengthMm ||
+                    cover(d).lengthMm + lengthTolerance < r.bendLengthMm) {
                     ++result.rejectedPairs;
                     continue;
                 }
@@ -116,22 +147,15 @@ ToolSelectionResult selectTools(const ToolCatalog &catalog, const ToolSelectionR
                 const double score =
                     std::abs(std::log(ratio / 8.0)) +
                     .1 * (r.innerRadiusMm - *catalog[p].noseRadiusMm) / r.innerRadiusMm;
-                result.candidates.push_back({p, d, g, score, ratio, assemblies[p], assemblies[d]});
-                if (!r.shapeHints.empty()) {
-                    ToolAssignment assignment{catalog[p], catalog[d], g, 10, "", true};
-                    assignment.punchAssembly =
-                        assemblies[p] ? std::optional{*assemblies[p]} : std::nullopt;
-                    assignment.dieAssembly =
-                        assemblies[d] ? std::optional{*assemblies[d]} : std::nullopt;
-                    const auto normal = toolShapeRisk(assignment, r.shapeHints, r.thicknessMm);
-                    assignment.punchReversed = true;
-                    const auto reverse = toolShapeRisk(assignment, r.shapeHints, r.thicknessMm);
-                    if (normal && reverse)
-                        result.candidates.back().shapeRisk = std::min(*normal, *reverse);
-                }
+                const auto &punch = cover(p).assembly, &die = cover(d).assembly;
+                result.candidates.push_back({p, d, g, score, ratio, punch, die});
             }
         }
     }
+    if (!r.shapeHints.empty())
+        evaluateToolCandidateShapes(catalog, r, result.candidates, stop);
+    if (stop.stop_requested())
+        return {};
     std::sort(result.candidates.begin(), result.candidates.end(),
               [&](const auto &a, const auto &b) {
                   return std::tuple{a.score, catalog[a.punch].id, catalog[a.die].id, a.groove} <

@@ -130,7 +130,8 @@ class ImportController::Impl {
     std::optional<BendRouteError> routeError;
     std::optional<BendRouteProgress> routeProgress;
     std::uint64_t routeId = 0, routeRevision = 0, routeEditRevision = 0;
-    bool preparingRoute = false;
+    enum class RouteTask { None, BuildRoute, CheckPlacement };
+    RouteTask routeTask = RouteTask::None;
     RouteDraftPtr draft;
     std::optional<BendRouteError> draftError;
     std::optional<RouteDraftPose> draftPose;
@@ -194,15 +195,21 @@ class ImportController::Impl {
         if (const auto builder = routeBuilder.lock())
             builder->discardRouteCache();
     }
-    void invalidateRoute() {
-        invalidateDraft();
+    std::optional<BendRouteError> placementError;
+    void invalidateRoute(bool keepPreviousPreview = false) {
+        if (keepPreviousPreview)
+            cancelPrefetch();
+        else {
+            invalidateDraft();
+            route.reset();
+        }
         ++routeId;
-        route.reset();
         routeError.reset();
+        placementError.reset();
         routeProgress.reset();
-        if (preparingRoute) {
+        if (routeTask != RouteTask::None) {
             stop.request_stop();
-            preparingRoute = false;
+            routeTask = RouteTask::None;
         }
     }
     BendingDrawingPtr drawing;
@@ -489,6 +496,14 @@ void ImportController::open(std::filesystem::path path) {
 }
 
 void ImportController::cancel() {
+    if (impl_->routeTask == Impl::RouteTask::CheckPlacement) {
+        impl_->stop.request_stop();
+        return;
+    }
+    cancelDocumentWork();
+}
+
+void ImportController::cancelDocumentWork() {
     impl_->stop.request_stop();
     impl_->discardRouteCache();
     impl_->invalidateRoute();
@@ -504,7 +519,7 @@ void ImportController::cancel() {
 
 void ImportController::closeDocument() {
     impl_->invalidateFlat();
-    cancel();
+    cancelDocumentWork();
     impl_->presenter({}, impl_->session.revision() + 1);
     impl_->session.close();
     emit stateChanged();
@@ -608,17 +623,24 @@ void ImportController::useAutomaticThickness() {
     emit stateChanged();
 }
 bool ImportController::setBendReview(std::size_t recognizedIndex, BendReview review) {
-    if (impl_->stopping || hasWork()) {
+    return setBendReview(std::span(&recognizedIndex, 1), review);
+}
+bool ImportController::setBendReview(std::span<const std::size_t> zones, BendReview review) {
+    if (impl_->stopping || hasWork() || zones.empty()) {
         return false;
     }
     const auto before = impl_->session.editRevision();
-    const auto result = impl_->session.setBendReview(recognizedIndex, review);
-    if (before != impl_->session.editRevision()) {
+    auto candidate = impl_->session;
+    for (const auto index : zones)
+        if (!candidate.setBendReview(index, review))
+            return false;
+    if (before != candidate.editRevision()) {
+        impl_->session = std::move(candidate);
         impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
-    return result;
+    return true;
 }
 bool ImportController::setBendTools(std::size_t recognizedIndex,
                                     std::optional<core::PressTools> tools) {
@@ -721,17 +743,25 @@ bool ImportController::setAllBendPunchOrientations(
 }
 bool ImportController::setBendTarget(std::size_t recognizedIndex,
                                      std::optional<core::BendTarget> target) {
-    if (impl_->stopping || hasWork()) {
+    return setBendTarget(std::span(&recognizedIndex, 1), target);
+}
+bool ImportController::setBendTarget(std::span<const std::size_t> zones,
+                                     std::optional<core::BendTarget> target) {
+    if (impl_->stopping || hasWork() || zones.empty()) {
         return false;
     }
     const auto before = impl_->session.editRevision();
-    const auto result = impl_->session.setBendTarget(recognizedIndex, target);
-    if (before != impl_->session.editRevision()) {
+    auto candidate = impl_->session;
+    for (const auto index : zones)
+        if (!candidate.setBendTarget(index, target))
+            return false;
+    if (before != candidate.editRevision()) {
+        impl_->session = std::move(candidate);
         impl_->invalidateRoute();
         impl_->invalidatePreview();
     }
     emit stateChanged();
-    return result;
+    return true;
 }
 bool ImportController::isSaving() const {
     return impl_->saving;
@@ -1047,8 +1077,11 @@ BendRoutePtr ImportController::bendRoute() const {
 std::optional<BendRouteError> ImportController::bendRouteError() const {
     return impl_->routeError;
 }
+const std::optional<BendRouteError> &ImportController::placementCheckError() const {
+    return impl_->placementError;
+}
 bool ImportController::isPreparingRoute() const {
-    return impl_->preparingRoute;
+    return impl_->routeTask != Impl::RouteTask::None;
 }
 std::optional<BendRouteProgress> ImportController::bendRouteProgress() const {
     return impl_->routeProgress;
@@ -1069,6 +1102,23 @@ void ImportController::discardRouteDraft() {
     impl_->invalidateDraft();
     emit stateChanged();
 }
+bool ImportController::editStrokes(std::uint64_t revision, std::uint64_t editRevision,
+                                   std::span<const StrokeEdit> edits) {
+    auto &session = impl_->session;
+    if (impl_->stopping || hasWork() || edits.empty() || session.revision() != revision ||
+        session.editRevision() != editRevision)
+        return false;
+    auto candidate = session;
+    for (const auto &edit : edits)
+        if (!(edit.setupSource ? candidate.mergeStrokes(edit.zones, *edit.setupSource)
+                               : candidate.splitStroke(edit.zones, edit.detached)))
+            return false;
+    session = std::move(candidate);
+    impl_->invalidateRoute();
+    impl_->invalidatePreview();
+    emit stateChanged();
+    return true;
+}
 bool ImportController::prepareRouteDraft(RouteDraftRequest request,
                                          std::shared_ptr<const SingleBendPreviewBuilder> builder) {
     auto *s = impl_.get();
@@ -1078,8 +1128,7 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
     const auto &session = s->session;
     const auto indices = session.orderedBends();
     if (request.operations.size() != indices.size() ||
-        request.step >
-            routeBendStrokes(session.document()->metadata().bendAnalysis, indices).size() ||
+        request.step > session.bendStrokes(indices).size() ||
         indices.size() != session.document()->metadata().bendAnalysis.bends.size())
         return false;
     for (std::size_t i = 0; i < indices.size(); ++i) {
@@ -1088,6 +1137,7 @@ bool ImportController::prepareRouteDraft(RouteDraftRequest request,
         if (!entry || !included(entry->review) || op.bendIndex != indices[i] ||
             op.id != entry->id || op.workpieceReversed != entry->workpieceReversed ||
             op.workpieceOffsetMm != entry->workpieceOffsetMm ||
+            op.strokePartition != entry->strokePartition ||
             session.bendTarget(indices[i]) != std::optional{op.target})
             return false;
     }
@@ -1146,8 +1196,10 @@ bool ImportController::isPrefetchingRouteDraft() const {
     return impl_->activePrefetch || impl_->pendingPrefetch.has_value();
 }
 bool ImportController::prepareBendRoute(BendRouteRequest request,
-                                        std::shared_ptr<const SingleBendPreviewBuilder> builder) {
-    if (impl_->stopping || hasWork() || !builder || !impl_->session.document())
+                                        std::shared_ptr<const SingleBendPreviewBuilder> builder,
+                                        bool keepPreviousPreview) {
+    if (impl_->stopping || hasWork() || !builder || !impl_->session.document() ||
+        (keepPreviousPreview && (request.automatic || !request.withTools)))
         return false;
     const auto &session = impl_->session;
     if (!prepareBendRouteRequest(session, request))
@@ -1157,13 +1209,16 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     if (const auto previous = s->routeBuilder.lock(); previous && previous != builder)
         previous->discardRouteCache();
     s->routeBuilder = builder;
-    s->invalidateRoute();
-    s->invalidatePreview();
+    s->invalidateRoute(keepPreviousPreview);
+    if (!keepPreviousPreview)
+        s->invalidatePreview();
     const auto id = s->routeId, revision = session.revision(), edit = session.editRevision();
     const auto document = session.document();
     s->beginForeground();
     const auto stop = s->stop.get_token();
-    s->running = s->preparingRoute = true;
+    s->running = true;
+    s->routeTask =
+        keepPreviousPreview ? Impl::RouteTask::CheckPlacement : Impl::RouteTask::BuildRoute;
     s->routeProgress = BendRouteProgress{};
     struct ProgressGate {
         std::chrono::steady_clock::time_point sent = {};
@@ -1186,7 +1241,7 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
                 if (!owner)
                     return;
                 auto *state = owner->impl_.get();
-                if (state->preparingRoute && state->routeId == id &&
+                if (state->routeTask != Impl::RouteTask::None && state->routeId == id &&
                     state->session.revision() == revision &&
                     state->session.editRevision() == edit && !stop.stop_requested()) {
                     state->routeProgress = progress;
@@ -1197,7 +1252,8 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
     };
     QMetaObject::invokeMethod(
         s->worker,
-        [s, id, revision, edit, document, stop, request = std::move(request), builder]() mutable {
+        [s, id, revision, edit, document, stop, request = std::move(request), builder,
+         keepPreviousPreview]() mutable {
             BendRouteResult result = BendRouteError{BendRouteErrorCode::Cancelled, "Cancelled"};
             try {
                 if (!stop.stop_requested())
@@ -1209,25 +1265,31 @@ bool ImportController::prepareBendRoute(BendRouteRequest request,
             }
             QMetaObject::invokeMethod(
                 s->owner,
-                [s, id, revision, edit, stop, request = std::move(request),
+                [s, id, revision, edit, stop, request = std::move(request), keepPreviousPreview,
                  result = std::move(result)]() mutable {
-                    s->running = s->preparingRoute = false;
+                    s->running = false;
+                    s->routeTask = Impl::RouteTask::None;
                     if (s->stopping)
                         return;
                     if (id == s->routeId && revision == s->session.revision() &&
                         edit == s->session.editRevision() && !stop.stop_requested() &&
                         !s->session.activeRequest()) {
+                        auto &failure = keepPreviousPreview ? s->placementError : s->routeError;
                         if (const auto *route = std::get_if<BendRoutePtr>(&result)) {
                             if (applyBendRouteResult(s->session, std::move(request), *route)) {
+                                if (keepPreviousPreview) {
+                                    s->invalidateDraft();
+                                    s->invalidatePreview();
+                                }
                                 s->route = *route;
                                 s->routeRevision = revision;
                                 s->routeEditRevision = s->session.editRevision();
                             } else
-                                s->routeError = BendRouteError{BendRouteErrorCode::Failed,
-                                                               "Invalid route result"};
+                                failure = BendRouteError{BendRouteErrorCode::Failed,
+                                                         "Invalid route result"};
                         } else if (const auto &e = std::get<BendRouteError>(result);
                                    e.code != BendRouteErrorCode::Cancelled)
-                            s->routeError = e;
+                            failure = e;
                     }
                     s->dispatch();
                     emit s->owner->stateChanged();

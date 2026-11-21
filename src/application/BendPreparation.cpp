@@ -48,9 +48,9 @@ bool validBendPreparations(const std::vector<BendPreparation> &entries) {
                                  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                                         (c >= '0' && c <= '9') || c == '-' || c == '_';
                              });
-        if (!validWorkpieceOffset(entry.workpieceOffsetMm) || !validId ||
-            !ids.insert(entry.id).second || !finite(a.axisStart) || !finite(a.axisEnd) ||
-            !std::isfinite(a.angleRadians) || a.angleRadians <= 0.0 ||
+        if (!validWorkpieceOffset(entry.workpieceOffsetMm) || entry.strokePartition > 512 ||
+            !validId || !ids.insert(entry.id).second || !finite(a.axisStart) ||
+            !finite(a.axisEnd) || !std::isfinite(a.angleRadians) || a.angleRadians <= 0.0 ||
             a.angleRadians >= std::numbers::pi || !std::isfinite(a.innerRadiusMm) ||
             a.innerRadiusMm <= 0.0 || !std::isfinite(a.thicknessMm) || a.thicknessMm <= 0.0 ||
             !std::isfinite(a.lengthMm) || a.lengthMm <= 0.0 ||

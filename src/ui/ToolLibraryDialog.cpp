@@ -1,4 +1,5 @@
 #include "ToolLibraryDialog.h"
+#include "MeasurementText.h"
 #include "ToolDrawingWidget.h"
 #include "ToolImportDialog.h"
 #include "ToolStockDialog.h"
@@ -399,9 +400,10 @@ void ToolLibraryDialog::loadCard() {
     groove_->clear();
     for (std::size_t i = 0; i < t->openingsMm.size(); ++i) {
         const auto g = core::dieGroove(*t, i);
-        groove_->addItem(QStringLiteral("V %1 мм · %2°")
-                             .arg(t->openingsMm[i], 0, 'g', 5)
-                             .arg(g ? g->angleRadians * 180 / std::numbers::pi : 0, 0, 'g', 5));
+        groove_->addItem(
+            QStringLiteral("V %1 мм · %2°")
+                .arg(measurementText(t->openingsMm[i]))
+                .arg(measurementText(g ? g->angleRadians * 180 / std::numbers::pi : 0)));
     }
     if (groove_->count())
         groove_->setCurrentIndex(std::clamp(grooveChoices_[t->id], 0, groove_->count() - 1));
@@ -449,8 +451,8 @@ void ToolLibraryDialog::updateGroove() {
     parameters_->setVisible(t->kind == core::ToolKind::Punch && t->noseRadiusMm.has_value());
     parameters_->setText(t->noseRadiusMm
                              ? QStringLiteral("α %1° · R %2 мм")
-                                   .arg(t->angleRadians * 180 / std::numbers::pi, 0, 'g', 5)
-                                   .arg(*t->noseRadiusMm, 0, 'g', 5)
+                                   .arg(measurementText(t->angleRadians * 180 / std::numbers::pi))
+                                   .arg(measurementText(*t->noseRadiusMm))
                              : QString{});
     const auto error = issue_(*t, g);
     status_->setText(error);

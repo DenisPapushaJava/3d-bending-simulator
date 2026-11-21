@@ -13,6 +13,138 @@ std::vector<std::size_t> DocumentSession::orderedBends() const {
                 result.push_back(i);
     return result;
 }
+std::vector<BendStroke> DocumentSession::bendStrokes(std::span<const std::size_t> order) const {
+    if (!document_)
+        return {};
+    const auto &analysis = document_->metadata().bendAnalysis;
+    std::vector<unsigned> partitions(analysis.bends.size());
+    for (const auto index : order)
+        if (const auto *entry = bend(index))
+            partitions[index] = entry->strokePartition;
+    return routeBendStrokes(analysis, order, true, partitions);
+}
+bool DocumentSession::canSplitStroke(std::span<const std::size_t> selected,
+                                     std::span<const std::size_t> remainder) const {
+    if (!document_ || selected.empty() || remainder.empty())
+        return false;
+    const auto &zones = document_->metadata().bendAnalysis.bends;
+    if (selected.front() >= zones.size())
+        return false;
+    const auto &first = zones[selected.front()];
+    if (!first.interruptedStroke)
+        return false;
+    using Wall = std::array<std::size_t, 2>;
+    const auto wall = [&](std::size_t index, std::size_t side) {
+        const auto &faces = zones[index].flangeFaces;
+        return Wall{faces[side * 2], faces[side * 2 + 1]};
+    };
+    for (std::size_t side = 0; side < 2; ++side) {
+        const auto fixed = wall(selected.front(), side);
+        const auto moving = [&](std::size_t index) -> std::optional<Wall> {
+            if (!bend(index) || zones[index].interruptedStroke != first.interruptedStroke)
+                return {};
+            if (wall(index, 0) == fixed)
+                return wall(index, 1);
+            if (wall(index, 1) == fixed)
+                return wall(index, 0);
+            return {};
+        };
+        std::set<Wall> selectedWalls;
+        for (const auto index : selected)
+            if (const auto flange = moving(index))
+                selectedWalls.insert(*flange);
+        if (!selectedWalls.empty() &&
+            std::all_of(selected.begin(), selected.end(),
+                        [&](auto index) { return moving(index).has_value(); }) &&
+            std::all_of(remainder.begin(), remainder.end(), [&](auto index) {
+                const auto flange = moving(index);
+                return flange && !selectedWalls.contains(*flange);
+            }))
+            return true;
+    }
+    return false;
+}
+bool DocumentSession::splitStroke(const BendStroke &stroke, const BendStroke &selected) {
+    if (active_ || stroke.empty())
+        return false;
+    const auto strokes = bendStrokes(orderedBends());
+    const auto current = std::find_if(strokes.begin(), strokes.end(), [&](const auto &group) {
+        return std::is_permutation(group.begin(), group.end(), stroke.begin(), stroke.end());
+    });
+    const std::set<std::size_t> chosen(selected.begin(), selected.end());
+    if (current == strokes.end() || chosen.size() != selected.size() ||
+        !std::all_of(chosen.begin(), chosen.end(), [&](auto index) {
+            return std::find(stroke.begin(), stroke.end(), index) != stroke.end();
+        }))
+        return false;
+    BendStroke remainder;
+    for (const auto index : stroke)
+        if (!chosen.contains(index))
+            remainder.push_back(index);
+    if (!canSplitStroke(selected, remainder))
+        return false;
+    std::array<bool, 513> used{};
+    for (const auto &entry : bends_)
+        used[entry.strokePartition] = true;
+    const auto available = std::find(used.begin() + 1, used.end(), false);
+    if (available == used.end())
+        return false;
+    const auto partition = static_cast<unsigned>(available - used.begin());
+    const auto originalPartition = bend(remainder.front())->strokePartition;
+    if (!originalPartition) {
+        const auto remaining = std::find(available + 1, used.end(), false);
+        if (remaining == used.end())
+            return false;
+        for (const auto index : remainder)
+            bends_[*bendBindings_.byRecognizedBend[index]].strokePartition =
+                static_cast<unsigned>(remaining - used.begin());
+    }
+    for (const auto index : selected)
+        bends_[*bendBindings_.byRecognizedBend[index]].strokePartition = partition;
+    ++editRevision_;
+    modified_ = true;
+    return true;
+}
+bool DocumentSession::mergeStrokes(const BendStroke &zones, std::size_t setupSource) {
+    const auto *selected = bend(setupSource);
+    if (active_ || !selected || !selected->strokePartition || zones.empty())
+        return false;
+    const auto &bends = document_->metadata().bendAnalysis.bends;
+    const auto group = bends[setupSource].interruptedStroke;
+    const std::set<std::size_t> wanted(zones.begin(), zones.end());
+    if (!group || wanted.size() != zones.size() || !wanted.contains(setupSource))
+        return false;
+    std::size_t matched = 0, count = 0, total = 0;
+    for (const auto &stroke : bendStrokes(orderedBends())) {
+        if (bends[stroke.front()].interruptedStroke != group)
+            continue;
+        total += stroke.size();
+        const auto members = static_cast<std::size_t>(std::count_if(
+            stroke.begin(), stroke.end(), [&](auto index) { return wanted.contains(index); }));
+        if (!members)
+            continue;
+        if (members != stroke.size())
+            return false;
+        matched += members;
+        ++count;
+    }
+    if (count < 2 || matched != zones.size())
+        return false;
+    const auto settings = *selected;
+    for (const auto index : zones) {
+        auto &entry = bends_[*bendBindings_.byRecognizedBend[index]];
+        entry.strokePartition = matched == total ? 0 : settings.strokePartition;
+        entry.tools = settings.tools;
+        entry.catalogTools = settings.catalogTools;
+        entry.workpieceReversed = settings.workpieceReversed;
+        entry.workpieceOffsetMm = settings.workpieceOffsetMm;
+        entry.target = settings.target;
+        entry.review = settings.review;
+    }
+    ++editRevision_;
+    modified_ = true;
+    return true;
+}
 bool DocumentSession::setBendOrder(const std::vector<std::string> &ids) {
     if (!document_ || active_ || ids.size() != bendBindings_.byRecognizedBend.size() ||
         std::set<std::string>(ids.begin(), ids.end()).size() != ids.size())

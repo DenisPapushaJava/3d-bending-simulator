@@ -3,9 +3,12 @@
 #include "TrayFixtures.h"
 
 #include <APIHeaderSection_MakeHeader.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Controller.hxx>
 #include <STEPControl_Writer.hxx>
@@ -14,17 +17,34 @@
 #include <StepData_StepModel.hxx>
 #include <StepData_StepWriter.hxx>
 #include <TCollection_HAsciiString.hxx>
+#include <TopoDS_Compound.hxx>
 #include <XSControl_Controller.hxx>
 #include <XSControl_WorkSession.hxx>
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <numbers>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace {
+TopoDS_Shape fourTabPart() {
+    // The slots open through the moving flange and leave the common web intact.
+    TopoDS_Compound slots;
+    BRep_Builder builder;
+    builder.MakeCompound(slots);
+    for (const auto &[start, length] :
+         std::array{std::pair{45., 15.}, std::pair{115., 20.}, std::pair{175., 15.}})
+        builder.Add(slots, BRepPrimAPI_MakeBox(gp_Pnt(-40, -5, start), 55, 20, length).Shape());
+    BRepAlgoAPI_Cut cut(bending::fixtures::bentStrip(4, 2, std::numbers::pi / 2, 255), slots);
+    if (!cut.IsDone() || cut.HasErrors() || !BRepCheck_Analyzer(cut.Shape()).IsValid())
+        throw std::runtime_error("Cannot construct the four-tab example");
+    return cut.Shape();
+}
+
 TopoDS_Shape rotateAroundZ(const TopoDS_Shape &shape, double degrees) {
     gp_Trsf rotation;
     rotation.SetRotation(gp_Ax1(gp_Pnt(), gp_Dir(0, 0, 1)), degrees * std::numbers::pi / 180.0);
@@ -71,6 +91,7 @@ int main(int argc, char *argv[]) {
             write(output / "tray-four-bends-2mm.step", bending::fixtures::tray(), "MM");
             write(output / "tool-clearance-2mm.step", bending::fixtures::channel(80, 24, 40), "MM");
             write(output / "reverse-tab-2mm.step", bending::fixtures::dieWindowPart(), "MM");
+            write(output / "four-tabs-2mm.step", fourTabPart(), "MM");
             if (argc == 2)
                 write(output / "profiled-bend-6mm.step", bending::fixtures::profiledBend(), "MM");
             return 0;

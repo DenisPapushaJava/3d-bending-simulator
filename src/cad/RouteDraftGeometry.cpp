@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <gp_Lin.hxx>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -216,6 +217,19 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
     const auto n = request.operations.size();
     const auto strokes = routeDraftStrokes(request, analysis);
     require(!strokes.empty() && request.step <= strokes.size(), "Invalid draft prefix");
+    if (std::any_of(request.operations.begin(), request.operations.end(),
+                    [](const auto &op) { return op.strokePartition != 0; })) {
+        std::vector<std::optional<unsigned>> wallPartitions(layout.walls.size());
+        std::vector<unsigned> bendPartitions(n);
+        for (const auto &op : request.operations)
+            bendPartitions[op.bendIndex] = op.strokePartition;
+        for (const auto &member : layout.bends) {
+            const auto part = bendPartitions[member.bendIndex];
+            auto &partition = wallPartitions[member.child];
+            require(!partition || *partition == part, "Участки общей полки должны гнуться вместе.");
+            partition = part;
+        }
+    }
     const auto &stroke = strokes[request.step ? request.step - 1 : 0];
     const auto &active = request.operations[stroke.front()];
     BendStroke zones;
@@ -227,6 +241,14 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
     const auto link = std::find_if(layout.bends.begin(), layout.bends.end(),
                                    [&](const auto &b) { return b.bendIndex == active.bendIndex; });
     require(link != layout.bends.end(), "Draft bend has no layout link");
+    std::vector<const SheetBendRegion *> jointLinks;
+    if (joint && analysis.bends[active.bendIndex].interruptedStroke) {
+        for (const auto &member : layout.bends)
+            if (member.bendIndex != active.bendIndex &&
+                std::find(zones.begin(), zones.end(), member.bendIndex) != zones.end())
+                jointLinks.push_back(&member);
+        require(jointLinks.size() + 1 == zones.size(), "Missing interrupted bend layout link");
+    }
     const bool flipped = active.workpieceReversed != impl_->referenceReversed[active.bendIndex];
     auto sectionAxes = link->sectionAxes;
     std::vector<std::array<double, 2>> intervals{{0, bend.lengthMm}};
@@ -251,6 +273,9 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
                 interval = {bend.lengthMm - interval[1], bend.lengthMm - interval[0]};
         }
     }
+    double collisionLength = bend.lengthMm;
+    for (const auto index : zones)
+        collisionLength = std::min(collisionLength, analysis.bends[index].lengthMm);
     auto visual = std::make_shared<CadPreview>();
     visual->draft = true;
     visual->reversed = active.workpieceReversed;
@@ -388,6 +413,19 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
         for (const auto index : zones)
             progress[index] = p;
         const auto placement = routePlacement(layout, progress);
+        if (!jointLinks.empty()) {
+            const auto reference = sectionAxes.Transformed(placement.walls[link->parent]);
+            const gp_Lin axis(reference.Location(), reference.Direction());
+            for (const auto *member : jointLinks) {
+                const auto pose = member->sectionAxes.Transformed(placement.walls[member->parent]);
+                require(axis.Distance(pose.Location()) <= analysis.lengthToleranceMm &&
+                            reference.Direction().IsParallel(pose.Direction(),
+                                                             analysis.angleToleranceRadians) &&
+                            reference.XDirection().IsEqual(pose.XDirection(),
+                                                           analysis.angleToleranceRadians),
+                        "Совместный гиб расходится в текущем положении детали");
+            }
+        }
         gp_Trsf machine;
         PreviewFrame frame;
         if (withTools) {
@@ -468,7 +506,8 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
         std::optional<ToolCollisionPair> collision;
         std::vector<CollisionEvidence> evidence;
         if (withTools) {
-            const double budget = std::max(1.e-6, bend.lengthMm * bend.thicknessMm * tolerance * 2);
+            const double budget =
+                std::max(1.e-6, collisionLength * bend.thicknessMm * tolerance * 2);
             const std::array toolBounds{dieBounds, collisionBox(frame.tools[1], tolerance)};
             materialBounds.clear();
             for (const auto &solid : material) {
@@ -617,6 +656,8 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
     prepareBackgauge(*visual, analysis.lengthToleranceMm, stop);
     if (withTools && visual->gauging)
         result->checkedToolPositions += visual->gauging->addedRetractionPositions;
+    std::sort(intervals.begin(), intervals.end());
+    visual->draftAxialIntervals = std::move(intervals);
     result->visual = visual;
     cancelled(stop);
     return result;

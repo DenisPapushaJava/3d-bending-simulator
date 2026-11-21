@@ -1,5 +1,6 @@
 #pragma once
 
+#include "MeasurementText.h"
 #include "ToolDrawingPath.h"
 #include "bending/core/ToolCatalog.h"
 #include <QPainter>
@@ -52,8 +53,7 @@ class ToolDrawingWidget final : public QWidget {
         p.setPen(QColor("#1C2938"));
         p.drawText(rect().adjusted(8, height() - 48, -8, -8), Qt::AlignCenter | Qt::TextWordWrap,
                    QStringLiteral("%1 × %2 %3")
-                       .arg(bounds.width(), 0, 'f', 2)
-                       .arg(bounds.height(), 0, 'f', 2)
+                       .arg(measurementText(bounds.width()), measurementText(bounds.height()))
                        .arg(drawing_.millimeters
                                 ? QStringLiteral("мм")
                                 : QStringLiteral("ед. файла · масштаб не подтверждён")));

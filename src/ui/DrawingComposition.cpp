@@ -116,6 +116,7 @@ struct FitPlacement {
     double scale;
     QRectF selectionBounds;
     bool compactDimensions;
+    int paperQuarterTurns;
 };
 // No CAD, paths, dimension recordings or painter state retained by the cache.
 // nullopt is an ordinary fit failure, never cancellation or a spent budget.
@@ -128,7 +129,7 @@ std::vector<FitPlacement> cacheFit(const std::vector<DrawingPlacedView> &views) 
     result.reserve(views.size());
     for (const auto &view : views)
         result.push_back({view.key, view.area, view.centre, view.scale, view.selectionBounds,
-                          view.compactDimensions});
+                          view.compactDimensions, view.paperQuarterTurns});
     return result;
 }
 std::optional<std::vector<DrawingPlacedView>> restoreFit(const CachedFit &cached, int page) {
@@ -140,6 +141,7 @@ std::optional<std::vector<DrawingPlacedView>> restoreFit(const CachedFit &cached
         result.push_back(
             {view.key, page, view.area, view.centre, view.scale, view.selectionBounds});
         result.back().compactDimensions = view.compactDimensions;
+        result.back().paperQuarterTurns = view.paperQuarterTurns;
     }
     return result;
 }
@@ -339,6 +341,7 @@ std::vector<DrawingPlacedView> fitItem(const BendingDrawing &d, const Item &item
             if (*scale > fit + 1.e-9)
                 throw std::runtime_error("Вид не помещается в выбранном масштабе");
             DrawingPlacedView at{choice.key, page, area, area.center() + QPointF(0, 4), *scale};
+            at.paperQuarterTurns = choice.paperQuarterTurns;
             at.compactDimensions = item.compactDimensions;
             at.essentialDimensions = item.essentialDimensions;
             at.smallOptionalText = item.smallOptionalText;
@@ -580,12 +583,7 @@ std::optional<UnplacedItem> packItems(const std::vector<Item> &items,
 // overwrite an item that already participated in a FitKey.
 std::size_t internItem(std::vector<Item> &items, Item item) {
     const auto same = [&](const auto &old) {
-        return old.compactDimensions == item.compactDimensions &&
-               old.choices.size() == item.choices.size() &&
-               std::equal(old.choices.begin(), old.choices.end(), item.choices.begin(),
-                          [](const auto &a, const auto &b) {
-                              return a.key == b.key && a.visible == b.visible && a.scale == b.scale;
-                          });
+        return old.compactDimensions == item.compactDimensions && old.choices == item.choices;
     };
     const auto found = std::find_if(items.begin(), items.end(), same);
     if (found != items.end())
@@ -773,8 +771,10 @@ void retainOptionalDimensions(DrawingSheetPlan &plan, drawing::LayoutContext &co
 std::shared_ptr<const DrawingSheetPlan>
 DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewChoice> &choices,
                       DrawingFlatSide side, std::stop_token stop, DrawingLayoutLimits limits,
-                      DrawingPaperFormat format) {
-    drawing::LayoutContext context(stop, limits);
+                      DrawingPaperFormat format, int dimensionDecimals) {
+    if (!application::validDimensionDecimalPlaces(dimensionDecimals))
+        throw std::runtime_error("Недопустимая точность размеров");
+    drawing::LayoutContext context(stop, limits, dimensionDecimals);
     context.checkpoint();
     if (!source)
         throw std::runtime_error("Нет данных чертежа");
@@ -783,8 +783,10 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     plan->source = source;
     plan->choices = choices;
     context.choices = &plan->choices;
+    context.flatSide = side;
     plan->flatSide = side;
     plan->paperFormat = format;
+    plan->dimensionDecimals = dimensionDecimals;
     const auto paper = paperSizeMm(format);
     const auto frame = drawing::frameArea(paper);
     const auto titleLeft = frame.right() - drawing::titleBlockWidth;
@@ -805,6 +807,10 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
         if (choice.scale && (!std::isfinite(*choice.scale) || *choice.scale <= 0 ||
                              standardDrawingScale(*choice.scale) != choice.scale))
             throw std::runtime_error("Выберите стандартный масштаб");
+        if (choice.paperQuarterTurns < 0 || choice.paperQuarterTurns > 3 ||
+            (choice.paperQuarterTurns != 0 &&
+             !application::supportsPaperViewRotation(choice.key.kind)))
+            throw std::runtime_error("Недопустимый поворот вида на листе");
         if (!choice.visible)
             continue;
         if (choice.key.kind == DrawingViewKind::Projection)
@@ -915,6 +921,7 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
             plan->views.push_back(
                 {iso->key, page, isoArea, isoArea.center() + QPointF(0, 4), *scale});
             auto &at = plan->views.back();
+            at.paperQuarterTurns = iso->paperQuarterTurns;
             const QSizeF size(width(v) * *scale, height(v) * *scale);
             at.selectionBounds =
                 QRectF(at.centre - QPointF(size.width() / 2, size.height() / 2), size)
@@ -942,14 +949,15 @@ DrawingSheet::compose(BendingDrawingPtr source, const std::vector<DrawingViewCho
     return plan;
 }
 namespace drawing {
-void paintComposition(QPainter &p, const BendingDrawing &d, const DrawingTitle &title, int page) {
+void paintCompositionViews(QPainter &p, const BendingDrawing &d, const DrawingTitle &title,
+                           int page) {
     const auto &plan = *title.plan;
-    if (plan.source.get() != &d || page < 0 || page >= plan.pages)
-        throw std::runtime_error("Устаревшая компоновка чертежа");
-    paintCompositionFrame(p, d, title, plan, page);
     for (const auto &at : plan.views)
-        if (at.page == page)
+        if (at.page == page) {
+            if (title.shadeIsometric && at.key.kind == DrawingViewKind::Isometric)
+                paintIsometricFill(p, d, at.centre, at.scale, at.paperQuarterTurns);
             paintRecorded(p, at, plan.flatSide);
+        }
 }
 } // namespace drawing
 } // namespace bending::ui

@@ -389,9 +389,11 @@ int main(int argc, char **argv) {
         editIntegrated(2, 8);
         auto individual = common;
         individual.dieAssembly->jointGapsMm = {2, 8};
+        // The joint stroke is the atomic tooling unit: its scope covers every
+        // member, so the edit must reach both bends identically.
         check(controller.session().bend(0)->catalogTools == individual &&
-                  controller.session().bend(1)->catalogTools == common,
-              "Individual edit changed another bend, profile or punch assembly");
+                  controller.session().bend(1)->catalogTools == individual,
+              "Joint stroke edit did not reach every member or changed another profile");
         integrated.hide();
         if (app.arguments().contains("--graphics")) {
             auto *viewer = new viewer::ViewerWidget(&window);

@@ -1,4 +1,5 @@
 #include "RoutePanel.h"
+#include "MeasurementText.h"
 #include "bending/application/SingleBendPreview.h"
 #include "bending/core/BendSequence.h"
 #include <QApplication>
@@ -18,10 +19,8 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
-#include <numbers>
 namespace bending::ui {
 QString routeFailureReason(const application::BendRouteError &error) {
     QString message;
@@ -33,9 +32,9 @@ QString routeFailureReason(const application::BendRouteError &error) {
         const auto &lengths = *error.toolLengths;
         message += QStringLiteral(" Нужно %1 мм; пуансон %2 мм, матрица %3 мм. "
                                   "Подберите секции на этапе «Инструмент».")
-                       .arg(lengths.bendLengthMm, 0, 'f', 2)
-                       .arg(lengths.punchLengthMm, 0, 'f', 2)
-                       .arg(lengths.dieLengthMm, 0, 'f', 2);
+                       .arg(measurementText(lengths.bendLengthMm))
+                       .arg(measurementText(lengths.punchLengthMm))
+                       .arg(measurementText(lengths.dieLengthMm));
     }
     if (error.operationError) {
         using Code = application::BendPreviewErrorCode;
@@ -100,6 +99,8 @@ QString routeFailureReason(const application::BendRouteError &error) {
 namespace {
 const char *stepMime = "application/x-bending-route-step";
 QString stepZones(const application::BendRouteStep &step) {
+    if (step.additionalBends.size() > 2)
+        return QStringLiteral("Участков %1").arg(step.additionalBends.size() + 1);
     auto result = QStringLiteral("B%1").arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
     for (const auto &member : step.additionalBends)
         result += QStringLiteral(" + B%1").arg(member.bendIndex + 1, 2, 10, QLatin1Char('0'));
@@ -237,14 +238,14 @@ class StepCanvas final : public QWidget {
 } // namespace
 RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     setObjectName("bendRoutePanel");
-    auto *layout = new QVBoxLayout(this);
+    auto *layout = primaryLayout_ = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    auto *advanced = new QWidget(this);
+    auto *advanced = advanced_ = new QWidget(this);
     advanced->setObjectName("routeAdvancedActions");
-    auto *advancedLayout = new QVBoxLayout(advanced);
+    auto *advancedLayout = advancedLayout_ = new QVBoxLayout(advanced);
     advancedLayout->setContentsMargins(0, 0, 0, 0);
     auto *actions = new QVBoxLayout;
-    automatic_ = new QPushButton(QStringLiteral("Автопорядок"), this);
+    automatic_ = new QPushButton(QStringLiteral("Подобрать порядок"), this);
     automatic_->setObjectName("prepareBendRoute");
     manual_ = new QPushButton(QStringLiteral("Проверить мой порядок"), this);
     manual_->setObjectName("checkBendRoute");
@@ -295,11 +296,9 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     status_->setObjectName("bendRouteStatus");
     status_->setWordWrap(true);
     status_->setTextFormat(Qt::PlainText);
-    advancedLayout->addWidget(status_);
-    editTool_ = new QPushButton(QStringLiteral("Инструмент выбранного гиба…"), this);
+    editTool_ = new QPushButton(QStringLiteral("Инструмент…"), this);
     editTool_->setObjectName("routeEditTool");
-    editTool_->setToolTip(QStringLiteral("Открыть инструмент выбранного гиба"));
-    editTool_->setAccessibleName(QStringLiteral("Изменить инструмент выбранного гиба"));
+    editTool_->setAccessibleName(QStringLiteral("Изменить оснастку"));
     layout->addWidget(editTool_);
     details->addWidget(earlier_);
     details->addWidget(later_);
@@ -330,15 +329,6 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
         });
     }
     advancedLayout->addLayout(details);
-    auto *more = new QToolButton(this);
-    more->setObjectName("routeActionsToggle");
-    more->setText(QStringLiteral("Действия шага и параметры ▸"));
-    more->setCheckable(true);
-    more->setMinimumHeight(32);
-    layout->addWidget(more);
-    layout->addWidget(advanced);
-    advanced->hide();
-    connect(more, &QToolButton::toggled, advanced, &QWidget::setVisible);
     stepStrip_->setStyleSheet(QStringLiteral(
         "QWidget#routeStepStrip{background:transparent;border:0;}"
         "QScrollArea{background:transparent;border:0;}"
@@ -361,8 +351,8 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     connect(earlier_, &QPushButton::clicked, this, [this] { move(-1); });
     connect(later_, &QPushButton::clicked, this, [this] { move(1); });
     connect(editTool_, &QPushButton::clicked, this, [this] {
-        if (const auto index = selectedBend(); index && onEditTool)
-            onEditTool(*index);
+        if (onEditTool)
+            onEditTool();
     });
     connect(mode_, &QComboBox::currentIndexChanged, this, [this] {
         if (onModeChanged)
@@ -503,8 +493,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             indices.push_back(step.bendIndex);
         }
     } else if (session.document()) {
-        for (const auto &stroke : application::routeBendStrokes(
-                 session.document()->metadata().bendAnalysis, sourceIndices)) {
+        for (const auto &stroke : session.bendStrokes(sourceIndices)) {
             std::vector<std::string> group;
             for (const auto index : stroke)
                 if (const auto *b = session.bend(index))
@@ -572,9 +561,14 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         steps_[i]->setProperty("routePosition", static_cast<int>(i));
         steps_[i]->setProperty("routeId", i ? QString::fromStdString(ids_[i - 1]) : QString{});
         QStringList draftZones;
-        if (i && !route_)
-            for (const auto &id : draftGroups_[i - 1])
-                draftZones.push_back(QString::fromStdString(id));
+        if (i && !route_) {
+            const auto &group = draftGroups_[i - 1];
+            if (group.size() > 3)
+                draftZones.push_back(QStringLiteral("Участков %1").arg(group.size()));
+            else
+                for (const auto &id : group)
+                    draftZones.push_back(QString::fromStdString(id));
+        }
         steps_[i]->setToolTip(
             i ? (route_ ? QString{} : QStringLiteral("Черновик · ")) +
                     QStringLiteral("Шаг %1 · %2 · форма после гиба. Перетащите между шагами.")
@@ -598,8 +592,15 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                     missingTool = index;
             }
         }
-    const bool ready = included && ids_.size() <= application::maximumSheetBends && !busy &&
-                       !preparingDraft && (mode_->currentIndex() == 0 || assigned);
+    const bool ready = included && sourceIndices.size() <= application::maximumSheetBends &&
+                       !busy && !preparingDraft && (mode_->currentIndex() == 0 || assigned);
+    auto *destination = route_ ? advancedLayout_ : primaryLayout_;
+    if (automatic_->parentWidget() != destination->parentWidget()) {
+        destination->insertWidget(0, automatic_);
+        automatic_->show();
+    }
+    automatic_->setText(route_ ? QStringLiteral("Подобрать другой порядок")
+                               : QStringLiteral("Подобрать порядок"));
     automatic_->setEnabled(ready);
     manual_->setEnabled(ready);
     mode_->setEnabled(!busy);
@@ -610,8 +611,9 @@ void RoutePanel::refresh(const application::DocumentSession &session,
     expandSearch_->setEnabled(canExpand && !busy);
     earlier_->setEnabled(!busy && selected_ > 1);
     later_->setEnabled(!busy && selected_ > 0 && selected_ < static_cast<int>(ids_.size()));
-    editTool_->setVisible(selected_ > 0);
-    editTool_->setEnabled(!busy && selected_ > 0);
+    editTool_->setEnabled(!busy && !preparingDraft && !ids_.empty());
+    editTool_->setToolTip(selected_ == 0 ? QStringLiteral("Изменить оснастку для всех гибов")
+                                         : QStringLiteral("Изменить оснастку выбранного шага"));
     for (std::size_t i = 0; i < steps_.size(); ++i) {
         steps_[i]->setEnabled(!busy && included);
         steps_[i]->setChecked(static_cast<int>(i) == selected_);
@@ -642,51 +644,31 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         if (!reason.isEmpty())
             message += QLatin1Char(' ') + reason;
     } else if (route_) {
-        if (selected_ == 0)
-            message = QStringLiteral("Плоская геометрическая заготовка · %1 операций. ")
-                          .arg(route_->steps.size());
-        else {
+        if (selected_ > 0) {
             const auto &step = route_->steps[operation()];
-            const auto &b = session.document()->metadata().bendAnalysis.bends[step.bendIndex];
-            message =
-                QStringLiteral("Шаг %1/%2 · %6 · целевой внутренний угол %3° · L %4 мм · подача "
-                               "со стороны %5. ")
-                    .arg(selected_)
-                    .arg(route_->steps.size())
-                    .arg((std::numbers::pi - b.angleRadians) * 180 / std::numbers::pi, 0, 'f', 1)
-                    .arg(step.preview->model().widthMm, 0, 'f', 1)
-                    .arg(step.fixedSecond ? "B" : "A")
-                    .arg(stepZones(step));
+            message = QStringLiteral("%1 · подача со стороны %2. ")
+                          .arg(stepZones(step), step.fixedSecond ? "B" : "A");
         }
-        message += route_->partialEndSupport
-                       ? QStringLiteral("Маршрут найден. Торцевые подрезы: возможна деформация. ")
-                   : route_->manualExtraction
-                       ? QStringLiteral("Гибка проверена до заданного угла. ")
-                   : route_->withTools ? QStringLiteral("Циклы с инструментом проверены. ")
-                                       : QStringLiteral("Движение без инструмента. ");
+        if (route_->partialEndSupport)
+            message += QStringLiteral("Торцевые подрезы: возможна деформация. ");
         if (selected_ > 0)
             for (const auto &interval : route_->steps[operation()].preview->endSupportIntervals()) {
                 const auto &support = interval.material;
                 if (support.supportedFromMm == 0 && support.supportedToMm == support.bendLengthMm)
                     continue;
                 message += QStringLiteral("Участок %1–%2 мм: материал под опорой %3–%4 из %5 мм. ")
-                               .arg(interval.fromMm, 0, 'f', 2)
-                               .arg(interval.fromMm + support.bendLengthMm, 0, 'f', 2)
-                               .arg(support.supportedFromMm, 0, 'f', 2)
-                               .arg(support.supportedToMm, 0, 'f', 2)
+                               .arg(measurementText(interval.fromMm))
+                               .arg(measurementText(interval.fromMm + support.bendLengthMm))
+                               .arg(measurementText(support.supportedFromMm))
+                               .arg(measurementText(support.supportedToMm))
                                .arg(support.bendLengthMm, 0, 'f', 2);
             }
         if (selected_ > 0 && route_->withTools) {
             const auto *entry = session.bend(route_->steps[operation()].bendIndex);
-            if (entry && entry->catalogTools)
-                message += QStringLiteral("%1 / %2 · V%3. ")
-                               .arg(QString::fromStdString(entry->catalogTools->punch.code),
-                                    QString::fromStdString(entry->catalogTools->die.code))
-                               .arg(entry->tools ? entry->tools->openingMm : 0, 0, 'f', 1);
             if (entry && entry->tools)
                 message += QStringLiteral("Пуансон %1 мм, матрица %2 мм. ")
-                               .arg(core::punchLengthMm(*entry->tools), 0, 'f', 1)
-                               .arg(entry->tools->lengthMm, 0, 'f', 1);
+                               .arg(measurementText(core::punchLengthMm(*entry->tools)))
+                               .arg(measurementText(entry->tools->lengthMm));
             if (operation() > 0) {
                 const auto *previous = session.bend(route_->steps[operation() - 1].bendIndex);
                 if (entry && previous &&
@@ -696,14 +678,7 @@ void RoutePanel::refresh(const application::DocumentSession &session,
                                               "переналадка не проверена. ");
             }
         }
-        const bool demoMachine =
-            std::any_of(route_->steps.begin(), route_->steps.end(), [](const auto &s) {
-                return s.preview && s.preview->machineModel() != core::MachineModel::None;
-            });
-        message += demoMachine
-                       ? QStringLiteral("Учебный станок проверен по кадрам. Реальные габариты, "
-                                        "ход, извлечение и перенос не подтверждены.")
-                       : QStringLiteral("Извлечение, перенос и станок не проверены.");
+        message += QStringLiteral("Извлечение и перенос детали не проверены.");
     } else if (draft) {
         message = selected_ ? QStringLiteral("Ручной порядок · шаг %1/%2 · B%3. ")
                                   .arg(selected_)
@@ -714,8 +689,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             draft->checkedToolPositions
                 ? QStringLiteral("Столкновения проверены по кадрам. Полный порядок не проверен.")
                 : QStringLiteral("Выберите инструмент для проверки столкновений.");
-    } else if (ids_.size() > application::maximumSheetBends)
-        message = QStringLiteral("Порядок поддерживает до %1 полных прямых гибов.")
+    } else if (sourceIndices.size() > application::maximumSheetBends)
+        message = QStringLiteral("Порядок поддерживает до %1 участков гиба.")
                       .arg(application::maximumSheetBends);
     else if (!included)
         message = QStringLiteral("Для полного порядка нужны все распознанные зоны детали.");

@@ -1,4 +1,5 @@
 #include "ToolAssemblyDiagram.h"
+#include "MeasurementText.h"
 #include "ToolSegmentColorPreferences.h"
 #include <QMouseEvent>
 #include <QPainter>
@@ -100,9 +101,11 @@ void ToolAssemblyDiagram::paintEvent(QPaintEvent *) {
             p.drawRect(QRectF(0, 0, w, height));
         p.restore();
         p.setPen(palette().color(QPalette::Text));
-        if (w >= 38)
-            p.drawText(QRectF(x, y + height + 4, w, 18), Qt::AlignCenter,
-                       QString::number(piece.lengthMm));
+        if (w >= 38) {
+            const auto label = measurementText(piece.lengthMm);
+            if (p.fontMetrics().horizontalAdvance(label) + 2 <= w)
+                p.drawText(QRectF(x, y + height + 4, w, 18), Qt::AlignCenter, label);
+        }
     }
     if (target > 0) {
         const double x = start + (span - target) / 2 * scale, lineY = 99;
@@ -113,7 +116,7 @@ void ToolAssemblyDiagram::paintEvent(QPaintEvent *) {
             p.drawLine(QPointF(end, lineY - 5), QPointF(end, lineY + 5));
         p.setPen(palette().color(QPalette::Text));
         p.drawText(QRectF(0, lineY + 7, width(), 20), Qt::AlignCenter,
-                   QStringLiteral("Гиб %1 мм").arg(target));
+                   QStringLiteral("Гиб %1 мм").arg(measurementText(target)));
     }
 }
 void ToolAssemblyDiagram::mousePressEvent(QMouseEvent *event) {

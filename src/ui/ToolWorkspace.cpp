@@ -1,4 +1,5 @@
 #include "ToolWorkspace.h"
+#include "MeasurementText.h"
 #include "ToolAssemblyDiagram.h"
 #include "ToolContourButton.h"
 #include "ToolEndButtons.h"
@@ -6,7 +7,6 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QLocale>
 #include <QPushButton>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -16,7 +16,7 @@
 namespace bending::ui {
 namespace {
 QString number(double n) {
-    return QLocale().toString(n, 'g', 6);
+    return measurementText(n);
 }
 QString sections(const core::ToolPreset &tool, const std::optional<core::ToolAssembly> &assembly) {
     if (!tool.segments)
@@ -180,11 +180,11 @@ void ToolWorkspace::refresh() {
     if (maximum)
         fit_->setToolTip(QStringLiteral("Пуансон до %1 мм с зазором у полок. "
                                         "Свободный ход проверяется в симуляции.")
-                             .arg(*maximum, 0, 'f', 2));
+                             .arg(measurementText(*maximum)));
     else if (const auto minimum = selection_->compactSectionMinimumMm())
         fit_->setToolTip(QStringLiteral("Подобрать непрерывные сборки от %1 мм. "
                                         "Проём проверяется в симуляции.")
-                             .arg(*minimum, 0, 'f', 2));
+                             .arg(measurementText(*minimum)));
     else
         fit_->setToolTip(QStringLiteral(
             "Подобрать длину обоих инструментов, сохранив выбранные крайние сапожки."));
@@ -203,7 +203,7 @@ void ToolWorkspace::refresh() {
         punch_->setText(punch_->text() + QStringLiteral(" · схема в обычной ориентации"));
     if (maximum)
         punch_->setText(punch_->text() +
-                        QStringLiteral(" · по проёму до %1 мм").arg(*maximum, 0, 'f', 2));
+                        QStringLiteral(" · по проёму до %1 мм").arg(measurementText(*maximum)));
     die_->setText(die ? QString::fromStdString(die->code) + QStringLiteral(" · ") +
                             sections(*die, selection_->selectedAssembly(core::ToolKind::Die))
                       : QString{});

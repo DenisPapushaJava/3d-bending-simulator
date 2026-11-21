@@ -1,12 +1,35 @@
 #include "PreviewRigidScene.h"
 #include <Prs3d_Drawer.hxx>
+#include <Select3D_SensitiveEntity.hxx>
+#include <SelectMgr_Selection.hxx>
+#include <StdSelect_BRepOwner.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <algorithm>
 #include <utility>
 
 namespace bending::viewer {
 namespace {
+class ToolPresentation final : public AIS_ColoredShape {
+  public:
+    using AIS_ColoredShape::AIS_ColoredShape;
+
+  protected:
+    void ComputeSelection(const Handle(SelectMgr_Selection) & selection, int mode) override {
+        AIS_ColoredShape::ComputeSelection(selection, mode);
+        if (mode != AIS_Shape::SelectionMode(TopAbs_FACE))
+            return;
+        // Keep the face for resolving the clicked section. OCCT highlights its whole
+        // presentation when the selection owner is marked as a global highlight.
+        for (const auto &entity : selection->Entities())
+            entity->BaseSensitive()->OwnerId()->SetComesFromDecomposition(false);
+    }
+};
+
+bool isTool(const std::string &id) {
+    return id == "punch" || id == "die";
+}
 bool sameTransform(const gp_Trsf &a, const gp_Trsf &b) {
     for (int row = 1; row <= 3; ++row)
         for (int column = 1; column <= 4; ++column)
@@ -48,12 +71,57 @@ void PreviewRigidScene::apply(const Entry &entry, int mode, bool boundaries) {
         context_->SetDisplayMode(object, mode, false);
     if (entry.body.visible) {
         if (!context_->IsDisplayed(object))
-            context_->Display(object, mode, -1, false);
+            context_->Display(
+                object, mode,
+                toolPicking_ && isTool(entry.body.id) ? AIS_Shape::SelectionMode(TopAbs_FACE) : -1,
+                false);
         if (boundaryChange)
             context_->Redisplay(object, false);
     } else if (context_->IsDisplayed(object)) {
         context_->Erase(object, false);
     }
+}
+void PreviewRigidScene::setToolPicking(bool enabled) {
+    if (toolPicking_ == enabled)
+        return;
+    if (!enabled)
+        clearToolHover();
+    toolPicking_ = enabled;
+    const int mode = AIS_Shape::SelectionMode(TopAbs_FACE);
+    for (const auto &entry : entries_) {
+        if (!isTool(entry.body.id) || !context_->IsDisplayed(entry.presentation))
+            continue;
+        if (enabled) {
+            // Presentations displayed with selection mode -1 are not loaded in the selector.
+            context_->Load(entry.presentation, mode);
+            context_->Activate(entry.presentation, mode, false);
+        } else
+            context_->Deactivate(entry.presentation, mode);
+    }
+}
+void PreviewRigidScene::clearToolHover() {
+    if (detectedTool())
+        context_->ClearDetected(true);
+}
+std::optional<std::pair<bool, int>> PreviewRigidScene::detectedTool() const {
+    if (!toolPicking_ || !context_->HasDetected())
+        return {};
+    const auto object = context_->DetectedInteractive();
+    for (const auto &entry : entries_) {
+        if (entry.presentation != object || !isTool(entry.body.id))
+            continue;
+        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context_->DetectedOwner());
+        if (!owner.IsNull() && owner->HasShape()) {
+            const auto &face = owner->Shape();
+            for (std::size_t i = 0; i < entry.body.colors.size(); ++i)
+                for (TopExp_Explorer faces(entry.body.colors[i].shape, TopAbs_FACE); faces.More();
+                     faces.Next())
+                    if (face.IsSame(faces.Current()))
+                        return std::pair{entry.body.id == "punch", static_cast<int>(i)};
+        }
+        return std::pair{entry.body.id == "punch", -1};
+    }
+    return {};
 }
 void PreviewRigidScene::update(std::vector<RigidDisplayBody> bodies, int mode, bool boundaries) {
     std::vector<Entry> next;
@@ -76,7 +144,11 @@ void PreviewRigidScene::update(std::vector<RigidDisplayBody> bodies, int mode, b
         if (found != entries_.end()) {
             object = found->presentation;
         } else {
-            object = new AIS_ColoredShape(body.shape.Located(TopLoc_Location()));
+            const auto localShape = body.shape.Located(TopLoc_Location());
+            if (isTool(body.id))
+                object = new ToolPresentation(localShape);
+            else
+                object = new AIS_ColoredShape(localShape);
             object->Attributes()->SetAutoTriangulation(false);
             object->Attributes()->SetFaceBoundaryDraw(boundaries && body.boundaries);
             object->SetColor(body.color);

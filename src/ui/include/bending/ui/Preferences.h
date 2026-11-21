@@ -5,6 +5,8 @@ namespace bending::ui {
 // Configure once in app composition; tests/development retain native settings.
 void setPreferencesFile(const QString &path);
 std::unique_ptr<QSettings> preferences();
+[[nodiscard]] int dimensionDecimalPlaces();
+[[nodiscard]] bool setDimensionDecimalPlaces(int decimals);
 // Own library paths are relative to settings, so portable data survives relocation.
 QString toolCatalogPath();
 QString toolLibraryDirectory();

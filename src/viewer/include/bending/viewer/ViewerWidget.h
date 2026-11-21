@@ -4,9 +4,11 @@
 #include <QImage>
 #include <QWidget>
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 class QMenu;
@@ -47,11 +49,17 @@ class ViewerWidget final : public QWidget {
     void fitAll();
     void setCutoutsVisible(bool visible);
     void setDimensionsVisible(bool visible);
+    void setDimensionDecimals(int decimals);
     // Presentation hint only: animation keeps the active angle and hides detailed dimensions.
     void setAnimationRunning(bool running);
     [[nodiscard]] bool isRepositioning() const;
     void startDraftReposition(const application::RouteDraftPose &, quint64 documentRevision);
     void finishReposition();
+    void setBendToolPicking(bool enabled);
+    // Temporary translation of the shown sheet along machine Z, during installation editing.
+    void setBendPlacementHandle(bool enabled, const QString &notice = {});
+    void setBendPlacement(bool editing, double deltaMm = 0,
+                          std::span<const std::array<double, 2>> uncovered = {});
     [[nodiscard]] bool dimensionsVisible() const;
     void setOrientation(Orientation orientation);
     // Empty result means accepted. Geometry is prepared by the importer before publication.
@@ -61,6 +69,8 @@ class ViewerWidget final : public QWidget {
     void highlightFaces(const std::vector<std::size_t> &indices, quint64 revision);
     // Distinguishes the bend zone from its adjacent planar flanges.
     void highlightBend(const application::RecognizedBend &bend, quint64 revision);
+    void highlightBendZones(const std::vector<std::size_t> &indices, quint64 revision);
+    void setBendStrokePartitions(std::vector<unsigned> partitions, quint64 revision);
     void highlightPreviewBend(std::optional<std::size_t>, bool activeZone = false);
     void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
                                  quint64 revision);
@@ -78,6 +88,11 @@ class ViewerWidget final : public QWidget {
     void selectionChanged(quint64 documentRevision, int faceIndex);
     // Source bend index on the flat pattern, -1 clears selection; never a route step.
     void bendSelectionChanged(quint64 documentRevision, int bendIndex);
+    void bendToolPicked(quint64 documentRevision, bool punch, int section);
+    void bendPlacementDragStarted();
+    void bendPlacementDragged(double deltaMm);
+    void bendPlacementDragFinished();
+    void bendPlacementDragCancelled();
 
   private:
     class Impl;

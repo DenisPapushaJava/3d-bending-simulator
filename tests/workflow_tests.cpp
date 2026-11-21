@@ -407,6 +407,9 @@ void testProjectWorkflow(bool graphics) {
     auto *label = window.findChild<QLabel *>(QStringLiteral("thicknessProperties"));
     require(label && label->text().contains(QStringLiteral("определена по геометрии")),
             "Automatic thickness not shown");
+    auto *partStage = window.findChild<QToolButton *>("processStage0");
+    require(partStage && partStage->accessibleName() == QStringLiteral("Деталь · Без гибов · 2 мм"),
+            "Part card did not display the detected thickness");
     if (graphics) {
         waitUntil([&] { return viewer->isReady(); });
         const auto automaticHighlight = viewer->captureImage();
@@ -567,14 +570,21 @@ void testInitialThickness(bool graphics, const QString &path, double expected) {
             require(image.save(output), "Cannot save initial thickness snapshot");
         }
     }
+    const auto *partStage = window.findChild<QToolButton *>("processStage0");
+    const auto proposalSuffix = QStringLiteral(" · %1 мм").arg(expected);
+    require(partStage && partStage->accessibleName().endsWith(proposalSuffix),
+            "The part card did not display the proposed thickness");
     // Applying an unverified manual override and resetting it must restore the local proposal.
     input->setValue(expected + 1.0);
     window.findChild<QPushButton *>(QStringLiteral("applyThickness"))->click();
     require(controller.session().manualThicknessMm() == expected + 1.0,
             "Manual override not applied");
+    require(partStage->accessibleName().endsWith(QStringLiteral(" · %1 мм").arg(expected + 1.0)),
+            "The part card did not update to the manual thickness");
     window.findChild<QPushButton *>(QStringLiteral("automaticThickness"))->click();
     require(!controller.session().manualThicknessMm() &&
-                std::abs(input->value() - expected) < 1.0e-5 && pairs->currentIndex() == 0,
+                std::abs(input->value() - expected) < 1.0e-5 && pairs->currentIndex() == 0 &&
+                partStage->accessibleName().endsWith(proposalSuffix),
             "Reset did not restore proposed thickness and surfaces");
     controller.closeDocument();
     require(input->value() == 0.0 && pairs->count() == 0,
@@ -601,7 +611,7 @@ void testBendWorkflow(bool graphics) {
     window.openStep(QString::fromUtf8(BENDING_EXAMPLE_DIR) + QStringLiteral("/channel-2mm.step"));
     waitUntil(finished);
     require(list->model()->rowCount() == 2 &&
-                summary->text().contains(QStringLiteral("зон сгиба: 2")),
+                summary->text().contains(QStringLiteral("Найдено гибов: 2")),
             "Recognized bends not listed");
     if (graphics) {
         waitUntil([&] { return viewer->isReady() || !viewer->errorString().isEmpty(); });
@@ -2193,6 +2203,18 @@ void testGuidedWorkflow(bool graphics) {
                 core::punchLengthMm(*controller.session().bend(0)->tools) == 525 &&
                 !controller.session().bend(0)->target,
             "Guided check lost catalogue snapshot/separate lengths");
+    auto *blankStep = window.findChild<QPushButton *>("routeStep0");
+    auto *firstStep = window.findChild<QPushButton *>("routeStep1");
+    require(blankStep && firstStep, "Single bend is missing its step buttons");
+    firstStep->click();
+    require(firstStep->isChecked() && slider->value() == 0,
+            "Single bend skipped the initial setup or selected the blank");
+    slider->setValue(10);
+    blankStep->click();
+    require(blankStep->isChecked() && slider->value() == 0 &&
+                controller.bendPreview() == guidedPreview && !controller.hasWork(),
+            "Returning to the blank replaced or recalculated the single bend");
+    firstStep->click();
     slider->setValue(24);
     if (graphics) {
         const auto preview = controller.bendPreview();

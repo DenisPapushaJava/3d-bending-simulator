@@ -149,7 +149,14 @@ int main(int argc, char **argv) {
             check(shot.save(output), "Snapshot failed");
         }
         const auto selectedId = c.routeDraft()->request.operations.back().id;
-        panel->findChild<QPushButton *>("routeMoveEarlier")->click();
+        auto *details = window.findChild<QToolButton *>("routeActionsToggle");
+        auto *moveEarlier = window.findChild<QPushButton *>("routeMoveEarlier");
+        check(details && moveEarlier && !moveEarlier->isVisible(),
+              "Large route actions did not start collapsed");
+        details->click();
+        check(moveEarlier->isVisible() && moveEarlier->isEnabled(),
+              "Large route reorder is missing from advanced actions");
+        moveEarlier->click();
         wait([&] { return !c.hasWork(); });
         check(c.routeDraft() && c.routeDraft()->request.step == 31 &&
                   c.routeDraft()->request.operations[30].id == selectedId &&
@@ -157,8 +164,7 @@ int main(int argc, char **argv) {
               "Moving a large step lost identity or collision checks");
         panel->select(0);
         wait([&] { return !c.hasWork(); });
-        check(c.routeDraft() && c.routeDraft()->request.step == 0 &&
-                  !panel->findChild<QPushButton *>("routeMoveEarlier")->isEnabled() &&
+        check(c.routeDraft() && c.routeDraft()->request.step == 0 && !moveEarlier->isEnabled() &&
                   builder->searches == 0,
               "Flat step became reorderable");
         const bool fastPrefetch = app.arguments().contains("--audit-prefetch-fast");

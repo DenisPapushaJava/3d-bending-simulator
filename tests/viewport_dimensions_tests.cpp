@@ -2,7 +2,6 @@
 #include <PrsDim_LengthDimension.hxx>
 
 #include <QApplication>
-#include <QLocale>
 #include <QRegularExpression>
 #include <cmath>
 #include <iostream>
@@ -32,6 +31,18 @@ int main(int argc, char **argv) {
                   source.labels.size() == 4 && source.labels.join(' ').contains("X 100 мм") &&
                   source.labels.join(' ').contains("Y 100 мм"),
               "Repeated flanges or a covered extent were duplicated, or different axes collapsed");
+        layout.decimals = 3;
+        const auto precise =
+            viewer::documentDimensions(metadata, {}, {}, 14, layout, &measurements);
+        check(precise.labels == source.labels,
+              "The viewport added zeros to integer dimensions at higher precision");
+        auto fractional = metadata;
+        fractional.bounds.maximum.x = 100.125;
+        const auto labels =
+            viewer::documentDimensions(fractional, {}, {}, 14, layout, &measurements);
+        check(labels.labels.join(' ').contains("X 100,125 мм"),
+              "The viewport lost significant fractional dimensions at higher precision");
+        layout.decimals = application::defaultDimensionDecimalPlaces;
         application::MeasuredOpening hole;
         hole.center = {20, 20, 0};
         hole.normal = {0, 0, 1};
@@ -52,11 +63,11 @@ int main(int argc, char **argv) {
             base.second = {110, base.first.y, 0};
             base.faces = {1};
             measurements.edges.push_back(base);
-            const auto labels =
+            const auto datumLabels =
                 viewer::documentDimensions(metadata, {}, {}, 14, layout, &measurements,
                                            {viewer::MeasurementKind::Opening, 0, {id}})
                     .labels;
-            check(labels.filter(QStringLiteral("До базы")).size() == (id == 1 ? 1 : 0),
+            check(datumLabels.filter(QStringLiteral("До базы")).size() == (id == 1 ? 1 : 0),
                   "Manual datum accepted an inner wire or extended a finite external edge");
         }
         application::FlatPatternInfo info;
@@ -87,6 +98,30 @@ int main(int argc, char **argv) {
                   !overview.labels.join(' ').contains(" · Y ") &&
                   !overview.labels.join(' ').contains(" · L "),
               "Overview must have overall sizes and compact IDs, not full callouts");
+        auto interrupted = info;
+        interrupted.bends.clear();
+        application::BendAnalysis interruptedAnalysis;
+        interruptedAnalysis.bends.resize(40);
+        for (std::size_t i = 0; i < interruptedAnalysis.bends.size(); ++i) {
+            auto segment = info.bends.front();
+            segment.bendIndex = i;
+            segment.start = {double(i) * 20, 20, 0};
+            segment.end = {double(i) * 20 + 15, 20, 0};
+            interrupted.bends.push_back(segment);
+            interruptedAnalysis.bends[i].interruptedStroke = 1;
+        }
+        std::vector<unsigned> partitions(40, 1);
+        std::fill(partitions.begin() + 35, partitions.end(), 2);
+        const auto combined =
+            viewer::flatPatternDimensions(interrupted, 14, layout, {}, 1, {}, &interruptedAnalysis);
+        const auto separated = viewer::flatPatternDimensions(interrupted, 14, layout, {}, 1, {},
+                                                             &interruptedAnalysis, partitions);
+        check(
+            combined.labels.filter(QStringLiteral("40 уч.")).size() == 1 &&
+                separated.labels.filter(QStringLiteral("35 уч.")).size() == 1 &&
+                separated.labels.filter(QRegularExpression(QStringLiteral(" · 5 уч\\.$"))).size() ==
+                    1,
+            "A long interrupted stroke expanded into IDs or lost its partition labels");
         const auto selectedAnnotations = viewer::flatPatternDimensions(info, 14, layout, 7, 1);
         const auto selected = selectedAnnotations.labels;
         const auto dimensions = [](const viewer::DimensionAnnotations &annotations) {
@@ -102,12 +137,11 @@ int main(int argc, char **argv) {
                   std::abs(selectedDimensions.back()->FirstPoint().Y()) < 1.e-6 &&
                   std::abs(selectedDimensions.back()->SecondPoint().Y() - 302) < 1.e-6,
               "Selected bend lacks a dimension between the real edge and its centre line");
-        check(
-            !selected.join(' ').contains(" · Y ") &&
-                selected.join(' ').contains(QStringLiteral("B08 · ВНИЗ · 125° · R 3 · L %1 мм")
-                                                .arg(QLocale::system().toString(1000.0, 'f', 0))) &&
-                selected.contains(QStringLiteral("302 мм")),
-            "Selected dimensions lost internal angle/radius/length/coordinate or used step ID");
+        check(!selected.join(' ').contains(" · Y ") &&
+                  selected.join(' ').contains(
+                      QStringLiteral("B08 · ВНИЗ · 125° · R 3 · L 1000 мм")) &&
+                  selected.contains(QStringLiteral("302 мм")),
+              "Selected dimensions lost internal angle/radius/length/coordinate or used step ID");
         const auto reverse = viewer::flatPatternDimensions(info, 14, layout, 7, -1).labels;
         check(reverse.size() == selected.size() && reverse.join(' ').contains("B08 · ВВЕРХ · 125°"),
               "Directions must reverse with the shown physical side");

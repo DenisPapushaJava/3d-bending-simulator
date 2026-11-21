@@ -1,5 +1,6 @@
 #include "bending/cad/BendingDrawingBuilder.h"
 #include "BendRecognizer.h"
+#include "DrawingIsometricFill.h"
 #include "DrawingOpenings.h"
 #include "DrawingProfiles.h"
 #include "DrawingRepeats.h"
@@ -26,8 +27,11 @@
 #include <Bnd_Box.hxx>
 #include <GCPnts_QuasiUniformDeflection.hxx>
 #include <GProp_GProps.hxx>
+#include <HLRAlgo_EdgeIterator.hxx>
 #include <HLRAlgo_Projector.hxx>
 #include <HLRBRep_Algo.hxx>
+#include <HLRBRep_Data.hxx>
+#include <HLRBRep_EdgeData.hxx>
 #include <HLRBRep_HLRToShape.hxx>
 #include <IntAna_QuadQuadGeo.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
@@ -35,6 +39,7 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -558,8 +563,91 @@ void contours(const TopoDS_Shape &shape, bool hidden, DrawingView &view, std::si
         view.paths.push_back(std::move(path));
     }
 }
+TopTools_IndexedMapOfShape bendBoundaryEdges(const TopoDS_Shape &shape,
+                                             const TopTools_IndexedMapOfShape &faces,
+                                             const BendAnalysis &analysis, std::stop_token stop) {
+    TopTools_IndexedMapOfShape result;
+    if (analysis.bends.empty() && analysis.interiorContourDiagnostics.empty())
+        return result;
+    TopTools_IndexedDataMapOfShapeListOfShape parents;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, parents);
+    const auto collect = [&](const RecognizedBend &bend) {
+        for (const auto faceId : {bend.innerFace, bend.outerFace}) {
+            if (!faceId || faceId > static_cast<std::size_t>(faces.Extent()))
+                continue;
+            const auto surface = BRepAdaptor_Surface(TopoDS::Face(faces(static_cast<int>(faceId))));
+            if (surface.GetType() != GeomAbs_Cylinder)
+                continue;
+            const auto axis = surface.Cylinder().Axis().Direction();
+            for (TopExp_Explorer edges(faces(static_cast<int>(faceId)), TopAbs_EDGE); edges.More();
+                 edges.Next()) {
+                const auto &edge = edges.Current();
+                const BRepAdaptor_Curve curve(TopoDS::Edge(edge));
+                if (curve.GetType() != GeomAbs_Line ||
+                    !curve.Line().Direction().IsParallel(axis, 1.e-6))
+                    continue;
+                for (const auto &wall : parents.FindFromKey(edge)) {
+                    const auto id = static_cast<std::size_t>(faces.FindIndex(wall));
+                    if (id && std::find(bend.flangeFaces.begin(), bend.flangeFaces.end(), id) !=
+                                  bend.flangeFaces.end())
+                        result.Add(edge);
+                }
+            }
+        }
+    };
+    for (const auto &bend : analysis.bends) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        collect(bend);
+    }
+    for (const auto &opening : analysis.interiorContourDiagnostics) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        collect(opening.candidate);
+    }
+    return result;
+}
+
+std::vector<std::array<DrawingPoint, 2>>
+visibleBendBoundaries(const TopTools_IndexedMapOfShape &edges, const Handle(HLRBRep_Data) & data,
+                      const Frame &frame, std::stop_token stop) {
+    constexpr std::size_t maximumFragments = 2048;
+    std::vector<std::array<DrawingPoint, 2>> paths;
+    if (data.IsNull())
+        return paths;
+    for (int edgeId = 1; edgeId <= edges.Extent(); ++edgeId) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const int index = data->EdgeMap().FindIndex(edges(edgeId));
+        if (index == 0)
+            continue;
+        auto &edge = data->EDataArray().ChangeValue(index);
+        // A sharp boundary already appears in the regular contour set.
+        if (!edge.Selected() || edge.Vertical() || !edge.Rg1Line() || edge.RgNLine())
+            continue;
+        HLRAlgo_EdgeIterator visibility;
+        for (visibility.InitVisible(edge.Status()); visibility.MoreVisible();
+             visibility.NextVisible()) {
+            double first, last;
+            float firstTolerance, lastTolerance;
+            visibility.Visible(first, firstTolerance, last, lastTolerance);
+            const auto &curve = edge.Geometry();
+            const auto a = project(curve.Value3D(first), frame);
+            const auto b = project(curve.Value3D(last), frame);
+            const double length = std::hypot(a.x - b.x, a.y - b.y);
+            if (!std::isfinite(length) || length <= 1.e-7)
+                continue;
+            if (paths.size() == maximumFragments)
+                return {};
+            paths.push_back({a, b});
+        }
+    }
+    return paths;
+}
+
 DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budget,
-                   std::stop_token stop, const std::vector<DrawingOpening> *openings = nullptr) {
+                   std::stop_token stop, const std::vector<DrawingOpening> *openings = nullptr,
+                   const TopTools_IndexedMapOfShape *bendEdges = nullptr) {
     if (stop.stop_requested())
         throw DrawingError{"Cancelled", true};
     Handle(HLRBRep_Algo) algo = new HLRBRep_Algo;
@@ -592,6 +680,13 @@ DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budge
     }
     if (view.paths.empty())
         throw std::runtime_error("HLR produced no drawing contours");
+    if (bendEdges && !bendEdges->IsEmpty()) {
+        try {
+            view.bendBoundaries = visibleBendBoundaries(*bendEdges, algo->DataStructure(), f, stop);
+        } catch (const Standard_Failure &) {
+            // The regular vector view remains usable if optional detail is unavailable.
+        }
+    }
     const auto b = bounds(shape, f);
     view.minimum = {b[0], b[1]};
     view.maximum = {b[2], b[3]};
@@ -1534,7 +1629,27 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         auto profileGroup = planProfileGroup(shape, bendAnalysis.bends, frames,
                                              bendAnalysis.lengthToleranceMm, budget, stop);
         for (std::size_t i = 0; i < frames.size(); ++i) {
-            drawing->views[i] = viewOf(shape, frames[i], budget, stop, i < 3 ? &openings : nullptr);
+            if (i == 3) {
+                TopTools_IndexedMapOfShape bendEdges;
+                try {
+                    bendEdges = bendBoundaryEdges(shape, faces, bendAnalysis, stop);
+                } catch (const Standard_Failure &) {
+                    // Optional boundaries must not prevent creating the drawing.
+                }
+                drawing->views[i] = viewOf(shape, frames[i], budget, stop, nullptr, &bendEdges);
+                try {
+                    drawing->isometricFill = makeDrawingIsometricFill(
+                        OcctDocumentAccess::shape(*source),
+                        gp_Ax2(gp_Pnt(0, 0, 0), frames[i].normal, frames[i].u), drawing->views[i],
+                        stop);
+                } catch (const Standard_Failure &) {
+                    // Fall back to vector contours if the import mesh cannot be used.
+                }
+                if (stop.stop_requested())
+                    return DrawingError{"Cancelled", true};
+                continue;
+            }
+            drawing->views[i] = viewOf(shape, frames[i], budget, stop, &openings);
             if (i < 3)
                 (*drawing->classicalViews)[i] = drawing->views[i];
             if (i > 0 && i < 3 && std::any_of(openings.begin(), openings.end(), [&](const auto &o) {

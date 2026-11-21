@@ -32,7 +32,6 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
-#include <QLocale>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -243,7 +242,9 @@ void checkDxfMeasurements() {
                           Qt::LeftButton, modifiers);
         QApplication::sendEvent(view.viewport(), &press);
     };
-    const auto formatted = [](double value) { return QLocale().toString(value, 'f', 2); };
+    const auto formatted = [](double value) {
+        return QString::fromStdString(application::formatMeasurement(value));
+    };
     const auto move = [&](double x, double y) {
         const auto position = view.mapFromScene(QPointF(x, -y));
         QMouseEvent event(QEvent::MouseMove, QPointF(position),
@@ -305,6 +306,11 @@ void checkDxfMeasurements() {
     check(result == slotLength, "A quadrant outside the actual arc became selectable");
     click(36, 20);
     check(result == QStringLiteral("Ø%1 мм").arg(formatted(12)), "Incorrect DXF bore diameter");
+    view.setDimensionDecimals(3);
+    check(result == QStringLiteral("Ø12 мм"),
+          "Higher precision added trailing zeros to an integer bore diameter");
+    view.setDimensionDecimals(application::defaultDimensionDecimalPlaces);
+    check(result == QStringLiteral("Ø12 мм"), "Bore pick was lost on precision change");
     click(30, 20);
     click(70, 20);
     check(result.startsWith(formatted(40)) && result.contains(QStringLiteral("ΔX")),

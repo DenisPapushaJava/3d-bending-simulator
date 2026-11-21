@@ -2,6 +2,7 @@
 
 #include "bending/application/Document.h"
 #include "bending/application/FlatPattern.h"
+#include "bending/application/MeasurementDisplay.h"
 #include "bending/cad/occt/PreviewAccess.h"
 
 #include <AIS_InteractiveObject.hxx>
@@ -13,6 +14,7 @@
 #include <functional>
 
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace bending::viewer {
@@ -29,6 +31,8 @@ struct DimensionLayout {
     QRectF viewport;
     std::vector<QRectF> excluded;
     std::function<gp_Pnt(QPointF, const gp_Pnt &)> unproject = {};
+    int decimals = application::defaultDimensionDecimalPlaces;
+    [[nodiscard]] QString measurementText(double value) const;
 };
 enum class MeasurementKind { None, Opening, Face, Edge };
 struct MeasurementSelection {
@@ -53,8 +57,9 @@ documentDimensions(const application::DocumentMetadata &, const TopTools_Indexed
                                                      const simulation::SingleBend &,
                                                      double textHeight, const DimensionLayout &,
                                                      bool compact = false);
-[[nodiscard]] DimensionAnnotations flatPatternDimensions(const application::FlatPatternInfo &,
-                                                         double textHeight, const DimensionLayout &,
-                                                         std::optional<std::size_t> selected,
-                                                         double facing, MeasurementSelection = {});
+[[nodiscard]] DimensionAnnotations
+flatPatternDimensions(const application::FlatPatternInfo &, double textHeight,
+                      const DimensionLayout &, std::optional<std::size_t> selected, double facing,
+                      MeasurementSelection = {}, const application::BendAnalysis * = nullptr,
+                      std::span<const unsigned> partitions = {});
 } // namespace bending::viewer

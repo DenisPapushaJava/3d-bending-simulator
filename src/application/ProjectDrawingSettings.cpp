@@ -34,7 +34,9 @@ bool validProjectDrawingSettings(const ProjectDrawingSettings &s) {
         if (id.kind < DrawingViewKind::Projection || id.kind > DrawingViewKind::Isometric ||
             id.index >= 1024 || id.groups.size() > 128 ||
             !std::all_of(id.groups.begin(), id.groups.end(), validGroup) ||
-            (i->scale && standardDrawingScale(*i->scale) != i->scale) ||
+            (i->scale && standardDrawingScale(*i->scale) != i->scale) || i->paperQuarterTurns < 0 ||
+            i->paperQuarterTurns > 3 ||
+            (i->paperQuarterTurns != 0 && !supportsPaperViewRotation(id.kind)) ||
             std::any_of(s.views.begin(), i, [&](const auto &v) { return v.identity == id; }))
             return false;
     }

@@ -38,13 +38,15 @@ QJsonValue drawingSettingsJson(const std::optional<ProjectDrawingSettings> &sett
         QJsonArray groups;
         for (const auto &group : v.identity.groups)
             groups.append(groupJson(group));
-        views.append(
-            QJsonObject{{"kind", static_cast<int>(v.identity.kind)},
-                        {"index", static_cast<int>(v.identity.index)},
-                        {"groups", groups},
-                        {"variant", v.identity.variant},
-                        {"visible", v.visible},
-                        {"scale", v.scale ? QJsonValue(*v.scale) : QJsonValue(QJsonValue::Null)}});
+        QJsonObject entry{{"kind", static_cast<int>(v.identity.kind)},
+                          {"index", static_cast<int>(v.identity.index)},
+                          {"groups", groups},
+                          {"variant", v.identity.variant},
+                          {"visible", v.visible},
+                          {"scale", v.scale ? QJsonValue(*v.scale) : QJsonValue(QJsonValue::Null)}};
+        if (v.paperQuarterTurns != 0)
+            entry.insert("paperQuarterTurns", v.paperQuarterTurns);
+        views.append(entry);
     }
     return QJsonObject{{"name", s.name ? QJsonValue(QString::fromStdString(*s.name))
                                        : QJsonValue(QJsonValue::Null)},
@@ -59,6 +61,8 @@ QJsonValue drawingSettingsJson(const std::optional<ProjectDrawingSettings> &sett
                        {"allowBreaks", s.allowBreaks},
                        {"flatSide", static_cast<int>(s.flatSide)},
                        {"paperFormat", static_cast<int>(s.paperFormat)},
+                       {"shadeIsometric", s.shadeIsometric},
+                       {"showBendTools", s.showBendTools},
                        {"sectionEdits", edits},
                        {"views", views}};
 }
@@ -108,6 +112,16 @@ bool readDrawingSettings(const QJsonValue &value, std::optional<ProjectDrawingSe
             return false;
         s.paperFormat = static_cast<DrawingPaperFormat>(id);
     }
+    if (const auto shade = o.value("shadeIsometric"); !shade.isUndefined()) {
+        if (!shade.isBool())
+            return false;
+        s.shadeIsometric = shade.toBool();
+    }
+    if (const auto tools = o.value("showBendTools"); !tools.isUndefined()) {
+        if (!tools.isBool())
+            return false;
+        s.showBendTools = tools.toBool();
+    }
     const auto edits = o.value("sectionEdits");
     const auto views = o.value("views");
     if (!edits.isArray() || edits.toArray().size() > 128 || !views.isArray() ||
@@ -146,6 +160,8 @@ bool readDrawingSettings(const QJsonValue &value, std::optional<ProjectDrawingSe
         }
         if (scale.isDouble())
             entry.scale = scale.toDouble();
+        if (const auto turns = v.value("paperQuarterTurns"); !turns.isUndefined())
+            entry.paperQuarterTurns = turns.toInt(-1);
         s.views.push_back(std::move(entry));
     }
     if (!validProjectDrawingSettings(s))

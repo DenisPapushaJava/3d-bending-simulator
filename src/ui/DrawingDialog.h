@@ -10,6 +10,7 @@ class DrawingDialog final : public QDialog {
                   std::optional<std::size_t> selectedFace, QWidget *parent);
     ~DrawingDialog() override;
     void showAtParent();
+    void setDimensionDecimals(int decimals);
 
   protected:
     void done(int result) override;

@@ -23,11 +23,13 @@ void DrawingLayoutController::cancel() {
 }
 void DrawingLayoutController::request(application::BendingDrawingPtr source,
                                       std::vector<DrawingViewChoice> choices, DrawingFlatSide side,
-                                      DrawingLayoutLimits limits, DrawingPaperFormat format) {
+                                      DrawingLayoutLimits limits, DrawingPaperFormat format,
+                                      int dimensionDecimals) {
     drawing::initializeFont(); // Resource registration stays on the GUI thread.
     cancel();
     pending_ =
-        Request{std::move(source), std::move(choices), side, limits, format, {}, generation_};
+        Request{std::move(source), std::move(choices), side, limits, format, dimensionDecimals, {},
+                generation_};
     dispatch();
 }
 void DrawingLayoutController::dispatch() {
@@ -46,8 +48,10 @@ void DrawingLayoutController::dispatch() {
             try {
                 if (!token.stop_requested()) {
                     plan = composer_(job.source, job.choices, job.side, token, job.limits,
-                                     job.paperFormat);
-                    if (!plan || plan->source != job.source || plan->paperFormat != job.paperFormat)
+                                     job.paperFormat, job.dimensionDecimals);
+                    if (!plan || plan->source != job.source ||
+                        plan->paperFormat != job.paperFormat ||
+                        plan->dimensionDecimals != job.dimensionDecimals)
                         throw std::runtime_error("Устаревшая компоновка чертежа");
                 }
             } catch (const DrawingLayoutInterrupted &e) {

@@ -1,9 +1,12 @@
 #include "BendOperation.h"
 #include "DieWindowFixture.h"
+#include "RouteSheetFeatures.h"
 #include "ToolFixtures.h"
 #include "bending/application/SingleBendPreview.h"
+#include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
+#include "bending/cad/occt/FlatPatternAccess.h"
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -18,6 +21,15 @@ namespace {
 void check(bool value, const char *why) {
     if (!value)
         throw std::runtime_error(why);
+}
+auto hints(const application::DocumentPtr &document) {
+    const auto flat =
+        cad::FlatPatternBuilder{}.build(document, {{core::SheetMaterial::Unknown, .5, 1}, {}}, {});
+    if (const auto *error = std::get_if<application::FlatPatternError>(&flat))
+        throw std::runtime_error(error->detail);
+    const auto pattern = std::get<application::FlatPatternPtr>(flat);
+    return cad::reverseTabHints(cad::OcctFlatPatternAccess::layout(*pattern),
+                                document->metadata().bendAnalysis, pattern->info().bends);
 }
 
 } // namespace
@@ -37,14 +49,24 @@ int main() {
         check(bool(doc), "Fixture import");
         std::cout << "bends=" << doc->metadata().bendAnalysis.bends.size() << '\n';
         std::vector<std::size_t> joint;
+        std::optional<std::size_t> tab;
         for (std::size_t i = 0; i < doc->metadata().bendAnalysis.bends.size(); ++i) {
             const auto &b = doc->metadata().bendAnalysis.bends[i];
             std::cout << i << " length=" << b.lengthMm << " axis=" << b.axisStart.x << ','
                       << b.axisStart.y << ',' << b.axisStart.z << '\n';
             if (b.lengthMm > 20)
                 joint.push_back(i);
+            else {
+                check(!tab, "Expected one short central tab");
+                tab = i;
+            }
         }
-        check(joint.size() == 2, "Missing two outer bend zones");
+        check(joint.size() == 2 && tab, "Missing two outer bend zones or the central tab");
+        const auto reverse = hints(doc);
+        check(reverse.size() == 1 && reverse.front().bend == *tab &&
+                  reverse.front().neighbours ==
+                      ((std::uint64_t{1} << joint[0]) | (std::uint64_t{1} << joint[1])),
+              "An opposite bend between the two zones was not recognised");
         auto tools = tool_fixture::explicitPair(
             core::PressTools{16, std::numbers::pi / 3, 85 * std::numbers::pi / 180, .8, 120, 10});
         tools.punch.segments = std::vector<core::ToolSegment>{{120, 1}};
@@ -84,6 +106,11 @@ int main() {
                                     tools});
         }
         const auto source = std::string(doc->sourceStep());
+        std::optional<std::size_t> firstAttempt;
+        q.onProgress = [&](const auto &progress) {
+            if (!firstAttempt && progress.phase == application::BendRoutePhase::Checking)
+                firstAttempt = progress.bendIndex;
+        };
         const auto route = builder.buildRoute(doc, q, {});
         if (const auto *e = std::get_if<application::BendRouteError>(&route))
             throw std::runtime_error("route: " + e->detail);
@@ -91,6 +118,25 @@ int main() {
         std::cout << "route steps=" << r->steps.size()
                   << " windows=" << r->statistics.plannedDieWindows
                   << " attempts=" << r->evaluatedOperations << '\n';
+        std::cout << "first attempt=" << firstAttempt.value_or(99)
+                  << " transitions=" << r->statistics.builtTransitions << '\n';
+        check(firstAttempt == reverse.front().bend,
+              "The reverse tab was not tried first in the reverse search");
+        auto unranked = q;
+        unranked.rankToolAccess = false;
+        std::optional<std::size_t> referenceFirst;
+        unranked.onProgress = [&](const auto &progress) {
+            if (!referenceFirst && progress.phase == application::BendRoutePhase::Checking)
+                referenceFirst = progress.bendIndex;
+        };
+        const auto referenceRoute = cad::SingleBendPreviewBuilder{}.buildRoute(doc, unranked, {});
+        check(std::holds_alternative<application::BendRoutePtr>(referenceRoute),
+              "Reference window route did not pass");
+        const auto reference = std::get<application::BendRoutePtr>(referenceRoute);
+        std::cout << "reference first=" << referenceFirst.value_or(99)
+                  << " transitions=" << reference->statistics.builtTransitions << '\n';
+        check(r->statistics.builtTransitions <= reference->statistics.builtTransitions,
+              "Tab priority added exact checks on the reverse-tab fixture");
         check(r->steps.size() == 2 && r->statistics.plannedDieWindows > 0,
               "The actual reverse-tab collision did not produce a bounded window route");
         auto resolved = q;
@@ -167,6 +213,26 @@ int main() {
                 check(!step.assemblyAssignment ||
                           step.assemblyAssignment->dieAssembly->jointGapsMm.empty(),
                       "Window planner reused unavailable stock from another inventory snapshot");
+        auto split = q;
+        split.onProgress = {};
+        split.allowWorkpieceRotation = true;
+        for (auto &op : split.operations) {
+            // Each flange can use a short assembly but there is no stock to
+            // span the two outer bends with a permitted gap.
+            op.assignment->punch.segments = std::vector<core::ToolSegment>{{55, 1}, {10, 1}};
+            op.assignment->die.segments = std::vector<core::ToolSegment>{{55, 1}, {10, 1}};
+            op.assignment->punchAssembly = op.assignment->dieAssembly =
+                core::ToolAssembly{{op.bendIndex == reverse.front().bend ? 1u : 0u}, 0};
+            op.tools = core::toolParameters(*op.assignment);
+        }
+        const auto splitRoute = builder.buildRoute(doc, split, {});
+        if (const auto *error = std::get_if<application::BendRouteError>(&splitRoute))
+            throw std::runtime_error("Separate route: " + error->detail);
+        const auto splitChecked = std::get<application::BendRoutePtr>(splitRoute);
+        std::cout << "separate transitions=" << splitChecked->statistics.builtTransitions << '\n';
+        check(splitChecked->steps.size() == 3 && splitChecked->statistics.plannedDieWindows == 0 &&
+                  splitChecked->statistics.builtTransitions == 3,
+              "The search did not fall back to separate flanges with short stock");
         auto narrow = q;
         narrow.maximumChecks = 12;
         narrow.maximumTimeMs = 30000;
@@ -190,6 +256,7 @@ int main() {
                   cleanWriter.Write(cleanFile.string().c_str()) == IFSelect_RetDone,
               "Clean fixture write");
         const auto clean = application::resultDocument(cad::StepImporter{}.load(cleanFile, {}, {}));
+        check(clean && hints(clean).empty(), "An empty relief was classified as a reverse tab");
         auto ordinary = q;
         ordinary.operations.clear();
         ordinary.assemblySearch->bendIndices = {0, 1};
@@ -208,6 +275,34 @@ int main() {
         for (const auto &step : std::get<application::BendRoutePtr>(untouched)->steps)
             check(!step.assemblyAssignment,
                   "A collision-free continuous die was unnecessarily split");
+        gp_Trsf along;
+        along.SetTranslation(gp_Vec(0, 0, 50));
+        BRepAlgoAPI_Fuse sameDirection(
+            fixtures::jointBend(),
+            fixtures::bentStrip(4, 2, std::numbers::pi / 2, 10).Moved(TopLoc_Location(along)));
+        sameDirection.SimplifyResult(true, true);
+        const auto sameFile = folder / "same-direction.step";
+        STEPControl_Writer sameWriter;
+        check(sameDirection.IsDone() &&
+                  sameWriter.Transfer(sameDirection.Shape(), STEPControl_AsIs) ==
+                      IFSelect_RetDone &&
+                  sameWriter.Write(sameFile.string().c_str()) == IFSelect_RetDone,
+              "Same-direction fixture write");
+        const auto same = application::resultDocument(cad::StepImporter{}.load(sameFile, {}, {}));
+        check(same && same->metadata().bendAnalysis.bends.size() == 3 && hints(same).empty(),
+              "A tab folded the same way triggered the reverse-tab hint");
+        auto sameRequest = q;
+        sameRequest.onProgress = {};
+        for (auto &op : sameRequest.operations) {
+            const auto &bend = same->metadata().bendAnalysis.bends.at(op.bendIndex);
+            op.target = {bend.angleRadians, bend.innerRadiusMm};
+        }
+        const auto sameRoute = builder.buildRoute(same, sameRequest, {});
+        if (const auto *error = std::get_if<application::BendRouteError>(&sameRoute))
+            throw std::runtime_error("Same-direction route: " + error->detail);
+        const auto sameChecked = std::get<application::BendRoutePtr>(sameRoute);
+        check(sameChecked->statistics.plannedDieWindows == 0 && sameChecked->steps.size() <= 2,
+              "A same-direction tab required an unnecessary window or extra stroke");
         gp_Trsf rotation;
         rotation.SetRotation(gp_Ax1(gp_Pnt(3, 8, -4), gp_Dir(1, 2, 3)), .61);
         const auto rotatedFile = folder / "rotated.step";
@@ -219,6 +314,8 @@ int main() {
               "Rotated write");
         const auto rotated =
             application::resultDocument(cad::StepImporter{}.load(rotatedFile, {}, {}));
+        check(rotated && hints(rotated).size() == 1,
+              "Reverse tab detection depended on the STEP orientation");
         auto other = q;
         other.operations.clear();
         for (std::size_t i = 0; i < rotated->metadata().bendAnalysis.bends.size(); ++i) {

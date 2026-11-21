@@ -31,6 +31,7 @@ struct BendPreparation {
     std::optional<core::ToolAssignment> catalogTools = std::nullopt;
     bool workpieceReversed = false; // Physical Y half-turn; independent of tool orientation.
     double workpieceOffsetMm = 0;   // Along machine Z, relative to the centred tool installation.
+    unsigned strokePartition = 0;   // Zero uses the automatically recognized stroke.
 };
 struct BendBindings {
     // Current recognized zone -> preparation entry. Ambiguous matches stay unbound.

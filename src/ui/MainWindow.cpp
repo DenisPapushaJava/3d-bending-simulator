@@ -1,16 +1,18 @@
 #include "bending/ui/MainWindow.h"
 #include "BendMessagePanel.h"
+#include "BendPlacementCoverage.h"
 #include "DrawingDialog.h"
 #include "ExportFileDialog.h"
 #include "FlatDxfDialog.h"
 #include "MaterialPresets.h"
+#include "MeasurementText.h"
 #include "PartInputDialog.h"
 #include "ProcessNavigationBar.h"
+#include "StrokeSegmentsDialog.h"
 #include "ToolSearchDialog.h"
 #include "ToolSelectionWidget.h"
 #include "ToolWorkspace.h"
 #include "UpdateDialog.h"
-#include "bending/application/WorkpiecePlacement.h"
 #include "bending/core/ToolGeometry.h"
 #include "bending/ui/Preferences.h"
 #include "bending/update/UpdateClient.h"
@@ -19,6 +21,7 @@
 #include "bending/viewer/ViewerWidget.h"
 
 #include "RoutePanel.h"
+#include "RouteToolDialog.h"
 #include "ToolSegmentColorPreferences.h"
 #include <QAction>
 #include <QApplication>
@@ -34,15 +37,17 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHelpEvent>
 #include <QIcon>
+#include <QInputDialog>
 #include <QLabel>
 #include <QListView>
 #include <QListWidget>
 #include <QLocale>
-#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -58,22 +63,128 @@
 #include <QStandardItemModel>
 #include <QStatusBar>
 #include <QStyle>
+#include <QStyleOptionButton>
+#include <QStyledItemDelegate>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolButton>
+#include <QToolTip>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numbers>
+#include <numeric>
 #include <optional>
+#include <utility>
 
 namespace bending::ui {
 namespace {
 using namespace application;
+constexpr int strokeEditorRole = Qt::UserRole + 1;
+
+class BendListDelegate final : public QStyledItemDelegate {
+  public:
+    BendListDelegate(QListView *view, std::function<void(const QModelIndex &)> editStroke)
+        : QStyledItemDelegate(view), editStroke_(std::move(editStroke)) {}
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override {
+        if (!index.data(strokeEditorRole).toBool()) {
+            QStyledItemDelegate::paint(painter, option, index);
+            return;
+        }
+        auto textOption = option;
+        textOption.rect.adjust(0, 0, -buttonSpace, 0);
+        QStyledItemDelegate::paint(painter, textOption, index);
+
+        QStyleOptionButton button;
+        button.rect = buttonRect(option.rect);
+        button.state = QStyle::State_Raised | (option.state & QStyle::State_Enabled);
+        const bool selected = option.state.testFlag(QStyle::State_Selected);
+        painter->save();
+        painter->fillRect(QRect(textOption.rect.right() + 1, option.rect.top(), buttonSpace,
+                                option.rect.height()),
+                          option.palette.brush(selected ? QPalette::Highlight : QPalette::Base));
+        auto *style = option.widget ? option.widget->style() : QApplication::style();
+        style->drawControl(QStyle::CE_PushButton, &button, painter, option.widget);
+        const auto c = button.rect.center();
+        const bool enabled = option.state.testFlag(QStyle::State_Enabled);
+        const auto outline = option.palette.color(enabled ? QPalette::Active : QPalette::Disabled,
+                                                  QPalette::ButtonText);
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(QPen(outline, 1.25));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawPolygon(QPolygon{c + QPoint(-9, -7), c + QPoint(9, -7), c + QPoint(9, 7),
+                                      c + QPoint(2, 7), c + QPoint(2, -2), c + QPoint(-2, -2),
+                                      c + QPoint(-2, 7), c + QPoint(-9, 7)});
+        painter->setPen(QPen(enabled ? QColor("#087E83") : outline, 1.5));
+        painter->drawLine(c + QPoint(-7, 2), c + QPoint(-4, 2));
+        painter->drawLine(c + QPoint(4, 2), c + QPoint(7, 2));
+        painter->restore();
+    }
+
+    bool editorEvent(QEvent *event, QAbstractItemModel *, const QStyleOptionViewItem &option,
+                     const QModelIndex &index) override {
+        const auto type = event->type();
+        if (type != QEvent::MouseButtonPress && type != QEvent::MouseButtonRelease &&
+            type != QEvent::MouseButtonDblClick)
+            return false;
+        const auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() != Qt::LeftButton)
+            return false;
+        const bool hit = option.state.testFlag(QStyle::State_Enabled) &&
+                         index.data(strokeEditorRole).toBool() &&
+                         buttonRect(option.rect).contains(mouse->position().toPoint());
+        if (type != QEvent::MouseButtonRelease) {
+            pressed_ = hit ? QPersistentModelIndex(index) : QPersistentModelIndex{};
+            return hit;
+        }
+        const auto pressed = std::exchange(pressed_, {});
+        if (!hit || pressed != index)
+            return false;
+        QTimer::singleShot(0, this, [this, pressed] {
+            if (pressed.isValid())
+                editStroke_(pressed);
+        });
+        return true;
+    }
+
+    bool helpEvent(QHelpEvent *event, QAbstractItemView *view, const QStyleOptionViewItem &option,
+                   const QModelIndex &index) override {
+        if (event->type() == QEvent::ToolTip && index.data(strokeEditorRole).toBool() &&
+            buttonRect(option.rect).contains(event->pos())) {
+            QToolTip::showText(event->globalPos(), QStringLiteral("Ходы гибки…"), view->viewport(),
+                               buttonRect(option.rect));
+            return true;
+        }
+        return QStyledItemDelegate::helpEvent(event, view, option, index);
+    }
+
+  private:
+    static constexpr int buttonSpace = 32;
+    static QRect buttonRect(const QRect &row) {
+        return {row.right() - 28, row.center().y() - 11, 25, 23};
+    }
+
+    std::function<void(const QModelIndex &)> editStroke_;
+    QPersistentModelIndex pressed_;
+};
+
+QString strokeLabel(const BendStroke &stroke) {
+    if (stroke.size() > 3)
+        return QStringLiteral("B%1 · участков %2")
+            .arg(stroke.front() + 1, 2, 10, QLatin1Char('0'))
+            .arg(stroke.size());
+    QStringList labels;
+    for (const auto index : stroke)
+        labels << QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
+    return labels.join(QStringLiteral(" + "));
+}
 QIcon playbackIcon(bool playing) {
     QIcon icon;
     for (int ratio : {1, 2})
@@ -114,7 +225,7 @@ QIcon workpieceOrientationIcon(bool reversed) {
         painter.setBrush(QColor("#087F83"));
         QPolygonF arrow{QPointF(39, 8), QPointF(43, 4), QPointF(43, 10)};
         painter.drawPolygon(arrow);
-        if (reversed) {
+        if (!reversed) {
             painter.translate(48, 0);
             painter.scale(-1, 1);
         }
@@ -218,8 +329,39 @@ QString fileDropPath(const QMimeData *mime, bool inspectFile) {
         return {};
     return !inspectFile || file.isFile() ? file.filePath() : QString{};
 }
-QString number(double value) {
+QString compactValue(double value) {
     return QLocale::system().toString(value, 'g', 8);
+}
+QString number(double value) {
+    return measurementText(value);
+}
+QString partStageStatus(const DocumentSession &session, std::size_t bends) {
+    const auto &document = session.document();
+    if (!document)
+        return QStringLiteral("Открыть STEP");
+    const auto &metadata = document->metadata();
+    QString result;
+    if (bends == 0) {
+        result = isPlanarCutCandidate(metadata.bendAnalysis) ? QStringLiteral("Без гибов")
+                                                             : QStringLiteral("Гибы не распознаны");
+    } else {
+        const auto ending = bends % 10;
+        const bool teens = bends % 100 >= 11 && bends % 100 <= 14;
+        const auto unit = !teens && ending == 1                  ? QStringLiteral("гиб")
+                          : !teens && ending >= 2 && ending <= 4 ? QStringLiteral("гиба")
+                                                                 : QStringLiteral("гибов");
+        result = QStringLiteral("%1 %2").arg(bends).arg(unit);
+    }
+    const auto &manual = session.manualThicknessMm();
+    const auto thickness = manual ? manual : suggestThickness(metadata.thickness);
+    if (thickness)
+        result += QStringLiteral(" · %1 мм").arg(nonzeroMeasurementText(*thickness));
+    if (const auto &drawing = session.drawingSettings(); drawing) {
+        const auto grade = text(drawing->material).simplified();
+        if (!grade.isEmpty())
+            result += QStringLiteral(" · ") + grade;
+    }
+    return result;
 }
 QString surfaceName(SurfaceKind kind) {
     switch (kind) {
@@ -365,7 +507,7 @@ class MainWindow::Impl {
                              number(metadata.volumeMm3))
                         .arg(metadata.faceCount)
                         .arg(units.join(QStringLiteral(", ")),
-                             number(metadata.maximumToleranceMm)));
+                             compactValue(metadata.maximumToleranceMm)));
                 window->setWindowTitle(displayPath(metadata.sourcePath.filename()) +
                                        QStringLiteral(" — ") + title);
             } else {
@@ -568,8 +710,7 @@ class MainWindow::Impl {
         }
         if (includeJoint && index && members.empty() && session.document()) {
             const auto &analysis = session.document()->metadata().bendAnalysis;
-            for (const auto &stroke :
-                 application::routeBendStrokes(analysis, session.orderedBends()))
+            for (const auto &stroke : session.bendStrokes(session.orderedBends()))
                 if (stroke.size() > 1 &&
                     std::find(stroke.begin(), stroke.end(), *index) != stroke.end()) {
                     for (const auto member : stroke)
@@ -587,7 +728,7 @@ class MainWindow::Impl {
         toolContextSpan = span;
         if (const auto selected = toolContextIndex()) {
             const QSignalBlocker block(bendList->selectionModel());
-            bendList->setCurrentIndex(bendModel->index(static_cast<int>(*selected), 0));
+            bendList->setCurrentIndex(bendRow(*selected));
         }
         showSelectedBend(false);
         refreshPreview();
@@ -606,8 +747,7 @@ class MainWindow::Impl {
             if (step != route->steps.end())
                 routePanel->select(static_cast<int>(step - route->steps.begin()) + 1, false);
         } else if (found != order.end()) {
-            const auto &analysis = controller->session().document()->metadata().bendAnalysis;
-            const auto strokes = application::routeBendStrokes(analysis, order);
+            const auto strokes = controller->session().bendStrokes(order);
             const auto stroke =
                 std::find_if(strokes.begin(), strokes.end(), [&](const auto &group) {
                     return std::find(group.begin(), group.end(), index) != group.end();
@@ -695,7 +835,7 @@ class MainWindow::Impl {
             request.operations.push_back(
                 {entry->id, index, *target, !withTools ? std::nullopt : operationTools,
                  !withTools ? std::nullopt : operationAssignment, entry->workpieceReversed,
-                 withTools ? entry->workpieceOffsetMm : 0});
+                 withTools ? entry->workpieceOffsetMm : 0, entry->strokePartition});
         }
         if (checkedTooling) {
             application::RouteAssemblySearch scope;
@@ -781,12 +921,9 @@ class MainWindow::Impl {
         if (controller->hasWork() || !session.document())
             return;
         const bool perBend = !toolContextId.empty();
-        const auto row = bendList->currentIndex().row();
-        if (perBend && row < 0)
+        const auto target = perBend ? toolContextIndex() : std::nullopt;
+        if (perBend && !target)
             return;
-        std::optional<std::size_t> target;
-        if (perBend)
-            target = static_cast<std::size_t>(row);
         std::vector<std::size_t> members;
         for (const auto index : session.orderedBends())
             if (const auto *entry = session.bend(index);
@@ -842,7 +979,7 @@ class MainWindow::Impl {
             return;
         }
         viewingRoute = false;
-        const auto row = bendList->currentIndex().row();
+        const auto row = selectedSourceBend();
         const auto tools = toolSelection->parameters();
         if (!tools) {
             propertyTabs->setCurrentIndex(3);
@@ -1175,10 +1312,9 @@ class MainWindow::Impl {
             const auto &info = flat->info();
             status = QStringLiteral(
                          "Расчётная развёртка %1 × %2 мм · t %3 · гибов %4\nСвободная гибка · %5")
-                         .arg(QLocale::system().toString(info.bounds.maximum.x, 'f', 2),
-                              QLocale::system().toString(info.bounds.maximum.y, 'f', 2),
+                         .arg(number(info.bounds.maximum.x), number(info.bounds.maximum.y),
                               number(info.thicknessMm))
-                         .arg(info.bends.size())
+                         .arg(bendRows.size())
                          .arg(settings.manualK ? QStringLiteral("K задан вручную")
                                                : QStringLiteral("справочник Wiz Parts v1"));
             QString details =
@@ -1193,7 +1329,7 @@ class MainWindow::Impl {
             for (const auto &b : info.bends)
                 details += QStringLiteral("\nB%1: Ri %2 · K %3 · BA %4 мм · L %5 мм")
                                .arg(b.bendIndex + 1, 2, 10, QLatin1Char('0'))
-                               .arg(number(b.radiusMm), number(b.k), number(b.allowanceMm),
+                               .arg(number(b.radiusMm), compactValue(b.k), number(b.allowanceMm),
                                     number(b.lengthMm()));
             flatStatus->setToolTip(details);
             if (checkFlatStatus)
@@ -1226,7 +1362,7 @@ class MainWindow::Impl {
     void refreshWorkflow() {
         const auto &session = controller->session();
         const auto &document = session.document();
-        const auto row = bendList->currentIndex().row();
+        const auto row = selectedSourceBend();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
         const auto preview = scenePreview();
         const auto tools = toolSelection->parameters();
@@ -1243,7 +1379,9 @@ class MainWindow::Impl {
             (!singleBendSupported || !matchingBendThickness || !entry || !included(entry->review)));
         projectState->setVisible(document &&
                                  (session.modified() || !session.projectPath().empty()));
-        bendList->setVisible(bendModel->rowCount() > 1 || (!entry && bendModel->rowCount() > 0));
+        bendList->setVisible(bendModel->rowCount() > 1 ||
+                             (!bendRows.empty() && bendRows.front().size() > 1) ||
+                             (!entry && bendModel->rowCount() > 0));
         editBend->setVisible(document && (row >= 0 || !session.bendBindings().unresolved.empty()));
         editBend->setEnabled(!controller->hasWork());
         changePartTools->setVisible(document && chosen);
@@ -1252,15 +1390,17 @@ class MainWindow::Impl {
         partPrimary->setText(document ? QStringLiteral("К инструменту →")
                                       : QStringLiteral("Открыть деталь…"));
         const auto bendCount = document ? document->metadata().bendAnalysis.bends.size() : 0;
-        processNavigation->setStageStatus(
-            0, document ? QStringLiteral("Найдено сгибов: %1").arg(bendCount)
-                        : QStringLiteral("Открыть STEP"));
+        processNavigation->setStageStatus(0, partStageStatus(session, bendRows.size()));
         if (document && bendCount > 1 && !toolContextId.empty()) {
-            std::size_t assigned = 0;
-            for (const auto index : session.orderedBends())
-                assigned += session.bend(index)->tools.has_value() ? 1 : 0;
+            const auto assigned =
+                std::count_if(bendRows.begin(), bendRows.end(), [&](const auto &stroke) {
+                    return std::all_of(stroke.begin(), stroke.end(), [&](auto index) {
+                        const auto *entry = session.bend(index);
+                        return entry && entry->tools.has_value();
+                    });
+                });
             processNavigation->setStageStatus(
-                1, QStringLiteral("По гибам: %1 из %2").arg(assigned).arg(bendCount));
+                1, QStringLiteral("По гибам: %1 из %2").arg(assigned).arg(bendRows.size()));
         } else
             processNavigation->setStageStatus(1, chosen && document
                                                      ? toolSelection->shortSummary()
@@ -1287,9 +1427,13 @@ class MainWindow::Impl {
             : preview ? QStringLiteral("Просмотр подготовлен")
             : !chosen ? QStringLiteral("Нужен инструмент")
                       : QStringLiteral("Нужна проверка");
-        std::size_t activeBends = 0;
-        for (auto i : session.orderedBends())
-            activeBends += included(session.bend(i)->review);
+        const auto activeBends =
+            std::count_if(bendRows.begin(), bendRows.end(), [&](const auto &stroke) {
+                return std::all_of(stroke.begin(), stroke.end(), [&](auto index) {
+                    const auto *entry = session.bend(index);
+                    return entry && included(entry->review);
+                });
+            });
         processNavigation->setStageStatus(
             2, document ? QStringLiteral("Гибов: %1 · %2").arg(activeBends).arg(bendingStatus)
                         : bendingStatus);
@@ -1323,13 +1467,18 @@ class MainWindow::Impl {
         playBend->setToolTip(context.isEmpty() ? action : action + QLatin1Char('\n') + context);
     }
     void startPlayback() {
+        viewer->setBendToolPicking(false);
+        viewer->setBendPlacementHandle(false);
         playback->start();
         refreshPlaybackAction();
     }
     void stopPlayback() {
+        const bool wasPlaying = playback->isActive();
         playback->stop();
         viewer->finishReposition();
         refreshPlaybackAction();
+        if (wasPlaying)
+            refreshPlacementEditor();
     }
     void advancePlaybackStep() {
         const QScopedValueRollback advancing(advancingPlayback, true);
@@ -1352,7 +1501,7 @@ class MainWindow::Impl {
                           draft->toolLengths->coversBend(playbackLengthAllowanceMm)));
     }
     void prefetchDraftStep() {
-        if (!viewingDraft || viewingSource || propertyTabs->currentIndex() != 2 ||
+        if (!viewingDraft || viewingSource || placementEdit || propertyTabs->currentIndex() != 2 ||
             !previewDisplayError.isEmpty() || shortToolPlaybackBlocked())
             return;
         if (const auto draft = controller->routeDraft();
@@ -1387,9 +1536,10 @@ class MainWindow::Impl {
             preview && (preview->frameCount() > 1 || preview->unverifiedDraft() || viewingRoute);
         const bool awaiting = draftAutoPlay && viewingDraft && controller->isPreparingDraft();
         playBend->setEnabled(
-            awaiting || (animated && !lengthBlocked && !viewingSource && !controller->hasWork() &&
-                         previewDisplayError.isEmpty() && stageSetupIssue.isEmpty() &&
-                         !collisionAt(preview, static_cast<std::size_t>(bendFrame->value()))));
+            !placementEdit &&
+            (awaiting || (animated && !lengthBlocked && !viewingSource && !controller->hasWork() &&
+                          previewDisplayError.isEmpty() && stageSetupIssue.isEmpty() &&
+                          !collisionAt(preview, static_cast<std::size_t>(bendFrame->value())))));
         playbackSpeedControls->setEnabled(playBend->isEnabled());
     }
     void setFrameText(const QString &text) {
@@ -1402,12 +1552,14 @@ class MainWindow::Impl {
         refreshPlaybackAction();
     }
     std::optional<std::size_t> selectedOperationIndex() const {
-        if (viewingRoute && controller->bendRoute() && routePanel->selected() > 0)
-            return controller->bendRoute()->steps[routePanel->operation()].bendIndex;
+        if (const auto route = controller->bendRoute();
+            viewingRoute && route && routePanel->selected() > 0 &&
+            routePanel->operation() < route->steps.size())
+            return route->steps[routePanel->operation()].bendIndex;
         if (controller->session().document() &&
             controller->session().document()->metadata().bendAnalysis.bends.size() > 1)
             return routePanel->selectedBend();
-        const auto row = bendList->currentIndex().row();
+        const auto row = selectedSourceBend();
         return row >= 0 ? std::optional{static_cast<std::size_t>(row)} : std::nullopt;
     }
     bool blankSetupSelected() const {
@@ -1438,13 +1590,300 @@ class MainWindow::Impl {
         }
         const auto &session = controller->session();
         if (session.document()) {
-            auto strokes = application::routeBendStrokes(
-                session.document()->metadata().bendAnalysis, session.orderedBends());
+            auto strokes = session.bendStrokes(session.orderedBends());
             const auto index = routePanel->operation();
             if (index < strokes.size() && strokes[index].size() > 1)
                 return std::move(strokes[index]);
         }
         return {};
+    }
+    void closePlacementEditor() {
+        placementEdit.reset();
+        viewer->setBendPlacement(false);
+    }
+    bool canPickSceneTool(const application::BendPreviewPtr &preview) const {
+        return propertyTabs->currentIndex() == 2 && !viewingSource && !wantFlat && preview &&
+               preview->toolSetup() && preview == displayedPreview && previewDisplayError.isEmpty();
+    }
+    bool canEditInstallation(const application::BendPreviewPtr &preview) const {
+        return canPickSceneTool(preview) && !blankSetupSelected() &&
+               (!preview->pressMotion() || routePanel->selected() > 0) &&
+               selectedOperationIndex().has_value();
+    }
+    void openRouteTools(std::optional<core::ToolKind> kind = {},
+                        std::optional<std::size_t> piece = {}) {
+        const auto &session = controller->session();
+        const auto document = session.document();
+        if (!document || propertyTabs->currentIndex() != 2 || controller->hasWork() ||
+            placementEdit || toolDraftChanged)
+            return;
+        const int step = routePanel->selected();
+        const bool all = step == 0;
+        const auto &analysis = document->metadata().bendAnalysis;
+        const auto order = session.orderedBends();
+        auto strokes = session.bendStrokes(order);
+        const auto route = controller->bendRoute();
+        if (viewingRoute && route) {
+            strokes.clear();
+            for (const auto &operation : route->steps) {
+                strokes.push_back({operation.bendIndex});
+                for (const auto &member : operation.additionalBends)
+                    strokes.back().push_back(member.bendIndex);
+            }
+        }
+        const auto operation = routePanel->operation();
+        if (operation >= strokes.size() || strokes[operation].empty())
+            return;
+        const auto representative = strokes[operation].front();
+        std::vector<std::size_t> scope;
+        double span = 0, maximumThickness = 0;
+        for (std::size_t i = 0; i < strokes.size(); ++i) {
+            if (!all && i != operation)
+                continue;
+            for (const auto index : strokes[i])
+                if (included(session.bend(index)->review)) {
+                    scope.push_back(index);
+                    maximumThickness =
+                        std::max(maximumThickness, analysis.bends[index].thicknessMm);
+                }
+            span = std::max(span, application::routeStrokeLengthMm(analysis, strokes[i]));
+        }
+        if (scope.empty())
+            return;
+        const auto toTools = [](const auto &entry) -> RouteToolDialog::Changes {
+            if (!entry.catalogTools)
+                return {};
+            const auto &a = *entry.catalogTools;
+            return {RouteToolDialog::Tool{a.punch, a.punchAssembly, 0, a.punchReversed},
+                    RouteToolDialog::Tool{a.die, a.dieAssembly, a.groove}};
+        };
+        const auto displayed = toTools(*session.bend(representative));
+        std::array<bool, 2> mixed{};
+        for (const auto index : scope) {
+            const auto tools = toTools(*session.bend(index));
+            for (std::size_t i = 0; i < mixed.size(); ++i)
+                mixed[i] |= tools[i] != displayed[i];
+        }
+        const auto identity = std::pair{session.revision(), session.editRevision()};
+        const auto current = [&] {
+            return identity == std::pair{session.revision(), session.editRevision()} &&
+                   propertyTabs->currentIndex() == 2 && routePanel->selected() == step &&
+                   !controller->hasWork();
+        };
+        std::vector<application::BendToolUpdate> toolUpdates;
+        RouteToolDialog dialog(
+            window, all ? QStringLiteral("Все гибы") : QStringLiteral("Шаг %1").arg(step),
+            toolSelection->workshopCatalog(), displayed, mixed, span, maximumThickness,
+            toolSelection->maximumSegmentGapMm(), true,
+            [&](const RouteToolDialog::Changes &changes) {
+                if (!current())
+                    return QStringLiteral("Деталь изменилась. Откройте оснастку заново.");
+                toolUpdates.clear();
+                toolUpdates.reserve(scope.size());
+                for (const auto index : scope) {
+                    const auto &entry = *session.bend(index);
+                    auto a = entry.catalogTools.value_or(core::ToolAssignment{});
+                    if (!entry.catalogTools && entry.tools) {
+                        a.clearanceMm = entry.tools->clearanceMm;
+                        a.machineModel = entry.tools->machineModel;
+                        a.backgauge = entry.tools->backgauge;
+                    }
+                    if (const auto &punch = changes[0]) {
+                        if (a.punch != punch->profile)
+                            a.punchReversed = punch->reversed;
+                        a.punch = punch->profile;
+                        a.punchAssembly = punch->assembly;
+                    }
+                    if (const auto &die = changes[1]) {
+                        a.die = die->profile;
+                        a.dieAssembly = die->assembly;
+                        a.groove = die->groove;
+                    }
+                    if (a.punch.id.empty() || a.die.id.empty())
+                        return QStringLiteral("Выберите пуансон и матрицу.");
+                    if (!core::hasLibraryProfile(a.punch) || !core::hasLibraryProfile(a.die))
+                        return QStringLiteral("Выберите рабочие профили из библиотеки.");
+                    if (!core::toolLength(a.punch, a.punchAssembly) ||
+                        !core::toolLength(a.die, a.dieAssembly))
+                        return QStringLiteral("Подберите секции.");
+                    a.useDrawingGeometry = true;
+                    const auto issue = ToolSelectionWidget::profileIssue(
+                        a.die, a.groove, analysis.bends[index].thicknessMm);
+                    if (!issue.isEmpty())
+                        return issue;
+                    const auto tools = core::toolParameters(a);
+                    if (!tools)
+                        return QStringLiteral("Проверьте параметры оснастки.");
+                    toolUpdates.push_back({index, tools, std::move(a)});
+                }
+                return QString{};
+            });
+        if (kind)
+            dialog.openFor(*kind, piece);
+        stopPlayback();
+        const auto decision = dialog.exec();
+        if (!current())
+            return;
+        if (decision == RouteToolDialog::Advanced) {
+            if (!all)
+                editRouteTool(representative);
+            else if (setToolContext(std::nullopt))
+                propertyTabs->setCurrentIndex(3);
+            return;
+        }
+        if (decision != QDialog::Accepted || toolUpdates.empty())
+            return;
+        beginPreviewReplacement();
+        if (!controller->setBendToolAssignments(toolUpdates) ||
+            session.editRevision() == identity.second)
+            return;
+        routePanel->select(step, false);
+        if (analysis.bends.size() > 1) {
+            prepareManualDraft();
+        } else {
+            viewingRoute = false;
+            viewingDraft = false;
+            viewingSource = false;
+            wantFlat = false;
+            if (controller->prepareBendPreview(representative, false, previewBuilder,
+                                               BendPreviewMode::ToolMotion,
+                                               toolSelection->maximumEndSupportLossMm()))
+                showPlaybackPanel();
+        }
+    }
+    void refreshPlacementEditor() {
+        const auto &session = controller->session();
+        if (placementEdit && placementEdit->checking && !controller->isPreparingRoute()) {
+            if (const auto &failure = controller->placementCheckError()) {
+                const auto reason = routeFailureReason(*failure).trimmed();
+                returnToVerifiedPlacement(
+                    reason.isEmpty() ? QStringLiteral("Положение не подтверждено.") : reason);
+            } else if (controller->bendRoute() &&
+                       session.editRevision() != placementEdit->editRevision) {
+                acceptedPlacementBend = placementEdit->bend;
+                closePlacementEditor();
+                routePanel->setWithTools(true);
+                viewingRoute = true;
+                viewingDraft = false;
+                positionedPreview.reset();
+            } else {
+                closePlacementEditor();
+            }
+        }
+        const auto preview = scenePreview();
+        const bool available = canEditInstallation(preview);
+        if (placementEdit && (!available || placementEdit->preview != preview ||
+                              placementEdit->revision != session.revision() ||
+                              placementEdit->editRevision != session.editRevision() ||
+                              selectedOperationIndex() != std::optional{placementEdit->bend} ||
+                              bendFrame->value() != 0))
+            closePlacementEditor();
+        const bool idle = !controller->hasWork() && !playback->isActive();
+        viewer->setBendToolPicking(canPickSceneTool(preview) && idle && !placementEdit);
+        const bool initialFrame =
+            available && displayedPreviewFrame == 0 && bendFrame->value() == 0;
+        if (!initialFrame || placementNotice.preview != preview ||
+            placementNotice.bend != selectedOperationIndex())
+            placementNotice = {};
+        const bool handle = initialFrame && idle;
+        if (!placementEdit) {
+            viewer->setBendPlacementHandle(handle, handle ? placementNotice.message : QString{});
+            return;
+        }
+        const double offset = placementEdit->offsetMm;
+        const auto coverage = placementEdit->coverage.at(offset);
+        viewer->setBendPlacement(true, offset - preview->workpieceOffsetMm(), coverage.uncovered);
+        if (placementEdit->checking) {
+            viewer->setBendPlacementHandle(false, QStringLiteral("Проверяем положение…"));
+            return;
+        }
+        auto hint = QStringLiteral("Смещение %1 мм").arg(number(offset));
+        if (coverage.missingMm[0] > 0)
+            hint += QStringLiteral("\nВне матрицы %1 мм")
+                        .arg(nonzeroMeasurementText(coverage.missingMm[0]));
+        if (coverage.missingMm[1] > 0)
+            hint += QStringLiteral("\nВне пуансона %1 мм")
+                        .arg(nonzeroMeasurementText(coverage.missingMm[1]));
+        viewer->setBendPlacementHandle(handle, hint);
+    }
+    void returnToVerifiedPlacement(const QString &message) {
+        placementNotice = {placementEdit->preview, placementEdit->bend, message};
+        closePlacementEditor();
+    }
+    void beginPlacementEdit() {
+        const auto preview = scenePreview();
+        const auto index = selectedOperationIndex();
+        if (placementEdit || !canEditInstallation(preview) || !index || controller->hasWork() ||
+            bendFrame->value() != 0 || displayedPreviewFrame != 0 || playback->isActive() ||
+            viewer->isRepositioning())
+            return;
+        placementNotice = {};
+        controller->cancelRouteDraftPrefetch();
+        const auto &session = controller->session();
+        const auto *bend = session.bend(*index);
+        const auto *assignment = bend && bend->catalogTools ? &*bend->catalogTools : nullptr;
+        const double offset = preview->workpieceOffsetMm();
+        const double limit = std::min(
+            1.e6, std::max(std::abs(offset),
+                           (preview->model().widthMm + preview->toolSetup()->tools.lengthMm) / 2));
+        placementEdit = PlacementEdit{session.revision(),
+                                      session.editRevision(),
+                                      *index,
+                                      preview,
+                                      BendPlacementCoverage::prepare(*preview, assignment),
+                                      offset,
+                                      limit};
+        refreshPreview();
+    }
+    void finishPlacementDrag() {
+        if (!placementEdit || placementEdit->checking)
+            return;
+        const auto &session = controller->session();
+        const auto &edit = *placementEdit;
+        if (controller->hasWork() || session.revision() != edit.revision ||
+            session.editRevision() != edit.editRevision || scenePreview() != edit.preview ||
+            selectedOperationIndex() != std::optional{edit.bend} ||
+            edit.offsetMm == edit.preview->workpieceOffsetMm()) {
+            closePlacementEditor();
+            refreshPreview();
+            return;
+        }
+        auto stroke = selectedJointBends();
+        if (stroke.empty())
+            stroke.push_back(edit.bend);
+        application::BendRouteRequest request;
+        request.withTools = true;
+        request.manualExtraction = controller->bendRoute()
+                                       ? controller->bendRoute()->manualExtraction
+                                       : viewingDraft || edit.preview->manualExtraction();
+        request.allowPartialEndSupport = true;
+        request.maximumEndSupportLossMm = viewingDraft ? toolSelection->maximumEndSupportLossMm()
+                                                       : edit.preview->endSupportLimitMm();
+        request.maximumChecks = 512;
+        request.maximumTimeMs = 120000;
+        for (const auto index : session.orderedBends()) {
+            const auto *entry = session.bend(index);
+            const auto target = session.bendTarget(index);
+            if (!entry || !target || !entry->tools ||
+                !ToolSelectionWidget::assignmentIssue(entry->catalogTools).isEmpty()) {
+                returnToVerifiedPlacement(
+                    QStringLiteral("Для гиба B%1 нужна оснастка.").arg(index + 1));
+                refreshPreview();
+                return;
+            }
+            const double offset = std::find(stroke.begin(), stroke.end(), index) != stroke.end()
+                                      ? edit.offsetMm
+                                      : entry->workpieceOffsetMm;
+            request.operations.push_back({entry->id, index, *target, entry->tools,
+                                          entry->catalogTools, entry->workpieceReversed, offset,
+                                          entry->strokePartition});
+        }
+        lastRouteAutomatic = false;
+        placementEdit->checking = true;
+        if (!controller->prepareBendRoute(std::move(request), previewBuilder, true)) {
+            returnToVerifiedPlacement(QStringLiteral("Проверку установки не удалось запустить."));
+            refreshPreview();
+        }
     }
     void beginPreviewReplacement(bool preserveFrame = false) {
         manualDraftWarmup.stop();
@@ -1463,13 +1902,14 @@ class MainWindow::Impl {
             setFrameText({});
         }
     }
-    void setWorkpieceOrientation(bool reversed) {
+    void toggleWorkpieceOrientation() {
         const auto index = selectedPunchIndex(); // Blank uses the first operation's installation.
         if (!index || controller->hasWork())
             return;
         const auto *entry = controller->session().bend(*index);
-        if (!entry || entry->workpieceReversed == reversed)
+        if (!entry)
             return;
+        const bool reversed = !entry->workpieceReversed;
         const bool multiple =
             controller->session().document()->metadata().bendAnalysis.bends.size() > 1;
         const int step = routePanel->selected();
@@ -1487,13 +1927,13 @@ class MainWindow::Impl {
             if (oldRoute)
                 prepareRoute(false, oldRoute->withTools);
             else
-                routePanel->select(step);
+                refreshOrientedDraft(step);
             return;
         }
         if (!controller->setBendWorkpieceOrientation(*index, reversed))
             return;
         if (multiple) {
-            routePanel->select(step);
+            refreshOrientedDraft(step);
         } else {
             toolMode->setCurrentIndex(0);
             checkTools();
@@ -1535,14 +1975,14 @@ class MainWindow::Impl {
                 if (verified)
                     prepareRoute(false, true);
                 else
-                    routePanel->select(step);
+                    refreshOrientedDraft(step);
             }
             return;
         }
         if (all) {
             if (!controller->setAllBendPunchOrientations(reversed))
                 return;
-            routePanel->select(0);
+            refreshOrientedDraft(0);
             return;
         }
         tools.punchReversed = reversed;
@@ -1554,9 +1994,9 @@ class MainWindow::Impl {
         }
         if (!controller->setBendToolAssignments({{*index, tools, assignment}}))
             return;
-        bendList->setCurrentIndex(bendModel->index(static_cast<int>(*index), 0));
+        bendList->setCurrentIndex(bendRow(*index));
         if (multi)
-            routePanel->select(step);
+            refreshOrientedDraft(step);
         else {
             toolMode->setCurrentIndex(0);
             checkTools();
@@ -1576,7 +2016,10 @@ class MainWindow::Impl {
         const bool preparing = controller->isPreparingDraft() || controller->isPreparingRoute() ||
                                controller->isPreparingPreview();
         QString result;
-        if (!stageSetupIssue.isEmpty() && !preparing)
+        if (placementEdit)
+            result = placementEdit->checking ? QStringLiteral("Проверяем установку…")
+                                             : QStringLiteral("Ручное положение · нужна проверка");
+        else if (!stageSetupIssue.isEmpty() && !preparing)
             result = stageSetupIssue;
         else if (controller->isPreparingDraft())
             result = QStringLiteral("Проверяем столкновения выбранного шага…");
@@ -1620,23 +2063,19 @@ class MainWindow::Impl {
                         continue;
                     if (preview->activeBendCount() > 1)
                         result += QStringLiteral("\nУчасток %1–%2 мм:")
-                                      .arg(interval.fromMm, 0, 'f', 2)
-                                      .arg(interval.fromMm + s.bendLengthMm, 0, 'f', 2);
+                                      .arg(number(interval.fromMm))
+                                      .arg(number(interval.fromMm + s.bendLengthMm));
                     result += QStringLiteral("\nНехватка опоры у торцов: %1 / %2 мм.")
-                                  .arg(s.supportedFromMm, 0, 'f', 2)
-                                  .arg(s.bendLengthMm - s.supportedToMm, 0, 'f', 2);
+                                  .arg(nonzeroMeasurementText(s.supportedFromMm))
+                                  .arg(nonzeroMeasurementText(s.bendLengthMm - s.supportedToMm));
                     if (const auto limit = preview->endSupportLimitMm())
-                        result += QStringLiteral(" Допуск %1 мм на каждый.").arg(*limit, 0, 'f', 2);
+                        result += QStringLiteral(" Допуск %1 мм на каждый.").arg(number(*limit));
                 }
         } else if (preview && preview->pressMotion())
-            result =
-                (preview->manualExtraction() ? QStringLiteral("Гибка проверена в модели.")
-                 : viewingRoute ? QStringLiteral("Порядок проверен в модели.")
-                                : QStringLiteral("Геометрическая проверка пройдена.")) +
-                (!preview->manualExtraction() && preview->machineModel() == core::MachineModel::None
-                     ? QStringLiteral("\nГибка — по кадрам, отвод пуансона — непрерывно.\n"
-                                      "Станок, держатели и перенос не проверены.")
-                     : QString{});
+            result = preview->manualExtraction()
+                         ? QStringLiteral("Гибка проверена до заданного угла.")
+                     : viewingRoute ? QStringLiteral("Порядок проверен в модели.")
+                                    : QStringLiteral("Геометрическая проверка пройдена.");
         else if (preview && preview->toolSetup())
             result = QStringLiteral("Начальная установка проверена.");
         else if (preview)
@@ -1668,10 +2107,10 @@ class MainWindow::Impl {
             QStringList unsupported;
             if (missing[1] > 1.e-5)
                 unsupported
-                    << QStringLiteral("пуансон %1 мм").arg(QLocale().toString(missing[1], 'f', 2));
+                    << QStringLiteral("пуансон %1 мм").arg(nonzeroMeasurementText(missing[1]));
             if (missing[0] > 1.e-5)
                 unsupported
-                    << QStringLiteral("матрица %1 мм").arg(QLocale().toString(missing[0], 'f', 2));
+                    << QStringLiteral("матрица %1 мм").arg(nonzeroMeasurementText(missing[0]));
             if (!unsupported.isEmpty()) {
                 supportDetail = unsupported.join(QStringLiteral(" · "));
                 addSummary(QStringLiteral("Без оснастки по линии гиба: %1.").arg(supportDetail));
@@ -1683,11 +2122,6 @@ class MainWindow::Impl {
                 else if (status == application::BackgaugeStatus::Collision && !collision)
                     addSummary(QStringLiteral("Столкновение с задним упором."));
             }
-            if (preview->machineModel() != core::MachineModel::None)
-                addSummary(
-                    preview->floorChecked()
-                        ? QStringLiteral("Демонстрационный станок и пол проверены по кадрам.")
-                        : QStringLiteral("Демонстрационный станок. Пол не проверен."));
             if ((preview->machineModel() == core::MachineModel::DemoPressV2 ||
                  preview->machineModel() == core::MachineModel::DemoPressV3) &&
                 preview->usesDrawingPunch() && !preview->seatedPunchMount())
@@ -1792,6 +2226,7 @@ class MainWindow::Impl {
             bendMessages->setMessages(std::move(messages));
         }
         checkSummary->setText(result);
+        checkSummary->setVisible(!placementEdit);
         checkSummary->setStyleSheet(
             collision && !preparing
                 ? QStringLiteral("background:#FBE9E7;color:#8F2318;border-radius:4px;padding:10px;")
@@ -1838,37 +2273,37 @@ class MainWindow::Impl {
         if (reverseWorkpieceButton) {
             const QSignalBlocker block(reverseWorkpieceButton);
             const auto *part = punchIndex ? session.bend(*punchIndex) : nullptr;
-            const bool reversed = part && part->workpieceReversed;
+            const auto &document = session.document();
+            // The imported setup can already include a half-turn to face the operator.
+            const bool turnedFromDefault =
+                part &&
+                part->workpieceReversed !=
+                    document->metadata().bendAnalysis.bends[*punchIndex].preferWorkpieceReversed;
             reverseWorkpieceButton->setEnabled(part && preview && preview->toolSetup() &&
                                                !controller->hasWork());
-            reverseWorkpieceButton->setChecked(reversed);
-            reverseWorkpieceButton->setIcon(workpieceOrientationIcons[reversed ? 1 : 0]);
+            reverseWorkpieceButton->setChecked(turnedFromDefault);
+            reverseWorkpieceButton->setIcon(workpieceOrientationIcons[turnedFromDefault ? 1 : 0]);
             reverseWorkpieceButton->setToolTip(
                 QStringLiteral(
-                    "Деталь: %1. Развернуть на 180° вокруг вертикали Y.\n"
+                    "%1. Развернуть деталь на 180° вокруг вертикали Y.\n"
                     "Инструмент остаётся на месте. Только текущий гиб; шаг 0 — первый гиб.\n"
                     "«Проверить мой порядок» сохраняет положение; «Подобрать порядок» может его "
                     "изменить.")
-                    .arg(reversed ? QStringLiteral("180°") : QStringLiteral("0°")));
+                    .arg(turnedFromDefault ? QStringLiteral("Развёрнутое положение")
+                                           : QStringLiteral("Исходное положение")));
         }
         operationSummary->clear();
         if (const auto &document = session.document(); document) {
             if (index && *index < document->metadata().bendAnalysis.bends.size()) {
                 const auto &bend = document->metadata().bendAnalysis.bends[*index];
                 const auto target = session.bendTarget(*index);
-                const auto currentRoute = controller->bendRoute();
-                const auto currentPreview = scenePreview();
-                const auto operationCount =
-                    currentRoute ? currentRoute->steps.size() : session.orderedBends().size();
-                const auto length = currentPreview && currentPreview->activeBendCount() > 1
-                                        ? currentPreview->model().widthMm
+                const auto length = preview && preview->activeBendCount() > 1
+                                        ? preview->model().widthMm
                                         : bend.lengthMm;
                 operationSummary->setText(
-                    QStringLiteral("Гиб %1 из %2\n%3° · L %4 мм")
-                        .arg(document->metadata().bendAnalysis.bends.size() > 1
-                                 ? routePanel->selected()
-                                 : 1)
-                        .arg(operationCount)
+                    QStringLiteral("Шаг %1 из %2 · %3° · %4 мм")
+                        .arg(std::max(1, routePanel->selected()))
+                        .arg(std::max(1, routePanel->stepCount()))
                         .arg(number((std::numbers::pi -
                                      (target ? target->angleRadians : bend.angleRadians)) *
                                     180 / std::numbers::pi),
@@ -1881,10 +2316,21 @@ class MainWindow::Impl {
                     operationSummary->setText(operationSummary->text() +
                                               QStringLiteral("\n%1 · V %2 мм")
                                                   .arg(name, number(entry->tools->openingMm)));
+                    if (entry->workpieceOffsetMm != 0)
+                        operationSummary->setText(operationSummary->text() +
+                                                  QStringLiteral("\nСмещение %1 мм")
+                                                      .arg(number(entry->workpieceOffsetMm)));
                 }
-            } else
+            } else {
+                const int count = routePanel->stepCount();
+                const auto unit = count % 100 >= 11 && count % 100 <= 14 ? QStringLiteral("ходов")
+                                  : count % 10 == 1                    ? QStringLiteral("ход")
+                                  : count % 10 >= 2 && count % 10 <= 4 ? QStringLiteral("хода")
+                                                                       : QStringLiteral("ходов");
                 operationSummary->setText(
-                    QStringLiteral("Заготовка · гибов %1").arg(session.orderedBends().size()));
+                    count > 0 ? QStringLiteral("Заготовка · %1 %2").arg(count).arg(unit)
+                              : QStringLiteral("Заготовка"));
+            }
         }
     }
     application::BendPreviewPtr scenePreview() const {
@@ -1902,6 +2348,11 @@ class MainWindow::Impl {
             return p;
         const auto &e = controller->bendPreviewError();
         return e ? e->diagnostic : nullptr;
+    }
+    void refreshOrientedDraft(int step) {
+        routePanel->select(step, false);
+        draftAutoPlay = false;
+        prepareManualDraft();
     }
     void prepareManualDraft(bool warmNext = false) {
         const auto &session = controller->session();
@@ -1922,7 +2373,7 @@ class MainWindow::Impl {
             return;
         if (const auto index = routePanel->selectedBend()) {
             const QSignalBlocker block(bendList->selectionModel());
-            bendList->setCurrentIndex(bendModel->index(static_cast<int>(*index), 0));
+            bendList->setCurrentIndex(bendRow(*index));
         }
         for (auto index : session.orderedBends()) {
             const auto *entry = session.bend(index);
@@ -1937,7 +2388,7 @@ class MainWindow::Impl {
                 return;
             request.operations.push_back({entry->id, index, *target, entry->tools,
                                           entry->catalogTools, entry->workpieceReversed,
-                                          entry->workpieceOffsetMm});
+                                          entry->workpieceOffsetMm, entry->strokePartition});
         }
         stopPlayback();
         viewingDraft = true;
@@ -1963,9 +2414,9 @@ class MainWindow::Impl {
             bendFrame->setValue(0);
         }
         const auto index = static_cast<std::size_t>(bendFrame->value());
-        if (!viewingDraft && !viewingRoute && preview->pressMotion() &&
-            controller->session().orderedBends().size() == 1)
-            routePanel->select(index == 0 ? 0 : 1, false);
+        if (index > 0 && routePanel->selected() == 0 && !viewingDraft && !viewingRoute &&
+            preview->pressMotion() && controller->session().orderedBends().size() == 1)
+            routePanel->select(1, false);
         if (displayedPreview != preview || displayedPreviewFrame != index ||
             displayedPreviewRevision != controller->session().revision()) {
             const bool reposition =
@@ -2039,20 +2490,23 @@ class MainWindow::Impl {
                          QLocale::system().toString(progressValue * 100.0, 'f', 0),
                          QLocale::system().toString(
                              state->section.angleRadians * 180.0 / std::numbers::pi, 'f', 1),
-                         QLocale::system().toString(state->punchTravelMm, 'f', 1)));
+                         number(state->punchTravelMm)));
             return;
         }
         setFrameText(approximation +
                      (preview->toolSetup()
                           ? QStringLiteral("Начальное положение · статичный просмотр")
                           : QStringLiteral("%1% · поворот %2°")
-                                .arg(number(progressValue * 100.0),
+                                .arg(compactValue(progressValue * 100.0),
                                      number(progressValue * preview->model().angleRadians * 180.0 /
                                             std::numbers::pi))));
     }
     void refreshPreview() {
         const auto &session = controller->session();
         const auto &document = session.document();
+        // Resolve the check before choosing which snapshot to present.
+        if (placementEdit && placementEdit->checking && !controller->isPreparingRoute())
+            refreshPlacementEditor();
         if (previewReplacement &&
             (previewReplacement->document != document ||
              previewReplacement->revision != session.revision() || viewingSource))
@@ -2074,13 +2528,22 @@ class MainWindow::Impl {
             toolAssignmentScope->clear();
             toolAssignmentScope->addItem(QStringLiteral("Вся деталь"), QString{});
             int position = 0;
-            for (const auto index : session.orderedBends()) {
-                const auto *entry = session.bend(index);
-                toolAssignmentScope->addItem(QStringLiteral("Гиб %1").arg(++position),
-                                             text(entry->id));
-            }
+            if (document)
+                for (const auto &stroke : session.bendStrokes(session.orderedBends())) {
+                    const auto *entry = session.bend(stroke.front());
+                    ++position;
+                    const bool joint = stroke.size() > 1;
+                    toolAssignmentScope->addItem(
+                        joint ? QStringLiteral("Совместный гиб %1").arg(strokeLabel(stroke))
+                              : QStringLiteral("Гиб %1").arg(position),
+                        text(entry->id));
+                    if (joint)
+                        toolAssignmentScope->setItemData(toolAssignmentScope->count() - 1, true,
+                                                         Qt::UserRole + 1);
+                }
             auto at = toolAssignmentScope->findData(text(toolContextId));
-            if (!toolContextMembers.empty()) {
+            if (!toolContextMembers.empty() &&
+                (at < 0 || !toolAssignmentScope->itemData(at, Qt::UserRole + 1).toBool())) {
                 QString label = QStringLiteral("Совместный гиб");
                 for (const auto index : session.orderedBends()) {
                     const auto *entry = session.bend(index);
@@ -2101,8 +2564,6 @@ class MainWindow::Impl {
         assignBendTool->setVisible(toolDraftChanged);
         toolAssignmentStatus->setVisible(multiple && perBend);
         toolAssignmentStatus->setText(QStringLiteral("Переналадка между гибами не проверяется."));
-        routePanel->setVisible(propertyTabs->currentIndex() == 2 && document &&
-                               document->metadata().bendAnalysis.bends.size() > 1);
         const auto stagePreview = scenePreview();
         const bool singleCycle =
             !multiple && document &&
@@ -2116,7 +2577,19 @@ class MainWindow::Impl {
                             controller->isPreparingRoute(), toolSelection->parameters().has_value(),
                             controller->routeDraft(), controller->routeDraftError(),
                             controller->isPreparingDraft());
-        const auto row = bendList->currentIndex().row();
+        bool showAcceptedPlacement = false;
+        if (const auto bend = std::exchange(acceptedPlacementBend, std::nullopt)) {
+            if (const auto route = controller->bendRoute()) {
+                const auto step =
+                    std::find_if(route->steps.begin(), route->steps.end(),
+                                 [&](const auto &value) { return value.bendIndex == *bend; });
+                if (step != route->steps.end()) {
+                    routePanel->select(static_cast<int>(step - route->steps.begin()) + 1, false);
+                    showAcceptedPlacement = true;
+                }
+            }
+        }
+        const auto row = selectedSourceBend();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
         const bool hasInteriorContours =
             document && !document->metadata().bendAnalysis.interiorContourDiagnostics.empty() &&
@@ -2170,7 +2643,7 @@ class MainWindow::Impl {
                     const auto order = session.orderedBends();
                     const auto &analysis = document->metadata().bendAnalysis;
                     const auto strokes = application::routeDraftStrokes(draft->request, analysis);
-                    const auto current = application::routeBendStrokes(analysis, order);
+                    const auto current = session.bendStrokes(order);
                     const double tolerance = analysis.lengthToleranceMm;
                     if (step <= strokes.size() && step <= current.size() &&
                         operations[strokes[step - 1].front()].bendIndex ==
@@ -2206,8 +2679,7 @@ class MainWindow::Impl {
                         selectionRequest->innerRadiusMm =
                             std::min(selectionRequest->innerRadiusMm, target->innerRadiusMm);
                     }
-                for (const auto &stroke :
-                     application::routeBendStrokes(analysis, session.orderedBends()))
+                for (const auto &stroke : session.bendStrokes(session.orderedBends()))
                     if (stroke.size() > 1)
                         selectionRequest->bendLengthMm =
                             std::max(selectionRequest->bendLengthMm,
@@ -2391,16 +2863,11 @@ class MainWindow::Impl {
                                 }
                             }
                 }
-                bendFrame->setValue(restoreFrame   ? static_cast<int>(previewReplacement->frame)
+                bendFrame->setValue(showAcceptedPlacement ? 0
+                                    : restoreFrame ? static_cast<int>(previewReplacement->frame)
                                     : matchedAngle ? *matchedAngle
-                                    : advancingPlayback           ? 0
-                                    : draft && draft->toolLengths ? 0
-                                    : diagnostic                  ? bendFrame->maximum()
-                                    : (viewingDraft || viewingRoute) &&
-                                            routePanel->selected() > 0 && !draftAutoPlay &&
-                                            !(previewReplacement && previewReplacement->reposition)
-                                        ? bendFrame->maximum()
-                                        : 0);
+                                    : diagnostic   ? bendFrame->maximum()
+                                                   : 0);
                 positionedPreview = preview;
             }
             showPreviewFrame();
@@ -2410,17 +2877,17 @@ class MainWindow::Impl {
             ((diagnostic && preview->frameCount() == 1) ||
              (!preview->unverifiedDraft() && preview->toolSetup() && !preview->pressMotion()));
         previewControls->setCurrentIndex(staticSetup ? 1 : 0);
-        kinematicsToggle->setVisible(!viewingDraft);
-        kinematicsPanel->setVisible(!viewingDraft && kinematicsToggle->isChecked());
+        kinematicsPanel->setVisible(!viewingDraft);
         playBend->setVisible(!staticSetup);
         playbackSpeedControls->setVisible(!staticSetup);
         showKinematics->setVisible(staticSetup && !diagnostic);
         showKinematics->setEnabled(staticSetup && preparePreview->isEnabled());
-        bendFrame->setEnabled(preview && !viewingSource && !staticSetup && !controller->hasWork() &&
-                              !shortToolPlaybackBlocked() &&
+        bendFrame->setEnabled(preview && !placementEdit && !viewingSource && !staticSetup &&
+                              !controller->hasWork() && !shortToolPlaybackBlocked() &&
                               !((viewingRoute || viewingDraft) && routePanel->selected() == 0) &&
                               previewDisplayError.isEmpty());
         refreshPlaybackAvailability(preview);
+        refreshPlacementEditor();
         returnToCad->setEnabled(preview || previewReplacement || controller->isPreparingPreview() ||
                                 controller->isPreparingDraft());
         if (!preview && !controller->isPreparingDraft())
@@ -2601,22 +3068,43 @@ class MainWindow::Impl {
         const bool failed = controller->bendPreviewError().has_value() || routeFailure ||
                             !previewDisplayError.isEmpty();
         refreshCheckResult();
+        const bool overview = blankSetupSelected() && (controller->bendRoute() || draft) &&
+                              routePanel->stepCount() > 0 && !viewingSource && !wantFlat;
+        firstBend->setVisible(overview && !placementEdit);
+        firstBend->setEnabled(!controller->hasWork());
+        routePanel->setVisible(propertyTabs->currentIndex() == 2 && multiple);
+        singleRouteTool->setVisible(propertyTabs->currentIndex() == 2 && document && !multiple &&
+                                    row >= 0 && !placementEdit);
+        singleRouteTool->setEnabled(!controller->hasWork());
+        routePanel->advancedWidget()->setVisible(multiple);
+        const bool detailsAvailable = document != nullptr && !placementEdit;
+        bendDetailsToggle->setVisible(detailsAvailable);
+        bendDetails->setVisible(detailsAvailable && bendDetailsToggle->isChecked());
         routePanel->reportWidget()->setVisible(multiple);
         if (document && document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled)
             previewStatus->setText(QStringLiteral("ПРИБЛИЖЕНИЕ: вырезы исключены из проверки.\n") +
                                    previewStatus->text());
-        checkScope->setText(preview && preview->usesDrawingTools()
-                                ? QStringLiteral("Пуансон: %1. Матрица: %2.")
-                                      .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
-                                                                       : QStringLiteral("условный"),
-                                           preview->usesDrawingDie() ? QStringLiteral("по DXF")
-                                                                     : QStringLiteral("условная"))
-                                : QStringLiteral("Геометрическая проверка."));
-        checkScope->setVisible(document != nullptr && !viewingDraft &&
-                               !(viewingRoute && controller->bendRoute()));
-        checkScope->setMinimumHeight(std::max(0, checkScope->heightForWidth(240)));
+        QStringList scope;
+        if (preview && preview->toolSetup()) {
+            if (!overview && preview->usesDrawingTools())
+                scope.push_back(QStringLiteral("Пуансон %1 · матрица %2")
+                                    .arg(preview->usesDrawingPunch() ? QStringLiteral("по DXF")
+                                                                     : QStringLiteral("условный"),
+                                         preview->usesDrawingDie() ? QStringLiteral("по DXF")
+                                                                   : QStringLiteral("условная")));
+            if (preview->machineModel() != core::MachineModel::None)
+                scope.push_back(
+                    preview->floorChecked()
+                        ? QStringLiteral("Демонстрационный станок и пол проверены по кадрам.")
+                        : QStringLiteral("Демонстрационный станок · пол не проверен."));
+            else if (preview->pressMotion())
+                scope.push_back(QStringLiteral("Станок и держатели не проверены."));
+        }
+        checkScope->setText(scope.join(QLatin1Char('\n')));
+        checkScope->setVisible(!scope.isEmpty());
+        previewStatus->setVisible(!(overview && controller->bendRoute()));
         checkBend->setEnabled(applyTools->isEnabled() && toolSelection->parameters().has_value());
-        checkBend->setVisible(!preview || preview->unverifiedDraft());
+        checkBend->setVisible((!preview || preview->unverifiedDraft()) && !placementEdit);
         const auto checkTitle = !lastRouteAutomatic ? QStringLiteral("Проверить мой порядок")
                                 : document && document->metadata().bendAnalysis.bends.size() > 1
                                     ? QStringLiteral("Проверить все гибы")
@@ -2743,8 +3231,59 @@ class MainWindow::Impl {
         if (!bendList->currentIndex().isValid())
             showThicknessEvidence(false);
     }
+    int selectedSourceBend() const {
+        const auto row = bendList->currentIndex().row();
+        if (row < 0)
+            return -1;
+        const auto position = static_cast<std::size_t>(row);
+        if (position < bendRows.size())
+            return static_cast<int>(bendRows[position].front());
+        return static_cast<int>(bendRowBySource.size() + position - bendRows.size());
+    }
+    QModelIndex bendRow(std::size_t source) const {
+        return source < bendRowBySource.size() ? bendModel->index(bendRowBySource[source], 0)
+                                               : QModelIndex{};
+    }
+    BendStroke selectedBendZones() const {
+        const auto row = bendList->currentIndex().row();
+        return row >= 0 && static_cast<std::size_t>(row) < bendRows.size()
+                   ? bendRows[static_cast<std::size_t>(row)]
+                   : BendStroke{};
+    }
+    void editBendStroke(const QModelIndex &index) {
+        if (!index.isValid() || !index.data(strokeEditorRole).toBool() || controller->hasWork())
+            return;
+        bendList->setCurrentIndex(index);
+        const auto stroke = selectedBendZones();
+        if (stroke.empty())
+            return;
+        const auto &session = controller->session();
+        const auto revision = session.revision();
+        const auto editRevision = session.editRevision();
+        StrokeSegmentsDialog dialog(window);
+        if (dialog.edit(session, stroke.front(), [this, revision](const auto &indices) {
+                viewer->highlightBendZones(indices, revision);
+            })) {
+            const QSignalBlocker blockSelection(bendList->selectionModel());
+            if (controller->editStrokes(revision, editRevision, dialog.edits())) {
+                toolContextId.clear();
+                toolContextMembers.clear();
+                toolContextSpan = 0;
+                fillBends();
+                bendList->setCurrentIndex(bendRow(dialog.selectedBend()));
+                refresh();
+            }
+        }
+        showSelectedBend(true);
+    }
+    void addBendListEditor(QListView *list) {
+        list->setItemDelegate(new BendListDelegate(
+            list, [this](const QModelIndex &index) { editBendStroke(index); }));
+    }
     void fillBends() {
         bendModel->clear();
+        bendRows.clear();
+        bendRowBySource.clear();
         cutoutNotice->clear();
         showCutouts->hide();
         const auto &document = controller->session().document();
@@ -2754,6 +3293,15 @@ class MainWindow::Impl {
         }
         const auto &analysis = document->metadata().bendAnalysis;
         const auto &cutouts = document->metadata().closedCutouts;
+        std::vector<std::size_t> sourceOrder(analysis.bends.size());
+        std::iota(sourceOrder.begin(), sourceOrder.end(), 0);
+        bendRows = controller->session().bendStrokes(sourceOrder);
+        std::vector<unsigned> partitions(sourceOrder.size());
+        for (const auto index : sourceOrder)
+            if (const auto *entry = controller->session().bend(index))
+                partitions[index] = entry->strokePartition;
+        viewer->setBendStrokePartitions(std::move(partitions), controller->session().revision());
+        bendRowBySource.resize(sourceOrder.size());
         if (cutouts.status == ClosedCutoutStatus::Filled) {
             cutoutNotice->setText(QStringLiteral("Вырезы найдены и подсвечены.\nВлияние на металл "
                                                  "и реальную опору не учитывается."));
@@ -2765,8 +3313,7 @@ class MainWindow::Impl {
         showCutouts->setVisible(!cutouts.boundaryFaces.empty());
         switch (analysis.status) {
         case BendRecognitionStatus::Completed:
-            bendSummary->setText(
-                QStringLiteral("Найдено зон сгиба: %1").arg(analysis.bends.size()));
+            bendSummary->setText(QStringLiteral("Найдено гибов: %1").arg(bendRows.size()));
             if (analysis.unrecognizedCylindricalFaces > 0) {
                 bendSummary->setText(bendSummary->text() +
                                      QStringLiteral("\nДругих цилиндрических граней: %1.")
@@ -2805,21 +3352,30 @@ class MainWindow::Impl {
                     "\nЗон с внутренними вырезами: %1. Выберите D для просмотра причины.")
                     .arg(analysis.interiorContourDiagnostics.size()));
         }
-        for (std::size_t i = 0; i < analysis.bends.size(); ++i) {
-            const auto &bend = analysis.bends[i];
-            auto *item =
-                new QStandardItem(QStringLiteral("B%1 · %2° · R%3 · L%4 мм")
-                                      .arg(i + 1, 2, 10, QLatin1Char('0'))
-                                      .arg(number(bend.angleRadians * 180.0 / std::numbers::pi),
-                                           number(bend.innerRadiusMm), number(bend.lengthMm)));
-            if (cutouts.status == ClosedCutoutStatus::Filled) {
+        for (const auto &stroke : bendRows) {
+            for (const auto index : stroke)
+                bendRowBySource[index] = bendModel->rowCount();
+            const auto &bend = analysis.bends[stroke.front()];
+            auto *item = new QStandardItem(
+                QStringLiteral("%1 · %2° · R%3 · %4 мм")
+                    .arg(stroke.size() > 1 ? QStringLiteral("Гиб %1").arg(bendModel->rowCount() + 1)
+                                           : strokeLabel(stroke),
+                         number(bend.angleRadians * 180.0 / std::numbers::pi),
+                         number(bend.innerRadiusMm),
+                         (stroke.size() > 1 ? QStringLiteral("Охват ") : QStringLiteral("L")) +
+                             number(routeStrokeLengthMm(analysis, stroke))));
+            if (stroke.size() > 1)
+                item->setText(item->text() +
+                              QStringLiteral("\nПрерывистый · участков %1").arg(stroke.size()));
+            if (cutouts.status == ClosedCutoutStatus::Filled && stroke.size() == 1)
                 item->setText(item->text() + QStringLiteral(" · приближение"));
-            }
-            if (bend.trimmedEnds) {
+            if (std::any_of(stroke.begin(), stroke.end(),
+                            [&](auto index) { return analysis.bends[index].trimmedEnds; }))
                 item->setText(item->text() + QStringLiteral(" · подрезка"));
-            }
             item->setToolTip(item->text());
             item->setData(item->text(), Qt::UserRole);
+            const auto *entry = controller->session().bend(stroke.front());
+            item->setData(stroke.size() > 1 || (entry && entry->strokePartition), strokeEditorRole);
             item->setEditable(false);
             bendModel->appendRow(item);
         }
@@ -2837,15 +3393,17 @@ class MainWindow::Impl {
         const auto &session = controller->session();
         for (int row = 0; row < bendModel->rowCount(); ++row) {
             auto *item = bendModel->item(row);
-            const auto *entry = session.bend(static_cast<std::size_t>(row));
-            const auto &document = session.document();
-            const bool diagnosticRow =
-                document &&
-                static_cast<std::size_t>(row) >= document->metadata().bendAnalysis.bends.size();
+            const auto position = static_cast<std::size_t>(row);
+            const bool diagnosticRow = position >= bendRows.size();
+            const auto *entry = diagnosticRow ? nullptr : session.bend(bendRows[position].front());
             const auto status = diagnosticRow ? QStringLiteral("Движение недоступно")
                                 : entry ? reviewText(entry->review)
                                         : QStringLiteral("Нет однозначной привязки");
-            item->setText(item->data(Qt::UserRole).toString() + QLatin1Char('\n') + status);
+            item->setText(item->data(Qt::UserRole).toString() +
+                          (!diagnosticRow && bendRows[position].size() > 1 && entry &&
+                                   entry->review == BendReview::Automatic
+                               ? QString{}
+                               : QLatin1Char('\n') + status));
             item->setToolTip(item->text());
         }
         QStringList unresolved;
@@ -2866,7 +3424,7 @@ class MainWindow::Impl {
                 .arg(unresolved.join(QLatin1Char('\n'))));
     }
     void updateTargetButtons() {
-        const auto row = bendList->currentIndex().row();
+        const auto row = selectedSourceBend();
         const auto *entry =
             row < 0 ? nullptr : controller->session().bend(static_cast<std::size_t>(row));
         const bool editable = entry && included(entry->review) && !controller->hasWork();
@@ -2879,8 +3437,11 @@ class MainWindow::Impl {
     void showSelectedBend(bool highlight) {
         const auto &session = controller->session();
         const auto &document = session.document();
-        const auto row = bendList->currentIndex().row();
+        const auto row = selectedSourceBend();
         const auto *entry = row < 0 ? nullptr : session.bend(static_cast<std::size_t>(row));
+        const auto zones = selectedBendZones();
+        strokeSegments->setVisible(bendList->currentIndex().data(strokeEditorRole).toBool());
+        strokeSegments->setEnabled(!controller->hasWork());
         bendReview->setEnabled(entry && !controller->hasWork());
         updateTargetButtons();
         if (!document || row < 0 ||
@@ -2927,7 +3488,8 @@ class MainWindow::Impl {
             }
             return;
         }
-        const auto &bend = document->metadata().bendAnalysis.bends[static_cast<std::size_t>(row)];
+        const auto &analysis = document->metadata().bendAnalysis;
+        const auto &bend = analysis.bends[static_cast<std::size_t>(row)];
         const auto coordinate = [&](double value) {
             return number(std::abs(value) <= document->metadata().bendAnalysis.lengthToleranceMm
                               ? 0.0
@@ -2945,9 +3507,18 @@ class MainWindow::Impl {
                      coordinate(bend.axisStart.x), coordinate(bend.axisStart.y),
                      coordinate(bend.axisStart.z), coordinate(bend.axisEnd.x),
                      coordinate(bend.axisEnd.y), coordinate(bend.axisEnd.z));
+        if (zones.size() > 1) {
+            description = QStringLiteral("Прерывистый гиб · участков %1\nУгол поворота полок: %2°\n"
+                                         "Внутренний радиус: %3 мм\nТолщина: %4 мм\n"
+                                         "Охват инструмента: %5 мм")
+                              .arg(QString::number(zones.size()),
+                                   number(bend.angleRadians * 180.0 / std::numbers::pi),
+                                   number(bend.innerRadiusMm), number(bend.thicknessMm),
+                                   number(routeStrokeLengthMm(analysis, zones)));
+        }
         description += QStringLiteral("\n\nОранжевая заливка и светлая обводка — зона сгиба. "
                                       "Тонкая голубая обводка — прилегающие полки.");
-        if (bend.trimmedEnds) {
+        if (zones.size() == 1 && bend.trimmedEnds) {
             description.replace(QStringLiteral("Длина сгиба:"),
                                 QStringLiteral("Габарит вдоль оси:"));
             description +=
@@ -2990,7 +3561,9 @@ class MainWindow::Impl {
                                  "исключение вручную."));
         updateTargetButtons();
         if (highlight && !controller->hasWork()) {
-            if (document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
+            if (zones.size() > 1) {
+                viewer->highlightBendZones(zones, session.revision());
+            } else if (document->metadata().closedCutouts.status == ClosedCutoutStatus::Filled) {
                 viewer->highlightBendDiagnostic(
                     {bend, document->metadata().closedCutouts.boundaryFaces}, session.revision());
             } else {
@@ -3115,6 +3688,23 @@ class MainWindow::Impl {
     }
     MainWindow *window;
     RoutePanel *routePanel = nullptr;
+    struct PlacementEdit {
+        std::uint64_t revision, editRevision;
+        std::size_t bend;
+        application::BendPreviewPtr preview;
+        BendPlacementCoverage coverage;
+        double offsetMm, limitMm;
+        bool checking = false;
+    };
+    std::optional<PlacementEdit> placementEdit;
+    struct PlacementNotice {
+        application::BendPreviewPtr preview;
+        std::optional<std::size_t> bend;
+        QString message;
+    };
+    PlacementNotice placementNotice;
+    std::optional<std::size_t> acceptedPlacementBend;
+    QPushButton *singleRouteTool = nullptr;
     QComboBox *toolAssignmentScope = nullptr;
     QPushButton *assignBendTool = nullptr;
     QLabel *toolAssignmentStatus = nullptr;
@@ -3144,6 +3734,9 @@ class MainWindow::Impl {
     QListWidget *project = nullptr;
     QListView *bendList = nullptr;
     QStandardItemModel *bendModel = nullptr;
+    QPushButton *strokeSegments = nullptr;
+    std::vector<BendStroke> bendRows;
+    std::vector<int> bendRowBySource;
     QLabel *bendSummary = nullptr;
     QLabel *bendProperties = nullptr;
     QLabel *bendBindingWarning = nullptr;
@@ -3189,7 +3782,9 @@ class MainWindow::Impl {
     QPushButton *preparePreview = nullptr;
     QLabel *previewStatus = nullptr;
     QLabel *checkSummary = nullptr;
-    QToolButton *kinematicsToggle = nullptr;
+    QToolButton *bendDetailsToggle = nullptr;
+    QWidget *bendDetails = nullptr;
+    QPushButton *firstBend = nullptr;
     QWidget *kinematicsPanel = nullptr;
     ToolSelectionWidget *toolSelection = nullptr;
     QPushButton *checkBend = nullptr;
@@ -3304,6 +3899,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         QStringLiteral("3D Bending Simulator · %1").arg(text(runtime.applicationVersion));
     resize(1440, 900);
     impl_->viewer = new viewer::ViewerWidget(this);
+    impl_->viewer->setDimensionDecimals(dimensionDecimalPlaces());
     impl_->viewer->setToolSegmentColors(toolSegmentColors());
     auto *workspace = new QWidget(this);
     auto *workspaceLayout = new QVBoxLayout(workspace);
@@ -3530,9 +4126,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->bendList = new QListView(leftPanel);
     impl_->bendList->setObjectName(QStringLiteral("bendList"));
     impl_->bendList->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
-    impl_->bendList->setAccessibleName(QStringLiteral("Распознанные зоны сгибов"));
+    impl_->bendList->setAccessibleName(QStringLiteral("Гибы детали"));
     impl_->bendModel = new QStandardItemModel(impl_->bendList);
     impl_->bendList->setModel(impl_->bendModel);
+    impl_->addBendListEditor(impl_->bendList);
     leftLayout->addWidget(impl_->bendList);
     auto *panel = new QWidget(this);
     auto *layout = new QVBoxLayout(panel);
@@ -3725,6 +4322,16 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *partPage = taskPage(panel, impl_->partPrimary, this);
     auto *bendPanel = new QWidget(this);
     auto *bendLayout = new QVBoxLayout(bendPanel);
+    auto *angleList = new QListView(bendPanel);
+    angleList->setObjectName(QStringLiteral("angleBendList"));
+    angleList->setAccessibleName(QStringLiteral("Гибы детали"));
+    angleList->setModel(impl_->bendModel);
+    angleList->setSelectionModel(impl_->bendList->selectionModel());
+    impl_->addBendListEditor(angleList);
+    angleList->setMinimumHeight(110);
+    angleList->setMaximumHeight(180);
+    angleList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    bendLayout->addWidget(angleList);
     impl_->bendBindingWarning = new QLabel(bendPanel);
     impl_->bendBindingWarning->setObjectName(QStringLiteral("bendBindingWarning"));
     impl_->bendBindingWarning->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -3740,6 +4347,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->bendProperties->setTextFormat(Qt::PlainText);
     impl_->bendProperties->setTextInteractionFlags(Qt::TextSelectableByMouse);
     bendLayout->addWidget(impl_->bendProperties);
+    impl_->strokeSegments = new QPushButton(QStringLiteral("Ходы гибки…"), bendPanel);
+    impl_->strokeSegments->setObjectName(QStringLiteral("strokeSegments"));
+    bendLayout->addWidget(impl_->strokeSegments);
+    connect(impl_->strokeSegments, &QPushButton::clicked, this,
+            [this] { impl_->editBendStroke(impl_->bendList->currentIndex()); });
     bendLayout->addWidget(new QLabel(QStringLiteral("Решение по зоне сгиба"), bendPanel));
     impl_->bendReview = new QComboBox(bendPanel);
     impl_->bendReview->setObjectName(QStringLiteral("bendReview"));
@@ -3750,11 +4362,9 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     }
     bendLayout->addWidget(impl_->bendReview);
     connect(impl_->bendReview, &QComboBox::activated, this, [this](int index) {
-        const auto row = impl_->bendList->currentIndex().row();
-        if (row >= 0 && index >= 0 && index <= 3) {
-            impl_->controller->setBendReview(static_cast<std::size_t>(row),
+        if (index >= 0 && index <= 3)
+            impl_->controller->setBendReview(impl_->selectedBendZones(),
                                              static_cast<BendReview>(index));
-        }
     });
     impl_->bendTargetStatus = new QLabel(bendPanel);
     impl_->bendTargetStatus->setObjectName(QStringLiteral("bendTargetStatus"));
@@ -3810,20 +4420,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     connect(impl_->targetRadius, &QDoubleSpinBox::valueChanged, this,
             [this] { impl_->updateTargetButtons(); });
     connect(impl_->applyBendTarget, &QPushButton::clicked, this, [this] {
-        const auto row = impl_->bendList->currentIndex().row();
-        if (row >= 0) {
-            impl_->controller->setBendTarget(
-                static_cast<std::size_t>(row),
-                core::BendTarget{impl_->targetAngle->value() * std::numbers::pi / 180.0,
-                                 impl_->targetRadius->value()});
-        }
+        impl_->controller->setBendTarget(
+            impl_->selectedBendZones(),
+            core::BendTarget{impl_->targetAngle->value() * std::numbers::pi / 180.0,
+                             impl_->targetRadius->value()});
     });
-    connect(impl_->resetBendTarget, &QPushButton::clicked, this, [this] {
-        const auto row = impl_->bendList->currentIndex().row();
-        if (row >= 0) {
-            impl_->controller->setBendTarget(static_cast<std::size_t>(row), {});
-        }
-    });
+    connect(impl_->resetBendTarget, &QPushButton::clicked, this,
+            [this] { impl_->controller->setBendTarget(impl_->selectedBendZones(), {}); });
     auto *bendScroll = new QScrollArea(this);
     bendScroll->setWidgetResizable(true);
     bendScroll->setMinimumWidth(300);
@@ -3832,7 +4435,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->propertyTabs->setObjectName(QStringLiteral("propertiesTabs"));
     impl_->propertyTabs->tabBar()->hide();
     impl_->propertyTabs->addTab(partPage, QStringLiteral("Деталь"));
-    impl_->propertyTabs->addTab(bendScroll, QStringLiteral("Сгиб"));
+    impl_->propertyTabs->addTab(bendScroll, QStringLiteral("Углы"));
     auto *operationPanel = new QWidget(this);
     auto *operationLayout = new QVBoxLayout(operationPanel);
     operationLayout->setContentsMargins(18, 18, 18, 8);
@@ -3865,9 +4468,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->fixedSide = new QComboBox(operationPanel);
     impl_->fixedSide->setObjectName(QStringLiteral("fixedBendSide"));
     impl_->fixedSide->setAccessibleName(QStringLiteral("Неподвижная полка сгиба"));
-    impl_->fixedSide->addItems({QStringLiteral("Полка 1"), QStringLiteral("Полка 2")});
+    impl_->fixedSide->addItems(
+        {QStringLiteral("Полка 1 неподвижна"), QStringLiteral("Полка 2 неподвижна")});
 
-    impl_->preparePreview = new QPushButton(QStringLiteral("Подготовить просмотр"), operationPanel);
+    impl_->preparePreview = new QPushButton(QStringLiteral("Показать движение"), operationPanel);
     impl_->preparePreview->setObjectName(QStringLiteral("prepareBendPreview"));
 
     impl_->previewStatus = new QLabel(operationPanel);
@@ -3911,51 +4515,49 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->checkScope->setTextFormat(Qt::PlainText);
     impl_->checkScope->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     impl_->checkScope->setStyleSheet(QStringLiteral("color:#526171;font-size:12px;"));
-    operationLayout->addWidget(impl_->checkScope);
-    auto *reportToggle = new QToolButton(operationPanel);
-    reportToggle->setObjectName(QStringLiteral("checkReportToggle"));
-    reportToggle->setText(QStringLiteral("Подробности проверки ▸"));
+    auto *reportToggle = impl_->bendDetailsToggle = new QToolButton(operationPanel);
+    reportToggle->setObjectName(QStringLiteral("routeActionsToggle"));
+    reportToggle->setText(QStringLiteral("Дополнительно"));
+    reportToggle->setArrowType(Qt::RightArrow);
+    reportToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     reportToggle->setCheckable(true);
     reportToggle->setMinimumHeight(32);
-    operationLayout->addWidget(reportToggle);
-    auto *report = new QWidget(operationPanel);
+    auto *report = impl_->bendDetails = new QWidget(operationPanel);
     report->setObjectName("checkReportDetails");
     auto *reportLayout = new QVBoxLayout(report);
     reportLayout->setContentsMargins(0, 0, 0, 0);
-    operationLayout->removeWidget(impl_->checkScope);
+    reportLayout->addWidget(impl_->routePanel->advancedWidget());
     reportLayout->addWidget(impl_->checkScope);
     reportLayout->addWidget(impl_->previewStatus);
     reportLayout->addWidget(impl_->routePanel->reportWidget());
-    operationLayout->addWidget(report);
     report->hide();
-    connect(reportToggle, &QToolButton::toggled, report, &QWidget::setVisible);
+    connect(reportToggle, &QToolButton::toggled, report, [report, reportToggle](bool open) {
+        reportToggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        report->setVisible(open);
+    });
+    impl_->firstBend = new QPushButton(QStringLiteral("Показать первый гиб"), operationPanel);
+    impl_->firstBend->setObjectName(QStringLiteral("openFirstBend"));
+    impl_->firstBend->hide();
+    connect(impl_->firstBend, &QPushButton::clicked, this,
+            [this] { impl_->routePanel->select(1); });
+    operationLayout->addWidget(impl_->firstBend);
     operationLayout->addWidget(impl_->routePanel);
-    auto *kinematicHint = new QLabel(
-        QStringLiteral("Модель сохраняет толщину и длину средней поверхности. Это геометрическая "
-                       "кинематика.\n\n"
-                       "Здесь инструмент и контакт не участвуют. Начальная установка доступна на "
-                       "вкладке «Инструмент». Усилие и пружинение не рассчитываются. "
-                       "Это не технологическая развёртка для производства.\n\nВыбор полки и кадра "
-                       "относится к просмотру и не сохраняется в проекте."),
-        operationPanel);
-    kinematicHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    kinematicHint->setWordWrap(true);
-    auto *advancedToggle = new QToolButton(operationPanel);
-    impl_->kinematicsToggle = advancedToggle;
-    advancedToggle->setText(QStringLiteral("Движение без инструмента ▸"));
-    advancedToggle->setCheckable(true);
-    advancedToggle->setMinimumHeight(32);
-    auto *advanced = new QWidget(operationPanel);
+    impl_->singleRouteTool = new QPushButton(QStringLiteral("Инструмент…"), operationPanel);
+    impl_->singleRouteTool->setObjectName("singleRouteEditTool");
+    impl_->singleRouteTool->hide();
+    operationLayout->addWidget(impl_->singleRouteTool);
+    connect(impl_->singleRouteTool, &QPushButton::clicked, this,
+            [this] { impl_->openRouteTools(); });
+    auto *advanced = new QWidget(report);
     impl_->kinematicsPanel = advanced;
     auto *advancedLayout = new QVBoxLayout(advanced);
     advancedLayout->setContentsMargins(0, 0, 0, 0);
+    advancedLayout->addWidget(new QLabel(QStringLiteral("Просмотр без инструмента"), advanced));
     advancedLayout->addWidget(impl_->fixedSide);
     advancedLayout->addWidget(impl_->preparePreview);
-    advancedLayout->addWidget(kinematicHint);
-    reportLayout->addWidget(advancedToggle);
     reportLayout->addWidget(advanced);
-    advanced->hide();
-    connect(advancedToggle, &QToolButton::toggled, advanced, &QWidget::setVisible);
+    operationLayout->addWidget(reportToggle, 0, Qt::AlignLeft);
+    operationLayout->addWidget(report);
     operationLayout->addStretch();
     operationLayout->addWidget(impl_->checkBend);
     auto *operationPage = taskPage(operationPanel, impl_->checkBend, this);
@@ -4193,7 +4795,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->reverseWorkpieceButton->setStyleSheet(impl_->reversePunchButton->styleSheet());
     playLayout->addWidget(impl_->reverseWorkpieceButton);
     connect(impl_->reverseWorkpieceButton, &QToolButton::clicked, this,
-            [this](bool reversed) { impl_->setWorkpieceOrientation(reversed); });
+            [this] { impl_->toggleWorkpieceOrientation(); });
     connect(impl_->reversePunchButton, &QToolButton::clicked, this,
             [this](bool reversed) { impl_->setPunchOrientation(reversed); });
     playLayout->addWidget(impl_->previewControls, 1);
@@ -4244,7 +4846,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     });
     const auto updatePlaybackSpeed = [this](int step) {
         const double multiplier = 1.0 + static_cast<double>(step) / 4.0;
-        const auto value = number(multiplier) + QStringLiteral("×");
+        const auto value = compactValue(multiplier) + QStringLiteral("×");
         impl_->playback->setInterval(qRound(50.0 / multiplier));
         impl_->playbackSpeedValue->setText(value);
         const auto description = QStringLiteral("Скорость показа %1. Диапазон 1×–10×, шаг 0,25×. "
@@ -4255,7 +4857,11 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     };
     connect(impl_->playbackSpeed, &QSlider::valueChanged, this, updatePlaybackSpeed);
     updatePlaybackSpeed(impl_->playbackSpeed->value());
-    connect(impl_->bendFrame, &QSlider::valueChanged, this, [this] { impl_->showPreviewFrame(); });
+    connect(impl_->bendFrame, &QSlider::valueChanged, this, [this] {
+        impl_->showPreviewFrame();
+        if (!impl_->playback->isActive())
+            impl_->refreshPlacementEditor();
+    });
     connect(impl_->playback, &QTimer::timeout, this, [this] {
         if (impl_->shortToolPlaybackBlocked() ||
             Impl::collisionAt(impl_->scenePreview(),
@@ -4326,7 +4932,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         impl_->stageToolIssueIndex.reset();
         impl_->viewingRoute = false;
         impl_->viewingSource = false;
-        const auto row = impl_->bendList->currentIndex().row();
+        const auto row = impl_->selectedSourceBend();
         if (row >= 0) {
             impl_->propertyTabs->setCurrentIndex(2);
             if (impl_->controller->prepareBendPreview(static_cast<std::size_t>(row),
@@ -4344,10 +4950,14 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->bendMessages = new BendMessagePanel(this);
     impl_->viewer->setTopLeftOverlay(impl_->bendMessages);
     impl_->routePanel->onSelect = [this](int step) {
+        if (impl_->placementEdit && !impl_->placementEdit->checking)
+            impl_->closePlacementEditor();
         const auto previous = impl_->controller->routeDraft();
         const bool manualAdvance = !impl_->playback->isActive() && previous && step > 0 &&
                                    static_cast<std::size_t>(step) == previous->request.step + 1;
         impl_->beginPreviewReplacement();
+        if (impl_->previewReplacement)
+            impl_->previewReplacement->preserveFrame = false;
         impl_->stopPlayback();
         impl_->draftAutoPlay = false;
         if (impl_->controller->session().document() &&
@@ -4359,9 +4969,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                 impl_->viewingRoute = false;
                 impl_->viewingSource = false;
                 impl_->wantFlat = false;
-                impl_->bendFrame->setValue(impl_->routePanel->selected() == 0
-                                               ? 0
-                                               : static_cast<int>(preview->frameCount() - 1));
+                const QSignalBlocker block(impl_->bendFrame);
+                impl_->bendFrame->setValue(0);
                 impl_->showPreviewFrame();
                 impl_->refreshPreview();
             }
@@ -4404,10 +5013,10 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         else
             impl_->refreshPreview();
     };
-    impl_->routePanel->onEditTool = [this](std::size_t index) { impl_->editRouteTool(index); };
+    impl_->routePanel->onEditTool = [this] { impl_->openRouteTools(); };
     impl_->routePanel->onExpandSearch = [this] {
         if (!impl_->checkedToolVariants.empty())
-            impl_->prepareCheckedToolSelection();
+            impl_->prepareCheckedToolSelection(impl_->checkedSectionsOnly);
         else
             impl_->prepareRoute(impl_->lastRouteAutomatic, impl_->routePanel->withTools(), true);
     };
@@ -4486,6 +5095,36 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             [this] { impl_->startDraftReposition(); });
     connect(impl_->viewer, &viewer::ViewerWidget::renderingChanged, this,
             [this](bool) { impl_->refresh(); });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendPlacementDragStarted, this,
+            [this] { impl_->beginPlacementEdit(); });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendPlacementDragFinished, this,
+            [this] { impl_->finishPlacementDrag(); });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendPlacementDragCancelled, this, [this] {
+        if (const auto &edit = impl_->placementEdit; edit && !edit->checking) {
+            impl_->closePlacementEditor();
+            impl_->refreshPreview();
+        }
+    });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendPlacementDragged, this, [this](double delta) {
+        if (auto &edit = impl_->placementEdit; edit && !edit->checking) {
+            const double offset = std::clamp(edit->preview->workpieceOffsetMm() + delta,
+                                             -edit->limitMm, edit->limitMm);
+            if (edit->offsetMm != offset) {
+                edit->offsetMm = offset;
+                impl_->refreshPlacementEditor();
+            }
+        }
+    });
+    connect(impl_->viewer, &viewer::ViewerWidget::bendToolPicked, this,
+            [this](quint64 revision, bool punch, int section) {
+                const auto preview = impl_->scenePreview();
+                if (impl_->controller->session().revision() != revision ||
+                    !impl_->canPickSceneTool(preview) || impl_->playback->isActive())
+                    return;
+                impl_->openRouteTools(
+                    punch ? core::ToolKind::Punch : core::ToolKind::Die,
+                    section >= 0 ? std::optional{static_cast<std::size_t>(section)} : std::nullopt);
+            });
     connect(impl_->viewer, &viewer::ViewerWidget::bendSelectionChanged, this,
             [this](quint64 revision, int index) {
                 const auto &session = impl_->controller->session();
@@ -4496,12 +5135,13 @@ MainWindow::MainWindow(RuntimeInfo runtime,
                     (index >= 0 && static_cast<std::size_t>(index) >=
                                        session.document()->metadata().bendAnalysis.bends.size()))
                     return;
-                const auto item = index >= 0 ? impl_->bendModel->index(index, 0) : QModelIndex{};
+                const auto item =
+                    index >= 0 ? impl_->bendRow(static_cast<std::size_t>(index)) : QModelIndex{};
                 // Canvas has already applied the source selection. Reflect it without
                 // starting another scene update or invoking the route/tool workflow.
                 const QSignalBlocker block(impl_->bendList->selectionModel());
                 impl_->bendList->setCurrentIndex(item);
-                impl_->showSelectedBend(false);
+                impl_->showSelectedBend(impl_->selectedBendZones().size() > 1);
             });
     connect(impl_->viewer, &viewer::ViewerWidget::selectionChanged, this,
             [this](quint64 revision, int index) {
@@ -4529,6 +5169,38 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     auto *materials = settingsMenu->addAction(QStringLiteral("Материалы…"));
     materials->setObjectName(QStringLiteral("materialPresetsAction"));
     connect(materials, &QAction::triggered, this, [this] { editMaterialPresets(this); });
+    auto *precision = settingsMenu->addAction(QStringLiteral("Точность размеров…"));
+    precision->setObjectName(QStringLiteral("dimensionPrecisionAction"));
+    connect(precision, &QAction::triggered, this, [this] {
+        const int current = dimensionDecimalPlaces();
+        const QStringList formats{QStringLiteral("0"), QStringLiteral("0,0"),
+                                  QStringLiteral("0,00"), QStringLiteral("0,000")};
+        QInputDialog dialog(this);
+        dialog.setObjectName(QStringLiteral("dimensionPrecisionDialog"));
+        dialog.setWindowTitle(QStringLiteral("Точность размеров"));
+        dialog.setLabelText(QStringLiteral("Максимум знаков после запятой"));
+        dialog.setComboBoxItems(formats);
+        dialog.setComboBoxEditable(false);
+        dialog.setTextValue(formats[current]);
+        dialog.setOkButtonText(QStringLiteral("Сохранить"));
+        dialog.setCancelButtonText(QStringLiteral("Отмена"));
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const int decimals = formats.indexOf(dialog.textValue());
+        if (decimals == current)
+            return;
+        if (!setDimensionDecimalPlaces(decimals)) {
+            QMessageBox::warning(this, QStringLiteral("Настройки"),
+                                 QStringLiteral("Не удалось сохранить точность размеров."));
+            return;
+        }
+        impl_->viewer->setDimensionDecimals(decimals);
+        if (impl_->drawingDialog)
+            impl_->drawingDialog->setDimensionDecimals(decimals);
+        if (impl_->flatDxfDialog)
+            impl_->flatDxfDialog->setDimensionDecimals(decimals);
+        impl_->refresh();
+    });
     auto *help = menuBar()->addMenu(QStringLiteral("Справка"));
     auto *navigationHelp = help->addAction(QStringLiteral("Управление сценой"));
     navigationHelp->setShortcut(QKeySequence::HelpContents);

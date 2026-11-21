@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
@@ -29,24 +30,37 @@ class ProcessStepButton final : public QToolButton {
         title->setAttribute(Qt::WA_TransparentForMouseEvents);
         copy->addWidget(title);
         status_ = new QLabel(this);
+        status_->setObjectName(QStringLiteral("processStepStatus"));
+        status_->setTextFormat(Qt::PlainText);
         status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         status_->setStyleSheet(
             QStringLiteral("font-size:12px;color:#526171;background:transparent;"));
         status_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        status_->installEventFilter(this);
         copy->addWidget(status_);
         row->addLayout(copy, 1);
     }
 
     void setStatus(const QString &status) {
-        status_->setText(status);
-        setAccessibleName(name_ + QStringLiteral(" · ") + status);
-        setToolTip(name_ + QStringLiteral(" · ") + status +
-                   (stage_ < 3    ? QStringLiteral(" · Alt+%1").arg(stage_ + 1)
-                    : stage_ == 3 ? QStringLiteral(" · Ctrl+Shift+E")
-                                  : QString{}));
+        if (statusText_ == status)
+            return;
+        statusText_ = status;
+        updateStatusLabel();
+        const auto name = name_ + QStringLiteral(" · ") + status;
+        setAccessibleName(name);
+        const auto shortcut = stage_ < 3    ? QStringLiteral(" · Alt+%1").arg(stage_ + 1)
+                              : stage_ == 3 ? QStringLiteral(" · Ctrl+Shift+E")
+                                            : QString{};
+        setToolTip(QStringLiteral("<qt>%1</qt>").arg((name + shortcut).toHtmlEscaped()));
     }
 
   protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (watched == status_ &&
+            (event->type() == QEvent::Resize || event->type() == QEvent::FontChange))
+            updateStatusLabel();
+        return QToolButton::eventFilter(watched, event);
+    }
     void paintEvent(QPaintEvent *event) override {
         QToolButton::paintEvent(event);
         QPainter painter(this);
@@ -72,16 +86,25 @@ class ProcessStepButton final : public QToolButton {
             painter.setPen(QPen(painter.pen().color(), 1.5, Qt::DashLine));
             painter.drawLine(QPointF(16, 4), QPointF(16, 28));
         } else {
-            painter.drawPolygon(QPolygonF{{5, 2}, {22, 2}, {29, 9}, {29, 31}, {5, 31}});
-            painter.drawPolyline(QPolygonF{{22, 2}, {22, 9}, {29, 9}});
-            painter.drawLine(QPointF(10, 16), QPointF(24, 16));
-            painter.drawLine(QPointF(10, 22), QPointF(24, 22));
+            painter.drawRect(QRectF(2, 5, 28, 22));
+            auto framePen = painter.pen();
+            framePen.setWidthF(1.4);
+            painter.setPen(framePen);
+            painter.drawRect(QRectF(6, 9, 20, 14));
+            painter.drawPolyline(QPolygonF{{15, 23}, {15, 18}, {26, 18}});
+            painter.drawLine(QPointF(21, 18), QPointF(21, 23));
         }
     }
 
   private:
+    void updateStatusLabel() {
+        status_->setText(status_->fontMetrics().elidedText(statusText_, Qt::ElideRight,
+                                                           status_->contentsRect().width()));
+    }
+
     int stage_;
     QString name_;
+    QString statusText_;
     QLabel *status_;
 };
 } // namespace bending::ui

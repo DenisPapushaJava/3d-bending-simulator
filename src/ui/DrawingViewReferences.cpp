@@ -7,7 +7,22 @@ const application::DrawingView &LayoutContext::view(const application::BendingDr
     const auto id = std::pair{key.kind, key.index};
     if (const auto it = views_.find(id); it != views_.end())
         return it->second;
-    return views_.emplace(id, selectedView(drawing, key, choices)).first->second;
+    auto view = key.kind == DrawingViewKind::Flat ? preparedView(drawing, key)
+                                                  : selectedView(drawing, key, choices);
+    if (application::supportsPaperViewRotation(key.kind)) {
+        int turns = 0;
+        if (choices)
+            if (const auto found =
+                    std::find_if(choices->begin(), choices->end(),
+                                 [&](const auto &choice) { return choice.key == key; });
+                found != choices->end())
+                turns = found->paperQuarterTurns;
+        const bool mirror =
+            key.kind == DrawingViewKind::Flat &&
+            DrawingSheet::flatOrientation(drawing.flatPattern->info, flatSide).reversed;
+        orientPaperView(view, mirror, turns, this);
+    }
+    return views_.emplace(id, std::move(view)).first->second;
 }
 application::DrawingView selectedView(const application::BendingDrawing &drawing,
                                       DrawingViewKey key,
