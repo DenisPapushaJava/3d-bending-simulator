@@ -68,10 +68,10 @@ class StrokeList final : public QTreeWidget {
     }
 
     void startDrag(Qt::DropActions) override {
-        auto *data = new QMimeData;
-        data->setData(mimeType, QByteArray{});
+        auto *dragData = new QMimeData;
+        dragData->setData(mimeType, QByteArray{});
         QDrag drag(this);
-        drag.setMimeData(data);
+        drag.setMimeData(dragData);
         drag.exec(Qt::MoveAction);
     }
     void dragEnterEvent(QDragEnterEvent *event) override {

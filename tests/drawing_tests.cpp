@@ -3203,10 +3203,10 @@ void workflow(const QString &folder) {
         require(dialog->grab().save(initialSnapshot + ".default.png"),
                 "Cannot save default drawing workspace");
     if (QApplication::arguments().contains(QStringLiteral("--precision-workflow-only"))) {
-        auto *action = window.findChild<QAction *>("dimensionPrecisionAction");
+        auto *precisionAction = window.findChild<QAction *>("dimensionPrecisionAction");
         auto *preview = dialog->findChild<QLabel *>("drawingPreviewImage");
         auto *views = dialog->findChild<QListWidget *>("drawingViews");
-        require(action && preview && views && ui::dimensionDecimalPlaces() == 1,
+        require(precisionAction && preview && views && ui::dimensionDecimalPlaces() == 1,
                 "Dimension precision is missing or did not default to tenths");
         const auto choices = ui::DrawingSheet::defaultViews(*c.drawing());
         const auto flat = std::find_if(choices.begin(), choices.end(), [](const auto &choice) {
@@ -3226,7 +3226,7 @@ void workflow(const QString &folder) {
             input->setTextValue(QStringLiteral("0,000"));
             input->accept();
         });
-        action->trigger();
+        precisionAction->trigger();
         require(chosen && ui::dimensionDecimalPlaces() == 3 && !exportButton->isEnabled(),
                 "Dimension setting did not invalidate the old paper layout");
         wait([&] { return exportButton->isEnabled(); });

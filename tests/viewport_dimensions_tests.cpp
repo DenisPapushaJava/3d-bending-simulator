@@ -63,11 +63,11 @@ int main(int argc, char **argv) {
             base.second = {110, base.first.y, 0};
             base.faces = {1};
             measurements.edges.push_back(base);
-            const auto labels =
+            const auto datumLabels =
                 viewer::documentDimensions(metadata, {}, {}, 14, layout, &measurements,
                                            {viewer::MeasurementKind::Opening, 0, {id}})
                     .labels;
-            check(labels.filter(QStringLiteral("До базы")).size() == (id == 1 ? 1 : 0),
+            check(datumLabels.filter(QStringLiteral("До базы")).size() == (id == 1 ? 1 : 0),
                   "Manual datum accepted an inner wire or extended a finite external edge");
         }
         application::FlatPatternInfo info;

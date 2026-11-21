@@ -1636,14 +1636,15 @@ class MainWindow::Impl {
             return;
         const auto representative = strokes[operation].front();
         std::vector<std::size_t> scope;
-        double span = 0, thickness = 0;
+        double span = 0, maximumThickness = 0;
         for (std::size_t i = 0; i < strokes.size(); ++i) {
             if (!all && i != operation)
                 continue;
             for (const auto index : strokes[i])
                 if (included(session.bend(index)->review)) {
                     scope.push_back(index);
-                    thickness = std::max(thickness, analysis.bends[index].thicknessMm);
+                    maximumThickness =
+                        std::max(maximumThickness, analysis.bends[index].thicknessMm);
                 }
             span = std::max(span, application::routeStrokeLengthMm(analysis, strokes[i]));
         }
@@ -1669,16 +1670,16 @@ class MainWindow::Impl {
                    propertyTabs->currentIndex() == 2 && routePanel->selected() == step &&
                    !controller->hasWork();
         };
-        std::vector<application::BendToolUpdate> updates;
+        std::vector<application::BendToolUpdate> toolUpdates;
         RouteToolDialog dialog(
             window, all ? QStringLiteral("Все гибы") : QStringLiteral("Шаг %1").arg(step),
-            toolSelection->workshopCatalog(), displayed, mixed, span, thickness,
+            toolSelection->workshopCatalog(), displayed, mixed, span, maximumThickness,
             toolSelection->maximumSegmentGapMm(), true,
             [&](const RouteToolDialog::Changes &changes) {
                 if (!current())
                     return QStringLiteral("Деталь изменилась. Откройте оснастку заново.");
-                updates.clear();
-                updates.reserve(scope.size());
+                toolUpdates.clear();
+                toolUpdates.reserve(scope.size());
                 for (const auto index : scope) {
                     const auto &entry = *session.bend(index);
                     auto a = entry.catalogTools.value_or(core::ToolAssignment{});
@@ -1713,7 +1714,7 @@ class MainWindow::Impl {
                     const auto tools = core::toolParameters(a);
                     if (!tools)
                         return QStringLiteral("Проверьте параметры оснастки.");
-                    updates.push_back({index, tools, std::move(a)});
+                    toolUpdates.push_back({index, tools, std::move(a)});
                 }
                 return QString{};
             });
@@ -1730,10 +1731,10 @@ class MainWindow::Impl {
                 propertyTabs->setCurrentIndex(3);
             return;
         }
-        if (decision != QDialog::Accepted || updates.empty())
+        if (decision != QDialog::Accepted || toolUpdates.empty())
             return;
         beginPreviewReplacement();
-        if (!controller->setBendToolAssignments(updates) ||
+        if (!controller->setBendToolAssignments(toolUpdates) ||
             session.editRevision() == identity.second)
             return;
         routePanel->select(step, false);
@@ -3263,7 +3264,7 @@ class MainWindow::Impl {
         if (dialog.edit(session, stroke.front(), [this, revision](const auto &indices) {
                 viewer->highlightBendZones(indices, revision);
             })) {
-            const QSignalBlocker selection(bendList->selectionModel());
+            const QSignalBlocker blockSelection(bendList->selectionModel());
             if (controller->editStrokes(revision, editRevision, dialog.edits())) {
                 toolContextId.clear();
                 toolContextMembers.clear();
