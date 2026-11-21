@@ -49,16 +49,21 @@ int main() {
         check(bool(doc), "Fixture import");
         std::cout << "bends=" << doc->metadata().bendAnalysis.bends.size() << '\n';
         std::vector<std::size_t> joint;
+        std::optional<std::size_t> tab;
         for (std::size_t i = 0; i < doc->metadata().bendAnalysis.bends.size(); ++i) {
             const auto &b = doc->metadata().bendAnalysis.bends[i];
             std::cout << i << " length=" << b.lengthMm << " axis=" << b.axisStart.x << ','
                       << b.axisStart.y << ',' << b.axisStart.z << '\n';
             if (b.lengthMm > 20)
                 joint.push_back(i);
+            else {
+                check(!tab, "Expected one short central tab");
+                tab = i;
+            }
         }
-        check(joint.size() == 2, "Missing two outer bend zones");
+        check(joint.size() == 2 && tab, "Missing two outer bend zones or the central tab");
         const auto reverse = hints(doc);
-        check(reverse.size() == 1 && reverse.front().bend == 0 &&
+        check(reverse.size() == 1 && reverse.front().bend == *tab &&
                   reverse.front().neighbours ==
                       ((std::uint64_t{1} << joint[0]) | (std::uint64_t{1} << joint[1])),
               "An opposite bend between the two zones was not recognised");
