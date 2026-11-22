@@ -119,6 +119,7 @@ struct RouteDraftBasis::Impl {
     std::vector<std::uint32_t> nodeRegions;
     std::vector<TopoDS_Shape> regionSolids;
     std::vector<Bnd_Box> regionBoxes;
+    std::vector<gp_Pnt> labelPoints;
     std::vector<bool> referenceReversed;
     std::optional<std::size_t> referenceWall;
 };
@@ -130,6 +131,14 @@ RouteDraftBasis::RouteDraftBasis(application::DocumentPtr source, application::F
     impl_->flat = std::move(flat);
     const auto &layout = OcctFlatPatternAccess::layout(*impl_->flat);
     const auto &native = dynamic_cast<const CadDocument &>(*impl_->source);
+    try {
+        const auto &bends = impl_->source->metadata().bendAnalysis.bends;
+        impl_->labelPoints.resize(bends.size());
+        for (const auto &region : layout.bends)
+            impl_->labelPoints[region.bendIndex] = bendLabelPoint(region, bends[region.bendIndex]);
+    } catch (const Standard_Failure &) {
+        impl_->labelPoints.clear();
+    }
     const double tolerance = native.metadata().bendAnalysis.lengthToleranceMm;
     impl_->referenceReversed.resize(native.metadata().bendAnalysis.bends.size());
     for (const auto &b : layout.bends)
@@ -552,6 +561,17 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
             maps.push_back([m](gp_Pnt pnt) { return pnt.Transformed(m); });
         for (const auto &b : layout.bends)
             maps.push_back(placement.bends[b.bendIndex]);
+        try {
+            frame.bendLabelAnchors.reserve(impl_->labelPoints.size());
+            for (std::size_t i = 0; i < impl_->labelPoints.size(); ++i) {
+                const auto anchor = placement.bends[i](impl_->labelPoints[i]).Transformed(machine);
+                frame.bendLabelAnchors.push_back({anchor.X(), anchor.Y(), anchor.Z()});
+            }
+        } catch (const Standard_Failure &) {
+            frame.bendLabelAnchors.clear();
+        } catch (const std::runtime_error &) {
+            frame.bendLabelAnchors.clear();
+        }
         std::array<TopoDS_Compound, 3> regions{compound(), compound(), compound()};
         for (std::size_t i = 0; i < n; ++i)
             frame.bendZones.push_back(compound());

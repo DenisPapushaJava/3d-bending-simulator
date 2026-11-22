@@ -9,6 +9,7 @@ struct RoutePlacement {
     std::vector<std::function<gp_Pnt(gp_Pnt)>> bends;
 };
 RoutePlacement routePlacement(const SheetLayout &, const std::vector<double> &progress);
+[[nodiscard]] gp_Pnt bendLabelPoint(const SheetBendRegion &, const application::RecognizedBend &);
 [[nodiscard]] std::optional<std::size_t> adjacentSheetWall(const SheetBendRegion &active,
                                                            const SheetBendRegion &other);
 [[nodiscard]] std::optional<std::array<double, 2>>

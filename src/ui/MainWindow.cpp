@@ -2423,8 +2423,16 @@ class MainWindow::Impl {
                 previewReplacement && previewReplacement->reposition &&
                 previewReplacement->editRevision == controller->session().editRevision() &&
                 index == 0 && (!viewingDraft || draftAutoPlay) && !collisionAt(preview, index);
+            std::span<const PointMm> bendLabelAnchors;
+            if (viewingRoute)
+                if (const auto route = controller->bendRoute();
+                    route && routePanel->operation() < route->steps.size()) {
+                    const auto &step = route->steps[routePanel->operation()];
+                    if (step.preview == preview && index < step.bendLabelAnchors.size())
+                        bendLabelAnchors = step.bendLabelAnchors[index];
+                }
             const auto failure = viewer->presentBendPreview(
-                preview, index, controller->session().revision(), reposition);
+                preview, index, controller->session().revision(), reposition, bendLabelAnchors);
             if (!failure.isEmpty()) {
                 previewDisplayError = failure;
                 controller->cancelRouteDraftPrefetch();
@@ -2437,6 +2445,8 @@ class MainWindow::Impl {
             displayedPreviewFrame = index;
             displayedPreviewRevision = controller->session().revision();
         }
+        if (propertyTabs->currentIndex() == 2)
+            viewer->setPreviewBendLabels(routePanel->previewBendLabels());
         previewReplacement.reset();
         previewDisplayError.clear();
         if (collisionAt(preview, index)) {
@@ -2569,8 +2579,10 @@ class MainWindow::Impl {
             !multiple && document &&
             ((stagePreview && stagePreview->pressMotion()) ||
              (controller->isPreparingPreview() && toolMode->currentIndex() == 0));
-        routePanel->stepStrip()->setVisible(propertyTabs->currentIndex() == 2 && document &&
-                                            (multiple || singleCycle));
+        const bool showSteps =
+            propertyTabs->currentIndex() == 2 && document && (multiple || singleCycle);
+        routePanel->stepStrip()->setVisible(showSteps);
+        bendLabels->setVisible(showSteps);
         routePanel->refresh(session, controller->bendRoute(), controller->bendRouteError(),
                             controller->hasWork() &&
                                 (!controller->isPreparingDraft() || session.activeRequest()),
@@ -3847,6 +3859,7 @@ class MainWindow::Impl {
     QWidget *operationOverlay = nullptr;
     BendMessagePanel *bendMessages = nullptr;
     QLabel *operationSummary = nullptr;
+    QCheckBox *bendLabels = nullptr;
     std::optional<std::uint64_t> shownBendEditRevision;
     int shownTargetRow = -1;
     QTabWidget *propertyTabs = nullptr;
@@ -4448,6 +4461,23 @@ MainWindow::MainWindow(RuntimeInfo runtime,
     impl_->operationSummary->setWordWrap(true);
     impl_->operationSummary->setTextFormat(Qt::PlainText);
     operationLayout->addWidget(impl_->operationSummary);
+    auto *bendLabels = impl_->bendLabels =
+        new QCheckBox(QStringLiteral("Метки гибов"), operationPanel);
+    bendLabels->setObjectName(QStringLiteral("showBendLabels"));
+    bendLabels->setToolTip(QStringLiteral("Показать буквы гибов в ленте шагов и на детали"));
+    const auto bendLabelsKey = QStringLiteral("display/bendLabels");
+    const bool showBendLabels = preferences()->value(bendLabelsKey, true).toBool();
+    bendLabels->setChecked(showBendLabels);
+    impl_->routePanel->setBendLabelsVisible(showBendLabels);
+    operationLayout->addWidget(bendLabels);
+    connect(bendLabels, &QCheckBox::toggled, this, [this, bendLabelsKey](bool visible) {
+        preferences()->setValue(bendLabelsKey, visible);
+        impl_->routePanel->setBendLabelsVisible(visible);
+        if (!visible ||
+            (!impl_->controller->isPreparingDraft() && !impl_->controller->isPreparingRoute() &&
+             !impl_->viewingSource && impl_->displayedPreview == impl_->scenePreview()))
+            impl_->viewer->setPreviewBendLabels(impl_->routePanel->previewBendLabels());
+    });
     impl_->checkFlatButton = new QPushButton(operationPanel);
     impl_->checkFlatButton->setObjectName(QStringLiteral("checkFlatPattern"));
     connect(impl_->checkFlatButton, &QPushButton::clicked, impl_->flatAction, &QAction::trigger);
@@ -4992,7 +5022,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         if (impl_->controller->bendRoute())
             impl_->showPlaybackPanel();
     };
-    impl_->routePanel->onHover = [this](std::optional<std::size_t> i) {
+    impl_->routePanel->onHover = [this](std::optional<std::size_t> i, const QString &caption) {
         bool activeZone = false;
         if (i) {
             const auto route = impl_->controller->bendRoute();
@@ -5004,7 +5034,7 @@ MainWindow::MainWindow(RuntimeInfo runtime,
             else if (!draft && document)
                 activeZone = *i == 0 && document->metadata().bendAnalysis.bends.size() == 1;
         }
-        impl_->viewer->highlightPreviewBend(i, activeZone);
+        impl_->viewer->highlightPreviewBend(i, activeZone, caption);
     };
     impl_->routePanel->onModeChanged = [this] {
         impl_->controller->discardBendRoute();
@@ -5061,6 +5091,8 @@ MainWindow::MainWindow(RuntimeInfo runtime,
         const int stage = page == 3 ? 1 : page == 2 ? 2 : 0;
         impl_->processNavigation->setCurrentStage(stage);
         if (page != 2) {
+            impl_->viewer->setPreviewBendLabels({});
+            impl_->viewer->highlightPreviewBend(std::nullopt);
             impl_->manualDraftWarmup.stop();
             impl_->warmDraftAfterSelection = false;
             impl_->controller->cancelRouteDraftPrefetch();

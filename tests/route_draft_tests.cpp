@@ -45,6 +45,8 @@ RouteDraftPtr run(cad::SingleBendPreviewBuilder &builder, const DocumentPtr &doc
         doc->metadata().volumeMm3 + doc->metadata().closedCutouts.addedVolumeMm3;
     for (std::size_t i = 0; i < d->visual->frameCount(); ++i) {
         const auto &f = cad::OcctPreviewAccess::frame(*d->visual, i);
+        require(f.bendLabelAnchors.size() == request.operations.size(),
+                "Draft frame lost source bend anchors");
         require(std::abs(volume(f.shape) - expected) < std::max(.02, expected * 1.e-7),
                 "Draft lost material");
         require(!f.displayShape.IsNull(), "Original cutout surface missing");

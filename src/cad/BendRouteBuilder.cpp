@@ -44,6 +44,7 @@
 #include <map>
 #include <mutex>
 #include <numbers>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -169,6 +170,80 @@ struct State {
     std::shared_ptr<const CadDocument> document;
     std::vector<std::optional<std::size_t>> indices;
 };
+struct CheckedTransition {
+    BendPreviewPtr preview;
+    std::size_t rootSide; // Verified by the comparison with the complete predecessor.
+};
+struct CheckedRouteStep {
+    BendRouteStep step;
+    std::size_t rootSide;
+};
+using CheckedTransitionResult = std::variant<CheckedTransition, BendPreviewError>;
+
+std::vector<std::vector<PointMm>> routeLabelAnchors(const SheetLayout &layout,
+                                                    const BendAnalysis &analysis, Mask mask,
+                                                    const CheckedRouteStep &checked,
+                                                    std::stop_token stop) {
+    const auto &step = checked.step;
+    const auto &preview = *step.preview;
+    const auto width = analysis.bends.size();
+    auto active = Mask{1} << step.bendIndex;
+    for (const auto &member : step.additionalBends)
+        active |= Mask{1} << member.bendIndex;
+    std::vector<double> progress(width);
+    for (std::size_t i = 0; i < width; ++i)
+        progress[i] = (mask & (Mask{1} << i)) ? 1. : 0.;
+    const auto placement = routePlacement(layout, progress);
+    const auto link = std::find_if(layout.bends.begin(), layout.bends.end(), [&](const auto &bend) {
+        return bend.bendIndex == step.bendIndex;
+    });
+    if (link == layout.bends.end())
+        return {};
+    const auto axes = link->sectionAxes.Transformed(placement.walls[link->parent]);
+    const gp_Vec axis(axes.Direction());
+    const auto axial = [&](const gp_Pnt &p) { return gp_Vec(axes.Location(), p).Dot(axis); };
+    std::vector<gp_Pnt> anchors(width);
+    std::vector<std::size_t> walls(layout.walls.size()), sides(width);
+    walls[0] = checked.rootSide;
+    double low = std::numeric_limits<double>::infinity(), high = -low;
+    for (const auto &region : layout.bends) {
+        const auto i = region.bendIndex;
+        const auto &bend = analysis.bends[i];
+        const bool forming = (active & (Mask{1} << i)) != 0;
+        sides[i] = walls[region.parent];
+        // Once the active edges are cut, every other zone moves with one flange.
+        walls[region.child] = forming ? 1 - sides[i] : sides[i];
+        const auto &place = placement.bends[i];
+        anchors[i] = place(bendLabelPoint(region, bend));
+        if (forming) {
+            const auto a = axial(place(point(bend.axisStart)));
+            const auto b = axial(place(point(bend.axisEnd)));
+            low = std::min({low, a, b});
+            high = std::max({high, a, b});
+        }
+    }
+    const auto middle = std::midpoint(low, high);
+    std::vector<std::vector<PointMm>> frames;
+    frames.reserve(preview.frameCount());
+    for (std::size_t f = 0; f < preview.frameCount(); ++f) {
+        cancelled(stop);
+        const auto &frame = OcctPreviewAccess::frame(preview, f);
+        if (!frame.dimensions)
+            return {};
+        const auto &section = *frame.dimensions;
+        const auto centre = section.bendMiddle.Translated(section.widthVector * .5);
+        const auto frameAxis = axis.Transformed(frame.materialTransforms[checked.rootSide]);
+        auto &points = frames.emplace_back();
+        points.reserve(width);
+        for (std::size_t i = 0; i < width; ++i) {
+            const auto p = (active & (Mask{1} << i))
+                               ? centre.Translated(frameAxis * (axial(anchors[i]) - middle))
+                               : anchors[i].Transformed(frame.materialTransforms[sides[i]]);
+            points.push_back({p.X(), p.Y(), p.Z()});
+        }
+    }
+    return frames;
+}
 struct TransitionInputs {
     RouteOperation operation;
     bool withTools, partialEndSupport;
@@ -269,7 +344,7 @@ struct CacheData {
     // Exact inputs are compared once per operation/request and shared by all its state keys.
     std::vector<std::weak_ptr<const TransitionInputs>> inputs;
     // Bound retained motion geometry independently of the supported route size.
-    TransitionLru<BendPreviewPtr, 32> transitions;
+    TransitionLru<CheckedTransition, 32> transitions;
     // Null rejection is a success hint. A positive verdict alone cannot publish a cycle.
     TransitionLru<std::optional<BendPreviewError>, 512> verdicts;
     BendWorkpieceReuse workpieces;
@@ -423,7 +498,7 @@ class RouteSearch {
         return preferred; // Soft handling preference only; the same exact checker follows.
     }
     std::set<Mask> dead;
-    std::vector<BendRouteStep> reversed;
+    std::vector<CheckedRouteStep> reversed;
     std::vector<TransitionKey> reversedKeys;
     std::size_t attempts = 0;
     std::string lastFailure;
@@ -1162,32 +1237,34 @@ class RouteSearch {
                                       const std::vector<RouteOperation> &additional = {}) const {
         if (request.withTools && request.reuseCalculations)
             if (const auto *preview = cache->transitions.peek(key(mask, op, side, additional)))
-                return endSupportLossRank(**preview);
+                return endSupportLossRank(*preview->preview);
         return {}; // Unknown is neutral. Ranking never requests a new CAD transition.
     }
-    void remember(TransitionKey key, BendPreviewResult result) {
+    void remember(TransitionKey key, const BendPreviewError &error) {
         if (!request.reuseCalculations)
             return;
         cancelled(stop);
-        if (const auto *error = std::get_if<BendPreviewError>(&result)) {
-            // Route search consumes the report, not the failed cycle. Never retain its
-            // diagnostic BReps/meshes here; single/manual previews have their own cache.
-            cache->verdicts.put(std::move(key), BendPreviewError{error->code,
-                                                                 error->detail,
-                                                                 error->frameIndex,
-                                                                 {},
-                                                                 error->endSupport,
-                                                                 error->axialSupportGap,
-                                                                 error->toolCollision,
-                                                                 error->dieWindow});
-        } else {
-            cache->transitions.put(key, std::get<BendPreviewPtr>(std::move(result)));
-            cache->verdicts.put(std::move(key), std::nullopt);
-        }
+        // The search retains the report, while diagnostic geometry has its own cache.
+        cache->verdicts.put(std::move(key), BendPreviewError{error.code,
+                                                             error.detail,
+                                                             error.frameIndex,
+                                                             {},
+                                                             error.endSupport,
+                                                             error.axialSupportGap,
+                                                             error.toolCollision,
+                                                             error.dieWindow});
     }
-    BendPreviewResult transition(Mask mask, const RouteOperation &op, bool fixedSecond,
-                                 const std::vector<RouteOperation> &additional,
-                                 const TransitionKey &wanted, PreparedBendOperationPtr &prepared) {
+    void remember(TransitionKey key, CheckedTransition transition) {
+        if (!request.reuseCalculations)
+            return;
+        cancelled(stop);
+        cache->transitions.put(key, std::move(transition));
+        cache->verdicts.put(std::move(key), std::nullopt);
+    }
+    CheckedTransitionResult transition(Mask mask, const RouteOperation &op, bool fixedSecond,
+                                       const std::vector<RouteOperation> &additional,
+                                       const TransitionKey &wanted,
+                                       PreparedBendOperationPtr &prepared) {
         if (request.reuseCalculations) {
             if (const auto *preview = cache->transitions.find(wanted)) {
                 ++statistics.reusedTransitions;
@@ -1280,8 +1357,8 @@ class RouteSearch {
             if (failure->code == BendPreviewErrorCode::BackgaugeUnavailable)
                 ++statistics.backgauge.noReferenceTransitions;
             if (stableRejection(failure->code))
-                remember(wanted, preview);
-            return preview;
+                remember(wanted, *failure);
+            return *failure;
         }
         const auto p = std::get<BendPreviewPtr>(preview);
         const auto missing = p->uncoveredToolLengthMm();
@@ -1322,8 +1399,9 @@ class RouteSearch {
             sameVolumeWithin(expected, material, tolerance, budget, stop);
         cancelled(stop);
         check(matchesPredecessor, "Operation start does not match the complete preceding state");
-        remember(wanted, preview);
-        return preview;
+        const CheckedTransition result{p, *rootSide};
+        remember(wanted, result);
+        return result;
     }
     std::vector<std::size_t> candidates(Mask mask) {
         std::vector<std::size_t> result;
@@ -1372,9 +1450,9 @@ class RouteSearch {
                     profileRank.empty() ? std::size_t{0}
                     : reversed.empty()
                         ? profileRank[op.bendIndex]
-                        : static_cast<std::size_t>(
-                              std::abs(static_cast<int>(profileRank[op.bendIndex]) -
-                                       static_cast<int>(profileRank[reversed.back().bendIndex])));
+                        : static_cast<std::size_t>(std::abs(
+                              static_cast<int>(profileRank[op.bendIndex]) -
+                              static_cast<int>(profileRank[reversed.back().step.bendIndex])));
                 // Preserve a potential common stroke while undoing its separating
                 // neighbours. This is only a ranking preference, never precedence.
                 const bool separatesJoint =
@@ -1796,7 +1874,7 @@ class RouteSearch {
                 if (const auto *v = cache->verdicts.peek(wanted))
                     verdict = v->has_value() ? 2 : 0;
                 if (const auto *p = cache->transitions.peek(wanted))
-                    support = endSupportLossRank(**p);
+                    support = endSupportLossRank(*p->preview);
             }
             return std::pair{verdict, support};
         };
@@ -1900,14 +1978,15 @@ class RouteSearch {
                     prepared.reset();
                     for (auto &member : resolved)
                         member.workpieceOffsetMm = offset;
-                    reversed.push_back({op.id, op.bendIndex, fixedSecond,
-                                        std::get<BendPreviewPtr>(std::move(preview)),
-                                        std::move(resolved)});
+                    auto checked = std::get<CheckedTransition>(std::move(preview));
+                    reversed.push_back({{op.id, op.bendIndex, fixedSecond,
+                                         std::move(checked.preview), std::move(resolved)},
+                                        checked.rootSide});
                     const auto original = std::find_if(
                         request.operations.begin(), request.operations.end(),
                         [&](const auto &value) { return value.bendIndex == op.bendIndex; });
                     if (op.assignment != original->assignment)
-                        reversed.back().assemblyAssignment =
+                        reversed.back().step.assemblyAssignment =
                             std::shared_ptr<const core::ToolAssignment>(
                                 wanted.inputs, &*wanted.inputs->operation.assignment);
                     reversedKeys.push_back(wanted);
@@ -2126,7 +2205,8 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
             const auto full = (Mask{1} << bends.size()) - 1;
             std::lock_guard guard(checked->mutex);
             const auto found = checked->transitions.findMatching([&](const auto &entry,
-                                                                     const auto &preview) {
+                                                                     const auto &transition) {
+                const auto &preview = transition.preview;
                 const auto &input = *entry.inputs;
                 const auto &op = input.operation;
                 return entry.mask == full && entry.jointInputs.empty() &&
@@ -2141,7 +2221,7 @@ BendPreviewResult SingleBendPreviewBuilder::cachedOperation(
                        preview->punchRetraction() && preview->endSupportLimitMm() == limit;
             });
             if (found)
-                reused = *found;
+                reused = found->preview;
         }
     }
     if (stop.stop_requested())
@@ -2857,13 +2937,23 @@ BendRouteResult SingleBendPreviewBuilder::buildRouteImpl(DocumentPtr document,
         result->manualExtraction = search.request.manualExtraction;
         result->evaluatedOperations = search.attempts;
         result->statistics = search.statistics;
-        result->steps.assign(search.reversed.rbegin(), search.reversed.rend());
+        result->steps.reserve(search.reversed.size());
+        for (std::size_t i = search.reversed.size(); i-- > 0;) {
+            auto &checked = search.reversed[i];
+            const auto &key = search.reversedKeys[i];
+            try {
+                checked.step.bendLabelAnchors =
+                    routeLabelAnchors(*search.layout, analysis, key.mask, checked, stop);
+            } catch (const Standard_Failure &) {
+                // Display anchors are optional, independent of the checked cycle.
+            } catch (const std::runtime_error &) {
+                // An unsupported display mapping leaves the checked route available.
+            }
+            // Retain the successful route beyond the search working set.
+            search.remember(key, CheckedTransition{checked.step.preview, checked.rootSide});
+            result->steps.push_back(std::move(checked.step));
+        }
         if (search.request.reuseCalculations) {
-            // A complete path can be longer than the working set of an earlier partial
-            // branch. Retain its exact checked cycles, not previews from failed branches.
-            for (std::size_t i = 0; i < result->steps.size(); ++i)
-                search.remember(search.reversedKeys[result->steps.size() - 1 - i],
-                                result->steps[i].preview);
             const auto &first = result->steps.front();
             if (first.additionalBends.empty()) {
                 const auto input =
@@ -2878,7 +2968,8 @@ BendRouteResult SingleBendPreviewBuilder::buildRouteImpl(DocumentPtr document,
                 active.workpieceReversed = first.fixedSecond;
                 active.workpieceOffsetMm = first.preview->workpieceOffsetMm();
                 cancelled(stop);
-                work->drafts.rememberBlank(document, std::move(active), first.preview);
+                work->drafts.rememberBlank(document, std::move(active), first.preview,
+                                           first.bendLabelAnchors);
             }
         }
         result->partialEndSupport =

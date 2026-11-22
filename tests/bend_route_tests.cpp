@@ -2,7 +2,9 @@
 #include "bending/cad/SingleBendPreviewBuilder.h"
 #include "bending/cad/StepImporter.h"
 #include "bending/cad/occt/PreviewAccess.h"
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <STEPControl_Writer.hxx>
@@ -74,10 +76,24 @@ int main(int argc, char **argv) {
             const auto &step = route->steps[i];
             require(seen.insert(step.bendIndex).second && step.preview->otherFormedBends() == i,
                     "Duplicate zone or other bends do not represent the route prefix");
+            require(step.bendLabelAnchors.size() == step.preview->frameCount(),
+                    "Checked operation is missing bend anchors");
             std::cout << i + 1 << ": B" << step.bendIndex + 1 << " fixed=" << step.fixedSecond
                       << '\n';
             for (std::size_t f = 0; f < step.preview->frameCount(); ++f) {
                 const auto &frame = cad::OcctPreviewAccess::frame(*step.preview, f);
+                const auto &anchors = step.bendLabelAnchors[f];
+                require(anchors.size() == bends.size(), "Missing non-active bend anchor");
+                if (!sample && (f == 0 || f == step.preview->frameCount() / 2 ||
+                                f + 1 == step.preview->frameCount())) {
+                    for (const auto &p : anchors) {
+                        const auto vertex =
+                            BRepBuilderAPI_MakeVertex(gp_Pnt(p.x, p.y, p.z)).Vertex();
+                        BRepExtrema_DistShapeShape distance(vertex, frame.shape);
+                        require(distance.IsDone() && distance.Value() < 1.e-3,
+                                "A bend label detached from its moving sheet");
+                    }
+                }
                 const double materialVolume =
                     volume(frame.regions[0]) + volume(frame.regions[1]) + volume(frame.regions[2]);
                 require(

@@ -61,7 +61,8 @@ void RouteDraftCache::remember(const RouteDraftPtr &draft) {
          draft->centredPunchOpeningMm});
 }
 void RouteDraftCache::rememberBlank(DocumentPtr source, RouteOperation active,
-                                    const BendPreviewPtr &cycle) {
+                                    const BendPreviewPtr &cycle,
+                                    std::span<const std::vector<PointMm>> labelAnchors) {
     const auto p = std::dynamic_pointer_cast<const CadPreview>(cycle);
     if (!source || !p || p->draft || p->activeBends != 1 || p->otherBends != 0 ||
         p->frames.empty() || p->toolCore || !p->motion || !p->retraction || !p->setup ||
@@ -102,6 +103,8 @@ void RouteDraftCache::rememberBlank(DocumentPtr source, RouteOperation active,
     blank->envelope = p->envelope;
     blank->setup = p->setup;
     blank->frames.push_back(p->frames[index]);
+    if (index < labelAnchors.size())
+        blank->frames.front().bendLabelAnchors = labelAnchors[index];
     blank->frames.front().backgaugeContacts = p->frames.front().backgaugeContacts;
     blank->frameConflicts.emplace_back();
     blank->machineConflicts.emplace_back();

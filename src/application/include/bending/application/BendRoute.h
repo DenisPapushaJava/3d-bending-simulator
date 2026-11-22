@@ -124,6 +124,8 @@ struct BendRouteStep {
     // Only an explicitly authorized assembly search may change this snapshot.
     // Alias of an interned immutable input, not a new DXF copy for each state.
     std::shared_ptr<const core::ToolAssignment> assemblyAssignment = {};
+    // Display-only points in frame coordinates, indexed by frame and original bend zone.
+    std::vector<std::vector<PointMm>> bendLabelAnchors = {};
 };
 struct BendRoute {
     DocumentPtr source;

@@ -16,6 +16,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
+#include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEnterEvent>
 #include <QKeyEvent>
@@ -978,6 +979,27 @@ int main(int argc, char **argv) {
         require(controller.routeDraft() && controller.routeDraft()->request.step == 4,
                 "Cannot recover from a failed replacement");
         const auto original = order(controller);
+        auto *bendLabels = window.findChild<QCheckBox *>("showBendLabels");
+        const auto *taskPanel = window.findChild<QDockWidget *>("propertiesDock");
+        require(bendLabels && bendLabels->isChecked() && bendLabels->isVisible() && taskPanel &&
+                    taskPanel->isAncestorOf(bendLabels),
+                "Bend labels should start enabled in the bending task panel");
+        const auto draftsBeforeLabels = builder->drafts.load();
+        const auto letter = [](const std::string &id) {
+            return QString(QLatin1Char(
+                static_cast<char>('A' + QString::fromStdString(id).section('-', -1).toInt() - 1)));
+        };
+        const auto fourthCaption = QStringLiteral("4 · %1").arg(letter(original.back()));
+        require(step(4)->text() == fourthCaption, "Default strip is missing bend labels");
+        bendLabels->click();
+        require(!bendLabels->isChecked() && step(4)->text() == "4" &&
+                    !ui::preferences()->value("display/bendLabels", true).toBool(),
+                "Turning bend labels off did not update the strip or save the preference");
+        bendLabels->click();
+        require(step(0)->text() == "0" && step(4)->text() == fourthCaption &&
+                    ui::preferences()->value("display/bendLabels").toBool() &&
+                    builder->drafts == draftsBeforeLabels && !controller.hasWork(),
+                "Enabling bend labels changed the model or used the route position as identity");
         auto expected = original;
         const auto id = expected.back();
         expected.pop_back();
@@ -990,6 +1012,14 @@ int main(int argc, char **argv) {
             window.activateWindow();
             QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
             QApplication::processEvents();
+            viewer->setOrientation(viewer::ViewerWidget::Orientation::Isometric);
+            viewer->fitAll();
+            const auto labelled = viewer->captureImage();
+            bendLabels->click();
+            const auto unlabelled = viewer->captureImage();
+            bendLabels->click();
+            require(!labelled.isNull() && labelled != unlabelled,
+                    "Enabled labels were absent from the native viewport");
             if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
                 !output.isEmpty()) {
                 auto shot = window.grab().toImage();
@@ -999,30 +1029,58 @@ int main(int argc, char **argv) {
                 require(shot.save(output + "-before-drag.png"), "Cannot capture drag layout");
             }
             const auto start = step(4)->mapToGlobal(step(4)->rect().center());
-            const auto end = step(2)->mapToGlobal(QPoint(2, step(2)->height() / 2));
+            const auto end = step(2)->mapToGlobal(QPoint(4, step(2)->height() / 2));
             QProcess mouse;
             const QString script = QStringLiteral(R"PY(import ctypes as c, sys, time
 x=c.CDLL('libX11.so.6');t=c.CDLL('libXtst.so.6')
 x.XOpenDisplay.restype=c.c_void_p
 x.XFlush.argtypes=[c.c_void_p];x.XCloseDisplay.argtypes=[c.c_void_p]
+x.XKeysymToKeycode.argtypes=[c.c_void_p,c.c_ulong]
 t.XTestFakeMotionEvent.argtypes=[c.c_void_p,c.c_int,c.c_int,c.c_int,c.c_ulong]
 t.XTestFakeButtonEvent.argtypes=[c.c_void_p,c.c_uint,c.c_int,c.c_ulong]
+t.XTestFakeKeyEvent.argtypes=[c.c_void_p,c.c_uint,c.c_int,c.c_ulong]
 d=x.XOpenDisplay(None)
 assert d
-sx,sy,ex,ey=map(int,sys.argv[1:])
+sx,sy,ex,ey,cancel=map(int,sys.argv[1:])
 def move(a,b):
     t.XTestFakeMotionEvent(d,-1,a,b,0);x.XFlush(d);time.sleep(.2)
 move(sx,sy)
 t.XTestFakeButtonEvent(d,1,1,0);x.XFlush(d);time.sleep(.2)
-move(sx-15,sy);move(ex,ey)
+move(sx-22,sy);move((sx+ex)//2,ey);move(ex+1,ey);move(ex,ey)
+time.sleep(.6)
+if cancel:
+    esc=x.XKeysymToKeycode(d,0xff1b)
+    t.XTestFakeKeyEvent(d,esc,1,0);t.XTestFakeKeyEvent(d,esc,0,0)
+    x.XFlush(d);time.sleep(.2)
 t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d);time.sleep(.2)
 x.XCloseDisplay(d)
 )PY");
-            mouse.start("python3",
-                        {"-c", script, QString::number(start.x()), QString::number(start.y()),
-                         QString::number(end.x()), QString::number(end.y())});
-            wait([&] { return mouse.state() == QProcess::NotRunning; });
-            require(mouse.exitCode() == 0, "Native drag driver failed");
+            const auto target = QStringLiteral("%1 перед %2").arg(letter(id), letter(original[1]));
+            auto *dropHint = window.findChild<QLabel *>("routeDropHint");
+            require(dropHint, "Insertion hint is missing from the drag strip");
+            for (const bool cancel : {true, false}) {
+                bool sawTarget = false;
+                QTimer watchTarget;
+                watchTarget.setInterval(20);
+                QObject::connect(&watchTarget, &QTimer::timeout, [&] {
+                    sawTarget |= dropHint->isVisible() && dropHint->text() == target;
+                });
+                watchTarget.start();
+                mouse.start("python3", {"-c", script, QString::number(start.x()),
+                                        QString::number(start.y()), QString::number(end.x()),
+                                        QString::number(end.y()), QString::number(cancel)});
+                wait([&] { return mouse.state() == QProcess::NotRunning; });
+                require(mouse.exitCode() == 0, "Native drag driver failed");
+                if (!sawTarget)
+                    throw std::runtime_error("Missing live insertion target: expected " +
+                                             target.toStdString() + ", last " +
+                                             dropHint->text().toStdString() +
+                                             (cancel ? " (Esc)" : " (drop)"));
+                if (cancel)
+                    require(order(controller) == original && step(0)->isChecked() &&
+                                !controller.hasWork() && !dropHint->isVisible(),
+                            "Esc left a drag hint, switched the step or changed the route");
+            }
         } else {
             window.findChild<QPushButton *>("routeMoveEarlier")->click();
             window.findChild<QPushButton *>("routeMoveEarlier")->click();
@@ -1034,7 +1092,7 @@ x.XCloseDisplay(d)
                       << ", searches " << builder->searches << '\n';
         const int selectedAfterReorder = nativeDrag ? 0 : 2;
         require(order(controller) == expected && step(selectedAfterReorder)->isChecked() &&
-                    step(2)->text() == "2" &&
+                    step(2)->text() == QStringLiteral("2 · %1").arg(letter(id)) &&
                     step(2)->property("routeId").toString().toStdString() == id &&
                     controller.routeDraft() &&
                     controller.routeDraft()->request.step ==

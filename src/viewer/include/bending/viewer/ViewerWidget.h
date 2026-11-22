@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/Document.h"
 #include "bending/viewer/ToolSegmentColors.h"
 #include <QImage>
 #include <QWidget>
@@ -9,14 +10,12 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 class QMenu;
 class QAction;
 namespace bending::application {
-class Document;
-struct RecognizedBend;
-struct BendInteriorContourDiagnostic;
 class SingleBendPreview;
 struct RouteDraftPose;
 class FlatPattern;
@@ -71,12 +70,15 @@ class ViewerWidget final : public QWidget {
     void highlightBend(const application::RecognizedBend &bend, quint64 revision);
     void highlightBendZones(const std::vector<std::size_t> &indices, quint64 revision);
     void setBendStrokePartitions(std::vector<unsigned> partitions, quint64 revision);
-    void highlightPreviewBend(std::optional<std::size_t>, bool activeZone = false);
+    void setPreviewBendLabels(std::vector<std::pair<std::size_t, QString>>);
+    void highlightPreviewBend(std::optional<std::size_t>, bool activeZone = false,
+                              const QString &caption = {});
     void highlightBendDiagnostic(const application::BendInteriorContourDiagnostic &diagnostic,
                                  quint64 revision);
     [[nodiscard]] QString
     presentBendPreview(std::shared_ptr<const application::SingleBendPreview> preview,
-                       std::size_t frameIndex, quint64 documentRevision, bool reposition = false);
+                       std::size_t frameIndex, quint64 documentRevision, bool reposition = false,
+                       std::span<const application::PointMm> bendLabelAnchors = {});
     [[nodiscard]] QString endBendPreview();
     [[nodiscard]] QString presentFlatPattern(std::shared_ptr<const application::FlatPattern>,
                                              quint64 documentRevision);

@@ -72,6 +72,7 @@ struct PreviewFrame {
     TopoDS_Shape displayShape;
     std::array<TopoDS_Shape, 3> displayRegions; // Complete display skin, excluding tools/machine.
     std::vector<TopoDS_Shape> bendZones;        // Optional draft highlights by original bend index.
+    std::vector<application::PointMm> bendLabelAnchors; // Draft positions by original bend index.
     // World-space attachments prepared from the same section/basis as the solid.
     std::optional<BendDimensionAnchors> dimensions;
 };

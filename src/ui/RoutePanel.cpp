@@ -7,6 +7,7 @@
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMimeData>
@@ -21,6 +22,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <span>
 namespace bending::ui {
 QString routeFailureReason(const application::BendRouteError &error) {
     QString message;
@@ -98,18 +100,27 @@ QString routeFailureReason(const application::BendRouteError &error) {
 }
 namespace {
 const char *stepMime = "application/x-bending-route-step";
+QString bendCode(std::size_t index) {
+    return QStringLiteral("B%1").arg(index + 1, 2, 10, QLatin1Char('0'));
+}
+QString bendLetter(std::size_t index) {
+    if (index < 26)
+        return QString(QLatin1Char(static_cast<char>('A' + index)));
+    return bendCode(index);
+}
 QString stepZones(const application::BendRouteStep &step) {
     if (step.additionalBends.size() > 2)
         return QStringLiteral("Участков %1").arg(step.additionalBends.size() + 1);
-    auto result = QStringLiteral("B%1").arg(step.bendIndex + 1, 2, 10, QLatin1Char('0'));
+    auto result = bendCode(step.bendIndex);
     for (const auto &member : step.additionalBends)
-        result += QStringLiteral(" + B%1").arg(member.bendIndex + 1, 2, 10, QLatin1Char('0'));
+        result += QStringLiteral(" + ") + bendCode(member.bendIndex);
     return result;
 }
 class StepButton final : public QPushButton {
   public:
     using QPushButton::QPushButton;
     std::function<void(bool)> hovered;
+    std::function<void(bool)> dragging;
 
   protected:
     void enterEvent(QEnterEvent *e) override {
@@ -123,20 +134,48 @@ class StepButton final : public QPushButton {
             hovered(false);
     }
     void mousePressEvent(QMouseEvent *e) override {
+        pressed_ = e->button() == Qt::LeftButton;
         start_ = e->position().toPoint();
         QPushButton::mousePressEvent(e);
     }
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        pressed_ = false;
+        QPushButton::mouseReleaseEvent(e);
+    }
     void mouseMoveEvent(QMouseEvent *e) override {
-        if ((e->buttons() & Qt::LeftButton) && property("routePosition").toInt() > 0 &&
+        if (pressed_ && (e->buttons() & Qt::LeftButton) && property("routePosition").toInt() > 0 &&
             (e->position().toPoint() - start_).manhattanLength() >=
                 QApplication::startDragDistance()) {
+            pressed_ = false;
+            const auto notifyDrag = dragging;
             QPointer<QDrag> drag = new QDrag(this);
             auto *mime = new QMimeData;
             mime->setData(stepMime, property("routeId").toString().toUtf8());
             drag->setMimeData(mime);
-            drag->setPixmap(grab());
             setDown(false);
+            const auto caption = property("dragCaption").toString();
+            QPixmap card(QSize(fontMetrics().horizontalAdvance(caption) + 24, height()) *
+                         devicePixelRatioF());
+            card.setDevicePixelRatio(devicePixelRatioF());
+            card.fill(Qt::transparent);
+            {
+                QPainter painter(&card);
+                painter.setRenderHint(QPainter::Antialiasing);
+                const QRectF rect(QPointF{}, QSizeF(card.size()) / card.devicePixelRatio());
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor("#087F83"));
+                painter.drawRoundedRect(rect, 4, 4);
+                painter.setPen(Qt::white);
+                painter.setFont(font());
+                painter.drawText(rect, Qt::AlignCenter, caption);
+            }
+            drag->setPixmap(card);
+            drag->setHotSpot(QPoint(8, height() - 2));
+            if (notifyDrag)
+                notifyDrag(true);
             drag->exec(Qt::MoveAction);
+            if (notifyDrag)
+                notifyDrag(false);
             if (drag)
                 drag->deleteLater();
             return;
@@ -146,17 +185,35 @@ class StepButton final : public QPushButton {
 
   private:
     QPoint start_;
+    bool pressed_ = false;
 };
 class StepCanvas final : public QWidget {
   public:
-    explicit StepCanvas(QWidget *parent) : QWidget(parent) {
+    explicit StepCanvas(QScrollArea *scroll) : QWidget(scroll), scroll_(scroll) {
         setAcceptDrops(true);
+        dragHint_ = new QLabel(scroll_->parentWidget());
+        dragHint_->setObjectName(QStringLiteral("routeDropHint"));
+        dragHint_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        dragHint_->setTextFormat(Qt::PlainText);
+        dragHint_->setStyleSheet(
+            QStringLiteral("QLabel{background:#E5F3F3;color:#1C2938;border:1px solid #087F83;"
+                           "border-radius:4px;padding:2px 8px;}"));
+        dragHint_->hide();
+        scrollTimer_.setInterval(35);
+        connect(&scrollTimer_, &QTimer::timeout, this, [this] {
+            auto *bar = scroll_->horizontalScrollBar();
+            const auto previous = bar->value();
+            bar->setValue(previous + scrollDelta_);
+            if (bar->value() == previous)
+                scrollTimer_.stop();
+            updateMarker();
+        });
     }
     std::function<void(int, int)> moved;
     std::vector<QPushButton *> buttons;
-    void clearMarker() {
-        marker_ = -1;
-        update();
+    void finishDropPreview() {
+        scrollTimer_.stop();
+        clearMarker();
     }
 
   protected:
@@ -183,33 +240,30 @@ class StepCanvas final : public QWidget {
     }
     void dragMoveEvent(QDragMoveEvent *e) override {
         if (!accepts(e)) {
+            finishDropPreview();
             e->ignore();
             return;
         }
-        const auto at = slot(e->position().toPoint());
-        marker_ = at < static_cast<int>(buttons.size())
-                      ? buttons[static_cast<std::size_t>(at)]->x() - 2
-                      : buttons.back()->geometry().right() + 2;
-        if (auto *scroll = qobject_cast<QScrollArea *>(parentWidget()->parentWidget())) {
-            const auto x = mapTo(scroll->viewport(), e->position().toPoint()).x();
-            if (x < 28)
-                scroll->horizontalScrollBar()->setValue(scroll->horizontalScrollBar()->value() -
-                                                        20);
-            else if (x > scroll->viewport()->width() - 28)
-                scroll->horizontalScrollBar()->setValue(scroll->horizontalScrollBar()->value() +
-                                                        20);
-        }
-        update();
+        cursor_ = mapTo(scroll_->viewport(), e->position().toPoint());
+        from_ = e->source()->property("routePosition").toInt();
+        scrollDelta_ = cursor_.x() < 28                                  ? -18
+                       : cursor_.x() > scroll_->viewport()->width() - 28 ? 18
+                                                                         : 0;
+        if (scrollDelta_ == 0)
+            scrollTimer_.stop();
+        else if (!scrollTimer_.isActive())
+            scrollTimer_.start();
+        updateMarker();
         e->setDropAction(Qt::MoveAction);
-        e->accept();
+        e->accept(QRect{});
     }
     void dragLeaveEvent(QDragLeaveEvent *e) override {
-        clearMarker();
+        finishDropPreview();
         e->accept();
     }
     void dropEvent(QDropEvent *e) override {
         if (!accepts(e)) {
-            clearMarker();
+            finishDropPreview();
             e->ignore();
             return;
         }
@@ -217,7 +271,7 @@ class StepCanvas final : public QWidget {
         int to = slot(e->position().toPoint());
         if (to > from)
             --to;
-        clearMarker();
+        finishDropPreview();
         e->setDropAction(Qt::MoveAction);
         e->accept();
         if (moved)
@@ -227,12 +281,53 @@ class StepCanvas final : public QWidget {
         QWidget::paintEvent(e);
         if (marker_ >= 0) {
             QPainter p(this);
-            p.setPen(QPen(QColor("#087F83"), 3));
-            p.drawLine(marker_, 3, marker_, 39);
+            p.setPen(QPen(QColor("#087F83"), 3, Qt::SolidLine, Qt::RoundCap));
+            p.drawLine(marker_, 4, marker_, 33);
+            p.drawLine(marker_ - 3, 4, marker_ + 3, 4);
+            p.drawLine(marker_ - 3, 33, marker_ + 3, 33);
         }
     }
 
   private:
+    void clearMarker() {
+        if (marker_ < 0)
+            return;
+        marker_ = -1;
+        dragHint_->hide();
+        update();
+    }
+    void updateMarker() {
+        const auto at = slot(mapFrom(scroll_->viewport(), cursor_));
+        if (from_ <= 0 || from_ >= static_cast<int>(buttons.size()) || at == from_ ||
+            at == from_ + 1) {
+            clearMarker();
+            return;
+        }
+        const auto *next =
+            at < static_cast<int>(buttons.size()) ? buttons[static_cast<std::size_t>(at)] : nullptr;
+        const auto marker = next ? next->x() - 2 : buttons.back()->geometry().right() + 2;
+        if (marker != marker_) {
+            marker_ = marker;
+            const auto source =
+                buttons[static_cast<std::size_t>(from_)]->property("bendLabel").toString();
+            dragHint_->setText(next ? QStringLiteral("%1 перед %2")
+                                          .arg(source, next->property("bendLabel").toString())
+                                    : QStringLiteral("%1 в конец").arg(source));
+            dragHint_->adjustSize();
+            update();
+        }
+        const auto *host = dragHint_->parentWidget();
+        const int x = mapTo(host, QPoint(marker_, 0)).x() - dragHint_->width() / 2;
+        dragHint_->move(std::clamp(x, 0, std::max(0, host->width() - dragHint_->width())),
+                        host->height() - dragHint_->height());
+        dragHint_->raise();
+        dragHint_->show();
+    }
+    QScrollArea *scroll_;
+    QLabel *dragHint_;
+    QTimer scrollTimer_;
+    QPoint cursor_;
+    int from_ = 0, scrollDelta_ = 0;
     int marker_ = -1;
 };
 } // namespace
@@ -280,7 +375,7 @@ RoutePanel::RoutePanel(QWidget *parent) : QWidget(parent) {
     auto *strip = new StepCanvas(scroll);
     strip->moved = [this](int from, int to) { moveTo(from, to, false); };
     strip_ = new QHBoxLayout(strip);
-    strip_->setContentsMargins(0, 0, 0, 0);
+    strip_->setContentsMargins(0, 0, 6, 0);
     strip_->setSpacing(4);
     strip_->setAlignment(Qt::AlignTop);
     scroll->setWidget(strip);
@@ -379,6 +474,46 @@ void RoutePanel::setWithTools(bool withTools) {
 }
 bool RoutePanel::withTools() const {
     return mode_->currentIndex() != 0;
+}
+void RoutePanel::setBendLabelsVisible(bool visible) {
+    if (bendLabelsVisible_ == visible)
+        return;
+    bendLabelsVisible_ = visible;
+    updateStepCaptions();
+    strip_->activate();
+    select(selected_, false);
+}
+std::vector<std::pair<std::size_t, QString>> RoutePanel::previewBendLabels() const {
+    if (!bendLabelsVisible_ || indices_.empty())
+        return {};
+    std::vector<std::pair<std::size_t, QString>> labels;
+    labels.reserve(sourceIndices_.size());
+    const auto active = indices_[operation()];
+    labels.emplace_back(active, bendLetter(active));
+    for (const auto i : sourceIndices_)
+        if (i != active)
+            labels.emplace_back(i, bendLetter(i));
+    return labels;
+}
+void RoutePanel::highlightStep(std::size_t step) {
+    if (!onHover)
+        return;
+    if (step > 0 && step <= indices_.size())
+        onHover(indices_[step - 1], bendLabels_[step - 1]);
+    else
+        onHover(std::nullopt, {});
+}
+void RoutePanel::updateStepCaptions() {
+    for (std::size_t i = 1; i < steps_.size(); ++i) {
+        const auto number = QString::number(i);
+        const auto caption = QStringLiteral("%1 · %2").arg(number, bendLabels_[i - 1]);
+        auto *button = steps_[i];
+        button->setProperty("bendLabel", bendLabels_[i - 1]);
+        button->setProperty("dragCaption", caption);
+        button->setText(bendLabelsVisible_ ? caption : number);
+        button->setFixedWidth(
+            std::max(40, button->fontMetrics().horizontalAdvance(button->text()) + 14));
+    }
 }
 QString RoutePanel::statusText() const {
     return status_->text();
@@ -479,18 +614,32 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         undo_.clear();
         redo_.clear();
     }
-    const auto sourceIndices = session.orderedBends();
+    sourceIndices_ = session.orderedBends();
+    const auto &sourceIndices = sourceIndices_;
     sourceIds_.clear();
     for (const auto index : sourceIndices)
         if (const auto *entry = session.bend(index))
             sourceIds_.push_back(entry->id);
     std::vector<std::size_t> indices;
     std::vector<std::string> ids;
+    bendLabels_.clear();
+    QStringList fullLabels;
+    const auto appendLabel = [&](std::size_t primary, const auto &members, auto indexOf) {
+        QStringList names{bendLetter(primary)};
+        for (const auto &member : members)
+            names.push_back(bendLetter(indexOf(member)));
+        bendLabels_.push_back(names.size() > 2
+                                  ? QStringLiteral("%1+%2").arg(names.front()).arg(names.size() - 1)
+                                  : names.join(QLatin1Char('+')));
+        fullLabels.push_back(names.join(QStringLiteral(", ")));
+    };
     draftGroups_.clear();
     if (route) {
         for (const auto &step : route->steps) {
             ids.push_back(step.id);
             indices.push_back(step.bendIndex);
+            appendLabel(step.bendIndex, step.additionalBends,
+                        [](const auto &member) { return member.bendIndex; });
         }
     } else if (session.document()) {
         for (const auto &stroke : session.bendStrokes(sourceIndices)) {
@@ -501,6 +650,8 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             if (!group.empty()) {
                 indices.push_back(stroke.front());
                 ids.push_back(group.front());
+                appendLabel(stroke.front(), std::span(stroke).subspan(1),
+                            [](auto index) { return index; });
                 draftGroups_.push_back(std::move(group));
             }
         }
@@ -530,23 +681,20 @@ void RoutePanel::refresh(const application::DocumentSession &session,
             const auto title = QString::number(i);
             auto *button = new StepButton(title, strip_->parentWidget());
             button->hovered = [this, i](bool entered) {
-                if (onHover)
-                    onHover(entered && i && i <= indices_.size() ? std::optional{indices_[i - 1]}
-                                                                 : std::nullopt);
+                if (!draggingStep_)
+                    highlightStep(entered ? i : 0);
+            };
+            button->dragging = [panel = QPointer(this), i](bool dragging) {
+                if (!panel)
+                    return;
+                panel->draggingStep_ = dragging;
+                if (!dragging)
+                    static_cast<StepCanvas *>(panel->strip_->parentWidget())->finishDropPreview();
+                panel->highlightStep(dragging ? i : 0);
             };
             button->setObjectName(QStringLiteral("routeStep%1").arg(i));
             button->setCheckable(true);
             button->setFixedSize(40, 36);
-            button->setToolTip(
-                i == 0 ? QStringLiteral("0 — заготовка до первого гиба")
-                       : (route_ ? QStringLiteral("Шаг %1 · B%2 · показать начало операции")
-                                 : QStringLiteral("Черновик: шаг %1 · B%2 · выделить гиб детали"))
-                             .arg(i)
-                             .arg(indices_[i - 1] + 1, 2, 10, QLatin1Char('0')));
-            button->setAccessibleName(i == 0 ? QStringLiteral("Показать заготовку")
-                                             : (route_ ? QStringLiteral("Показать операцию %1")
-                                                       : QStringLiteral("Выделить гиб для шага %1"))
-                                                   .arg(i));
             strip_->addWidget(button);
             steps_.push_back(button);
             connect(button, &QPushButton::clicked, this,
@@ -571,13 +719,17 @@ void RoutePanel::refresh(const application::DocumentSession &session,
         }
         steps_[i]->setToolTip(
             i ? (route_ ? QString{} : QStringLiteral("Черновик · ")) +
-                    QStringLiteral("Шаг %1 · %2 · форма после гиба. Перетащите между шагами.")
+                    QStringLiteral("Шаг %1 · %2 (%3)\nКлик — начало гиба. "
+                                   "Перетащите для смены порядка.")
                         .arg(i)
-                        .arg(route_ ? stepZones(route_->steps[i - 1]) : draftZones.join(" + "))
+                        .arg(fullLabels[i - 1],
+                             route_ ? stepZones(route_->steps[i - 1]) : draftZones.join(" + "))
               : QStringLiteral("0 — заготовка: все гибы разогнуты"));
-        steps_[i]->setAccessibleName(i ? QStringLiteral("Показать результат шага %1").arg(i)
-                                       : QStringLiteral("Показать заготовку"));
+        steps_[i]->setAccessibleName(
+            i ? QStringLiteral("Шаг %1 · гиб %2").arg(i).arg(fullLabels[i - 1])
+              : QStringLiteral("Показать заготовку"));
     }
+    updateStepCaptions();
     bool included =
         !ids_.empty() && session.document() &&
         sourceIndices.size() == session.document()->metadata().bendAnalysis.bends.size();

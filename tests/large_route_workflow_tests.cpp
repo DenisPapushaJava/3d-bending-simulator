@@ -5,8 +5,10 @@
 #include "bending/project/ProjectFiles.h"
 #include "bending/ui/ImportController.h"
 #include "bending/ui/MainWindow.h"
+#include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QElapsedTimer>
 #include <QLabel>
 #include <QPainter>
@@ -93,6 +95,7 @@ int main(int argc, char **argv) {
     QTemporaryDir folder;
     try {
         check(folder.isValid(), "No temporary directory");
+        ui::setPreferencesFile(folder.path() + "/settings.ini");
         const auto path = folder.path() + "/source.step";
         STEPControl_Writer w;
         check(w.Transfer(fixtures::foldedProfile(32), STEPControl_AsIs) == IFSelect_RetDone &&
@@ -130,6 +133,17 @@ int main(int argc, char **argv) {
         auto *scroll = panel->stepStrip()->findChild<QScrollArea *>();
         check(last && scroll && scroll->horizontalScrollBar()->maximum() > 0,
               "Large strip did not scroll");
+        auto *labels = window.findChild<QCheckBox *>("showBendLabels");
+        check(labels && labels->isChecked(), "Bend labels should be on by default");
+        labels->click();
+        labels->click();
+        const auto buttons = panel->stepStrip()->findChildren<QPushButton *>();
+        check(std::any_of(buttons.begin(), buttons.end(),
+                          [](const auto *button) {
+                              return button->property("routeId").toString() == "bend-32" &&
+                                     button->text().endsWith(QStringLiteral(" · B32"));
+                          }),
+              "Source IDs beyond the alphabet lost their label");
         wait([&] {
             return scroll->viewport()->rect().contains(
                 QRect(last->mapTo(scroll->viewport(), QPoint{}), last->size()));
