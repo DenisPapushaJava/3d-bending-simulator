@@ -22,6 +22,8 @@ class RoutePanel final : public QWidget {
                  bool preparingDraft = false);
     void select(int step, bool notify = true);
     void setWithTools(bool);
+    void setBendLabelsVisible(bool);
+    [[nodiscard]] std::vector<std::pair<std::size_t, QString>> previewBendLabels() const;
     [[nodiscard]] bool withTools() const;
     void setExpandedSearch(bool expanded) {
         expandedSearch_ = expanded;
@@ -49,7 +51,7 @@ class RoutePanel final : public QWidget {
     }
     std::function<void(bool automatic, bool withTools)> onPrepare;
     std::function<void(int)> onSelect;
-    std::function<void(std::optional<std::size_t>)> onHover;
+    std::function<void(std::optional<std::size_t>, const QString &)> onHover;
     std::function<bool(std::vector<std::string>, bool grouped)> onReorder;
     std::function<void()> onModeChanged;
     std::function<void()> onEditTool;
@@ -60,6 +62,8 @@ class RoutePanel final : public QWidget {
     void moveTo(int from, int to, bool selectMovedStep);
     void undo();
     void redo();
+    void updateStepCaptions();
+    void highlightStep(std::size_t step);
     struct OrderEdit {
         std::vector<std::string> before, after;
         int previousStep, nextStep;
@@ -74,11 +78,14 @@ class RoutePanel final : public QWidget {
     std::vector<std::string> sourceIds_;
     std::vector<std::vector<std::string>> draftGroups_;
     std::vector<std::size_t> indices_;
+    std::vector<std::size_t> sourceIndices_;
+    std::vector<QString> bendLabels_;
     std::vector<QPushButton *> steps_;
     int selected_ = 0;
     QComboBox *mode_;
     QPushButton *automatic_, *manual_, *earlier_, *later_, *editTool_, *expandSearch_;
     bool expandedSearch_ = false;
+    bool bendLabelsVisible_ = false, draggingStep_ = false;
     QLabel *status_;
     QHBoxLayout *strip_;
     QWidget *stepStrip_;

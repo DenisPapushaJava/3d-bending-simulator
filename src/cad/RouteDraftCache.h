@@ -17,7 +17,8 @@ class RouteDraftCache final {
     // Downgrade just the checked flat contact position; never adapt a bending
     // trajectory, joint operation or retraction to the manual 21-position path.
     void rememberBlank(application::DocumentPtr, application::RouteOperation,
-                       const application::BendPreviewPtr &);
+                       const application::BendPreviewPtr &,
+                       std::span<const std::vector<application::PointMm>> labelAnchors = {});
 
   private:
     struct Key {

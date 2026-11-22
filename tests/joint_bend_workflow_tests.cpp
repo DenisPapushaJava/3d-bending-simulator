@@ -8,6 +8,7 @@
 #include "bending/ui/Preferences.h"
 #include "bending/viewer/ViewerWidget.h"
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDialog>
@@ -404,6 +405,21 @@ int main(int argc, char **argv) {
         auto *button =
             window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(group + 1));
         require(button && button->toolTip().contains(" + B"), "Grouped tooltip lost a zone");
+        auto *labels = window.findChild<QCheckBox *>("showBendLabels");
+        require(labels && labels->isChecked(), "Grouped routes should start with bend labels");
+        const auto &stroke = route->steps[group];
+        require(stroke.bendLabelAnchors.size() == stroke.preview->frameCount() &&
+                    stroke.bendLabelAnchors.front().size() == zones,
+                "A shared stroke lost the positions of its original bend zones");
+        const auto letter = [](std::size_t index) {
+            return QString(QLatin1Char(static_cast<char>('A' + index)));
+        };
+        require(stroke.additionalBends.size() == 1 &&
+                    button->text() == QStringLiteral("%1 · %2+%3")
+                                          .arg(group + 1)
+                                          .arg(letter(stroke.bendIndex),
+                                               letter(stroke.additionalBends.front().bendIndex)),
+                "Joint step lost the original letters of its member zones");
         button->click();
         wait(controller);
         require(window.findChild<QLabel *>("bendRouteStatus")->text().contains(" + B"),

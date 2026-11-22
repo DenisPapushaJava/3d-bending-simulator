@@ -286,10 +286,18 @@ int main(int argc, char **argv) {
         auto *strip = window.findChild<QWidget *>("routeStepStrip");
         require(viewerWidget && strip && viewerWidget->isAncestorOf(strip),
                 "The route strip is outside the viewport");
-        for (int i = 0; i <= count; ++i)
+        for (int i = 0; i <= count; ++i) {
+            auto expectedCaption = QString::number(i);
+            if (i > 0) {
+                const auto zone = route->steps[static_cast<std::size_t>(i - 1)].bendIndex;
+                const auto label = zone < 26 ? QString(QLatin1Char(static_cast<char>('A' + zone)))
+                                             : QStringLiteral("B%1").arg(zone + 1);
+                expectedCaption += QStringLiteral(" · ") + label;
+            }
             require(window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(i))->text() ==
-                        QString::number(i),
-                    "Route numbers contain feature IDs");
+                        expectedCaption,
+                    "Route captions lost their number or original bend identity");
+        }
         require(window.findChild<QPushButton *>("routeStep0")
                     ->toolTip()
                     .contains(QStringLiteral("заготовка")),
@@ -320,6 +328,17 @@ int main(int argc, char **argv) {
             QApplication::sendEvent(step, &leave);
             require(viewerWidget->captureImage() == baseline,
                     "Leaving the checked step did not clear the hover highlight");
+            if (const auto output = qEnvironmentVariable("BENDING_ROUTE_SNAPSHOT");
+                !output.isEmpty()) {
+                window
+                    .findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(std::min(2, count)))
+                    ->click();
+                frame->setValue(10);
+                viewerWidget->fitAll();
+                QApplication::processEvents();
+                require(viewerWidget->captureImage(true).save(output + "-labels.png"),
+                        "Checked bend labels snapshot failed");
+            }
         }
         std::vector<QImage> images;
         for (int index = 0; index <= count; ++index) {
@@ -443,6 +462,7 @@ int main(int argc, char **argv) {
             std::cout << count << " route steps navigated successfully\n";
             return 0;
         }
+        window.findChild<QPushButton *>(QStringLiteral("routeStep%1").arg(count))->click();
         window.findChild<QPushButton *>("routeMoveEarlier")->click();
         require(!controller.bendRoute() && controller.session().modified(),
                 "Reorder not invalidated");

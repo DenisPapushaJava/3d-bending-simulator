@@ -13,6 +13,7 @@
 #include <AIS_ColoredShape.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <AIS_TextLabel.hxx>
 #include <AIS_ViewCube.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_NeutralWindow.hxx>
@@ -194,6 +195,34 @@ class PlacementCoverage final : public AIS_InteractiveObject {
     std::vector<std::array<double, 2>> intervals_;
 };
 
+class BendLabelLeaders final : public AIS_InteractiveObject {
+  public:
+    BendLabelLeaders() {
+        SetInfiniteState(true);
+        SetZLayer(Graphic3d_ZLayerId_Topmost);
+    }
+    std::vector<std::array<gp_Pnt, 2>> lines;
+
+  private:
+    void Compute(const Handle(PrsMgr_PresentationManager) &,
+                 const Handle(Prs3d_Presentation) & presentation, Standard_Integer) override {
+        if (lines.empty())
+            return;
+        Handle(Graphic3d_ArrayOfSegments) segments =
+            new Graphic3d_ArrayOfSegments(static_cast<int>(lines.size() * 2));
+        for (const auto &[origin, target] : lines) {
+            segments->AddVertex(origin);
+            segments->AddVertex(target);
+        }
+        const auto group = presentation->NewGroup();
+        Handle(Prs3d_LineAspect) style = new Prs3d_LineAspect(
+            Quantity_Color(.76, .88, .91, Quantity_TOC_sRGB), Aspect_TOL_SOLID, 1.);
+        group->SetPrimitivesAspect(style->Aspect());
+        group->AddPrimitiveArray(segments);
+    }
+    void ComputeSelection(const Handle(SelectMgr_Selection) &, Standard_Integer) override {}
+};
+
 class OcctCanvas final : public QWidget {
     enum class CameraSpace : std::size_t { Cad, Flat, Kinematic, Press };
     enum class DisplayStyle { Edges, Shaded, Wireframe };
@@ -222,6 +251,7 @@ class OcctCanvas final : public QWidget {
             guarded([&] {
                 const auto transform = reposition_->at(repositionProgress_) * fromOldPose_;
                 context_->SetLocation(presentation_, TopLoc_Location(transform));
+                refreshPreviewBendLabels();
                 view_->Redraw();
             });
         });
@@ -556,6 +586,10 @@ class OcctCanvas final : public QWidget {
             }
             for (const auto &object : dimensions_.objects)
                 context_->RecomputePrsOnly(object, false, true);
+            for (const auto &label : previewBendLabels_)
+                context_->RecomputePrsOnly(label, false, true);
+            if (!bendLabelLeaders_.IsNull() && context_->IsDisplayed(bendLabelLeaders_))
+                context_->RecomputePrsOnly(bendLabelLeaders_, false, true);
             for (const auto &object : sideMarkers_)
                 context_->RecomputePrsOnly(object, false, true);
             rigidScene_->refresh();
@@ -705,7 +739,8 @@ class OcctCanvas final : public QWidget {
                             displayStyle_ == DisplayStyle::Edges);
     }
     QString presentPreview(application::BendPreviewPtr preview, std::size_t index, quint64 revision,
-                           bool reposition = false) {
+                           bool reposition = false,
+                           std::span<const application::PointMm> labelAnchors = {}) {
         if (revision != revision_ || !document_ || !preview || index >= preview->frameCount()) {
             return QStringLiteral("Неактуальный результат просмотра сгиба");
         }
@@ -856,6 +891,8 @@ class OcctCanvas final : public QWidget {
         evidence_.Nullify();
         support_.Nullify();
         preview_ = std::move(preview);
+        if (entering || previewFrame_ != index || !labelAnchors.empty())
+            checkedBendLabelAnchors_.assign(labelAnchors.begin(), labelAnchors.end());
         flat_.reset();
         previewFrame_ = index;
         if (motion)
@@ -967,6 +1004,13 @@ class OcctCanvas final : public QWidget {
         support_.Nullify();
         dimensions_.objects.clear();
         dimensions_.labels.clear();
+        previewBendLabels_.clear();
+        bendLabelLeaders_.Nullify();
+        checkedBendLabelAnchors_.clear();
+        bendLabels_.clear();
+        hoverPreviewBend_.reset();
+        hoverBendLabel_.clear();
+        hoverActiveZone_ = false;
         sideMarkers_.clear();
         sourceOrientation_ = {};
         highlights_ = {};
@@ -1847,6 +1891,8 @@ class OcctCanvas final : public QWidget {
             if (updateFlatBendSide())
                 context_->Redisplay(presentation_, false);
             positionPlacementHandle();
+            if (refreshPreviewBendLabels() && !dimensionsVisible_)
+                view_->Redraw();
         });
         if (!dimensionsVisible_ && dimensions_.objects.empty()) {
             updateDimensionButton();
@@ -2257,7 +2303,8 @@ class OcctCanvas final : public QWidget {
             if (changed) {
                 refreshDimensions();
                 refreshOrientation();
-            }
+            } else
+                refreshPreviewBendLabels();
             view_->Redraw();
         });
     }
@@ -2359,24 +2406,175 @@ class OcctCanvas final : public QWidget {
         animationRunning_ = running;
         refreshDimensions();
     }
-    void highlightPreviewBend(std::optional<std::size_t> i, bool activeZone) {
+    void setPreviewBendLabels(std::vector<std::pair<std::size_t, QString>> labels) {
+        if (bendLabels_ == labels)
+            return;
+        bendLabels_ = std::move(labels);
+        guarded([&] {
+            if (refreshPreviewBendLabels())
+                view_->Redraw();
+        });
+    }
+    void highlightPreviewBend(std::optional<std::size_t> i, bool activeZone,
+                              const QString &caption) {
+        activeZone = i && activeZone;
+        if (i == hoverPreviewBend_ && activeZone == hoverActiveZone_ && caption == hoverBendLabel_)
+            return;
         const auto *frame =
             preview_ ? &cad::OcctPreviewAccess::frame(*preview_, previewFrame_) : nullptr;
         const auto previous = frame ? previewBendZone(*frame) : TopoDS_Shape{};
         hoverPreviewBend_ = i;
-        hoverActiveZone_ = i.has_value() && activeZone;
+        hoverActiveZone_ = activeZone;
+        hoverBendLabel_ = caption;
         if (!ready_ || !frame)
             return;
         const auto next = previewBendZone(*frame);
-        if ((previous.IsNull() && next.IsNull()) || (!previous.IsNull() && previous.IsSame(next)))
-            return;
-        if (reposition_)
+        if ((previous.IsNull() && next.IsNull()) || (!previous.IsNull() && previous.IsSame(next))) {
+            guarded([&] {
+                if (refreshPreviewBendLabels())
+                    view_->Redraw();
+            });
+        } else if (reposition_)
             deferredBendHover_ = true;
         else
             presentPreview(preview_, previewFrame_, revision_);
     }
 
   private:
+    bool refreshPreviewBendLabels() {
+        const auto previous = previewBendLabels_.size();
+        std::size_t used = 0;
+        std::vector<std::array<gp_Pnt, 2>> leaders;
+        if (preview_ && (!bendLabels_.empty() || !hoverBendLabel_.isEmpty())) {
+            const auto &frame = cad::OcctPreviewAccess::frame(*preview_, previewFrame_);
+            const auto &anchors = checkedBendLabelAnchors_.empty() ? frame.bendLabelAnchors
+                                                                   : checkedBendLabelAnchors_;
+            const auto layout = dimensionLayout();
+            const auto ratio = devicePixelRatioF();
+            const auto metrics = fontMetrics();
+            auto occupied = layout.excluded;
+            if (repositionLabel_->isVisible()) {
+                const auto bounds = repositionLabel_->geometry();
+                occupied.emplace_back(bounds.x() * ratio, bounds.y() * ratio,
+                                      bounds.width() * ratio, bounds.height() * ratio);
+            }
+            if (placementHandle_->isVisible()) {
+                const auto bounds = placementHandle_->geometry();
+                occupied.emplace_back(bounds.x() * ratio, bounds.y() * ratio,
+                                      bounds.width() * ratio, bounds.height() * ratio);
+            }
+            gp_Trsf transform;
+            if (reposition_)
+                transform = reposition_->at(repositionProgress_) * fromOldPose_;
+            else if (editingPlacement_)
+                transform.SetTranslation(gp_Vec(0, 0, placementDelta_));
+            const auto show = [&](std::size_t index, const QString &caption, bool hovered) {
+                gp_Pnt anchor;
+                if (index < anchors.size()) {
+                    const auto &p = anchors[index];
+                    anchor.SetCoord(p.x, p.y, p.z);
+                } else if (anchors.empty() && frame.dimensions) {
+                    const auto &section = *frame.dimensions;
+                    anchor = section.bendMiddle.Translated(section.widthVector * .5);
+                } else {
+                    return;
+                }
+                anchor.Transform(transform);
+                const auto screen = layout.project(anchor);
+                if (!layout.viewport.contains(screen))
+                    return;
+                const double w = (metrics.horizontalAdvance(caption) + 10.) * ratio;
+                const double h = 20. * ratio;
+                const QPointF base = screen - QPointF(0, 8. * ratio);
+                const auto position = [&]() -> std::optional<QPointF> {
+                    // Reserve space near the actual bend first. Spread coincident
+                    // anchors into nearby rows for end-on or crowded views.
+                    for (int ring = 0; ring <= 6; ++ring)
+                        for (int y = -ring; y <= ring; ++y)
+                            for (int x = -ring; x <= ring; ++x) {
+                                if (std::max(std::abs(x), std::abs(y)) != ring)
+                                    continue;
+                                const auto p =
+                                    base + QPointF(x * (w + 3 * ratio), y * (h + 3 * ratio));
+                                const QRectF box(p.x() - w / 2, p.y() - h, w, h);
+                                if (!layout.viewport.contains(box) ||
+                                    std::any_of(
+                                        occupied.begin(), occupied.end(),
+                                        [&](const auto &other) { return box.intersects(other); }))
+                                    continue;
+                                occupied.push_back(box);
+                                return p;
+                            }
+                    return {};
+                }();
+                if (!position)
+                    return;
+                const auto end = layout.unproject(*position, anchor);
+                if (*position != base) {
+                    const auto leaderEnd =
+                        *position - QPointF(0, position->y() > screen.y() ? h : 0);
+                    leaders.push_back({anchor, layout.unproject(leaderEnd, anchor)});
+                }
+                if (used == previewBendLabels_.size()) {
+                    Handle(AIS_TextLabel) label = new AIS_TextLabel;
+                    label->SetFont(Font_NOF_SANS_SERIF);
+                    label->SetZoomable(false);
+                    label->SetHJustification(Graphic3d_HTA_CENTER);
+                    label->SetVJustification(Graphic3d_VTA_BOTTOM);
+                    label->SetInfiniteState(true);
+                    label->SetZLayer(Graphic3d_ZLayerId_Topmost);
+                    label->SetDisplayType(Aspect_TODT_SUBTITLE);
+                    label->SetColorSubTitle(Quantity_Color(.08, .23, .27, Quantity_TOC_sRGB));
+                    previewBendLabels_.push_back(label);
+                }
+                const auto &label = previewBendLabels_[used++];
+                label->SetPosition(end);
+                label->SetHeight(15. * ratio);
+                label->SetText(TCollection_ExtendedString(caption.toLatin1().constData()));
+                label->SetColor(hovered ? bendHighlightAccent
+                                        : Quantity_Color(.92, .98, .99, Quantity_TOC_sRGB));
+                if (context_->IsDisplayed(label))
+                    context_->Redisplay(label, false);
+                else
+                    context_->Display(label, 0, -1, false);
+            };
+
+            const bool hoverLabel = hoverPreviewBend_ && !hoverBendLabel_.isEmpty() &&
+                                    (*hoverPreviewBend_ < anchors.size() || hoverActiveZone_);
+            if (hoverLabel) {
+                const auto it =
+                    std::find_if(bendLabels_.begin(), bendLabels_.end(), [&](const auto &label) {
+                        return label.first == *hoverPreviewBend_;
+                    });
+                show(*hoverPreviewBend_, it == bendLabels_.end() ? hoverBendLabel_ : it->second,
+                     true);
+            }
+            if (!anchors.empty()) {
+                for (const auto &[index, caption] : bendLabels_)
+                    if (!hoverLabel || *hoverPreviewBend_ != index)
+                        show(index, caption, false);
+            } else if (!hoverLabel && !bendLabels_.empty()) {
+                const auto &[index, caption] = bendLabels_.front();
+                show(index, caption, false);
+            }
+        }
+        for (auto i = used; i < previous; ++i)
+            context_->Remove(previewBendLabels_[i], false);
+        previewBendLabels_.resize(used);
+        if (!leaders.empty()) {
+            if (bendLabelLeaders_.IsNull())
+                bendLabelLeaders_ = new BendLabelLeaders;
+            bendLabelLeaders_->lines = std::move(leaders);
+            if (context_->IsDisplayed(bendLabelLeaders_))
+                context_->Redisplay(bendLabelLeaders_, false);
+            else
+                context_->Display(bendLabelLeaders_, 0, -1, false);
+        } else if (!bendLabelLeaders_.IsNull() && context_->IsDisplayed(bendLabelLeaders_)) {
+            context_->Remove(bendLabelLeaders_, false);
+        }
+        return previous > 0 || used > 0;
+    }
+
     TopoDS_Shape previewBendZone(const cad::PreviewFrame &frame) const {
         if (!hoverPreviewBend_)
             return {};
@@ -2480,6 +2678,11 @@ class OcctCanvas final : public QWidget {
             view_->Redraw();
     }
     std::optional<std::size_t> hoverPreviewBend_;
+    QString hoverBendLabel_;
+    std::vector<std::pair<std::size_t, QString>> bendLabels_;
+    std::vector<Handle(AIS_TextLabel)> previewBendLabels_;
+    std::vector<application::PointMm> checkedBendLabelAnchors_;
+    Handle(BendLabelLeaders) bendLabelLeaders_;
     bool hoverActiveZone_ = false;
     bool deferredBendHover_ = false;
     ToolSegmentColors segmentColors_;
@@ -2817,11 +3020,11 @@ void ViewerWidget::highlightBendDiagnostic(
 }
 
 QString ViewerWidget::presentBendPreview(application::BendPreviewPtr preview,
-                                         std::size_t frameIndex, quint64 revision,
-                                         bool reposition) {
+                                         std::size_t frameIndex, quint64 revision, bool reposition,
+                                         std::span<const application::PointMm> labelAnchors) {
     try {
         return impl_->canvas ? impl_->canvas->presentPreview(std::move(preview), frameIndex,
-                                                             revision, reposition)
+                                                             revision, reposition, labelAnchors)
                              : QString{};
     } catch (const Standard_Failure &error) {
         return failureText(error);
@@ -2844,9 +3047,14 @@ void ViewerWidget::setAnimationRunning(bool running) {
     if (impl_->canvas)
         impl_->canvas->setAnimationRunning(running);
 }
-void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i, bool activeZone) {
+void ViewerWidget::setPreviewBendLabels(std::vector<std::pair<std::size_t, QString>> labels) {
     if (impl_->canvas)
-        impl_->canvas->highlightPreviewBend(i, activeZone);
+        impl_->canvas->setPreviewBendLabels(std::move(labels));
+}
+void ViewerWidget::highlightPreviewBend(std::optional<std::size_t> i, bool activeZone,
+                                        const QString &caption) {
+    if (impl_->canvas)
+        impl_->canvas->highlightPreviewBend(i, activeZone, caption);
 }
 QString ViewerWidget::endBendPreview() {
     return impl_->canvas ? impl_->canvas->endPreview() : QString{};

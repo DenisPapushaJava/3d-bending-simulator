@@ -7,8 +7,19 @@
 #include <Standard_Failure.hxx>
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <stdexcept>
 namespace bending::cad {
+gp_Pnt bendLabelPoint(const SheetBendRegion &region, const application::RecognizedBend &bend) {
+    const gp_Pnt from(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z);
+    const gp_Pnt to(bend.axisEnd.x, bend.axisEnd.y, bend.axisEnd.z);
+    const auto span = bend.straightIntervalMm.value_or(std::array{0., bend.lengthMm});
+    const auto angle = bend.angleRadians / 2.;
+    return from.Translated(
+        gp_Vec(from, to).Normalized() * std::midpoint(span[0], span[1]) +
+        gp_Vec(region.sectionAxes.XDirection()) * (bend.innerRadiusMm * std::sin(angle)) -
+        gp_Vec(region.sectionAxes.YDirection()) * (bend.innerRadiusMm * std::cos(angle)));
+}
 std::optional<std::size_t> adjacentSheetWall(const SheetBendRegion &active,
                                              const SheetBendRegion &other) {
     if (active.parent == other.parent || active.child == other.parent)
