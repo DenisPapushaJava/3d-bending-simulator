@@ -564,8 +564,8 @@ RouteDraftBasis::build(application::RouteDraftRequest request, bool reused, std:
         try {
             frame.bendLabelAnchors.reserve(impl_->labelPoints.size());
             for (std::size_t i = 0; i < impl_->labelPoints.size(); ++i) {
-                const auto p = placement.bends[i](impl_->labelPoints[i]).Transformed(machine);
-                frame.bendLabelAnchors.push_back({p.X(), p.Y(), p.Z()});
+                const auto anchor = placement.bends[i](impl_->labelPoints[i]).Transformed(machine);
+                frame.bendLabelAnchors.push_back({anchor.X(), anchor.Y(), anchor.Z()});
             }
         } catch (const Standard_Failure &) {
             frame.bendLabelAnchors.clear();
