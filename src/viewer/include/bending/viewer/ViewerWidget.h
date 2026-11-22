@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bending/application/Document.h"
 #include "bending/viewer/ToolSegmentColors.h"
 #include <QImage>
 #include <QWidget>
@@ -15,10 +16,6 @@
 class QMenu;
 class QAction;
 namespace bending::application {
-class Document;
-struct RecognizedBend;
-struct PointMm;
-struct BendInteriorContourDiagnostic;
 class SingleBendPreview;
 struct RouteDraftPose;
 class FlatPattern;
