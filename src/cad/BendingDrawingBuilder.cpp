@@ -5,6 +5,7 @@
 #include "DrawingProfiles.h"
 #include "DrawingRepeats.h"
 #include "DrawingSections.h"
+#include "DrawingTubeProfile.h"
 #include "bending/cad/CadDocument.h"
 #include "bending/cad/FlatPatternBuilder.h"
 #include "bending/cad/occt/DocumentAccess.h"
@@ -52,6 +53,7 @@
 #include <cmath>
 #include <iterator>
 #include <numbers>
+#include <span>
 #include <stdexcept>
 #include <utility>
 
@@ -701,6 +703,436 @@ DrawingView viewOf(const TopoDS_Shape &shape, const Frame &f, std::size_t &budge
     }
     return view;
 }
+Frame projectionFrame(const gp_Ax2 &basis, bool reverse = false) {
+    return {basis.XDirection(), reverse ? basis.YDirection().Reversed() : basis.YDirection(),
+            reverse ? basis.Direction().Reversed() : basis.Direction()};
+}
+
+bool containsOpposedBore(const DrawingView &view, std::size_t pair) {
+    return std::any_of(view.opposedTubeBores.begin(), view.opposedTubeBores.end(),
+                       [pair](const auto &bore) { return bore.pair == pair; });
+}
+
+bool hasAdditionalTubeOpenings(const DrawingView &front, const DrawingView &back,
+                               std::stop_token stop) {
+    const auto samePoint = [](DrawingPoint a, DrawingPoint b) {
+        return std::hypot(a.x - b.x, a.y + b.y) < 1e-5;
+    };
+    const auto checkpoint = [&] {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+    };
+    if (back.hasIndependentTubeWallOpenings ||
+        std::any_of(back.opposedTubeBores.begin(), back.opposedTubeBores.end(),
+                    [&](const auto &bore) { return !containsOpposedBore(front, bore.pair); }))
+        return true;
+    if (std::any_of(back.holeDiameters.begin(), back.holeDiameters.end(), [&](const auto &hole) {
+            checkpoint();
+            return std::none_of(front.holeDiameters.begin(), front.holeDiameters.end(),
+                                [&](const auto &known) {
+                                    return samePoint(known.first, hole.first) &&
+                                           std::abs(known.second - hole.second) < 1e-5;
+                                });
+        }))
+        return true;
+    const auto sameAxis = [&](DrawingPoint a, DrawingPoint ac, DrawingPoint b, DrawingPoint bc) {
+        const DrawingPoint av{a.x - ac.x, a.y - ac.y}, bv{b.x - bc.x, b.y - bc.y};
+        return samePoint(av, bv) || samePoint(av, {-bv.x, -bv.y});
+    };
+    return std::any_of(back.openingAxes.begin(), back.openingAxes.end(), [&](const auto &axes) {
+        checkpoint();
+        return std::none_of(
+            front.openingAxes.begin(), front.openingAxes.end(), [&](const auto &known) {
+                return samePoint(known.center, axes.center) && known.obround == axes.obround &&
+                       sameAxis(known.first, known.center, axes.first, axes.center) &&
+                       sameAxis(known.second, known.center, axes.second, axes.center);
+            });
+    });
+}
+
+void tubeViewArrow(DrawingView &reference, const gp_Ax2 &frame, const gp_Dir &direction,
+                   const char *name) {
+    const double dx = direction.Dot(frame.XDirection()), dy = direction.Dot(frame.YDirection());
+    reference.viewArrows.push_back({{(reference.minimum.x + reference.maximum.x) / 2 +
+                                         dx * (reference.maximum.x - reference.minimum.x) / 2,
+                                     (reference.minimum.y + reference.maximum.y) / 2 +
+                                         dy * (reference.maximum.y - reference.minimum.y) / 2},
+                                    {-dx, -dy},
+                                    name});
+}
+
+void addTubeReverseViews(BendingDrawing &drawing, const TopoDS_Shape &shape,
+                         const DrawingTubeGeometry &tube, const std::array<gp_Ax2, 3> &frames,
+                         const std::vector<DrawingOpening> &openings, std::size_t &budget,
+                         std::stop_token stop) {
+    auto &views = *drawing.classicalViews;
+    constexpr std::array names{"Г", "Ц", "Ч"};
+    const auto *notch =
+        tube.compoundEnd && tube.compoundEnd->notch ? &*tube.compoundEnd->notch : nullptr;
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        const auto backFrame = projectionFrame(frames[i], true);
+        const bool notchFacesBack = notch && notch->outward.IsEqual(backFrame.normal, 1e-7);
+        const bool mayMeasureOpenings =
+            std::any_of(openings.begin(), openings.end(), [&](const auto &opening) {
+                if (!opening.tubeOutward)
+                    return opening.normal.IsParallel(backFrame.normal, 1e-7);
+                return opening.tubeOutward->IsEqual(backFrame.normal, 1e-7) &&
+                       (!opening.opposedBorePair ||
+                        !containsOpposedBore(views[i], *opening.opposedBorePair));
+            });
+        if (!notchFacesBack && !mayMeasureOpenings)
+            continue;
+        auto localBudget = budget;
+        DrawingView back;
+        try {
+            back = viewOf(shape, backFrame, localBudget, stop, &openings);
+        } catch (const Standard_Failure &) {
+            continue;
+        } catch (const std::runtime_error &) {
+            // An optional projection may exceed the remaining point budget.
+            continue;
+        }
+        const bool showNotch =
+            notchFacesBack &&
+            drawingTubeVisibleEdge(
+                project(gp_Pnt((notch->rearEdge[0].XYZ() + notch->rearEdge[1].XYZ()) / 2),
+                        backFrame),
+                back, stop);
+        if (!showNotch && !hasAdditionalTubeOpenings(views[i], back, stop))
+            continue;
+        back.reverseProjection = true;
+        drawing.auxiliaryViews.push_back({std::move(back), names[i], i});
+        budget = localBudget;
+
+        const std::size_t reference = i == 0 ? 1 : 0;
+        tubeViewArrow(views[reference], frames[reference], backFrame.normal, names[i]);
+    }
+}
+
+void addMissingTubeWallViews(BendingDrawing &drawing, const TopoDS_Shape &shape,
+                             const DrawingTubeGeometry &tube, const std::array<gp_Ax2, 3> &frames,
+                             const std::vector<DrawingOpening> &openings, std::size_t &budget,
+                             std::stop_token stop) {
+    if (!tube.planarWalls)
+        return;
+    auto &views = *drawing.classicalViews;
+    constexpr std::array names{"Д", "Е", "Ж", "И"};
+    for (std::size_t i = 0; i < tube.planarWalls->size(); ++i) {
+        const auto &wall = (*tube.planarWalls)[i];
+        if (std::any_of(frames.begin(), frames.end(), [&](const auto &basis) {
+                return wall.outward.IsParallel(basis.Direction(), 1e-7);
+            }))
+            continue;
+        const auto hasNewOpening =
+            std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
+                if (o.supportFace != wall.outerFace)
+                    return false;
+                return !o.opposedBorePair ||
+                       std::none_of(drawing.auxiliaryViews.begin(), drawing.auxiliaryViews.end(),
+                                    [&](const auto &view) {
+                                        return containsOpposedBore(view.view, *o.opposedBorePair);
+                                    });
+            });
+        if (!hasNewOpening)
+            continue;
+        const Frame frame{tube.axis, wall.outward.Crossed(tube.axis), wall.outward};
+        auto localBudget = budget;
+        try {
+            auto view = viewOf(shape, frame, localBudget, stop, &openings);
+            if (!view.visibleOpeningCount)
+                continue;
+            overallDimensions(shape, frame, view, stop);
+            const auto reference =
+                std::min_element(frames.begin(), frames.end(), [&](const auto &a, const auto &b) {
+                    return std::abs(a.Direction().Dot(wall.outward)) <
+                           std::abs(b.Direction().Dot(wall.outward));
+                });
+            const auto index = static_cast<std::size_t>(reference - frames.begin());
+            tubeViewArrow(views[index], *reference, wall.outward, names[i]);
+            drawing.auxiliaryViews.push_back({std::move(view), names[i], index, {}, false, i});
+            budget = localBudget;
+        } catch (const Standard_Failure &) {
+            // The general projections stay usable if this optional projection fails.
+        } catch (const std::runtime_error &) {
+            // Respect the shared projection point budget.
+        }
+    }
+}
+
+std::optional<DrawingView> tubeLocalDetail(const TopoDS_Shape &shape, const Frame &frame,
+                                           std::span<const DrawingPoint> points, double wall,
+                                           const std::array<gp_Ax2, 3> &frames,
+                                           const std::array<DrawingView, 3> &views,
+                                           std::size_t &budget, std::stop_token stop,
+                                           const DrawingView *reverse = nullptr) {
+    const auto aligned = std::find_if(frames.begin(), frames.end(), [&](const auto &source) {
+        return source.Direction().IsEqual(frame.normal, 1e-7);
+    });
+    const auto xs =
+        std::minmax_element(points.begin(), points.end(), [](auto a, auto b) { return a.x < b.x; });
+    const auto ys =
+        std::minmax_element(points.begin(), points.end(), [](auto a, auto b) { return a.y < b.y; });
+    const DrawingPoint middle{(xs.first->x + xs.second->x) / 2, (ys.first->y + ys.second->y) / 2};
+    const double radius = std::hypot(xs.second->x - xs.first->x, ys.second->y - ys.first->y) / 2 +
+                          std::max(6., 3 * wall);
+    DrawingView detail;
+    detail.minimum = {middle.x - radius, middle.y - radius};
+    detail.maximum = {middle.x + radius, middle.y + radius};
+
+    const auto collect = [&](const DrawingView &source, auto map) {
+        for (const auto &path : source.paths) {
+            DrawingPath run;
+            run.hidden = path.hidden;
+            const auto flush = [&] {
+                if (run.points.empty())
+                    return;
+                budget += run.points.size();
+                if (budget > 200000)
+                    throw std::runtime_error("Drawing projection exceeds 200000 points");
+                detail.paths.push_back({std::move(run.points), run.hidden});
+                run.points.clear();
+            };
+            for (std::size_t i = 1; i < path.points.size(); ++i) {
+                if (stop.stop_requested())
+                    throw DrawingError{"Cancelled", true};
+                const auto a = map(path.points[i - 1]), b = map(path.points[i]);
+                if (std::max(a.x, b.x) < detail.minimum.x ||
+                    std::min(a.x, b.x) > detail.maximum.x ||
+                    std::max(a.y, b.y) < detail.minimum.y ||
+                    std::min(a.y, b.y) > detail.maximum.y) {
+                    flush();
+                    continue;
+                }
+                if (run.points.empty())
+                    run.points.push_back(a);
+                run.points.push_back(b);
+            }
+            flush();
+        }
+    };
+    const auto collectAligned = [&](const DrawingView &source, const Frame &basis) {
+        const double ux = basis.u.Dot(frame.u), uy = basis.v.Dot(frame.u),
+                     vx = basis.u.Dot(frame.v), vy = basis.v.Dot(frame.v);
+        collect(source, [&](DrawingPoint at) {
+            return DrawingPoint{ux * at.x + uy * at.y, vx * at.x + vy * at.y};
+        });
+    };
+    if (aligned != frames.end()) {
+        collectAligned(views[static_cast<std::size_t>(aligned - frames.begin())],
+                       projectionFrame(*aligned));
+    } else if (reverse) {
+        const auto opposite = std::find_if(frames.begin(), frames.end(), [&](const auto &source) {
+            return source.Direction().IsOpposite(frame.normal, 1e-7);
+        });
+        collectAligned(*reverse, projectionFrame(*opposite, true));
+    } else {
+        const auto source = viewOf(shape, frame, budget, stop);
+        collect(source, [](DrawingPoint at) { return at; });
+    }
+    if (detail.paths.empty())
+        return {};
+    return detail;
+}
+
+void addTubeDimension(DrawingView &view, DrawingPoint first, DrawingPoint last, bool axial) {
+    const double value = axial ? std::abs(last.x - first.x) : std::abs(last.y - first.y);
+    const auto datum = axial ? DrawingPoint{first.x, std::min(first.y, last.y)}
+                             : DrawingPoint{std::max(first.x, last.x), first.y};
+    const auto limit = axial ? DrawingPoint{last.x, datum.y} : DrawingPoint{datum.x, last.y};
+    view.dimensions.push_back({datum, limit, value, {}, std::array{first, last}});
+}
+
+// View the planar cut edge-on and dimension its actual axial span.
+std::optional<DrawingView> tubeEndDetail(const TopoDS_Shape &shape, const TopoDS_Shape &end,
+                                         const gp_Dir &normal, const gp_Dir &right, double degrees,
+                                         double wall, const std::array<gp_Ax2, 3> &frames,
+                                         const std::array<DrawingView, 3> &views,
+                                         std::size_t &budget, std::stop_token stop,
+                                         std::optional<bool> leftEnd = {}) {
+    const gp_Dir slope(gp_Vec(normal) - gp_Vec(right) * normal.Dot(right));
+    Frame frame{right, slope, right.Crossed(slope)};
+    const auto opposite = std::find_if(frames.begin(), frames.end(), [&](const auto &source) {
+        return source.Direction().IsOpposite(frame.normal, 1e-7);
+    });
+    if (opposite != frames.end()) {
+        frame.normal.Reverse();
+        frame.v.Reverse();
+    }
+    const auto cut = bounds(end, frame);
+    const double span = cut[2] - cut[0], height = cut[3] - cut[1];
+    if (span <= 1e-5 || height <= 1e-5 ||
+        std::abs(span - height * std::tan(degrees * std::numbers::pi / 180)) > 1e-5)
+        return {};
+    const bool rises = normal.Dot(right) * normal.Dot(frame.v) < 0;
+    const DrawingPoint first{cut[0], rises ? cut[1] : cut[3]};
+    const DrawingPoint last{cut[2], rises ? cut[3] : cut[1]};
+    auto detail =
+        tubeLocalDetail(shape, frame, std::array{first, last}, wall, frames, views, budget, stop);
+    if (!detail)
+        return {};
+    if (leftEnd) {
+        // Keep the angular and axial annotations on opposite sides of the cut.
+        const auto origin = *leftEnd ? first : last, far = *leftEnd ? last : first;
+        const auto ray = DrawingPoint{2 * origin.x - far.x, 2 * origin.y - far.y};
+        detail->angles.push_back(
+            {origin, ray, {origin.x, ray.y}, degrees * std::numbers::pi / 180});
+        detail->dimensions.push_back(
+            {{first.x, far.y}, {last.x, far.y}, span, {}, std::array{first, last}});
+    } else {
+        addTubeDimension(*detail, first, last, true);
+        detail->tubeCuts.push_back({{(first.x + last.x) / 2, (first.y + last.y) / 2}, degrees});
+    }
+    return detail;
+}
+
+DrawingTubeCutLocation tubeFeatureLocation(const std::array<gp_Ax2, 3> &frames,
+                                           const gp_Dir &normal, const gp_Pnt &point) {
+    const auto score = [&](const gp_Ax2 &frame) {
+        const double d = normal.Dot(frame.Direction());
+        return std::abs(d) + 1e-4 * d;
+    };
+    const auto at =
+        std::max_element(frames.begin(), frames.end(),
+                         [&](const auto &a, const auto &b) { return score(a) < score(b); });
+    return {static_cast<std::size_t>(at - frames.begin()),
+            project(point, {at->XDirection(), at->YDirection(), at->Direction()})};
+}
+
+void publishTubeDetail(BendingDrawing &drawing, DrawingView detail,
+                       std::optional<DrawingTubeCutLocation> location, std::string name,
+                       std::size_t end, DrawingView *reference = nullptr, bool notch = false) {
+    if (location) {
+        auto &view = reference ? *reference : (*drawing.classicalViews)[location->projection];
+        view.detailLocators.push_back(
+            {location->anchor, (detail.maximum.x - detail.minimum.x) / 2, name});
+    }
+    drawing.auxiliaryViews.push_back(
+        {std::move(detail), std::move(name), location ? location->projection : 0, end, notch});
+}
+
+void addTubeCompoundDetails(BendingDrawing &drawing, const TopoDS_Shape &shape,
+                            const TopTools_IndexedMapOfShape &faces,
+                            const DrawingTubeGeometry &tube, const gp_Dir &right, bool reversed,
+                            const std::array<gp_Ax2, 3> &frames, std::size_t &budget,
+                            std::stop_token stop) {
+    if (!tube.compoundEnd)
+        return;
+    const auto &end = *tube.compoundEnd;
+    const auto &views = *drawing.classicalViews;
+    if (!end.bevelFaces.empty()) {
+        auto localBudget = budget;
+        BRep_Builder builder;
+        TopoDS_Compound cut;
+        builder.MakeCompound(cut);
+        for (int index : end.bevelFaces)
+            builder.Add(cut, faces(index));
+        const auto plane =
+            BRepAdaptor_Surface(TopoDS::Face(faces(end.bevelFaces.front())), false).Plane();
+        const auto normal = plane.Axis().Direction();
+        const double degrees =
+            std::atan2(gp_Vec(right).CrossMagnitude(gp_Vec(normal)), std::abs(right.Dot(normal))) *
+            180 / std::numbers::pi;
+        const auto shown = reversed ? 1 - end.axialSide : end.axialSide;
+        if (auto detail = tubeEndDetail(shape, cut, normal, right, degrees, tube.profile.wallMm,
+                                        frames, views, localBudget, stop, shown == 0)) {
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(cut, box, false, false);
+            const gp_Pnt extentCenter((box.CornerMin().XYZ() + box.CornerMax().XYZ()) / 2);
+            const auto center = extentCenter.Translated(
+                gp_Vec(normal) * gp_Vec(extentCenter, plane.Location()).Dot(gp_Vec(normal)));
+            const auto location = tubeFeatureLocation(frames, right.Crossed(normal), center);
+            publishTubeDetail(drawing, std::move(*detail), location, shown == 0 ? "А" : "Б",
+                              end.axialSide);
+            budget = localBudget;
+        }
+    }
+    if (end.notch) {
+        auto localBudget = budget;
+        const auto &slot = *end.notch;
+        const Frame frame{right, slot.outward.Crossed(right), slot.outward};
+        const auto first = project(slot.rearEdge[0], frame),
+                   last = project(slot.rearEdge[1], frame);
+        const auto datum = project(slot.endDatum, frame), side = project(slot.sideDatum, frame);
+        const auto aligned = std::find_if(frames.begin(), frames.end(), [&](const auto &source) {
+            return source.Direction().IsParallel(frame.normal, 1e-7);
+        });
+        const auto projection = static_cast<std::size_t>(aligned - frames.begin());
+        auto *reference =
+            projection < frames.size() ? &(*drawing.classicalViews)[projection] : nullptr;
+        DrawingView *reverse = nullptr;
+        if (reference && aligned->Direction().IsOpposite(frame.normal, 1e-7)) {
+            const auto opposite = std::find_if(
+                drawing.auxiliaryViews.begin(), drawing.auxiliaryViews.end(), [&](const auto &aux) {
+                    return aux.projection == projection && aux.view.reverseProjection;
+                });
+            reverse = opposite == drawing.auxiliaryViews.end() ? nullptr : &opposite->view;
+            reference = reverse;
+        }
+        if (auto detail =
+                tubeLocalDetail(shape, frame, std::array{first, last, datum, side},
+                                tube.profile.wallMm, frames, views, localBudget, stop, reverse)) {
+            const auto near = std::abs(first.y - side.y) < std::abs(last.y - side.y) ? first : last;
+            addTubeDimension(*detail, first, last, false);
+            addTubeDimension(*detail, side, near, false);
+            addTubeDimension(*detail, datum, near, true);
+            const gp_Pnt center((slot.rearEdge[0].XYZ() + slot.rearEdge[1].XYZ()) / 2);
+            std::optional<DrawingTubeCutLocation> location;
+            if (reference) {
+                const auto at = project(center, projectionFrame(*aligned, reverse != nullptr));
+                if (drawingTubeVisibleEdge(at, *reference, stop))
+                    location = DrawingTubeCutLocation{projection, at};
+            }
+            publishTubeDetail(drawing, std::move(*detail), location, "В", end.axialSide, reference,
+                              true);
+            budget = localBudget;
+        }
+    }
+}
+
+void addTubeEndDetails(BendingDrawing &drawing, const TopoDS_Shape &shape,
+                       const TopTools_IndexedMapOfShape &faces, const DrawingTubeGeometry &tube,
+                       const std::array<gp_Ax2, 3> &frames,
+                       const DrawingTubeCutLocations &locations, std::size_t &budget,
+                       std::stop_token stop) {
+    const auto &front = frames[0];
+    const bool horizontal =
+        std::abs(tube.axis.Dot(front.XDirection())) >= std::abs(tube.axis.Dot(front.YDirection()));
+    const auto &along = horizontal ? front.XDirection() : front.YDirection();
+    const bool reversed = tube.axis.Dot(along) < 0;
+    auto &views = *drawing.classicalViews;
+    for (std::size_t shown = 0; shown < tube.endFaces.size(); ++shown) {
+        const std::size_t end = reversed ? 1 - shown : shown;
+        if (!tube.cutsDegrees[end] || *tube.cutsDegrees[end] <= 1e-4)
+            continue;
+        try {
+            auto localBudget = budget;
+            const auto face = TopoDS::Face(faces(tube.endFaces[end]));
+            const auto normal = BRepAdaptor_Surface(face, false).Plane().Axis().Direction();
+            auto detail = tubeEndDetail(
+                shape, face, normal, reversed ? tube.axis.Reversed() : tube.axis,
+                *tube.cutsDegrees[end], tube.profile.wallMm, frames, views, localBudget, stop);
+            if (!detail)
+                continue;
+            publishTubeDetail(drawing, std::move(*detail), locations[end], shown == 0 ? "А" : "Б",
+                              end);
+            budget = localBudget;
+        } catch (const Standard_Failure &) {
+            // A failed optional enlargement leaves the general view and end annotation intact.
+        } catch (const std::runtime_error &) {
+            // Respect the existing point budget even if the optional enlargement cannot fit.
+        }
+    }
+    try {
+        addTubeCompoundDetails(drawing, shape, faces, tube,
+                               reversed ? tube.axis.Reversed() : tube.axis, reversed, frames,
+                               budget, stop);
+    } catch (const Standard_Failure &) {
+        // Optional end details never block the general views.
+    } catch (const std::runtime_error &) {
+        // An optional local view may exceed the available projection budget.
+    }
+}
+
 struct FlangeSize {
     gp_Pnt corner;
     gp_Pnt end;
@@ -1462,6 +1894,44 @@ void prepareFlatDrawing(BendingDrawing &drawing, DocumentPtr document,
         drawing.flatPattern = std::move(unfolded);
     }
 }
+std::optional<DrawingTubeGeometry> copiedTubeProfile(const CadDocument &source,
+                                                     BRepBuilderAPI_Copy &copy,
+                                                     const TopTools_IndexedMapOfShape &faces,
+                                                     std::stop_token stop) {
+    const auto *prepared = OcctDocumentAccess::tubeProfile(source);
+    if (!prepared && !OcctDocumentAccess::isRouteState(source))
+        return {};
+    if (prepared) {
+        try {
+            TopTools_IndexedMapOfShape originals;
+            TopExp::MapShapes(OcctDocumentAccess::shape(source), TopAbs_FACE, originals);
+            bool matches = originals.Extent() == faces.Extent();
+            for (int i = 1; matches && i <= originals.Extent(); ++i) {
+                if (stop.stop_requested())
+                    throw DrawingError{"Cancelled", true};
+                matches = copy.ModifiedShape(originals(i)).IsSame(faces(i));
+            }
+            if (matches) {
+                auto result = *prepared;
+                for (auto &bore : result.bores) {
+                    if (bore.IsNull())
+                        continue;
+                    const auto mapped = copy.ModifiedShape(bore);
+                    if (mapped.IsNull() || mapped.ShapeType() != TopAbs_WIRE) {
+                        matches = false;
+                        break;
+                    }
+                    bore = TopoDS::Wire(mapped);
+                }
+                if (matches)
+                    return result;
+            }
+        } catch (const Standard_Failure &) {
+            // Recognize again if OCCT cannot provide complete copy history.
+        }
+    }
+    return drawingTubeProfile(copy.Shape(), faces, source.metadata().maximumToleranceMm, stop);
+}
 } // namespace
 DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest request,
                                            std::stop_token stop) const {
@@ -1471,8 +1941,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             return DrawingError{"Drawing requires a loaded STEP solid"};
         if (stop.stop_requested())
             return DrawingError{"Cancelled", true};
-        const auto shape =
-            BRepBuilderAPI_Copy(OcctDocumentAccess::shape(*source), true, false).Shape();
+        const auto &original = OcctDocumentAccess::shape(*source);
+        BRepBuilderAPI_Copy copy(original, true, false);
+        const auto &shape = copy.Shape();
         TopTools_IndexedMapOfShape faces, edges;
         TopExp::MapShapes(shape, TopAbs_FACE, faces);
         TopExp::MapShapes(shape, TopAbs_EDGE, edges);
@@ -1483,6 +1954,15 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             (request.manualThicknessMm &&
              (!std::isfinite(*request.manualThicknessMm) || *request.manualThicknessMm <= 0)))
             return DrawingError{"Invalid drawing settings"};
+        const auto &metadata = document->metadata();
+        std::optional<DrawingTubeGeometry> tube;
+        try {
+            tube = copiedTubeProfile(*source, copy, faces, stop);
+        } catch (const Standard_Failure &) {
+            // Use the ordinary drawing path when the optional profile cannot be confirmed.
+        }
+        if (stop.stop_requested())
+            return DrawingError{"Cancelled", true};
         std::size_t base = request.baseFace.value_or(0);
         if (base > static_cast<std::size_t>(faces.Extent()))
             return DrawingError{"Selected face belongs to another document",
@@ -1490,7 +1970,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                 {},
                                 DrawingBaseError::InvalidFaceIndex};
         if (!base)
-            base = automaticBaseFace(faces, stop);
+            base = tube && tube->sideFace ? tube->sideFace : automaticBaseFace(faces, stop);
         if (!base)
             return DrawingError{"Choose a planar base face for the drawing",
                                 false,
@@ -1524,8 +2004,7 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 anchor = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
             }
         }
-        const auto &metadata = document->metadata();
-        auto bendAnalysis = metadata.bendAnalysis;
+        auto bendAnalysis = tube ? BendAnalysis{} : metadata.bendAnalysis;
         bool drawingOnlyRecognition = false;
         bool retryMeasurements = bendAnalysis.status == BendRecognitionStatus::Unsupported &&
                                  metadata.maximumToleranceMm > .001 &&
@@ -1588,16 +2067,26 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         }
 
         // A parallel bend axis makes the left view a useful true profile of the bend.
-        u = preferredAxis(bendAnalysis.bends, base, side, u);
+        if (tube && !request.baseFace && !tube->sideFace) {
+            // Round stock has no planar wall. Look perpendicular to its axis, in the plane
+            // of the slope of the chosen end where possible.
+            const gp_Vec slope = gp_Vec(side) - gp_Vec(tube->axis) * side.Dot(tube->axis);
+            side = slope.Magnitude() > 1e-6 ? gp_Dir(slope.Crossed(gp_Vec(tube->axis)))
+                                            : gp_Ax2(gp_Pnt{}, tube->axis).XDirection();
+        }
+        const bool axialView = tube && side.IsNormal(tube->axis, 1e-6);
+        u = axialView ? tube->axis : preferredAxis(bendAnalysis.bends, base, side, u);
         u = gp_Dir(gp_Vec(u) - gp_Vec(side) * gp_Vec(u).Dot(gp_Vec(side)));
         gp_Dir n = request.reverseView ? side.Reversed() : side;
         gp_Dir v = gp_Dir(gp_Vec(n).Crossed(gp_Vec(u)));
         int turns = request.quarterTurns;
         if (turns < 0) {
             turns = 0;
-            const auto b = bounds(shape, {u, v, n});
-            if ((b[3] - b[1]) > (b[2] - b[0]) * 1.2)
-                turns = 1;
+            if (!axialView) {
+                const auto b = bounds(shape, {u, v, n});
+                if ((b[3] - b[1]) > (b[2] - b[0]) * 1.2)
+                    turns = 1;
+            }
         }
         for (int i = 0; i < turns; ++i) {
             const auto previous = u;
@@ -1620,7 +2109,20 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
         const auto utf8 = metadata.sourcePath.filename().u8string();
         drawing->sourceName.assign(utf8.begin(), utf8.end());
         std::size_t budget = 0;
-        const auto openings = drawingOpenings(shape, faces, stop);
+        auto openings = drawingOpenings(shape, faces, stop, 0, tube ? &*tube : nullptr);
+        if (tube) {
+            if (axialView) {
+                tube->profile.vertical = std::abs(v.Dot(tube->axis)) > .5;
+                tube->profile.cutsDegrees = tube->cutsDegrees;
+                if ((tube->profile.vertical ? v : u).Dot(tube->axis) < 0)
+                    std::swap(tube->profile.cutsDegrees[0], tube->profile.cutsDegrees[1]);
+            }
+            drawing->tubeProfile = tube->profile;
+            std::erase_if(openings, [&](const auto &opening) {
+                return std::any_of(tube->bores.begin(), tube->bores.end(),
+                                   [&](const auto &bore) { return opening.wire.IsSame(bore); });
+            });
+        }
         const std::array<gp_Ax2, 3> classicalFrames{
             gp_Ax2(gp_Pnt(0, 0, 0), frames[0].normal, frames[0].u),
             gp_Ax2(gp_Pnt(0, 0, 0), frames[1].normal, frames[1].u),
@@ -1652,7 +2154,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             drawing->views[i] = viewOf(shape, frames[i], budget, stop, &openings);
             if (i < 3)
                 (*drawing->classicalViews)[i] = drawing->views[i];
-            if (i > 0 && i < 3 && std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
+            if (!tube && i > 0 && i < 3 &&
+                std::any_of(openings.begin(), openings.end(), [&](const auto &o) {
                     return o.normal.IsParallel(frames[i].normal, 1e-7);
                 })) {
                 const Frame oppositeFrame{frames[i].u, frames[i].v.Reversed(),
@@ -1677,20 +2180,60 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 }
             }
         }
+        if (tube) {
+            try {
+                auto &views = *drawing->classicalViews;
+                const auto locations = addDrawingTubeCuts(*tube, faces, classicalFrames,
+                                                          {&views[0], &views[1], &views[2]}, stop);
+                addTubeReverseViews(*drawing, shape, *tube, classicalFrames, openings, budget,
+                                    stop);
+                addMissingTubeWallViews(*drawing, shape, *tube, classicalFrames, openings, budget,
+                                        stop);
+                addTubeEndDetails(*drawing, shape, faces, *tube, classicalFrames, locations, budget,
+                                  stop);
+                for (std::size_t i = 0; i < views.size(); ++i)
+                    drawing->views[i].tubeCuts = views[i].tubeCuts;
+            } catch (const Standard_Failure &) {
+                // A local anchor is optional. The projected geometry and header remain readable.
+            }
+        }
         const auto &fv = drawing->views[0];
         const double width = fv.maximum.x - fv.minimum.x;
         const double section = std::max(fv.maximum.y - fv.minimum.y,
                                         drawing->views[1].maximum.y - drawing->views[1].minimum.y);
         if (request.allowBreaks && !profileGroup && drawingScale(*drawing).value_or(0) < .5 &&
-            width > 300 && width > 5 * section &&
-            homogeneous(shape, frames[0], fv.minimum.x, fv.maximum.x)) {
-            const double keep = std::max(80., 2.5 * section);
-            const std::array<double, 2> gap{fv.minimum.x + keep / 2, fv.maximum.x - keep / 2};
-            drawing->views[0].omittedX = gap;
-            drawing->views[1].omittedX = gap;
-            (*drawing->classicalViews)[0].omittedX = gap;
-            (*drawing->classicalViews)[1].omittedX = gap;
+            width > 300 && width > 5 * section) {
+            std::optional<std::array<double, 2>> gap;
+            if (tube) {
+                try {
+                    gap = drawingTubeBreak(faces, edges, *tube, frames[0].u, fv.minimum.x,
+                                           fv.maximum.x, stop);
+                } catch (const Standard_Failure &) {
+                    // Keep the full length if any geometric interval is unknown.
+                }
+            } else if (homogeneous(shape, frames[0], fv.minimum.x, fv.maximum.x)) {
+                const double keep = std::max(80., 2.5 * section);
+                gap = {{fv.minimum.x + keep / 2, fv.maximum.x - keep / 2}};
+            }
+            if (gap) {
+                for (std::size_t i : {0, 1}) {
+                    drawing->views[i].omittedX = gap;
+                    (*drawing->classicalViews)[i].omittedX = gap;
+                }
+                if (tube) {
+                    for (auto &auxiliary : drawing->auxiliaryViews)
+                        if (auxiliary.projection < 2 && !auxiliary.tubeEnd && !auxiliary.tubeWall)
+                            auxiliary.view.omittedX = gap;
+                    for (auto &view : *drawing->classicalViews)
+                        for (auto &arrow : view.viewArrows)
+                            if (view.omittedX && arrow.anchor.x > (*gap)[0] &&
+                                arrow.anchor.x < (*gap)[1])
+                                arrow.anchor.x = (view.minimum.x + (*gap)[0]) / 2;
+                }
+            }
         }
+        if (stop.stop_requested())
+            return DrawingError{"Cancelled", true};
         const double baseScale = drawingScale(*drawing).value_or(1);
         const auto addBend = [&](const RecognizedBend &bend, bool diagnostic) {
             const gp_Vec axisVector(gp_Pnt(bend.axisStart.x, bend.axisStart.y, bend.axisStart.z),
@@ -1971,31 +2514,34 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                 // NotMeasured remains visible on the sheet; cancellation is not caught here.
             }
         }
-        // Full circular surfaces (for example, bores) are not press-bend candidates.
-        std::vector<bool> used(static_cast<std::size_t>(faces.Extent()) + 1);
-        for (const auto &bend : bendAnalysis.bends) {
-            used[bend.innerFace] = true;
-            used[bend.outerFace] = true;
-        }
-        for (const auto &d : bendAnalysis.interiorContourDiagnostics) {
-            used[d.candidate.innerFace] = true;
-            used[d.candidate.outerFace] = true;
-        }
-        for (const auto &opening : openings)
-            for (auto faceIndex : opening.wallFaces)
-                used[faceIndex] = true;
-        drawing->unrecognizedCylindricalFaces = 0;
-        for (auto index : drawingContourRoundings(shape, faces, bendAnalysis.bends,
-                                                  bendAnalysis.lengthToleranceMm, stop))
-            used[index] = true;
-        for (int i = 1; i <= faces.Extent(); ++i) {
-            BRepAdaptor_Surface cylinderSurface(TopoDS::Face(faces(i)));
-            if (cylinderSurface.GetType() != GeomAbs_Cylinder || used[static_cast<std::size_t>(i)])
-                continue;
-            double u0, u1, v0, v1;
-            BRepTools::UVBounds(TopoDS::Face(faces(i)), u0, u1, v0, v1);
-            if (u1 - u0 < 2 * std::numbers::pi - 1e-5)
-                ++drawing->unrecognizedCylindricalFaces;
+        if (!tube) {
+            // Full circular surfaces (for example, bores) are not press-bend candidates.
+            std::vector<bool> used(static_cast<std::size_t>(faces.Extent()) + 1);
+            for (const auto &bend : bendAnalysis.bends) {
+                used[bend.innerFace] = true;
+                used[bend.outerFace] = true;
+            }
+            for (const auto &d : bendAnalysis.interiorContourDiagnostics) {
+                used[d.candidate.innerFace] = true;
+                used[d.candidate.outerFace] = true;
+            }
+            for (const auto &opening : openings)
+                for (auto faceIndex : opening.wallFaces)
+                    used[faceIndex] = true;
+            drawing->unrecognizedCylindricalFaces = 0;
+            for (auto index : drawingContourRoundings(shape, faces, bendAnalysis.bends,
+                                                      bendAnalysis.lengthToleranceMm, stop))
+                used[index] = true;
+            for (int i = 1; i <= faces.Extent(); ++i) {
+                BRepAdaptor_Surface cylinderSurface(TopoDS::Face(faces(i)));
+                if (cylinderSurface.GetType() != GeomAbs_Cylinder ||
+                    used[static_cast<std::size_t>(i)])
+                    continue;
+                double u0, u1, v0, v1;
+                BRepTools::UVBounds(TopoDS::Face(faces(i)), u0, u1, v0, v1);
+                if (u1 - u0 < 2 * std::numbers::pi - 1e-5)
+                    ++drawing->unrecognizedCylindricalFaces;
+            }
         }
         if (drawing->variableProfile != DrawingVariableProfile::Measured) {
             drawing->profiles = drawingProfiles(
@@ -2028,7 +2574,9 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             }
         }
         drawing->declaredThicknessMm = request.manualThicknessMm;
-        if (!drawing->bends.empty()) {
+        if (tube) {
+            drawing->thicknessMm = tube->profile.wallMm;
+        } else if (!drawing->bends.empty()) {
             const double t = drawing->bends.front().thicknessMm;
             if (std::all_of(drawing->bends.begin(), drawing->bends.end(),
                             [t](const auto &b) { return std::abs(b.thicknessMm - t) < 1e-5; })) {
@@ -2090,6 +2638,8 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
             }
         }
         for (auto &auxiliary : drawing->auxiliaryViews) {
+            if (auxiliary.tubeEnd || auxiliary.tubeWall)
+                continue;
             auto frame = frames.at(auxiliary.projection);
             if (auxiliary.view.reverseProjection !=
                 drawing->views[auxiliary.projection].reverseProjection) {
@@ -2108,21 +2658,23 @@ DrawingResult BendingDrawingBuilder::build(DocumentPtr document, DrawingRequest 
                                     request.sectionEdits);
         else if (!request.sectionEdits.empty())
             throw DrawingError{"Для этого типа сечения ручная настройка пока недоступна"};
-        try {
-            prepareFlatDrawing(*drawing, document, request, frames[0].v, budget, stop);
-        } catch (const DrawingError &error) {
-            if (error.cancelled)
-                throw;
-            drawing->flatPatternError =
-                FlatPatternError{FlatPatternErrorCode::Failed, error.detail};
-        } catch (const Standard_Failure &error) {
-            drawing->flatPatternError =
-                FlatPatternError{FlatPatternErrorCode::Failed,
-                                 error.GetMessageString() ? error.GetMessageString()
-                                                          : "Flat contour preparation failed"};
-        } catch (const std::runtime_error &error) {
-            drawing->flatPatternError =
-                FlatPatternError{FlatPatternErrorCode::Failed, error.what()};
+        if (!tube) {
+            try {
+                prepareFlatDrawing(*drawing, document, request, frames[0].v, budget, stop);
+            } catch (const DrawingError &error) {
+                if (error.cancelled)
+                    throw;
+                drawing->flatPatternError =
+                    FlatPatternError{FlatPatternErrorCode::Failed, error.detail};
+            } catch (const Standard_Failure &error) {
+                drawing->flatPatternError =
+                    FlatPatternError{FlatPatternErrorCode::Failed,
+                                     error.GetMessageString() ? error.GetMessageString()
+                                                              : "Flat contour preparation failed"};
+            } catch (const std::runtime_error &error) {
+                drawing->flatPatternError =
+                    FlatPatternError{FlatPatternErrorCode::Failed, error.what()};
+            }
         }
         if (!drawingScale(*drawing))
             return DrawingError{"The part does not fit the supported A3 / standard scale range"};

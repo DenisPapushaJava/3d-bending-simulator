@@ -1,4 +1,6 @@
 #include "DrawingOpenings.h"
+#include "DrawingTubeBores.h"
+#include "DrawingTubeProfile.h"
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
@@ -197,10 +199,87 @@ std::array<double, 4> bounds(const TopoDS_Shape &shape, const gp_Ax2 &frame) {
                            false);
     return {box.CornerMin().X(), box.CornerMin().Y(), box.CornerMax().X(), box.CornerMax().Y()};
 }
+void prepareTubeWallOpenings(std::vector<DrawingOpening> &openings, const DrawingTubeGeometry &tube,
+                             const TopTools_IndexedMapOfShape &faces,
+                             const TopTools_IndexedDataMapOfShapeListOfShape &neighbors,
+                             std::stop_token stop) {
+    if (!tube.planarWalls)
+        return;
+
+    const auto &walls = *tube.planarWalls;
+    std::array<std::vector<DrawingOpening *>, 4> bores;
+    std::array<std::vector<const DrawingOpening *>, 4> innerRims;
+    for (const auto &opening : openings) {
+        for (std::size_t i = 0; i < walls.size(); ++i)
+            if (walls[i].innerFace == opening.supportFace)
+                innerRims[i].push_back(&opening);
+    }
+    const auto aligned = [](const DrawingOpening &a, const DrawingOpening &b) {
+        return a.normal.IsParallel(b.normal, 1e-7) &&
+               gp_Vec(a.center, b.center).Crossed(gp_Vec(a.normal)).Magnitude() < tolerance;
+    };
+    const auto sameBore = [&](const DrawingOpening &a, const DrawingOpening &b) {
+        return a.straightBore && b.straightBore && aligned(a, b) &&
+               std::abs(a.major.Magnitude() - b.major.Magnitude()) < tolerance;
+    };
+    for (auto &opening : openings) {
+        if (stop.stop_requested())
+            throw DrawingError{"Cancelled", true};
+        const auto wall = std::find_if(walls.begin(), walls.end(), [&](const auto &candidate) {
+            return candidate.outerFace == opening.supportFace;
+        });
+        if (wall == walls.end())
+            continue;
+        opening.tubeOutward = wall->outward;
+        const auto index = static_cast<std::size_t>(wall - walls.begin());
+        if (opening.straightBore || !opening.windowWalls.empty())
+            for (const auto *inside : innerRims[index]) {
+                if (sameBore(opening, *inside) &&
+                    std::is_permutation(opening.wallFaces.begin(), opening.wallFaces.end(),
+                                        inside->wallFaces.begin(), inside->wallFaces.end())) {
+                    bores[index].push_back(&opening);
+                    opening.tubeBore =
+                        DrawingTubeBore{2 * opening.major.Magnitude(), {.throughWall = true}};
+                    break;
+                }
+                if (!opening.windowWalls.empty() && opening.windowWalls == inside->windowWalls &&
+                    aligned(opening, *inside)) {
+                    opening.tubeWindow = true;
+                    break;
+                }
+            }
+        if (opening.circular && !opening.tubeBore)
+            opening.tubeBore = drawingTubeBore(opening, *wall, faces, neighbors, stop);
+    }
+    std::size_t pair = 0;
+    for (std::size_t i : {0, 2})
+        for (auto *near : bores[i]) {
+            if (stop.stop_requested())
+                throw DrawingError{"Cancelled", true};
+            const auto other =
+                std::find_if(bores[i + 1].begin(), bores[i + 1].end(), [&](const auto *far) {
+                    return !far->opposedBorePair && sameBore(*near, *far);
+                });
+            if (other != bores[i + 1].end()) {
+                near->opposedBorePair = pair;
+                (*other)->opposedBorePair = pair;
+                ++pair;
+            }
+        }
+    // The inner rim can project onto an exterior opening. It supplies proof,
+    // while the physical projection and its dimensions belong to the outer wall.
+    std::erase_if(openings, [&](const auto &opening) {
+        return std::any_of(walls.begin(), walls.end(),
+                           [&](const auto &wall) { return wall.innerFace == opening.supportFace; });
+    });
+}
+
 } // namespace
 std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                                             const TopTools_IndexedMapOfShape &faces,
-                                            std::stop_token stop, std::size_t maximumCandidates) {
+                                            std::stop_token stop, std::size_t maximumCandidates,
+                                            const DrawingTubeGeometry *tube) {
+    const bool prepareTubeWalls = tube && tube->planarWalls;
     TopTools_IndexedDataMapOfShapeListOfShape neighbors;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, neighbors);
     std::vector<DrawingOpening> result;
@@ -311,22 +390,48 @@ std::vector<DrawingOpening> drawingOpenings(const TopoDS_Shape &shape,
                                        std::max(std::abs(dimensions[1]), std::abs(dimensions[3])),
                                    circular,
                                    {},
-                                   obround};
-            for (TopExp_Explorer ei(wire, TopAbs_EDGE); ei.More(); ei.Next())
+                                   obround,
+                                   id};
+            opening.straightBore = prepareTubeWalls && circular;
+            for (TopExp_Explorer ei(wire, TopAbs_EDGE); ei.More(); ei.Next()) {
+                bool cylindricalEdge = false;
                 for (const auto &neighbor : neighbors.FindFromKey(ei.Current())) {
+                    if (neighbor.IsSame(face))
+                        continue;
                     BRepAdaptor_Surface wall(TopoDS::Face(neighbor));
                     if (wall.GetType() == GeomAbs_Cylinder) {
                         const auto index = static_cast<std::size_t>(faces.FindIndex(neighbor));
                         if (std::find(opening.wallFaces.begin(), opening.wallFaces.end(), index) ==
                             opening.wallFaces.end())
                             opening.wallFaces.push_back(index);
+                        if (opening.straightBore) {
+                            const auto cylinder = wall.Cylinder();
+                            const gp_Vec offset(cylinder.Location(), opening.center);
+                            cylindricalEdge |=
+                                cylinder.Axis().Direction().IsParallel(opening.normal, 1e-7) &&
+                                offset.Crossed(gp_Vec(opening.normal)).Magnitude() < tolerance &&
+                                std::abs(cylinder.Radius() - radius) < tolerance;
+                        }
+                    } else if (prepareTubeWalls && rectangle && wall.GetType() == GeomAbs_Plane &&
+                               wall.Plane().Axis().Direction().IsNormal(opening.normal, 1e-7)) {
+                        opening.windowWalls.push_back(faces.FindIndex(neighbor));
                     }
                 }
+                opening.straightBore &= cylindricalEdge;
+            }
+            std::sort(opening.windowWalls.begin(), opening.windowWalls.end());
+            if (opening.windowWalls.size() != 4 || opening.windowWalls.front() <= 0 ||
+                std::adjacent_find(opening.windowWalls.begin(), opening.windowWalls.end()) !=
+                    opening.windowWalls.end())
+                opening.windowWalls.clear();
             result.push_back(std::move(opening));
         }
     }
+    if (prepareTubeWalls)
+        prepareTubeWallOpenings(result, *tube, faces, neighbors, stop);
     return result;
 }
+
 void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax2 &projection,
                         const TopoDS_Shape &visible, application::DrawingView &view,
                         std::stop_token stop) {
@@ -335,19 +440,22 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
     for (const auto &opening : openings) {
         if (stop.stop_requested())
             throw DrawingError{"Cancelled", true};
-        if (!opening.normal.IsParallel(projection.Direction(), 1e-7))
+        if (opening.tubeOutward ? !opening.tubeOutward->IsEqual(projection.Direction(), 1e-7)
+                                : !opening.normal.IsParallel(projection.Direction(), 1e-7))
             continue;
         const auto c = project(opening.center, projection);
+        const double diameter =
+            opening.tubeBore ? opening.tubeBore->diameterMm : 2 * opening.major.Magnitude();
         const bool duplicate = std::any_of(centers.begin(), centers.end(), [&](auto old) {
             return std::hypot(old.x - c.x, old.y - c.y) < tolerance;
         });
-        if (duplicate &&
-            (!opening.circular ||
-             std::any_of(
-                 view.holeDiameters.begin(), view.holeDiameters.end(), [&](const auto &old) {
-                     return std::hypot(old.first.x - c.x, old.first.y - c.y) < tolerance &&
-                            std::abs(old.second - 2 * opening.major.Magnitude()) < tolerance;
-                 })))
+        if (duplicate && (!opening.circular ||
+                          std::any_of(view.holeDiameters.begin(), view.holeDiameters.end(),
+                                      [&](const auto &old) {
+                                          return std::hypot(old.first.x - c.x, old.first.y - c.y) <
+                                                     tolerance &&
+                                                 std::abs(old.second - diameter) < tolerance;
+                                      })))
             continue;
         const double depth =
             gp_Vec(gp_Pnt(0, 0, 0), opening.center).Dot(gp_Vec(projection.Direction()));
@@ -372,8 +480,15 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
                                  *curves, stop))
                 continue;
         }
-        if (opening.circular)
-            view.holeDiameters.push_back({c, 2 * opening.major.Magnitude()});
+        view.hasIndependentTubeWallOpenings |= opening.tubeOutward && !opening.opposedBorePair;
+        if (opening.circular) {
+            if (opening.opposedBorePair)
+                view.opposedTubeBores.push_back(
+                    {view.holeDiameters.size(), *opening.opposedBorePair});
+            else if (opening.tubeBore)
+                view.boreNotes.push_back({view.holeDiameters.size(), opening.tubeBore->shape});
+            view.holeDiameters.push_back({c, diameter});
+        }
         if (duplicate)
             continue;
         centers.push_back(c);
@@ -383,7 +498,8 @@ void addDrawingOpenings(const std::vector<DrawingOpening> &openings, const gp_Ax
         if (!opening.circular)
             view.openingAxes.push_back(
                 {c, project(opening.center.Translated(opening.major), projection),
-                 project(opening.center.Translated(opening.minor), projection), opening.obround});
+                 project(opening.center.Translated(opening.minor), projection), opening.obround,
+                 opening.tubeWindow});
     }
     for (bool horizontal : {true, false}) {
         auto sorted = centers;

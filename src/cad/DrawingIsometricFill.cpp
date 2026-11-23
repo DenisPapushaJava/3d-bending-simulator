@@ -10,6 +10,7 @@
 #include <gp_Vec.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -20,6 +21,7 @@ makeDrawingIsometricFill(const TopoDS_Shape &shape, const gp_Ax2 &frame,
     constexpr int resolution = 768;
     constexpr std::size_t triangleBudget = 200000;
     constexpr std::size_t pixelBudget = 24000000;
+    constexpr double edgeTolerance = 1.e-9;
     const double spanX = view.maximum.x - view.minimum.x;
     const double spanY = view.maximum.y - view.minimum.y;
     if (!std::isfinite(spanX) || !std::isfinite(spanY) || spanX <= 0 || spanY <= 0)
@@ -114,9 +116,17 @@ makeDrawingIsometricFill(const TopoDS_Shape &shape, const gp_Ax2 &frame,
             };
             const int left = lower(a.x, b.x, c.x, width), right = upper(a.x, b.x, c.x, width);
             const int top = lower(a.y, b.y, c.y, height), bottom = upper(a.y, b.y, c.y, height);
-            pixels += static_cast<std::size_t>(right - left + 1) * (bottom - top + 1);
+            // Long, thin triangles may cover very little of their bounding rectangle.
+            // Clip their pixel spans with the same three barycentric half-spaces.
+            const int rows = bottom - top + 1, columns = right - left + 1;
+            const auto rectanglePixels = static_cast<std::size_t>(columns) * rows;
+            const bool clipRows =
+                columns >= 8 && rectanglePixels > 64 && rectanglePixels > 2 * std::abs(area);
+            pixels += clipRows ? static_cast<std::size_t>(3 * rows) : rectanglePixels;
             if (pixels > pixelBudget)
                 return {};
+            const auto slopes = clipRows ? std::array{cy / area, -by / area, (by - cy) / area}
+                                         : std::array<double, 3>{};
             const auto worldVector = [&](double x, double y, double z) {
                 return u * (x * spanX / width) - v * (y * spanY / height) + n * z;
             };
@@ -129,12 +139,40 @@ makeDrawingIsometricFill(const TopoDS_Shape &shape, const gp_Ax2 &frame,
             // Shared nodal illumination keeps the cylinder's tone continuous across facets.
             const double illuminationB = b.illumination - a.illumination;
             const double illuminationC = c.illumination - a.illumination;
-            for (int y = top; y <= bottom; ++y)
-                for (int x = left; x <= right; ++x) {
-                    const double dx = x + .5 - a.x, dy = y + .5 - a.y;
+            for (int y = top; y <= bottom; ++y) {
+                const double dy = y + .5 - a.y;
+                int first = left, last = right;
+                if (clipRows) {
+                    const double b = -dy * cx / area, c = dy * bx / area;
+                    const std::array offsets{b, c, 1 - b - c};
+                    double low = left + .5 - a.x, high = right + .5 - a.x;
+                    for (std::size_t edge = 0; edge < slopes.size(); ++edge) {
+                        const double slope = slopes[edge], offset = offsets[edge];
+                        if (slope > 0)
+                            low = std::max(low, (-edgeTolerance - offset) / slope);
+                        else if (slope < 0)
+                            high = std::min(high, (-edgeTolerance - offset) / slope);
+                        else if (offset < -edgeTolerance)
+                            high = -std::numeric_limits<double>::infinity();
+                    }
+                    if (low > high + 1)
+                        continue;
+                    // Round outwards. The original test below decides coverage at each pixel.
+                    first = static_cast<int>(
+                        std::clamp(std::floor(low + a.x - .5), double(left), double(right)));
+                    last = static_cast<int>(
+                        std::clamp(std::ceil(high + a.x - .5), double(left), double(right)));
+                    if (last < first)
+                        continue;
+                    pixels += static_cast<std::size_t>(last - first + 1);
+                    if (pixels > pixelBudget)
+                        return {};
+                }
+                for (int x = first; x <= last; ++x) {
+                    const double dx = x + .5 - a.x;
                     const double wb = (dx * cy - dy * cx) / area;
                     const double wc = (bx * dy - by * dx) / area;
-                    if (wb < -1.e-9 || wc < -1.e-9 || wb + wc > 1. + 1.e-9)
+                    if (wb < -edgeTolerance || wc < -edgeTolerance || wb + wc > 1. + edgeTolerance)
                         continue;
                     const double z = a.z + wb * bz + wc * cz;
                     const auto index = static_cast<std::size_t>(y) * width + x;
@@ -146,6 +184,7 @@ makeDrawingIsometricFill(const TopoDS_Shape &shape, const gp_Ax2 &frame,
                                                  : color;
                     }
                 }
+            }
         }
     }
     if (std::none_of(fill.pixels.begin(), fill.pixels.end(), [](auto pixel) { return pixel != 0; }))

@@ -119,6 +119,8 @@ class LayoutContext {
 };
 void initializeFont();
 application::DrawingView preparedView(const application::BendingDrawing &, DrawingViewKey);
+QString holeLeaderText(double diameter, const application::DrawingBoreShape *, std::size_t count,
+                       bool fromAxis, int decimals);
 application::DrawingView selectedView(const application::BendingDrawing &, DrawingViewKey,
                                       const std::vector<DrawingViewChoice> *);
 void orientPaperView(application::DrawingView &, bool mirror, int turns, LayoutContext *);

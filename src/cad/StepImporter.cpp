@@ -4,6 +4,7 @@
 #include "BendRecognizer.h"
 #include "CadDocumentData.h"
 #include "ClosedCutouts.h"
+#include "DrawingTubeProfile.h"
 #include "SheetOrientation.h"
 #include "ThicknessRecognizer.h"
 #include "ToolShapeHints.h"
@@ -530,6 +531,13 @@ StepImportResult StepImporter::readBytes(std::string source, const std::filesyst
             return fail(StepImportErrorCode::Cancelled,
                         "Import cancelled before presentation preparation");
         }
+        try {
+            if (faces.Extent() <= 4096)
+                data->tubeProfile = drawingTubeProfile(data->shape, faces, tolerance, stop);
+        } catch (const Standard_Failure &) {
+            // Optional drawing classification must leave a valid solid usable.
+        }
+        data->metadata.confirmedTubeProfile = data->tubeProfile.has_value();
         for (int i = 1; i <= faces.Extent(); ++i) {
             if (stop.stop_requested()) {
                 return fail(StepImportErrorCode::Cancelled, "Import cancelled during preparation");

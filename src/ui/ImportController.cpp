@@ -1326,32 +1326,35 @@ bool ImportController::prepareDrawing(
     auto *state = impl_.get();
     request.manualThicknessMm = state->session.manualThicknessMm();
     request.unfoldSettings = state->session.unfoldSettings();
-    request.preparedFlatPattern = state->flat;
+    const auto document = state->session.document();
+    const bool tube = document->metadata().confirmedTubeProfile;
+    request.preparedFlatPattern = tube ? nullptr : state->flat;
     request.preparedFlatError.reset();
     if (state->drawing && state->drawingRequest == request &&
         (!request.preparedFlatPattern ||
          state->drawing->preparedFlatPattern == request.preparedFlatPattern) &&
-        (!state->activeFlat || state->drawing->preparedFlatPattern)) {
+        (!state->activeFlat || state->drawing->preparedFlatPattern ||
+         state->drawing->tubeProfile)) {
         emit stateChanged();
         return true;
     }
     state->invalidateDrawing();
     state->drawingRequest = request;
     const auto id = state->drawingId;
-    const auto document = state->session.document();
     const auto revision = state->session.revision();
     const auto editRevision = state->session.editRevision();
     auto flatJob = state->activeFlat;
     if (flatJob &&
-        (flatJob->document != document || flatJob->revision != revision ||
-         flatJob->request != state->currentFlatRequest() || flatJob->stop.stop_requested()))
+        ((tube && !flatJob->show) || flatJob->document != document ||
+         flatJob->revision != revision || flatJob->request != state->currentFlatRequest() ||
+         flatJob->stop.stop_requested()))
         flatJob.reset();
     state->beginForeground(nullptr, bool(flatJob));
     const auto stop = state->stop.get_token();
     state->preparingDrawing = true;
     auto submit = [state, builder = std::move(builder), request = std::move(request), id, document,
-                   revision, editRevision, stop](const FlatPatternResult *prepared) mutable {
-        if (prepared) {
+                   revision, editRevision, stop, tube](const FlatPatternResult *prepared) mutable {
+        if (prepared && !tube) {
             if (const auto *flat = std::get_if<FlatPatternPtr>(prepared))
                 request.preparedFlatPattern = *flat;
             else
@@ -1550,8 +1553,10 @@ bool ImportController::prefetchFlatPattern(std::shared_ptr<const FlatPatternBuil
         s->session.activeRequest() || s->activeFlat || s->activePrefetch || s->pendingPrefetch ||
         s->flatRequest == s->currentFlatRequest())
         return false;
-    const auto &analysis = s->session.document()->metadata().bendAnalysis;
-    if (analysis.status != BendRecognitionStatus::Completed || analysis.bends.empty())
+    const auto &metadata = s->session.document()->metadata();
+    const auto &analysis = metadata.bendAnalysis;
+    if (metadata.confirmedTubeProfile || analysis.status != BendRecognitionStatus::Completed ||
+        analysis.bends.empty())
         return false;
     s->startFlat(std::move(builder), false);
     return true;

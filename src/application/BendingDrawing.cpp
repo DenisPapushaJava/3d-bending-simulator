@@ -29,6 +29,9 @@ DrawingMeasurementCoverage drawingMeasurementCoverage(const BendingDrawing &draw
     }
     return coverage;
 }
+double drawingPaperBreakGapMm(const BendingDrawing &drawing, const DrawingView &view) noexcept {
+    return view.omittedX ? (drawing.tubeProfile ? 3.5 : 8.) : 0.;
+}
 std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept {
     double fit = 100;
     std::array<DrawingPoint, 3> available{{{134, 48}, {134, 48}, {104, 48}}};
@@ -47,7 +50,8 @@ std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept {
                 return {};
             w -= (*v.omittedX)[1] - (*v.omittedX)[0];
         }
-        fit = std::min({fit, (available[i].x - (v.omittedX ? 8 : 0)) / w, available[i].y / h});
+        fit = std::min(
+            {fit, (available[i].x - drawingPaperBreakGapMm(drawing, v)) / w, available[i].y / h});
     }
     return standardDrawingScale(fit);
 }

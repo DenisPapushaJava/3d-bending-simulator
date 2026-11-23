@@ -47,6 +47,7 @@ struct DrawingCenterAxes {
     DrawingPoint first;
     DrawingPoint second;
     bool obround = false;
+    bool tubeWindow = false;
 };
 struct DrawingDirectionNote {
     DrawingPoint anchor;
@@ -75,6 +76,29 @@ struct DrawingContourCorners {
     // Candidate rays for each physical corner. A pair is a point on the contour
     // and a point in the outward direction.
     std::vector<std::vector<std::pair<DrawingPoint, DrawingPoint>>> corners;
+};
+struct DrawingTubeCutNote {
+    DrawingPoint anchor; // Confirmed point of the cut outline in this projection.
+    double degreesFromSquare;
+};
+struct DrawingConicalEntrance {
+    double diameterMm;
+    double includedAngleDegrees;
+    double depthMm; // Axial distance between the two rims of the conical entrance.
+};
+struct DrawingBoreShape {
+    bool throughWall = false;
+    std::optional<double> blindDepthMm = {};
+    std::optional<DrawingConicalEntrance> entrance = {};
+};
+struct DrawingBoreNote {
+    std::size_t diameterIndex; // Index in DrawingView::holeDiameters.
+    DrawingBoreShape shape;
+};
+struct DrawingOpposedBore {
+    std::size_t diameterIndex; // Index in DrawingView::holeDiameters.
+    std::size_t pair;
+    bool coveredOnAnotherView = false; // Set only on a view selected for a sheet.
 };
 struct DrawingView {
     std::vector<DrawingPath> paths;
@@ -111,6 +135,10 @@ struct DrawingView {
     std::vector<DrawingContourCorners> contourCorners;
     std::vector<DrawingViewArrow> viewArrows;
     std::vector<std::array<DrawingPoint, 2>> bendBoundaries = {}; // Visible isometric intervals.
+    std::vector<DrawingTubeCutNote> tubeCuts = {};
+    std::vector<DrawingOpposedBore> opposedTubeBores = {};
+    bool hasIndependentTubeWallOpenings = false;
+    std::vector<DrawingBoreNote> boreNotes = {};
 };
 struct DrawingBend {
     double turnRadians;
@@ -177,6 +205,9 @@ struct DrawingAuxiliaryView {
     DrawingView view;
     std::string designation;
     std::size_t projection = 0;
+    std::optional<std::size_t> tubeEnd = {}; // Source axial side, for independent end details.
+    bool tubeNotch = false;
+    std::optional<std::size_t> tubeWall = {}; // Normal view of a physical longitudinal wall.
 };
 enum class DrawingVariableProfile { None, Measured, NotMeasured };
 struct DrawingSectionEdit {
@@ -214,6 +245,14 @@ struct DrawingIsometricFill {
     int height;
     std::vector<std::uint32_t> pixels; // Top-down 0xAARRGGBB, aligned to isometric view bounds.
 };
+struct DrawingTubeProfile {
+    double sizeMm = 0; // Diameter for a round tube, larger outer side otherwise.
+    std::optional<double> minorSizeMm;
+    double wallMm = 0;
+    // In order from left to right, or from bottom to top on the main view.
+    std::array<std::optional<double>, 2> cutsDegrees{};
+    bool vertical = false;
+};
 struct BendingDrawing {
     std::array<DrawingView, 4> views; // Front, top, left: first-angle projection; isometric.
     std::optional<DrawingIsometricFill> isometricFill = {};
@@ -238,6 +277,7 @@ struct BendingDrawing {
     std::optional<DrawingFlatPattern> flatPattern = {};
     std::optional<FlatPatternError> flatPatternError = {};
     FlatPatternPtr preparedFlatPattern = {}; // Original stock snapshot, before paper orientation.
+    std::optional<DrawingTubeProfile> tubeProfile = {};
 };
 using BendingDrawingPtr = std::shared_ptr<const BendingDrawing>;
 struct DrawingComplexityLimits {
@@ -258,6 +298,7 @@ class BendingDrawingBuilder {
     [[nodiscard]] virtual DrawingResult build(DocumentPtr document, DrawingRequest request,
                                               std::stop_token stop) const = 0;
 };
+[[nodiscard]] double drawingPaperBreakGapMm(const BendingDrawing &, const DrawingView &) noexcept;
 // Largest standard scale fitting the three orthographic view boxes, including annotation space.
 [[nodiscard]] std::optional<double> drawingScale(const BendingDrawing &drawing) noexcept;
 [[nodiscard]] std::optional<double> standardDrawingScale(double maximum) noexcept;

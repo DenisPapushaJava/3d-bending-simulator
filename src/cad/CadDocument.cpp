@@ -31,6 +31,10 @@ OcctDocumentAccess::measurements(const CadDocument &document) {
 const TopoDS_Shape &OcctDocumentAccess::shape(const CadDocument &document) {
     return document.impl_->shape;
 }
+const DrawingTubeGeometry *OcctDocumentAccess::tubeProfile(const CadDocument &document) {
+    const auto &profile = document.impl_->tubeProfile;
+    return profile ? &*profile : nullptr;
+}
 const TopoDS_Shape &OcctDocumentAccess::simulationShape(const CadDocument &document) {
     return document.impl_->filledShape.IsNull() ? document.impl_->shape
                                                 : document.impl_->filledShape;
@@ -57,6 +61,7 @@ OcctDocumentAccess::routeState(const CadDocument &original, TopoDS_Shape shape, 
                                std::vector<SheetSide> sides) {
     auto data = std::make_unique<CadDocument::Impl>();
     data->metadata = original.metadata();
+    data->metadata.confirmedTubeProfile = false;
     data->metadata.bendAnalysis = recognizeBends(shape, data->metadata.maximumToleranceMm, stop,
                                                  BendRecognitionPurpose::RouteState);
     data->metadata.toolShapeHints.clear(); // Source-only hints must not follow internal bend IDs.

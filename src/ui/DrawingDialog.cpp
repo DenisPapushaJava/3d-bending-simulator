@@ -533,8 +533,10 @@ class DrawingDialog::Impl {
         return showBendTools->isChecked() && controller.bendRoute() == toolNotesRoute ? toolRows
                                                                                       : nullptr;
     }
-    void refreshToolRows() {
-        const bool enabled = showBendTools->isChecked();
+    void refreshToolRows(const application::BendingDrawingPtr &drawing) {
+        const bool show = drawing && !drawing->tubeProfile;
+        outputForm->setRowVisible(showBendTools, show);
+        const bool enabled = show && showBendTools->isChecked();
         const auto route = enabled ? controller.bendRoute() : nullptr;
         if (toolNotesRoute != route) {
             toolNotesRoute = route;
@@ -617,10 +619,17 @@ class DrawingDialog::Impl {
                 result.index = 0;
             }
             break;
-        case DrawingViewKind::Auxiliary:
-            result.index = drawing.auxiliaryViews[key.index].projection;
-            result.variant = drawing.auxiliaryViews[key.index].view.reverseProjection;
+        case DrawingViewKind::Auxiliary: {
+            const auto &auxiliary = drawing.auxiliaryViews[key.index];
+            // The ordinary auxiliaries use projection indices 0–2. Tube ends
+            // are identified by their physical axial side across reorientation.
+            if (auxiliary.tubeEnd)
+                result.index = 3 + *auxiliary.tubeEnd + (auxiliary.tubeNotch ? 2 : 0);
+            else
+                result.index = auxiliary.tubeWall ? 7 + *auxiliary.tubeWall : auxiliary.projection;
+            result.variant = auxiliary.view.reverseProjection;
             break;
+        }
         default:
             break;
         }
@@ -790,7 +799,11 @@ class DrawingDialog::Impl {
                 }
             if (!preserve && saved)
                 for (auto &choice : choices) {
-                    if (!restore && !application::supportsPaperViewRotation(choice.key.kind))
+                    const bool tubeDetail = choice.key.kind == DrawingViewKind::Auxiliary &&
+                                            (drawing->auxiliaryViews[choice.key.index].tubeEnd ||
+                                             drawing->auxiliaryViews[choice.key.index].tubeWall);
+                    if (!restore && !tubeDetail &&
+                        !application::supportsPaperViewRotation(choice.key.kind))
                         continue;
                     const auto id = identity(*drawing, choice.key);
                     const auto found =
@@ -798,7 +811,7 @@ class DrawingDialog::Impl {
                                      [&](const auto &entry) { return entry.identity == id; });
                     if (found == saved->views.end())
                         continue;
-                    if (restore) {
+                    if (restore || tubeDetail) {
                         choice.visible = found->visible;
                         choice.scale = found->scale;
                     }
@@ -1089,7 +1102,8 @@ class DrawingDialog::Impl {
         }
     }
     void refresh() {
-        refreshToolRows();
+        const auto drawing = controller.drawing();
+        refreshToolRows(drawing);
         const bool same =
             revision == controller.session().revision() && controller.session().document();
         const bool busy = controller.hasWork();
@@ -1099,7 +1113,6 @@ class DrawingDialog::Impl {
                         static_cast<QWidget *>(reverse), static_cast<QWidget *>(breaks)})
             w->setEnabled(same && !busy);
         prepare->setEnabled(same && controller.canPrepareDrawing());
-        const auto drawing = controller.drawing();
         views->setEnabled(same && !busy && drawing && !settingsChanged);
         flatSide->setEnabled(same && !busy && drawing && !settingsChanged);
         shadeIsometric->setEnabled(same && !busy && drawing && !settingsChanged);
@@ -1157,8 +1170,20 @@ class DrawingDialog::Impl {
                 showLayoutError(QString::fromUtf8(e.what()));
                 return;
             }
-            const bool cut = drawing->views[0].omittedX.has_value();
             const auto pages = drawingTitle.plan->pages + tools.extraPages();
+            if (drawing->tubeProfile) {
+                auto summary = QStringLiteral("Чертёж трубы · %1 · %2 лист(а)")
+                                   .arg(DrawingSheet::paperName(plan->paperFormat))
+                                   .arg(pages);
+                if (plan->omittedDimensions)
+                    summary +=
+                        QStringLiteral("\nНе показано размеров: %1").arg(plan->omittedDimensions);
+                status->setText(summary);
+                status->setToolTip(QStringLiteral("Размеры справочные."));
+                renderReady(*drawing, drawingTitle, tools);
+                return;
+            }
+            const bool cut = drawing->views[0].omittedX.has_value();
             const auto coverage = DrawingSheet::coverage(*drawing, drawingTitle);
             status->setText(
                 QStringLiteral("%1 · %2 · %3 лист(а)%4. Размеры полок и углы: %5 из %6 "

@@ -80,6 +80,23 @@ void checkProjections(const application::BendingDrawing &drawing, const ui::Draw
             "Selected projections are missing");
     verifyRecordedDimensions(drawing, plan);
 }
+void checkTubeBreakScale() {
+    auto tube = std::make_shared<application::BendingDrawing>();
+    tube->tubeProfile = application::DrawingTubeProfile{20, 20, 2};
+    rectangle(tube->views[0], 1200, 20);
+    // At 1:2 the visible geometry is 212 mm wide. The A4 scale bound has
+    // 218 mm available, which fits the tube gap but not an 8 mm gap.
+    tube->views[0].omittedX = std::array{212., 988.};
+    for (const auto scale : {std::optional<double>{.5}, std::optional<double>{}}) {
+        const std::vector<ui::DrawingViewChoice> choices{
+            {{ui::DrawingViewKind::Projection, 0}, true, scale}};
+        const auto plan =
+            ui::DrawingSheet::compose(tube, choices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+        require(plan->pages == 1 && plan->views.size() == 1 && plan->views.front().scale == .5,
+                "A4 rejected a tube projection that fits at 1:2 with the actual break gap");
+        checkProjections(*tube, *plan, choices);
+    }
+}
 void checkRowSharing(const ui::DrawingSheetPlan &plan) {
     bool shared = false;
     for (const auto &at : plan.views) {
@@ -118,6 +135,7 @@ void interrupted(const std::shared_ptr<application::BendingDrawing> &drawing,
 } // namespace
 
 void drawingPaginationChecks() {
+    checkTubeBreakScale();
     auto choices = projections();
     const auto compactDrawing = disjointDimensions();
     const auto compact = ui::DrawingSheet::compose(compactDrawing, choices);

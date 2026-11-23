@@ -1,9 +1,11 @@
 #include "BendFixtures.h"
+#include "DrawingIsometricFill.h"
 #include "DrawingLayoutChecks.h"
 #include "DrawingPaginationChecks.h"
 #include "DrawingRepeats.h"
 #include "DrawingSectionOrientationChecks.h"
 #include "DrawingSheetInternal.h"
+#include "DrawingTubeProfile.h"
 #include "ProfileFixtures.h"
 #include "ToolFixtures.h"
 #include "TrayFixtures.h"
@@ -21,10 +23,16 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Poly_Triangulation.hxx>
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -140,6 +148,639 @@ void requireCompactOrientation(const QImage &preview) {
             if (qGray(preview.pixel(x, y)) < 160)
                 ++pixels;
     require(pixels > 100, "The sheet lost its compact isometric geometry below the caption");
+}
+void tubeDrawing(const QString &folder) {
+    const auto stock = [](double length) {
+        return BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(40, 20, length).Shape(),
+                               BRepPrimAPI_MakeBox(gp_Pnt(2, 2, -1), 36, 16, length + 2).Shape())
+            .Shape();
+    };
+    const auto tube = stock(200);
+    gp_Trsf tilt;
+    tilt.SetRotation(gp_Ax1(gp_Pnt(0, 0, 160), gp_Dir(0, 1, 0)), std::numbers::pi / 6);
+    const auto cutter = BRepPrimAPI_MakeBox(gp_Pnt(-100, -100, 160), 200, 200, 100).Shape();
+    const auto miter = BRepAlgoAPI_Cut(tube, cutter.Moved(TopLoc_Location(tilt))).Shape();
+    const auto path = folder + "/mitered-tube.step";
+    const auto document = load(miter, path);
+    application::DrawingRequest request;
+    request.unfoldSettings = core::UnfoldSettings{core::SheetMaterial::MildSteel, {}, 1};
+    const auto drawing = build(document, request);
+    require(drawing->tubeProfile && drawing->bends.empty() && drawing->sections.empty() &&
+                !drawing->flatPattern && !drawing->flatPatternError && drawing->thicknessMm == 2.,
+            "A rectangular tube produced sheet-bending data");
+    const auto &profile = *drawing->tubeProfile;
+    require(std::abs(profile.sizeMm - 40) < 1e-5 &&
+                std::abs(profile.minorSizeMm.value_or(0) - 20) < 1e-5,
+            "Wrong outside tube dimensions");
+    const auto &cuts = profile.cutsDegrees;
+    require(cuts[0] && cuts[1] && std::abs(std::min(*cuts[0], *cuts[1])) < 1e-5 &&
+                std::abs(std::max(*cuts[0], *cuts[1]) - 30) < 1e-5,
+            "Miter angle must be measured from a square cut");
+    std::size_t notes = 0;
+    for (const auto &view : *drawing->classicalViews)
+        for (const auto &note : view.tubeCuts) {
+            const double toEnd =
+                std::min(note.anchor.x - view.minimum.x, view.maximum.x - note.anchor.x);
+            require(toEnd >= -1e-5 && toEnd < 30 &&
+                        (std::abs(note.degreesFromSquare) < 1e-5 ||
+                         std::abs(note.degreesFromSquare - 30) < 1e-5),
+                    "A tube cut was labelled at an unrelated part of the view");
+            ++notes;
+        }
+    require(notes == 2, "The tube cut angles were not tied to the drawing outline");
+    const auto endView =
+        std::find_if(drawing->auxiliaryViews.begin(), drawing->auxiliaryViews.end(),
+                     [](const auto &view) { return view.tubeEnd.has_value(); });
+    require(endView != drawing->auxiliaryViews.end() && endView->view.dimensions.size() == 1 &&
+                endView->view.dimensions.front().witnesses &&
+                std::abs(endView->view.dimensions.front().valueMm -
+                         40 * std::tan(std::numbers::pi / 6)) < 1e-5 &&
+                endView->view.tubeCuts.size() == 1,
+            "The enlarged miter has no exact axial dimension");
+    const auto endIndex = static_cast<std::size_t>(endView - drawing->auxiliaryViews.begin());
+    const ui::DrawingViewKey endKey{application::DrawingViewKind::Auxiliary, endIndex};
+    const ui::DrawingViewKey sourceKey{application::DrawingViewKind::Projection,
+                                       endView->projection};
+    auto choices = ui::DrawingSheet::defaultViews(*drawing);
+    auto endChoice = std::find_if(choices.begin(), choices.end(),
+                                  [&](const auto &choice) { return choice.key == endKey; });
+    require(endChoice != choices.end() && endChoice->visible &&
+                ui::DrawingSheet::viewName(*drawing, endKey).startsWith(QStringLiteral("Торец ")),
+            "The enlarged end is not enabled by default");
+    endChoice->scale = .5;
+    const auto plan =
+        ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+    require(std::any_of(plan->views.begin(), plan->views.end(),
+                        [&](const auto &view) { return view.key == endKey && view.scale == .5; }),
+            "The tube end did not use its independent scale");
+    require(ui::drawing::selectedView(*drawing, sourceKey, &choices).detailLocators.size() == 1,
+            "The enlarged end was not referenced by the projection");
+    endChoice->visible = false;
+    const auto hidden =
+        ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+    require(std::none_of(hidden->views.begin(), hidden->views.end(),
+                         [&](const auto &view) { return view.key == endKey; }) &&
+                ui::drawing::selectedView(*drawing, sourceKey, &choices).detailLocators.empty(),
+            "The hidden end left a view or locator in the plan");
+    request.quarterTurns = 2;
+    const auto reversed = build(document, request);
+    require(reversed->tubeProfile && reversed->tubeProfile->cutsDegrees[0] == cuts[1] &&
+                reversed->tubeProfile->cutsDegrees[1] == cuts[0],
+            "Cut labels did not follow the main view");
+    const auto notch = BRepPrimAPI_MakeBox(gp_Pnt(10, -1, -1), 10, 7, 9).Shape();
+    const auto notched =
+        build(load(BRepAlgoAPI_Cut(miter, notch).Shape(), folder + "/notched-tube.step"));
+    require(notched->tubeProfile && notched->bends.empty() &&
+                std::count_if(notched->tubeProfile->cutsDegrees.begin(),
+                              notched->tubeProfile->cutsDegrees.end(),
+                              [](auto value) { return bool(value); }) == 1,
+            "A local notch suppressed the tube or yielded an unconfirmed angle");
+
+    gp_Trsf diagonalTilt;
+    diagonalTilt.SetRotation(gp_Ax1(gp_Pnt(0, 0, 160), gp_Dir(1, 1, 0)), std::numbers::pi / 6);
+    const auto compound =
+        build(load(BRepAlgoAPI_Cut(tube, cutter.Moved(TopLoc_Location(diagonalTilt))).Shape(),
+                   folder + "/diagonal-tube.step"));
+    const auto diagonal =
+        std::find_if(compound->auxiliaryViews.begin(), compound->auxiliaryViews.end(),
+                     [](const auto &view) { return view.tubeEnd.has_value(); });
+    require(diagonal != compound->auxiliaryViews.end() &&
+                std::abs(diagonal->view.dimensions.front().valueMm -
+                         60 / std::sqrt(2.) * std::tan(std::numbers::pi / 6)) < 1e-5,
+            "The compound miter did not use the true profile of the cut");
+    gp_Trsf reduce;
+    reduce.SetScale(gp_Pnt{}, .1);
+    const auto thin = build(
+        load(BRepBuilderAPI_Transform(miter, reduce, true).Shape(), folder + "/small-tube.step"));
+    const auto smallPlan = ui::DrawingSheet::compose(thin, ui::DrawingSheet::defaultViews(*thin));
+    require(std::any_of(smallPlan->views.begin(), smallPlan->views.end(),
+                        [&](const auto &view) {
+                            return view.key.kind == application::DrawingViewKind::Auxiliary &&
+                                   thin->auxiliaryViews[view.key.index].tubeEnd.has_value();
+                        }),
+            "Automatic scale bounds prevented an enlarged view of a small profile");
+    const auto drill =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(20, -1, 600), gp_Dir(0, 1, 0)), 8, 22).Shape();
+    const auto longPart =
+        load(BRepAlgoAPI_Cut(stock(1200), drill).Shape(), folder + "/long-tube.step");
+    const auto withBreak = build(longPart);
+    const auto &front = (*withBreak->classicalViews)[0];
+    require(withBreak->isometricFill.has_value(), "The long tube has no isometric shading");
+    require(withBreak->tubeProfile && front.omittedX &&
+                (*withBreak->classicalViews)[1].omittedX == front.omittedX &&
+                !(*withBreak->classicalViews)[2].omittedX && !withBreak->views[3].omittedX,
+            "The two longitudinal views did not share the same break");
+    const auto &gap = *front.omittedX;
+    const double midpoint = (front.minimum.x + front.maximum.x) / 2;
+    require(gap[1] < midpoint - 8 || gap[0] > midpoint + 8,
+            "The break removed part of the center hole");
+    const auto lengthRetained = [](const application::DrawingView &view) {
+        return std::any_of(view.dimensions.begin(), view.dimensions.end(),
+                           [](const auto &dim) { return std::abs(dim.valueMm - 1200) < 1e-5; });
+    };
+    require(lengthRetained(front) && !front.holeDiameters.empty(),
+            "The full length or the tube hole dimension was lost with the break");
+    application::DrawingRequest continuous;
+    continuous.allowBreaks = false;
+    const auto withoutBreak = build(longPart, continuous);
+    require(!withoutBreak->views[0].omittedX && lengthRetained(withoutBreak->views[0]),
+            "The tube break cannot be disabled");
+    ui::DrawingTitle longTitle;
+    longTitle.name = QStringLiteral("Труба с отверстием");
+    longTitle.plan =
+        ui::DrawingSheet::compose(withBreak, ui::DrawingSheet::defaultViews(*withBreak), {}, {}, {},
+                                  ui::DrawingPaperFormat::A4);
+    require(ui::DrawingSheet::writePdf(folder + "/long-tube.pdf", *withBreak, longTitle).isEmpty(),
+            "The tube with a break could not be exported");
+    const auto round =
+        BRepAlgoAPI_Cut(
+            BRepPrimAPI_MakeCylinder(15, 100).Shape(),
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, -1), gp_Dir(0, 0, 1)), 13, 102).Shape())
+            .Shape();
+    const auto roundDrawing = build(load(round, folder + "/round-tube.step"));
+    require(roundDrawing->tubeProfile && !roundDrawing->tubeProfile->minorSizeMm &&
+                roundDrawing->tubeProfile->sizeMm == 30. &&
+                roundDrawing->views[2].holeDimensions.empty() &&
+                std::none_of(roundDrawing->auxiliaryViews.begin(),
+                             roundDrawing->auxiliaryViews.end(),
+                             [](const auto &view) { return view.tubeEnd.has_value(); }),
+            "A square tube end was treated as a drilled hole or a miter");
+    const auto blind = BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(40, 20, 100).Shape(),
+                                       BRepPrimAPI_MakeBox(gp_Pnt(2, 2, -1), 36, 16, 99).Shape())
+                           .Shape();
+    require(!build(load(blind, folder + "/blind-pocket.step"))->tubeProfile,
+            "A blind pocket was treated as an open tube");
+    const auto channel = build(load(fixtures::channel(), folder + "/open-channel.step"));
+    require(!channel->tubeProfile && channel->bends.size() == 2, "An open channel lost its bends");
+
+    const auto files = std::make_shared<project::ProjectFiles>();
+    ui::MainWindow window({"test", "test"}, files);
+    window.setAutomaticPartInputPrompt(false);
+    window.setDrawingBuilder(std::make_shared<cad::BendingDrawingBuilder>());
+    window.show();
+    window.openStep(path);
+    auto &controller = window.importController();
+    wait([&] { return !controller.hasWork(); });
+    auto *entry = window.findChild<QToolButton *>("drawingStageButton");
+    require(entry && entry->isEnabled(), "Tube drawing entry unavailable");
+    entry->click();
+    auto *dialog = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(dialog, "Tube drawing dialog unavailable");
+    auto *exportPdf = dialog->findChild<QPushButton *>("exportDrawingPdf");
+    auto *tools = dialog->findChild<QCheckBox *>("drawingShowBendTools");
+    auto *status = dialog->findChild<QLabel *>("drawingStatus");
+    require(exportPdf && tools && status, "Tube drawing controls unavailable");
+    wait([&] { return exportPdf->isEnabled(); });
+    require(controller.drawing()->tubeProfile && tools->isHidden() &&
+                status->text().contains(QStringLiteral("Чертёж трубы")) &&
+                !status->text().contains(QStringLiteral("гибов")),
+            "The tube preview exposed sheet-bending controls");
+    auto *list = dialog->findChild<QListWidget *>("drawingViews");
+    auto *scale = dialog->findChild<QComboBox *>("drawingViewScale");
+    require(list && scale, "Tube end controls are unavailable");
+    QListWidgetItem *endItem = nullptr;
+    for (int row = 0; row < list->count(); ++row)
+        if (list->item(row)->text().startsWith(QStringLiteral("Торец "))) {
+            endItem = list->item(row);
+            break;
+        }
+    require(endItem && endItem->checkState() == Qt::Checked,
+            "Tube end is not checked in the dialog");
+    const auto snapshot = controller.drawing();
+    list->setCurrentItem(endItem);
+    const int half = scale->findData(.5);
+    require(half > 0, "Tube end scale list does not have 1:2");
+    scale->setCurrentIndex(half);
+    wait([&] { return exportPdf->isEnabled(); });
+    endItem->setCheckState(Qt::Unchecked);
+    wait([&] { return exportPdf->isEnabled(); });
+    require(controller.drawing() == snapshot && controller.session().drawingSettings() &&
+                std::any_of(controller.session().drawingSettings()->views.begin(),
+                            controller.session().drawingSettings()->views.end(),
+                            [](const auto &v) {
+                                return v.identity.kind == application::DrawingViewKind::Auxiliary &&
+                                       v.identity.index >= 3 && v.scale == .5 && !v.visible;
+                            }),
+            "The end choices did not persist or re-ran the CAD builder");
+    const auto settings = controller.session().drawingSettings();
+    const auto project = native(folder + "/tube-view-settings.bend");
+    controller.saveProject(project, files);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.saveError().isEmpty(), "Cannot save the tube view settings");
+    controller.closeDocument();
+    controller.open(project);
+    wait([&] { return !controller.hasWork(); });
+    require(controller.session().drawingSettings() == settings,
+            "The project did not restore the tube view settings");
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    entry->click();
+    auto *reopened = window.findChild<QDialog *>("bendingDrawingDialog");
+    require(reopened, "The restored tube drawing did not open");
+    auto *reloadedExport = reopened->findChild<QPushButton *>("exportDrawingPdf");
+    auto *reloadedList = reopened->findChild<QListWidget *>("drawingViews");
+    auto *reloadedScale = reopened->findChild<QComboBox *>("drawingViewScale");
+    require(reloadedExport && reloadedList && reloadedScale,
+            "The restored tube controls are missing");
+    wait([&] { return reloadedExport->isEnabled(); });
+    bool restored = false;
+    for (int row = 0; row < reloadedList->count(); ++row) {
+        auto *item = reloadedList->item(row);
+        if (item->text().startsWith(QStringLiteral("Торец "))) {
+            reloadedList->setCurrentRow(row);
+            restored = item->checkState() == Qt::Unchecked &&
+                       reloadedScale->currentData().toDouble() == .5;
+            break;
+        }
+    }
+    require(restored, "The tube end visibility and scale were not applied after reopening");
+    window.close();
+}
+void tubeWallOpenings(const QString &folder) {
+    const auto stock =
+        BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(gp_Pnt(0, -30, -15), 200, 60, 30).Shape(),
+                        BRepPrimAPI_MakeBox(gp_Pnt(-1, -28.5, -13.5), 202, 57, 27).Shape())
+            .Shape();
+    const auto drill = [](double x, double y, double z, double radius) {
+        return BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x, y, z), gp_Dir(0, 0, 1)), radius, 3)
+            .Shape();
+    };
+    const auto drilled = BRepAlgoAPI_Cut(stock, drill(90, 9, 13, 4.5)).Shape();
+    const std::array fixtures{
+        load(drilled, folder + "/single-wall-hole.step"),
+        load(BRepAlgoAPI_Cut(drilled, drill(145, -5, -16, 6)).Shape(), folder + "/both-walls.step"),
+    };
+    using application::DrawingViewKind;
+    for (std::size_t i = 0; i < fixtures.size(); ++i) {
+        require(fixtures[i]->metadata().confirmedTubeProfile, "The import lost its tube proof");
+        for (const bool reverse : {false, true}) {
+            application::DrawingRequest request;
+            request.reverseView = reverse;
+            const auto drawing = build(fixtures[i], request);
+            require(drawing->tubeProfile.has_value(), "The drawing lost the imported tube proof");
+            const auto choices = ui::DrawingSheet::defaultViews(*drawing);
+            for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+                const auto plan = ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, format);
+                std::vector<double> diameters;
+                for (const auto &at : plan->views) {
+                    if (at.key.kind != DrawingViewKind::Projection &&
+                        at.key.kind != DrawingViewKind::Auxiliary)
+                        continue;
+                    const auto v = ui::drawing::selectedView(*drawing, at.key, &choices);
+                    for (const auto &hole : v.holeDiameters)
+                        diameters.push_back(hole.second);
+                    if (!v.holeDiameters.empty())
+                        require(v.holeDimensions.size() == 2,
+                                "A bore is missing its two datum coordinates");
+                }
+                std::sort(diameters.begin(), diameters.end());
+                require(diameters.size() == i + 1 && std::abs(diameters.front() - 9) < 1e-5 &&
+                            (i == 0 || std::abs(diameters.back() - 12) < 1e-5) &&
+                            plan->omittedDimensions == 0,
+                        "A wall's hole was lost or duplicated in the sheet");
+            }
+        }
+    }
+    const auto coaxial =
+        BRepAlgoAPI_Cut(
+            stock,
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(90, 9, -16), gp_Dir(0, 0, 1)), 4.5, 32).Shape())
+            .Shape();
+    const auto blind =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(90, 9, -16), gp_Dir(0, 0, 1)), 4.5, 1.75).Shape();
+    const auto opening = BRepPrimAPI_MakeBox(gp_Pnt(82, -6, 13), 23, 14, 3).Shape();
+    struct Expected {
+        application::DocumentPtr document;
+        std::size_t diameters;
+        std::size_t opposed;
+        bool window;
+    };
+    const std::array cases{
+        Expected{load(coaxial, folder + "/opposed-bore.step"), 1, 1, false},
+        Expected{load(BRepAlgoAPI_Cut(drilled, blind).Shape(), folder + "/blind-opposite.step"), 2,
+                 0, false},
+        Expected{load(BRepAlgoAPI_Cut(coaxial, drill(145, -5, -16, 6)).Shape(),
+                      folder + "/opposed-bore-and-extra.step"),
+                 2, 1, false},
+        Expected{load(BRepAlgoAPI_Cut(stock, opening).Shape(), folder + "/tube-window.step"), 0, 0,
+                 true},
+    };
+    for (const auto &[document, diameters, opposed, hasWindow] : cases)
+        for (const bool reverse : {false, true})
+            for (const int turns : {0, 1}) {
+                application::DrawingRequest request;
+                request.reverseView = reverse;
+                request.quarterTurns = turns;
+                const auto drawing = build(document, request);
+                require(drawing->tubeProfile.has_value(), "The feature lost its tube proof");
+                const auto choices = ui::DrawingSheet::defaultViews(*drawing);
+                for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+                    const auto plan =
+                        ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, format);
+                    std::size_t shown = 0, paired = 0, windows = 0;
+                    for (const auto &at : plan->views) {
+                        if (at.key.kind != DrawingViewKind::Projection &&
+                            at.key.kind != DrawingViewKind::Auxiliary)
+                            continue;
+                        const auto v = ui::drawing::selectedView(*drawing, at.key, &choices);
+                        shown += v.holeDiameters.size();
+                        for (const auto &bore : v.opposedTubeBores) {
+                            if (bore.coveredOnAnotherView)
+                                --shown;
+                            else
+                                ++paired;
+                            require(std::abs(v.holeDiameters.at(bore.diameterIndex).second - 9) <
+                                        1e-5,
+                                    "A coaxial bore changed diameter");
+                        }
+                        for (const auto &axes : v.openingAxes)
+                            if (axes.tubeWindow) {
+                                ++windows;
+                                const auto span = [&](application::DrawingPoint point) {
+                                    return 2 * std::hypot(point.x - axes.center.x,
+                                                          point.y - axes.center.y);
+                                };
+                                require(std::abs(span(axes.first) - 23) < 1e-5 &&
+                                            std::abs(span(axes.second) - 14) < 1e-5 &&
+                                            v.holeDimensions.size() == 2 &&
+                                            at.dimensions.size() >= 2,
+                                        "A rectangular window lost its size or centre coordinates");
+                                require(std::all_of(
+                                            v.holeDimensions.begin(), v.holeDimensions.end(),
+                                            [](const auto &d) {
+                                                constexpr std::array coordinates{93.5, 106.5, 29.,
+                                                                                 31.};
+                                                return std::any_of(
+                                                    coordinates.begin(), coordinates.end(),
+                                                    [&](double value) {
+                                                        return std::abs(d.valueMm - value) < 1e-5;
+                                                    });
+                                            }),
+                                        "The window centre moved after reorientation");
+                            }
+                    }
+                    require(shown == diameters && paired == opposed &&
+                                windows == static_cast<std::size_t>(hasWindow) &&
+                                plan->omittedDimensions == 0,
+                            "The sheet changed the identity or coverage of a tube opening");
+                }
+            }
+    // Reuse the mixed pair fixture: the second wall needs its own projection for the Ø12 hole.
+    const auto mixedPair = build(cases[2].document);
+    auto choices = ui::DrawingSheet::defaultViews(*mixedPair);
+    const auto front = std::find_if(choices.begin(), choices.end(), [&](const auto &choice) {
+        return choice.key.kind == DrawingViewKind::Projection &&
+               !mixedPair->classicalViews->at(choice.key.index).opposedTubeBores.empty();
+    });
+    const auto back = std::find_if(choices.begin(), choices.end(), [&](const auto &choice) {
+        return choice.key.kind == DrawingViewKind::Auxiliary &&
+               !mixedPair->auxiliaryViews[choice.key.index].view.opposedTubeBores.empty();
+    });
+    require(front != choices.end() && back != choices.end() && front->visible && back->visible,
+            "Both visible projections must retain the physical pair");
+    require(ui::drawing::selectedView(*mixedPair, back->key, &choices)
+                .opposedTubeBores.front()
+                .coveredOnAnotherView,
+            "The second view repeats the pair while the main view is visible");
+    front->visible = false;
+    const auto remaining = ui::drawing::selectedView(*mixedPair, back->key, &choices);
+    require(
+        !remaining.opposedTubeBores.front().coveredOnAnotherView &&
+            remaining.holeDimensions.size() >= 2 &&
+            ui::DrawingSheet::compose(mixedPair, choices, {}, {}, {}, ui::DrawingPaperFormat::A4)
+                    ->omittedDimensions == 0,
+        "The pair must be dimensioned on the remaining view");
+
+    gp_Trsf tilt;
+    tilt.SetRotation(gp_Ax1(gp_Pnt(180, 0, 0), gp_Dir(0, 1, 0)), std::numbers::pi / 6);
+    const auto cutter = BRepPrimAPI_MakeBox(gp_Pnt(180, -100, -100), 100, 200, 200).Shape();
+    const auto staggered = BRepAlgoAPI_Cut(drilled, drill(145, -5, -16, 6)).Shape();
+    const auto mitered =
+        load(BRepAlgoAPI_Cut(staggered, cutter.Moved(TopLoc_Location(tilt))).Shape(),
+             folder + "/mitered-with-wall-holes.step");
+    const auto native = std::dynamic_pointer_cast<const cad::CadDocument>(mitered);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(cad::OcctDocumentAccess::shape(*native), TopAbs_FACE, faces);
+    application::DrawingRequest oblique;
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const BRepAdaptor_Surface surface(TopoDS::Face(faces(i)), false);
+        if (surface.GetType() != GeomAbs_Plane)
+            continue;
+        const double axial = std::abs(surface.Plane().Axis().Direction().X());
+        if (axial > .1 && axial < .99) {
+            oblique.baseFace = i;
+            break;
+        }
+    }
+    require(oblique.baseFace.has_value(), "Missing bevel face for the drawing base");
+    const auto angled = build(mitered, oblique);
+    const auto angledChoices = ui::DrawingSheet::defaultViews(*angled);
+    for (auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+        const auto plan = ui::DrawingSheet::compose(angled, angledChoices, {}, {}, {}, format);
+        std::size_t holes = 0;
+        for (const auto &placed : plan->views)
+            if (placed.key.kind == DrawingViewKind::Auxiliary) {
+                const auto &aux = angled->auxiliaryViews.at(placed.key.index);
+                if (aux.tubeWall)
+                    holes += aux.view.holeDiameters.size();
+            }
+        require(holes == 2 && plan->omittedDimensions == 0,
+                "A manually selected miter erased wall hole measurements");
+    }
+}
+void tubeBoreEntranceNotes(const QString &folder) {
+    const application::DrawingBoreShape blindDepth{.blindDepthMm = .4};
+    const application::DrawingBoreShape narrowEntrance{
+        .throughWall = true, .entrance = application::DrawingConicalEntrance{9.04, 90, .02}};
+    require(ui::drawing::holeLeaderText(9, &blindDepth, 1, true, 0) == QStringLiteral("⌀9×0,4") &&
+                ui::drawing::holeLeaderText(9, &narrowEntrance, 1, true, 1) ==
+                    QStringLiteral("⌀9/⌀9,04×90°") &&
+                ui::drawing::holeLeaderText(9, &narrowEntrance, 2, true, 3) ==
+                    QStringLiteral("2 отв. ⌀9/⌀9,04×90°"),
+            "The configured rounding must preserve distinct hole dimensions");
+
+    const auto stock =
+        BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(gp_Pnt(0, -30, -15), 200, 60, 30).Shape(),
+                        BRepPrimAPI_MakeBox(gp_Pnt(-1, -27, -12), 202, 54, 24).Shape())
+            .Shape();
+    const auto shaft = [](double x, double start, double height, double radius = 4.5) {
+        return BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x, 8, start), gp_Dir(0, 0, 1)), radius,
+                                        height)
+            .Shape();
+    };
+    const auto cone = [](double x, double entranceRadius, double semiAngle) {
+        const double slope = std::tan(semiAngle * std::numbers::pi / 180);
+        const double depth = (entranceRadius - 4.5) / slope;
+        return BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(x, 8, 15 - depth), gp_Dir(0, 0, 1)), 4.5,
+                                    entranceRadius + slope, depth + 1)
+            .Shape();
+    };
+    const auto makeHole = [&](double start, const TopoDS_Shape &entry) {
+        const auto drilled = BRepAlgoAPI_Cut(stock, shaft(90, start, 16 - start)).Shape();
+        return BRepAlgoAPI_Cut(drilled, entry).Shape();
+    };
+    const auto chamfered = makeHole(11, cone(90, 5, 45));
+    const auto countersunkBlind = makeHole(13.25, cone(90, 5.5, 50));
+    const auto blind = BRepAlgoAPI_Cut(stock, shaft(90, 14.25, 2)).Shape();
+    const auto stepped =
+        BRepAlgoAPI_Cut(BRepAlgoAPI_Cut(stock, shaft(90, 13, 3)).Shape(), shaft(90, 14.25, 2, 5.5))
+            .Shape();
+    const auto twoSides = BRepAlgoAPI_Cut(chamfered, shaft(90, -16, 5)).Shape();
+    struct Expected {
+        application::DocumentPtr document;
+        bool throughWall;
+        std::optional<double> depth;
+        std::optional<double> entrance;
+        double angle = 0;
+        bool opposite = false;
+    };
+    const std::array cases{
+        Expected{load(chamfered, folder + "/chamfered-hole.step"), true, {}, 10., 90.},
+        Expected{load(countersunkBlind, folder + "/countersunk-blind.step"), false, 1.75, 11.,
+                 100.},
+        Expected{load(blind, folder + "/flat-bottom-hole.step"), false, .75, {}},
+        Expected{load(stepped, folder + "/stepped-hole.step"), false, {}, {}},
+        Expected{
+            load(twoSides, folder + "/chamfer-and-opposite-hole.step"), true, {}, 10., 90., true},
+    };
+    using application::DrawingViewKind;
+    const auto close = [](double x, double y) { return std::abs(x - y) < 1e-5; };
+    for (const auto &expected : cases)
+        for (const bool reverse : {false, true}) {
+            application::DrawingRequest request;
+            request.reverseView = reverse;
+            const auto drawing = build(expected.document, request);
+            require(drawing->tubeProfile.has_value(), "Tube proof was lost for an opening");
+            const auto choices = ui::DrawingSheet::defaultViews(*drawing);
+            for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+                const auto plan = ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, format);
+                std::size_t holes = 0, notes = 0, entrances = 0;
+                for (const auto &at : plan->views) {
+                    if (at.key.kind != DrawingViewKind::Projection &&
+                        at.key.kind != DrawingViewKind::Auxiliary)
+                        continue;
+                    const auto v = ui::drawing::selectedView(*drawing, at.key, &choices);
+                    require(v.opposedTubeBores.empty(), "Different entrances were grouped");
+                    holes += v.holeDiameters.size();
+                    notes += v.boreNotes.size();
+                    for (const auto &entry : v.boreNotes) {
+                        const auto &shape = entry.shape;
+                        require(close(v.holeDiameters.at(entry.diameterIndex).second, 9),
+                                "A cone rim was passed off as the bore diameter");
+                        require(
+                            shape.throughWall == expected.throughWall &&
+                                shape.blindDepthMm.has_value() == expected.depth.has_value() &&
+                                (!expected.depth || close(*shape.blindDepthMm, *expected.depth)),
+                            "The bore termination or depth was misreported");
+                        if (shape.entrance) {
+                            ++entrances;
+                            require(
+                                expected.entrance &&
+                                    close(shape.entrance->diameterMm, *expected.entrance) &&
+                                    close(shape.entrance->includedAngleDegrees, expected.angle) &&
+                                    close(shape.entrance->depthMm,
+                                          (*expected.entrance - 9) /
+                                              (2 *
+                                               std::tan(expected.angle * std::numbers::pi / 360))),
+                                "The conical inlet has the wrong diameter, depth or full angle");
+                        }
+                    }
+                }
+                const bool measured = expected.throughWall || expected.depth || expected.entrance;
+                const bool hasExpectedHoles =
+                    measured ? holes == (expected.opposite ? 2u : 1u) : holes > 0;
+                require(hasExpectedHoles &&
+                            notes == static_cast<std::size_t>(measured) + expected.opposite &&
+                            entrances == static_cast<std::size_t>(expected.entrance.has_value()) &&
+                            plan->omittedDimensions == 0,
+                        "An opening note was lost or repeated after sheet layout");
+            }
+        }
+}
+void compoundTubeEnd(const QString &folder) {
+    const auto stock =
+        BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(gp_Pnt(0, -30, -15), 200, 60, 30).Shape(),
+                        BRepPrimAPI_MakeBox(gp_Pnt(-1, -28.5, -13.5), 202, 57, 27).Shape())
+            .Shape();
+    const auto wire = BRepBuilderAPI_MakePolygon(gp_Pnt(-20, -5, -20), gp_Pnt(-20, 40, -20),
+                                                 gp_Pnt(25, 40, -20), true)
+                          .Wire();
+    const auto cut =
+        BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire).Face(), gp_Vec(0, 0, 40)).Shape();
+    const auto bevel = BRepAlgoAPI_Cut(stock, cut).Shape();
+    const auto withSlot = [&](double start) {
+        const auto slot = BRepPrimAPI_MakeBox(gp_Pnt(start, 27, -13), 18.5 - start, 4, 5).Shape();
+        return BRepAlgoAPI_Cut(bevel, slot).Shape();
+    };
+    const auto document = load(withSlot(0), folder + "/open-tube-slot.step");
+    const auto drawing = build(document);
+    require(document->metadata().confirmedTubeProfile && drawing->tubeProfile &&
+                drawing->bends.empty(),
+            "A compound end lost its tube recognition");
+    const auto cutView =
+        std::find_if(drawing->auxiliaryViews.begin(), drawing->auxiliaryViews.end(),
+                     [](const auto &a) { return a.tubeEnd && !a.tubeNotch; });
+    const auto slotView =
+        std::find_if(drawing->auxiliaryViews.begin(), drawing->auxiliaryViews.end(),
+                     [](const auto &a) { return a.tubeNotch; });
+    require(cutView != drawing->auxiliaryViews.end() && slotView != drawing->auxiliaryViews.end() &&
+                cutView->tubeEnd == slotView->tubeEnd &&
+                cutView->projection != slotView->projection && cutView->view.angles.size() == 1 &&
+                std::abs(cutView->view.angles[0].radians - std::numbers::pi / 4) < 1e-5 &&
+                cutView->view.dimensions.size() == 1 &&
+                std::abs(cutView->view.dimensions[0].valueMm - 15) < 1e-5,
+            "The local bevel was measured as a whole-end cut");
+    const auto &dims = slotView->view.dimensions;
+    require(dims.size() == 3 && std::abs(dims[0].valueMm - 5) < 1e-5 &&
+                std::abs(dims[1].valueMm - 2) < 1e-5 && std::abs(dims[2].valueMm - 18.5) < 1e-5 &&
+                std::all_of(dims.begin(), dims.end(),
+                            [](const auto &dimension) { return dimension.witnesses.has_value(); }),
+            "The slot width or its datum dimensions were not confirmed");
+    const ui::DrawingViewKey slotKey{
+        application::DrawingViewKind::Auxiliary,
+        static_cast<std::size_t>(slotView - drawing->auxiliaryViews.begin())};
+    auto choices = ui::DrawingSheet::defaultViews(*drawing);
+    const auto option = std::find_if(choices.begin(), choices.end(),
+                                     [&](const auto &choice) { return choice.key == slotKey; });
+    require(option != choices.end() && option->visible, "The confirmed slot is hidden by default");
+    const auto plan =
+        ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, ui::DrawingPaperFormat::A4);
+    const auto record = std::find_if(plan->views.begin(), plan->views.end(),
+                                     [&](const auto &at) { return at.key == slotKey; });
+    require(record != plan->views.end() && record->dimensions.size() == 3,
+            "The A4 layout lost a slot dimension");
+    for (const bool reverse : {false, true})
+        for (int turns : {0, 2}) {
+            application::DrawingRequest request;
+            request.reverseView = reverse;
+            request.quarterTurns = turns;
+            const auto oriented = build(document, request);
+            auto selected = ui::DrawingSheet::defaultViews(*oriented);
+            const auto slot =
+                std::find_if(selected.begin(), selected.end(), [&](const auto &choice) {
+                    return choice.key.kind == application::DrawingViewKind::Auxiliary &&
+                           oriented->auxiliaryViews[choice.key.index].tubeNotch;
+                });
+            require(slot != selected.end() && slot->visible, "A rotated end lost its slot view");
+            const auto hasLocator = [&](const auto &choice) {
+                const auto v = ui::drawing::selectedView(*oriented, choice.key, &selected);
+                return std::any_of(v.detailLocators.begin(), v.detailLocators.end(),
+                                   [&](const auto &locator) {
+                                       return locator.designation == "В" &&
+                                              cad::drawingTubeVisibleEdge(locator.anchor, v, {});
+                                   });
+            };
+            const auto owner = std::find_if(selected.begin(), selected.end(), hasLocator);
+            require(owner != selected.end() && owner->visible,
+                    "A rotated slot has no visible source projection");
+            slot->visible = false;
+            require(std::none_of(selected.begin(), selected.end(), hasLocator),
+                    "The hidden slot left a source marker");
+        }
+    const auto closed = build(load(withSlot(16), folder + "/closed-tube-slot.step"));
+    require(closed->tubeProfile &&
+                std::none_of(closed->auxiliaryViews.begin(), closed->auxiliaryViews.end(),
+                             [](const auto &a) { return a.tubeNotch; }),
+            "A closed opening was labelled as a slot open at the end");
 }
 void drawingMeasurements(const QString &folder) {
     const auto trimmedDoc = load(fixtures::cornerTrimmedBend(), folder + "/split-cap.step");
@@ -1926,7 +2567,39 @@ void dimensionLayout(const QString &folder) {
             "Dimension layout changed the source measurements");
     verifyRecordedDimensions(*drawing, *title.plan);
 }
+void thinTriangleShading() {
+    constexpr double length = 600, strip = 8;
+    const auto meshStrip = [&](int bands) {
+        const auto wire =
+            BRepBuilderAPI_MakePolygon(gp_Pnt(0, 0, 0), gp_Pnt(length, length, 0),
+                                       gp_Pnt(length, length + strip, 0), gp_Pnt(0, strip, 0), true)
+                .Wire();
+        auto face = BRepBuilderAPI_MakeFace(wire).Face();
+        Handle(Poly_Triangulation) mesh = new Poly_Triangulation(2 * (bands + 1), 2 * bands, false);
+        for (int i = 0; i <= bands; ++i) {
+            const double rise = strip * i / bands;
+            const int left = 2 * i + 1, right = left + 1;
+            mesh->SetNode(left, gp_Pnt(0, rise, 0));
+            mesh->SetNode(right, gp_Pnt(length, length + rise, 0));
+            if (i < bands) {
+                mesh->SetTriangle(2 * i + 1, Poly_Triangle(left, right, left + 2));
+                mesh->SetTriangle(2 * i + 2, Poly_Triangle(right, right + 2, left + 2));
+            }
+        }
+        BRep_Builder{}.UpdateFace(face, mesh);
+        application::DrawingView drawing;
+        drawing.minimum = {0, 0};
+        drawing.maximum = {length, length + strip};
+        return cad::makeDrawingIsometricFill(face, gp_Ax2(gp_Pnt{}, gp_Dir(0, 0, 1)), drawing, {});
+    };
+    const auto reference = meshStrip(1);
+    const auto divided = meshStrip(64);
+    require(reference && divided && divided->width == reference->width &&
+                divided->height == reference->height && divided->pixels == reference->pixels,
+            "Long thin triangles exhausted the shading budget or changed coverage");
+}
 void isometricAppearance(const QString &folder) {
+    thinTriangleShading();
     const std::array models{std::pair{QStringLiteral("angle"), fixtures::bentStrip(8, 6)},
                             std::pair{QStringLiteral("tray"), fixtures::tray()},
                             std::pair{QStringLiteral("opening"), fixtures::bendWithZoneOpening()}};
@@ -2428,6 +3101,32 @@ void auditSample(const QString &path, const QString &reportPath, const QString &
         } else {
             const auto &d = *std::get<application::BendingDrawingPtr>(result);
             report.insert("drawingOk", true);
+            report.insert("tube", bool(d.tubeProfile));
+            if (d.tubeProfile) {
+                QJsonArray cuts;
+                if (d.classicalViews)
+                    for (std::size_t i = 0; i < d.classicalViews->size(); ++i)
+                        for (const auto &note : (*d.classicalViews)[i].tubeCuts)
+                            cuts.append(QJsonObject{{"view", static_cast<int>(i)},
+                                                    {"degrees", note.degreesFromSquare}});
+                report.insert("tubeCuts", cuts);
+                QJsonArray details;
+                for (const auto &end : d.auxiliaryViews)
+                    if (end.tubeEnd) {
+                        QJsonArray values;
+                        for (const auto &dimension : end.view.dimensions)
+                            values.append(dimension.valueMm);
+                        details.append(
+                            QJsonObject{{"name", QString::fromStdString(end.designation)},
+                                        {"offsetMm", end.view.dimensions.front().valueMm},
+                                        {"notch", end.tubeNotch},
+                                        {"dimensions", values}});
+                    }
+                report.insert("tubeEndDetails", details);
+                if (d.views[0].omittedX)
+                    report.insert("tubeBreakMm",
+                                  (*d.views[0].omittedX)[1] - (*d.views[0].omittedX)[0]);
+            }
             const auto coverage = ui::DrawingSheet::coverage(d);
             report.insert("drawingBends", static_cast<int>(coverage.total));
             report.insert("dimensionedBends", static_cast<int>(coverage.dimensioned));
@@ -4002,6 +4701,13 @@ int main(int argc, char **argv) {
             workflow(temp.path());
             return 0;
         }
+        if (app.arguments().contains(QStringLiteral("--tube-only"))) {
+            tubeDrawing(temp.path());
+            tubeWallOpenings(temp.path());
+            tubeBoreEntranceNotes(temp.path());
+            compoundTubeEnd(temp.path());
+            return 0;
+        }
         if (app.arguments().contains(QStringLiteral("--tool-notes-only"))) {
             toolNotesOnPaper(temp.path());
             return 0;
@@ -4114,6 +4820,10 @@ int main(int argc, char **argv) {
         paperViewRotation(temp.path());
         toolNotesOnPaper(temp.path());
         toolNotesWorkflow(temp.path());
+        tubeDrawing(temp.path());
+        tubeWallOpenings(temp.path());
+        tubeBoreEntranceNotes(temp.path());
+        compoundTubeEnd(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());
         obliqueSectionFallback(temp.path());
