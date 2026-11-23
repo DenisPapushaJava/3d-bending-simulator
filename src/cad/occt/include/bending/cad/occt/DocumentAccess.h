@@ -8,6 +8,7 @@
 #include <stop_token>
 
 namespace bending::cad {
+struct DrawingTubeGeometry;
 // Native bridge for CAD algorithms/presentation. Borrowed shapes remain immutable.
 // Derived route states are prepared privately in the CAD worker, never in the viewer.
 class OcctDocumentAccess final {
@@ -15,6 +16,7 @@ class OcctDocumentAccess final {
     [[nodiscard]] static std::shared_ptr<const application::ModelMeasurements>
     measurements(const CadDocument &);
     [[nodiscard]] static const TopoDS_Shape &shape(const CadDocument &document);
+    [[nodiscard]] static const DrawingTubeGeometry *tubeProfile(const CadDocument &document);
     [[nodiscard]] static const TopoDS_Shape &simulationShape(const CadDocument &document);
     [[nodiscard]] static const application::BendAnalysis &
     simulationBends(const CadDocument &document);

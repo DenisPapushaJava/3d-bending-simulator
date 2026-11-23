@@ -97,6 +97,7 @@ struct DocumentMetadata {
     ClosedCutouts closedCutouts{};
     // Prepared source-only hints; bend IDs belong to this import's bendAnalysis.
     std::vector<core::ToolFlangeHint> toolShapeHints{};
+    bool confirmedTubeProfile = false; // Source geometry passed the tube drawing recognizer.
 };
 
 // Immutable snapshot shared by the session and its presenter after worker preparation ends.

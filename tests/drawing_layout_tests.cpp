@@ -27,6 +27,12 @@ int main() {
         for (auto &v : d.views)
             v.omittedX = std::array<double, 2>{50, 1950};
         require(drawingScale(d) == .5);
+        d.views[0].omittedX = std::array{50., 1792.};
+        d.views[2].maximum.x = 40;
+        d.views[2].omittedX.reset();
+        require(drawingScale(d) == .4);
+        d.tubeProfile = DrawingTubeProfile{40, 40, 2};
+        require(drawingScale(d) == .5);
         d.views[0].omittedX = std::array<double, 2>{-1, 100};
         require(!drawingScale(d));
         BendingDrawing grouped;
