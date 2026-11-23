@@ -143,8 +143,8 @@ makeDrawingIsometricFill(const TopoDS_Shape &shape, const gp_Ax2 &frame,
                 const double dy = y + .5 - a.y;
                 int first = left, last = right;
                 if (clipRows) {
-                    const double b = -dy * cx / area, c = dy * bx / area;
-                    const std::array offsets{b, c, 1 - b - c};
+                    const double offsetB = -dy * cx / area, offsetC = dy * bx / area;
+                    const std::array offsets{offsetB, offsetC, 1 - offsetB - offsetC};
                     double low = left + .5 - a.x, high = right + .5 - a.x;
                     for (std::size_t edge = 0; edge < slopes.size(); ++edge) {
                         const double slope = slopes[edge], offset = offsets[edge];

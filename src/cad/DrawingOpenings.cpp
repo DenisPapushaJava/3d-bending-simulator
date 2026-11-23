@@ -253,15 +253,15 @@ void prepareTubeWallOpenings(std::vector<DrawingOpening> &openings, const Drawin
     }
     std::size_t pair = 0;
     for (std::size_t i : {0, 2})
-        for (auto *near : bores[i]) {
+        for (auto *firstWall : bores[i]) {
             if (stop.stop_requested())
                 throw DrawingError{"Cancelled", true};
-            const auto other =
-                std::find_if(bores[i + 1].begin(), bores[i + 1].end(), [&](const auto *far) {
-                    return !far->opposedBorePair && sameBore(*near, *far);
+            const auto other = std::find_if(
+                bores[i + 1].begin(), bores[i + 1].end(), [&](const auto *oppositeWall) {
+                    return !oppositeWall->opposedBorePair && sameBore(*firstWall, *oppositeWall);
                 });
             if (other != bores[i + 1].end()) {
-                near->opposedBorePair = pair;
+                firstWall->opposedBorePair = pair;
                 (*other)->opposedBorePair = pair;
                 ++pair;
             }

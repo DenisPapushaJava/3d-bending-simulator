@@ -92,10 +92,10 @@ facesAcross(const Ring &ring, const TopTools_IndexedMapOfShape &from, const Edge
     return result;
 }
 
-std::optional<BoreBand> boreBand(const Ring &near, const TopTools_IndexedMapOfShape &from,
+std::optional<BoreBand> boreBand(const Ring &startRing, const TopTools_IndexedMapOfShape &from,
                                  const BoreAxis &axis, const EdgeFaces &neighbors,
                                  std::stop_token stop) {
-    auto faces = facesAcross(near, from, neighbors);
+    auto faces = facesAcross(startRing, from, neighbors);
     if (!faces)
         return {};
     std::optional<double> semiAngle;
@@ -109,7 +109,7 @@ std::optional<BoreBand> boreBand(const Ring &near, const TopTools_IndexedMapOfSh
         if (surface.GetType() == GeomAbs_Cylinder) {
             const auto cylinder = surface.Cylinder();
             if (!axis.coaxial(cylinder.Axis()) ||
-                std::abs(cylinder.Radius() - near.radius) >= tolerance)
+                std::abs(cylinder.Radius() - startRing.radius) >= tolerance)
                 return {};
         } else if (surface.GetType() == GeomAbs_Cone) {
             const auto cone = surface.Cone();
@@ -128,7 +128,7 @@ std::optional<BoreBand> boreBand(const Ring &near, const TopTools_IndexedMapOfSh
             if (stop.stop_requested())
                 throw application::DrawingError{"Cancelled", true};
             const auto &edge = TopoDS::Edge(explorer.Current());
-            if (near.edges.Contains(edge) || BRep_Tool::IsClosed(edge, face))
+            if (startRing.edges.Contains(edge) || BRep_Tool::IsClosed(edge, face))
                 continue;
             if (!neighbors.Contains(edge))
                 return {};
@@ -142,12 +142,13 @@ std::optional<BoreBand> boreBand(const Ring &near, const TopTools_IndexedMapOfSh
                 return {};
         }
     }
-    auto far = circularRing(std::move(farEdges), axis, stop);
-    if (!far || !semiAngle || far->depth - near.depth <= tolerance ||
-        std::abs(near.radius - far->radius - (far->depth - near.depth) * std::tan(*semiAngle)) >=
-            tolerance)
+    auto endRing = circularRing(std::move(farEdges), axis, stop);
+    if (!endRing || !semiAngle || endRing->depth - startRing.depth <= tolerance ||
+        std::abs(startRing.radius - endRing->radius -
+                 (endRing->depth - startRing.depth) * std::tan(*semiAngle)) >= tolerance)
         return {};
-    return BoreBand{std::move(*faces), std::move(*far), *semiAngle > 0 ? semiAngle : std::nullopt};
+    return BoreBand{std::move(*faces), std::move(*endRing),
+                    *semiAngle > 0 ? semiAngle : std::nullopt};
 }
 
 bool closedFlatBottom(const TopoDS_Face &face, const Ring &rim, const BoreAxis &axis) {

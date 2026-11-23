@@ -972,12 +972,12 @@ std::optional<DrawingView> tubeEndDetail(const TopoDS_Shape &shape, const TopoDS
         return {};
     if (leftEnd) {
         // Keep the angular and axial annotations on opposite sides of the cut.
-        const auto origin = *leftEnd ? first : last, far = *leftEnd ? last : first;
-        const auto ray = DrawingPoint{2 * origin.x - far.x, 2 * origin.y - far.y};
+        const auto origin = *leftEnd ? first : last, otherPoint = *leftEnd ? last : first;
+        const auto ray = DrawingPoint{2 * origin.x - otherPoint.x, 2 * origin.y - otherPoint.y};
         detail->angles.push_back(
             {origin, ray, {origin.x, ray.y}, degrees * std::numbers::pi / 180});
         detail->dimensions.push_back(
-            {{first.x, far.y}, {last.x, far.y}, span, {}, std::array{first, last}});
+            {{first.x, otherPoint.y}, {last.x, otherPoint.y}, span, {}, std::array{first, last}});
     } else {
         addTubeDimension(*detail, first, last, true);
         detail->tubeCuts.push_back({{(first.x + last.x) / 2, (first.y + last.y) / 2}, degrees});
@@ -1071,10 +1071,11 @@ void addTubeCompoundDetails(BendingDrawing &drawing, const TopoDS_Shape &shape,
         if (auto detail =
                 tubeLocalDetail(shape, frame, std::array{first, last, datum, side},
                                 tube.profile.wallMm, frames, views, localBudget, stop, reverse)) {
-            const auto near = std::abs(first.y - side.y) < std::abs(last.y - side.y) ? first : last;
+            const auto closest =
+                std::abs(first.y - side.y) < std::abs(last.y - side.y) ? first : last;
             addTubeDimension(*detail, first, last, false);
-            addTubeDimension(*detail, side, near, false);
-            addTubeDimension(*detail, datum, near, true);
+            addTubeDimension(*detail, side, closest, false);
+            addTubeDimension(*detail, datum, closest, true);
             const gp_Pnt center((slot.rearEdge[0].XYZ() + slot.rearEdge[1].XYZ()) / 2);
             std::optional<DrawingTubeCutLocation> location;
             if (reference) {
