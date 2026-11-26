@@ -1309,9 +1309,11 @@ void addTubeReliefDetails(BendingDrawing &drawing, const TopoDS_Shape &shape,
                     if (at == feature.end())
                         continue;
                     // The oriented cut face points into the removed material.
-                    const auto stockWall = std::find_if(
-                        tube.planarWalls->begin(), tube.planarWalls->end(),
-                        [&](const auto &wall) { return wall.outward.IsEqual(normal, tolerance); });
+                    const auto stockWall =
+                        std::find_if(tube.planarWalls->begin(), tube.planarWalls->end(),
+                                     [&](const auto &candidate) {
+                                         return candidate.outward.IsEqual(normal, tolerance);
+                                     });
                     if (stockWall == tube.planarWalls->end())
                         continue;
                     const double y =

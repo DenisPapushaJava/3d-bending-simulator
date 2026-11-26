@@ -921,14 +921,15 @@ void tubeEndReliefs(const QString &folder) {
                                       reference.maximum.x - locator->anchor.x) -
                              (1350 - depth)) < 1e-5,
                 "The elongated detail marker was not compact or at the shoulder");
-        const auto key =
+        const auto deepEndKey =
             ui::DrawingViewKey{application::DrawingViewKind::Auxiliary,
                                static_cast<std::size_t>(at - deeper->auxiliaryViews.begin())};
         for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
             const auto plan = ui::DrawingSheet::compose(
                 deeper, ui::DrawingSheet::defaultViews(*deeper), {}, {}, {}, format);
-            const auto placed = std::find_if(plan->views.begin(), plan->views.end(),
-                                             [&](const auto &item) { return item.key == key; });
+            const auto placed =
+                std::find_if(plan->views.begin(), plan->views.end(),
+                             [&](const auto &item) { return item.key == deepEndKey; });
             require(placed != plan->views.end() &&
                         std::any_of(placed->dimensions.begin(), placed->dimensions.end(),
                                     [&](const auto &dimension) {
@@ -1015,8 +1016,8 @@ void tubeEndReliefs(const QString &folder) {
                             }),
             "A regular wall opening prevented tube recognition or went unmeasured");
 
-    const auto countEndViews = [](const auto &drawing) {
-        return std::count_if(drawing.auxiliaryViews.begin(), drawing.auxiliaryViews.end(),
+    const auto countEndViews = [](const auto &tubeDrawing) {
+        return std::count_if(tubeDrawing.auxiliaryViews.begin(), tubeDrawing.auxiliaryViews.end(),
                              [](const auto &view) { return view.tubeEnd.has_value(); });
     };
     require(countEndViews(*drilled) == 1, "A distant hole prevented matching identical end views");

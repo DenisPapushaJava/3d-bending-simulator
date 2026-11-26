@@ -12,6 +12,7 @@
 #include <QTextLayout>
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <numbers>
 #include <numeric>
 #include <span>
@@ -773,8 +774,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             QPainterPath wave;
             wave.moveTo(px, bounds.top() - 1);
             const int count = std::max(2, static_cast<int>(bounds.height() / 3));
-            for (int i = 0; i < count; ++i) {
-                const double y = bounds.top() - 1 + (bounds.height() + 2) * i / count;
+            for (int segment = 0; segment < count; ++segment) {
+                const double y = bounds.top() - 1 + (bounds.height() + 2) * segment / count;
                 const double step = (bounds.height() + 2) / count;
                 wave.cubicTo(px + waveAmplitude, y + step / 3, px - waveAmplitude, y + step * 2 / 3,
                              px, y + step);
@@ -1372,8 +1373,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         const auto shoulder = map(*locator.shoulder);
         constexpr double dotRadius = .45;
         constexpr double dotInk = dotRadius + .125;
-        const bool dotFits = std::none_of(breaks.begin(), breaks.end(), [&](const auto &gap) {
-            return gap.adjusted(-dotInk, -dotInk, dotInk, dotInk).contains(shoulder);
+        const bool dotFits = std::none_of(breaks.begin(), breaks.end(), [&](const auto &wave) {
+            return wave.adjusted(-dotInk, -dotInk, dotInk, dotInk).contains(shoulder);
         });
         if (!detailLeader(p, shoulder, dotFits ? 0. : 1.5, name, bounds, detailArea, occupied,
                           placement.lines, detailLeaders, context, breaks)) {
