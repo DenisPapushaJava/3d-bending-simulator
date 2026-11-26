@@ -65,6 +65,9 @@ QString DrawingSheet::viewName(const BendingDrawing &d, DrawingViewKey key) {
             .arg(QString::fromStdString(d.details.at(key.index).designation));
     case DrawingViewKind::Auxiliary: {
         const auto &view = d.auxiliaryViews.at(key.index);
+        if (view.mirroredTubeEnd)
+            return QStringLiteral("Торец %1 · второй зеркально")
+                .arg(QString::fromStdString(view.designation));
         return (view.tubeNotch ? QStringLiteral("Паз %1")
                 : view.tubeEnd ? QStringLiteral("Торец %1")
                                : QStringLiteral("Вид %1"))

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <tuple>
 
 namespace bending::cad {
 namespace {
@@ -541,61 +542,78 @@ std::optional<DrawingTubeGeometry> drawingTubeProfile(const TopoDS_Shape &shape,
     return match ? match : (ambiguousNotched ? std::nullopt : notched);
 }
 
-std::optional<std::array<double, 2>> drawingTubeBreak(const TopTools_IndexedMapOfShape &faces,
-                                                      const TopTools_IndexedMapOfShape &edges,
-                                                      const DrawingTubeGeometry &tube,
-                                                      const gp_Dir &right, double low, double high,
-                                                      std::stop_token stop) {
-    if (!right.IsParallel(tube.axis, angularTolerance))
-        return {};
-    const auto transform = axialProjection(right);
-    std::vector<std::array<double, 2>> blocked;
-    const double margin = std::max(8., tube.profile.sizeMm / 4);
-    const double keepEnd = std::max(40., 1.25 * tube.profile.sizeMm);
-    const auto block = [&](std::array<double, 2> span) {
-        blocked.push_back({span[0] - margin, span[1] + margin});
-    };
-    // Non-profile faces include all caps, cutouts and their walls. Even if a
-    // projection hides a feature, it blocks the same range in every view.
-    for (int i = 1; i <= faces.Extent() && !stop.stop_requested(); ++i)
-        if (!std::binary_search(tube.longitudinalFaces.begin(), tube.longitudinalFaces.end(), i))
-            block(axialRange(faces(i), transform));
-    for (int i = 1; i <= edges.Extent() && !stop.stop_requested(); ++i) {
-        const auto edge = TopoDS::Edge(edges(i));
+std::vector<DrawingTubeBreaks::Feature> DrawingTubeBreaks::collect() const {
+    const auto transform = axialProjection(tube_.axis);
+    std::vector<Feature> features;
+    for (int i = 1; i <= faces_.Extent() && !stop_.stop_requested(); ++i)
+        if (!std::binary_search(tube_.longitudinalFaces.begin(), tube_.longitudinalFaces.end(), i))
+            features.push_back({axialRange(faces_(i), transform), i});
+    for (int i = 1; i <= edges_.Extent() && !stop_.stop_requested(); ++i) {
+        const auto edge = TopoDS::Edge(edges_(i));
         if (BRep_Tool::Degenerated(edge))
             continue;
         const BRepAdaptor_Curve curve(edge);
         if (curve.GetType() == GeomAbs_Line &&
-            curve.Line().Direction().IsParallel(right, angularTolerance)) {
+            curve.Line().Direction().IsParallel(tube_.axis, angularTolerance)) {
             // Along the analytic skin nothing changes between these stations.
             for (double u : {curve.FirstParameter(), curve.LastParameter()}) {
                 const double station = curve.Value(u).Transformed(transform).Z();
-                block({station, station});
+                features.push_back({{station, station}, 0});
             }
         } else {
-            block(axialRange(edge, transform));
+            features.push_back({axialRange(edge, transform), 0});
         }
     }
-    if (stop.stop_requested())
+    std::sort(features.begin(), features.end(),
+              [](const auto &a, const auto &b) { return a.axial < b.axial; });
+    return features;
+}
+
+std::optional<std::array<double, 2>>
+DrawingTubeBreaks::find(const gp_Dir &right, double low, double high,
+                        std::span<const int> straightCutFaces) {
+    if (!right.IsParallel(tube_.axis, angularTolerance) || stop_.stop_requested())
         return {};
-    std::sort(blocked.begin(), blocked.end());
+    if (!features_) {
+        try {
+            features_ = collect();
+        } catch (const Standard_Failure &) {
+            // An incomplete scan cannot be used by any view of this drawing.
+            features_.emplace();
+        }
+    }
+    if (features_->empty() || stop_.stop_requested())
+        return {};
+    const bool reversed = right.Dot(tube_.axis) < 0;
+    if (reversed)
+        std::tie(low, high) = std::pair{-high, -low};
+    const double margin = std::max(8., tube_.profile.sizeMm / 4);
+    const double keepEnd = std::max(40., 1.25 * tube_.profile.sizeMm);
     std::optional<std::array<double, 2>> best;
     double length = std::max(50., (high - low) / 5);
     double start = low + keepEnd;
     const double limit = high - keepEnd;
     const auto consider = [&](double end) {
-        if (end - start > length) {
-            length = end - start;
+        const double available = end - start;
+        if (available > length || (reversed && best && available == length)) {
+            length = available;
             best = {start, end};
         }
     };
-    for (const auto &span : blocked) {
-        consider(std::min(span[0], limit));
-        start = std::max(start, span[1]);
+    for (const auto &feature : *features_) {
+        // Local straight cut faces can be crossed, their edges still protect
+        // all stations where the section changes.
+        if (feature.face && std::find(straightCutFaces.begin(), straightCutFaces.end(),
+                                      feature.face) != straightCutFaces.end())
+            continue;
+        consider(std::min(feature.axial[0] - margin, limit));
+        start = std::max(start, feature.axial[1] + margin);
         if (start >= limit)
             break;
     }
     consider(limit);
+    if (reversed && best)
+        return std::array{-(*best)[1], -(*best)[0]};
     return best;
 }
 

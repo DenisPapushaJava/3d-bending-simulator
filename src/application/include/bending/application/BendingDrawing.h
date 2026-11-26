@@ -64,6 +64,7 @@ struct DrawingDetailLocator {
     DrawingPoint anchor;
     double radius;
     std::string designation;
+    std::optional<DrawingPoint> shoulder = {}; // Alternative leader anchor for a tube end.
 };
 struct DrawingBendCallout {
     DrawingPoint anchor;
@@ -139,6 +140,8 @@ struct DrawingView {
     std::vector<DrawingOpposedBore> opposedTubeBores = {};
     bool hasIndependentTubeWallOpenings = false;
     std::vector<DrawingBoreNote> boreNotes = {};
+    std::size_t omittedTubeDimensions = 0;
+    bool tubeEndStrip = false;
 };
 struct DrawingBend {
     double turnRadians;
@@ -208,6 +211,8 @@ struct DrawingAuxiliaryView {
     std::optional<std::size_t> tubeEnd = {}; // Source axial side, for independent end details.
     bool tubeNotch = false;
     std::optional<std::size_t> tubeWall = {}; // Normal view of a physical longitudinal wall.
+    bool mirroredTubeEnd = false;
+    bool supplementalTubeEnd = false;
 };
 enum class DrawingVariableProfile { None, Measured, NotMeasured };
 struct DrawingSectionEdit {

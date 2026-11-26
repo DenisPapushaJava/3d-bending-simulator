@@ -1,7 +1,7 @@
 add_library(bending_cad STATIC Kernel.cpp CadDocument.cpp StepImporter.cpp ThicknessRecognizer.cpp BendRecognizer.cpp ClosedCutouts.cpp SingleBendPreviewBuilder.cpp MachineAssembly.cpp BendRouteBuilder.cpp RouteGeometry.cpp RouteDraftGeometry.cpp DrawingTools.cpp BendingDrawingBuilder.cpp DrawingTubeProfile.cpp DrawingTubeBores.cpp DrawingOpenings.cpp DrawingProfiles.cpp DrawingSections.cpp FlatPatternBuilder.cpp FlatPatternDisplay.cpp)
 add_library(Bending::Cad ALIAS bending_cad)
 target_sources(bending_cad PRIVATE Backgauge.cpp ModelMeasurements.cpp FlatCutProfileBuilder.cpp
-                                  DrawingIsometricFill.cpp)
+                                  DrawingIsometricFill.cpp DrawingTubeEndReliefs.cpp)
 target_sources(bending_cad PRIVATE RouteDraftCache.cpp RouteSheetFeatures.cpp)
 target_sources(bending_cad PRIVATE ObliqueBendEnd.cpp)
 target_sources(bending_cad PRIVATE FlatWallRegions.cpp)
