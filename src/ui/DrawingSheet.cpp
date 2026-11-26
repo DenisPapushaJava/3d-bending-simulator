@@ -14,6 +14,7 @@
 #include <cmath>
 #include <numbers>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 
 static void drawingResources() {
@@ -159,8 +160,11 @@ bool overlaps(const QRectF &box, const std::vector<QRectF> &occupied) {
         return old.adjusted(-.8, -.8, .8, .8).intersects(box);
     });
 }
+QRectF leaderKeepout(const QRectF &box) {
+    return box.adjusted(-.4, -.4, .4, .4);
+}
 bool crossesTextBox(QPointF a, QPointF b, const QRectF &text) {
-    const auto box = text.adjusted(-.4, -.4, .4, .4);
+    const auto box = leaderKeepout(text);
     if (box.contains(a) || box.contains(b))
         return true;
     const QLineF line(a, b);
@@ -516,10 +520,10 @@ void leaderNote(QPainter &p, QPointF anchor, QRectF bounds, const QString &value
             }
     throw std::runtime_error("Bend callouts do not fit; choose another orientation");
 }
-void detailLeader(QPainter &p, QPointF centre, double radius, const QString &name, QRectF bounds,
+bool detailLeader(QPainter &p, QPointF centre, double radius, const QString &name, QRectF bounds,
                   QRectF area, std::vector<QRectF> &occupied,
                   const std::vector<QLineF> &dimensionLines, std::vector<QLineF> &leaders,
-                  drawing::LayoutContext *context) {
+                  drawing::LayoutContext *context, std::span<const QRectF> breaks = {}) {
     struct Placement {
         QLineF leader;
         QLineF shelf;
@@ -531,6 +535,13 @@ void detailLeader(QPainter &p, QPointF centre, double radius, const QString &nam
     const double heading = std::atan2(outward.y(), outward.x());
     const double width = std::max(8., textWidthMm(name));
     const std::vector<QRectF> body{bounds};
+    const auto crossesBreak = [&](QPointF a, QPointF b) {
+        return std::any_of(breaks.begin(), breaks.end(), [&](const auto &gap) {
+            if (a == centre && leaderKeepout(gap).contains(a))
+                return (b.x() - a.x()) * (a.x() - gap.center().x()) < 0;
+            return crossesTextBox(a, b, gap);
+        });
+    };
     for (int lane = 0; lane < 16; ++lane) {
         const double length = 3 + lane * 3;
         if (best && length >= best->cost)
@@ -542,7 +553,8 @@ void detailLeader(QPainter &p, QPointF centre, double radius, const QString &nam
             const QPointF direction(std::cos(angle), std::sin(angle));
             const auto start = centre + direction * radius;
             const auto end = start + direction * length;
-            if (crossesText(start, end, occupied))
+            if (crossesText(start, end, occupied) || crossesBreak(centre, start) ||
+                crossesBreak(start, end))
                 continue;
             const QLineF leader(start, end);
             const double preferredSide = direction.x() < 0 ? -1 : 1;
@@ -553,15 +565,16 @@ void detailLeader(QPainter &p, QPointF centre, double radius, const QString &nam
                                       std::clamp(centre.y(), label.top(), label.bottom()));
                 if (!area.contains(label) || label.intersects(bounds) ||
                     QLineF(centre, nearest).length() < radius || overlaps(label, occupied) ||
-                    crossesText(end, shelfEnd, occupied))
+                    crossesText(end, shelfEnd, occupied) || crossesBreak(end, shelfEnd) ||
+                    std::any_of(breaks.begin(), breaks.end(),
+                                [&](const auto &gap) { return gap.intersects(label); }))
                     continue;
                 const QLineF shelf(end, shelfEnd);
-                const std::vector<QRectF> labelBox{label};
                 const auto along = [&](const QLineF &old) {
                     return overlappingRow(leader, old) || overlappingRow(shelf, old);
                 };
                 if (std::any_of(leaders.begin(), leaders.end(), [&](const auto &old) {
-                        return along(old) || crossesText(old.p1(), old.p2(), labelBox);
+                        return along(old) || crossesTextBox(old.p1(), old.p2(), label);
                     }))
                     continue;
                 const auto crossings = [&](const auto &lines) {
@@ -584,7 +597,7 @@ void detailLeader(QPainter &p, QPointF centre, double radius, const QString &nam
         }
     }
     if (!best)
-        throw std::runtime_error("Detail callout does not fit the available area");
+        return false;
     occupied.push_back(best->label);
     leaders.push_back(best->leader);
     leaders.push_back(best->shelf);
@@ -592,6 +605,32 @@ void detailLeader(QPainter &p, QPointF centre, double radius, const QString &nam
     p.drawLine(best->leader);
     p.drawLine(best->shelf);
     text(p, best->label, name, 3.5);
+    return true;
+}
+
+bool tubeLocatorCircleFits(QPointF centre, double radius, const QRectF &area,
+                           const std::vector<QRectF> &occupied,
+                           const std::vector<QLineF> &dimensionLines,
+                           std::span<const QRectF> breaks) {
+    const double keep = radius + .25; // Include the ink around the centerline.
+    const QRectF box(centre.x() - keep, centre.y() - keep, 2 * keep, 2 * keep);
+    const auto intersects = [&](const QRectF &other) {
+        const QPointF nearest(std::clamp(centre.x(), other.left(), other.right()),
+                              std::clamp(centre.y(), other.top(), other.bottom()));
+        return QLineF(centre, nearest).length() <= keep;
+    };
+    const auto onLine = [&](const QLineF &line) {
+        const auto vector = line.p2() - line.p1();
+        const double length = QPointF::dotProduct(vector, vector);
+        const double fraction =
+            length > 0
+                ? std::clamp(QPointF::dotProduct(centre - line.p1(), vector) / length, 0., 1.)
+                : 0.;
+        return QLineF(centre, line.p1() + fraction * vector).length() <= keep;
+    };
+    return area.contains(box) && std::none_of(occupied.begin(), occupied.end(), intersects) &&
+           std::none_of(breaks.begin(), breaks.end(), intersects) &&
+           std::none_of(dimensionLines.begin(), dimensionLines.end(), onLine);
 }
 void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPointF center,
           double scale, const QString &caption, bool isometric = false, bool circular = false,
@@ -602,6 +641,8 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
           const DrawingPlacedView *placedView = nullptr, bool flatDimensions = false) {
     if (context)
         context->checkpoint();
+    if (context && context->omittedDimensions)
+        *context->omittedDimensions += v.omittedTubeDimensions;
     const int decimals = context ? context->dimensionDecimals : defaultDimensionDecimalPlaces;
     const bool schematic = v.profileStart.has_value();
     const QPointF midpoint((v.minimum.x + v.maximum.x) / 2, (v.minimum.y + v.maximum.y) / 2);
@@ -616,7 +657,9 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
     };
     const QRectF bounds(map({v.minimum.x, v.maximum.y}), map({v.maximum.x, v.minimum.y}));
     p.save();
-    if (circular) {
+    if (v.tubeEndStrip) {
+        p.setClipRect(bounds.adjusted(0, -1, 0, 1), Qt::IntersectClip);
+    } else if (circular) {
         QPainterPath clip;
         clip.addEllipse(bounds);
         p.setClipPath(clip, Qt::IntersectClip);
@@ -719,33 +762,39 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             }
         }
     }
+    std::array<QRectF, 2> breakInk;
     if (v.omittedX) {
+        constexpr double waveAmplitude = .7;
         pen(p);
-        for (const double x : *v.omittedX) {
-            const double px = map({x, v.minimum.y}).x();
+        for (std::size_t i = 0; i < breakInk.size(); ++i) {
+            const double px = map({(*v.omittedX)[i], v.minimum.y}).x();
+            breakInk[i] = QRectF(px - waveAmplitude, bounds.top() - 1, 2 * waveAmplitude,
+                                 bounds.height() + 2);
             QPainterPath wave;
             wave.moveTo(px, bounds.top() - 1);
             const int count = std::max(2, static_cast<int>(bounds.height() / 3));
             for (int i = 0; i < count; ++i) {
                 const double y = bounds.top() - 1 + (bounds.height() + 2) * i / count;
                 const double step = (bounds.height() + 2) / count;
-                wave.cubicTo(px + .7, y + step / 3, px - .7, y + step * 2 / 3, px, y + step);
+                wave.cubicTo(px + waveAmplitude, y + step / 3, px - waveAmplitude, y + step * 2 / 3,
+                             px, y + step);
             }
             p.drawPath(wave);
         }
     }
     p.restore();
     dimensionPen(p);
-    if (circular)
+    if (circular && !v.tubeEndStrip)
         p.drawEllipse(bounds);
     const auto locatorRadius = [scale](const DrawingDetailLocator &locator) {
         return std::max(2.5, locator.radius * scale);
     };
-    for (const auto &locator : v.detailLocators) {
-        const auto at = map(locator.anchor);
-        const double r = locatorRadius(locator);
-        p.drawEllipse(at, r, r);
-    }
+    for (const auto &locator : v.detailLocators)
+        if (!locator.shoulder) {
+            const auto at = map(locator.anchor);
+            const double r = locatorRadius(locator);
+            p.drawEllipse(at, r, r);
+        }
     const bool paired = drawing.details.size() >= 2 && drawing.details[0].fullProfile &&
                         drawing.details[1].fullProfile;
     const double cell = fullProfile ? (paired ? 104 : 140) : compact ? 100 : 190;
@@ -1284,11 +1333,58 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
         text(p, QRectF(end.x() - 6, end.y() - 5, 12, 5), QString::fromStdString(value), 3.5);
     }
     std::vector<QLineF> detailLeaders;
-    for (const auto &locator : v.detailLocators)
-        detailLeader(p, map(locator.anchor), locatorRadius(locator),
-                     QString::fromStdString(locator.designation), bounds,
-                     cellArea ? annotationArea : QRectF(25, 20, 385, 193), occupied,
-                     placement.lines, detailLeaders, context);
+    const auto detailArea = cellArea ? annotationArea : QRectF(25, 20, 385, 193);
+    const auto breaks = v.omittedX ? std::span<const QRectF>(breakInk) : std::span<const QRectF>{};
+    QStringList captionReferences;
+    for (auto atLocator = v.detailLocators.begin(); atLocator != v.detailLocators.end();
+         ++atLocator) {
+        const auto &locator = *atLocator;
+        const auto at = map(locator.anchor);
+        const double radius = locatorRadius(locator);
+        auto name = QString::fromStdString(locator.designation);
+        if (!locator.shoulder) {
+            if (!detailLeader(p, at, radius, name, bounds, detailArea, occupied, placement.lines,
+                              detailLeaders, context))
+                throw std::runtime_error("Detail callout does not fit the available area");
+            continue;
+        }
+        const auto sameShoulder = [&](const auto &other) {
+            return other.shoulder && other.shoulder->x == locator.shoulder->x &&
+                   other.shoulder->y == locator.shoulder->y;
+        };
+        if (std::any_of(v.detailLocators.begin(), atLocator, sameShoulder))
+            continue;
+        bool grouped = false;
+        for (auto other = std::next(atLocator); other != v.detailLocators.end(); ++other)
+            if (sameShoulder(*other)) {
+                name += QStringLiteral(", ") + QString::fromStdString(other->designation);
+                grouped = true;
+            }
+        if (!grouped &&
+            tubeLocatorCircleFits(at, radius, detailArea, occupied, placement.lines, breaks) &&
+            detailLeader(p, at, radius, name, bounds, detailArea, occupied, placement.lines,
+                         detailLeaders, context, breaks)) {
+            dimensionPen(p);
+            p.drawEllipse(at, radius, radius);
+            occupied.emplace_back(at.x() - radius, at.y() - radius, 2 * radius, 2 * radius);
+            continue;
+        }
+        const auto shoulder = map(*locator.shoulder);
+        constexpr double dotRadius = .45;
+        constexpr double dotInk = dotRadius + .125;
+        const bool dotFits = std::none_of(breaks.begin(), breaks.end(), [&](const auto &gap) {
+            return gap.adjusted(-dotInk, -dotInk, dotInk, dotInk).contains(shoulder);
+        });
+        if (!detailLeader(p, shoulder, dotFits ? 0. : 1.5, name, bounds, detailArea, occupied,
+                          placement.lines, detailLeaders, context, breaks)) {
+            captionReferences.push_back(name);
+        } else if (dotFits) {
+            p.save();
+            p.setBrush(dimensionColor);
+            p.drawEllipse(shoulder, dotRadius, dotRadius);
+            p.restore();
+        }
+    }
     // Optional leaders share a bounded outline scan even on perforated plates.
     std::size_t remainingOutlineChecks = 20000;
     for (const auto &group : v.contourCorners) {
@@ -1426,7 +1522,13 @@ void view(QPainter &p, const BendingDrawing &drawing, const DrawingView &v, QPoi
             arrow(p, tip, a);
         }
     }
-    text(p, captionBox, caption, 3.5);
+    const auto captionText =
+        captionReferences.isEmpty()
+            ? caption
+            : caption + QStringLiteral(" · Виды ") + captionReferences.join(QStringLiteral(", "));
+    const double captionHeight =
+        !captionReferences.isEmpty() && textWidthMm(captionText) > captionBox.width() ? 2.5 : 3.5;
+    text(p, captionBox, captionText, captionHeight);
     if (dimensionLines)
         dimensionLines->insert(dimensionLines->end(), placement.lines.begin(),
                                placement.lines.end());

@@ -624,7 +624,9 @@ class DrawingDialog::Impl {
             // The ordinary auxiliaries use projection indices 0–2. Tube ends
             // are identified by their physical axial side across reorientation.
             if (auxiliary.tubeEnd)
-                result.index = 3 + *auxiliary.tubeEnd + (auxiliary.tubeNotch ? 2 : 0);
+                result.index = auxiliary.supplementalTubeEnd
+                                   ? 11 + *auxiliary.tubeEnd
+                                   : 3 + *auxiliary.tubeEnd + (auxiliary.tubeNotch ? 2 : 0);
             else
                 result.index = auxiliary.tubeWall ? 7 + *auxiliary.tubeWall : auxiliary.projection;
             result.variant = auxiliary.view.reverseProjection;

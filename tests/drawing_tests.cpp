@@ -29,6 +29,7 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -82,6 +83,7 @@
 #include <atomic>
 #include <cmath>
 #include <gp_Circ.hxx>
+#include <gp_Pln.hxx>
 #include <iostream>
 #include <numbers>
 #include <stdexcept>
@@ -782,6 +784,361 @@ void compoundTubeEnd(const QString &folder) {
                              [](const auto &a) { return a.tubeNotch; }),
             "A closed opening was labelled as a slot open at the end");
 }
+void tubeEndReliefs(const QString &folder) {
+    const auto outer = BRepPrimAPI_MakeBox(gp_Pnt(-30, 0, 0), 60, 40, 1350).Shape();
+    const auto stock = [&](double start) {
+        return BRepAlgoAPI_Cut(
+                   outer,
+                   BRepPrimAPI_MakeBox(gp_Pnt(-26.5, 3.5, start), 53, 33, 1351 - start).Shape())
+            .Shape();
+    };
+    const auto cutterFromOutline = [](const auto &outline) {
+        BRepBuilderAPI_MakePolygon polygon;
+        for (const auto &point : outline)
+            polygon.Add(point);
+        polygon.Close();
+        return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(polygon.Wire()).Face(),
+                                     gp_Vec(0, 42, 0))
+            .Shape();
+    };
+    const auto cutter = [&](double length) {
+        return cutterFromOutline(std::array{
+            gp_Pnt(-20, -1, -2), gp_Pnt(40, -1, -2), gp_Pnt(40, -1, length), gp_Pnt(25, -1, length),
+            gp_Pnt(25, -1, 13), gp_Pnt(17, -1, 5), gp_Pnt(-20, -1, 5)});
+    };
+    gp_Trsf mirror;
+    mirror.SetMirror(gp_Ax2(gp_Pnt(0, 0, 675), gp_Dir(0, 0, 1)));
+    const auto cutEnds = [&](const TopoDS_Shape &shape, const TopoDS_Shape &first,
+                             const TopoDS_Shape &last) {
+        return BRepAlgoAPI_Cut(BRepAlgoAPI_Cut(shape, first).Shape(),
+                               BRepBuilderAPI_Transform(last, mirror, true).Shape())
+            .Shape();
+    };
+    const auto cutBoth = [&](const TopoDS_Shape &shape, double otherLength) {
+        return cutEnds(shape, cutter(50), cutter(otherLength));
+    };
+    const auto shape = cutBoth(stock(-1), 50);
+    const auto doc = load(shape, folder + "/mirrored-tube-ends.step");
+    const auto drawing = build(doc);
+    require(!doc->metadata().confirmedTubeProfile && drawing->tubeProfile &&
+                drawing->tubeProfile->minorSizeMm &&
+                std::abs(drawing->tubeProfile->sizeMm - 60) < 1e-5 &&
+                std::abs(*drawing->tubeProfile->minorSizeMm - 40) < 1e-5 &&
+                std::abs(drawing->tubeProfile->wallMm - 3.5) < 1e-5 && drawing->bends.empty() &&
+                !drawing->flatPattern && drawing->views[0].omittedX,
+            "Both end reliefs lost the tube or leaked into the bending workflow");
+    const auto &main = (*drawing->classicalViews)[0];
+    const auto &gap = *main.omittedX;
+    require(gap[0] > main.minimum.x + 50 && gap[1] < main.maximum.x - 50,
+            "A paper break cuts an end relief");
+    const auto end = std::find_if(drawing->auxiliaryViews.begin(), drawing->auxiliaryViews.end(),
+                                  [](const auto &view) { return view.tubeEnd.has_value(); });
+    require(end != drawing->auxiliaryViews.end() && end->mirroredTubeEnd &&
+                std::count_if(drawing->auxiliaryViews.begin(), drawing->auxiliaryViews.end(),
+                              [](const auto &view) { return view.tubeEnd.has_value(); }) == 1,
+            "Mirrored reliefs did not share one enlarged view");
+    const auto &locators = drawing->classicalViews->at(end->projection).detailLocators;
+    require(locators.size() == 2 && locators[0].designation == end->designation &&
+                locators[1].designation == end->designation &&
+                std::abs(locators[0].anchor.x - locators[1].anchor.x) > 1000,
+            "The physical ends did not reference their common enlargement");
+    const auto covers = [](const auto &dims, double value, bool axial) {
+        return std::any_of(dims.begin(), dims.end(), [&](const auto &d) {
+            return d.witnesses && std::abs(d.valueMm - value) < 1e-5 &&
+                   (std::abs(d.start.y - d.end.y) < 1e-5) == axial;
+        });
+    };
+    require(covers(main.dimensions, 1350, true) && covers(end->view.dimensions, 50, true) &&
+                covers(end->view.dimensions, 5, true) && covers(end->view.dimensions, 50, false) &&
+                covers(end->view.dimensions, 5, false) && end->view.tubeCuts.size() == 1 &&
+                std::abs(end->view.tubeCuts.front().degreesFromSquare - 45) < 1e-5,
+            "The relief lost confirmed dimensions or their actual geometry");
+    const auto key =
+        ui::DrawingViewKey{application::DrawingViewKind::Auxiliary,
+                           static_cast<std::size_t>(end - drawing->auxiliaryViews.begin())};
+    auto choices = ui::DrawingSheet::defaultViews(*drawing);
+    for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+        ui::DrawingTitle title;
+        title.plan = ui::DrawingSheet::compose(drawing, choices, {}, {}, {}, format);
+        const auto placed = std::find_if(title.plan->views.begin(), title.plan->views.end(),
+                                         [&](const auto &view) { return view.key == key; });
+        require(placed != title.plan->views.end() && title.plan->omittedDimensions == 0 &&
+                    placed->dimensions.size() == end->view.dimensions.size() &&
+                    !ui::DrawingSheet::preview(*drawing, title).isNull(),
+                "The finished sheet lost the measured end view");
+    }
+    for (auto &choice : choices)
+        if (choice.key == key)
+            choice.visible = false;
+    require(ui::drawing::selectedView(
+                *drawing, {application::DrawingViewKind::Projection, end->projection}, &choices)
+                .detailLocators.empty(),
+            "Hiding the mirrored detail left a marker on the drawing");
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(10, 20, 30), gp_Dir(1, 2, 3)), .73);
+    const auto rotated = build(load(BRepBuilderAPI_Transform(shape, rotation, true).Shape(),
+                                    folder + "/rotated-tube-ends.step"));
+    require(rotated->tubeProfile &&
+                std::any_of(rotated->auxiliaryViews.begin(), rotated->auxiliaryViews.end(),
+                            [](const auto &view) { return view.mirroredTubeEnd; }),
+            "Rotating the source lost the tube or its corresponding end views");
+    const auto asymmetric =
+        build(load(cutBoth(stock(-1), 45), folder + "/asymmetric-tube-ends.step"));
+    require(asymmetric->tubeProfile &&
+                std::count_if(asymmetric->auxiliaryViews.begin(), asymmetric->auxiliaryViews.end(),
+                              [](const auto &view) {
+                                  return view.tubeEnd.has_value() && !view.mirroredTubeEnd;
+                              }) == 2,
+            "Asymmetric ends were merged");
+    const auto blocked = build(load(cutBoth(stock(40), 50), folder + "/blocked-tube-ends.step"));
+    require(!blocked->tubeProfile, "An axial obstruction was accepted as a through-profile");
+
+    for (const double depth : {60.1, 900.}) {
+        const auto source = load(cutBoth(stock(-1), depth),
+                                 folder + QStringLiteral("/tube-end-%1.step").arg(depth));
+        const auto deeper = build(source);
+        const auto at = std::find_if(
+            deeper->auxiliaryViews.begin(), deeper->auxiliaryViews.end(), [&](const auto &view) {
+                return view.tubeEnd && covers(view.view.dimensions, depth, true);
+            });
+        require(deeper->tubeProfile && at != deeper->auxiliaryViews.end(),
+                "The intact profile between deep end cuts was not found and measured");
+        if (depth < 100) {
+            require(!at->view.tubeEndStrip && !at->view.omittedX,
+                    "A regular short end changed its enlargement");
+            continue;
+        }
+        const auto &v = at->view;
+        require(v.tubeEndStrip && v.maximum.y - v.minimum.y < 120 && v.omittedX &&
+                    (*v.omittedX)[1] - (*v.omittedX)[0] > depth / 2,
+                "An elongated end retained a large circular view or lost its interior break");
+        const auto &reference = deeper->classicalViews->at(at->projection);
+        const auto locator =
+            std::find_if(reference.detailLocators.begin(), reference.detailLocators.end(),
+                         [&](const auto &entry) { return entry.designation == at->designation; });
+        require(locator != reference.detailLocators.end() && locator->radius <= 35 &&
+                    std::abs(std::min(locator->anchor.x - reference.minimum.x,
+                                      reference.maximum.x - locator->anchor.x) -
+                             (1350 - depth)) < 1e-5,
+                "The elongated detail marker was not compact or at the shoulder");
+        const auto key =
+            ui::DrawingViewKey{application::DrawingViewKind::Auxiliary,
+                               static_cast<std::size_t>(at - deeper->auxiliaryViews.begin())};
+        for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+            const auto plan = ui::DrawingSheet::compose(
+                deeper, ui::DrawingSheet::defaultViews(*deeper), {}, {}, {}, format);
+            const auto placed = std::find_if(plan->views.begin(), plan->views.end(),
+                                             [&](const auto &item) { return item.key == key; });
+            require(placed != plan->views.end() &&
+                        std::any_of(placed->dimensions.begin(), placed->dimensions.end(),
+                                    [&](const auto &dimension) {
+                                        return std::abs(dimension.measurement.valueMm - depth) <
+                                               1e-5;
+                                    }),
+                    "The break changed or hid the full length on the drawing");
+        }
+        application::DrawingRequest request;
+        request.allowBreaks = false;
+        const auto unbroken = build(source, request);
+        require(std::any_of(unbroken->auxiliaryViews.begin(), unbroken->auxiliaryViews.end(),
+                            [&](const auto &view) {
+                                return view.view.tubeEndStrip && !view.view.omittedX &&
+                                       covers(view.view.dimensions, depth, true);
+                            }),
+                "Disabling breaks lost the elongated view or its true dimension");
+    }
+
+    // The two adjacent depths straddle the main-view size change.
+    for (const double depth : {179., 181.}) {
+        const auto source = load(cutBoth(stock(-1), depth),
+                                 folder + QStringLiteral("/tube-locator-%1.step").arg(depth));
+        const auto nearBoundary = build(source);
+        const auto &auxiliary = nearBoundary->auxiliaryViews;
+        const auto detail = std::find_if(auxiliary.begin(), auxiliary.end(), [&](const auto &view) {
+            return view.tubeEnd && covers(view.view.dimensions, depth, true);
+        });
+        require(detail != auxiliary.end(), "The reference cut has no measured close-up");
+        const auto &ref = nearBoundary->classicalViews->at(detail->projection);
+        const auto locator = std::find_if(
+            ref.detailLocators.begin(), ref.detailLocators.end(),
+            [&](const auto &entry) { return entry.designation == detail->designation; });
+        require(locator != ref.detailLocators.end() && locator->shoulder &&
+                    std::abs(std::min(locator->shoulder->x - ref.minimum.x,
+                                      ref.maximum.x - locator->shoulder->x) -
+                             depth) < 1e-5,
+                "The callout fallback does not point to the actual transition of the cut");
+        for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+            ui::DrawingTitle title;
+            title.plan = ui::DrawingSheet::compose(
+                nearBoundary, ui::DrawingSheet::defaultViews(*nearBoundary), {}, {}, {}, format);
+            require(title.plan->omittedDimensions == 0 &&
+                        !ui::DrawingSheet::preview(*nearBoundary, title).isNull(),
+                    "The tube locators obstructed the sheet or its measured dimensions");
+        }
+    }
+
+    const auto bothLong =
+        load(cutEnds(stock(-1), cutter(380), cutter(520)), folder + "/tube-two-long-reliefs.step");
+    for (const bool reverse : {false, true}) {
+        application::DrawingRequest request;
+        request.reverseView = reverse;
+        const auto longDrawing = build(bothLong, request);
+        require(longDrawing->views[0].omittedX && std::count_if(longDrawing->auxiliaryViews.begin(),
+                                                                longDrawing->auxiliaryViews.end(),
+                                                                [](const auto &view) {
+                                                                    return view.view.tubeEndStrip &&
+                                                                           view.view.omittedX;
+                                                                }) == 2,
+                "The common axial scan lost a break when reused or reversed");
+        const auto plan =
+            ui::DrawingSheet::compose(longDrawing, ui::DrawingSheet::defaultViews(*longDrawing), {},
+                                      {}, {}, ui::DrawingPaperFormat::A4);
+        require(plan->omittedDimensions == 0 && (reverse || plan->pages == 1),
+                "The callouts beside the break did not fit at a small paper scale");
+    }
+
+    const auto drilledWall = [&](const TopoDS_Shape &source, double x, double station, double r) {
+        const auto drill =
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x, 41, station), gp_Dir(0, -1, 0)), r, 6)
+                .Shape();
+        return BRepAlgoAPI_Cut(source, drill).Shape();
+    };
+    const auto drilled =
+        build(load(drilledWall(shape, 0, 500, 3), folder + "/tube-ends-and-wall-hole.step"));
+    require(drilled->tubeProfile && drilled->bends.empty() && drilled->classicalViews &&
+                std::any_of(drilled->classicalViews->begin(), drilled->classicalViews->end(),
+                            [](const auto &view) {
+                                return std::any_of(view.holeDiameters.begin(),
+                                                   view.holeDiameters.end(), [](const auto &hole) {
+                                                       return std::abs(hole.second - 6) < 1e-5;
+                                                   });
+                            }),
+            "A regular wall opening prevented tube recognition or went unmeasured");
+
+    const auto countEndViews = [](const auto &drawing) {
+        return std::count_if(drawing.auxiliaryViews.begin(), drawing.auxiliaryViews.end(),
+                             [](const auto &view) { return view.tubeEnd.has_value(); });
+    };
+    require(countEndViews(*drilled) == 1, "A distant hole prevented matching identical end views");
+    const auto nearHole =
+        build(load(drilledWall(shape, 0, 60, 3), folder + "/opening-near-tube-end.step"));
+    require(nearHole->tubeProfile && countEndViews(*nearHole) == 2,
+            "The common enlargement hid a local feature found only at one end");
+
+    for (const double depth : {13., 27.}) {
+        const auto crossCut =
+            BRepPrimAPI_MakeBox(gp_Pnt(-40, 40 - depth, -1), 80, depth + 1, 33).Shape();
+        const auto adjacent =
+            build(load(cutEnds(shape, crossCut, crossCut),
+                       folder + QStringLiteral("/adjacent-cut-%1.step").arg(depth)));
+        require(adjacent->tubeProfile &&
+                    std::any_of(adjacent->auxiliaryViews.begin(), adjacent->auxiliaryViews.end(),
+                                [&](const auto &view) {
+                                    return view.supplementalTubeEnd && view.mirroredTubeEnd &&
+                                           covers(view.view.dimensions, depth, false);
+                                }),
+                "A transverse cut was dimensioned from the wrong wall");
+    }
+
+    const auto roundedPrism = [](double r, double inset, double start, double length) {
+        const double left = -30 + inset + r, right = 30 - inset - r;
+        const double bottom = inset + r, top = 40 - inset - r;
+        const std::array centers{gp_Pnt(right, bottom, 0), gp_Pnt(right, top, 0),
+                                 gp_Pnt(left, top, 0), gp_Pnt(left, bottom, 0)};
+        constexpr double quarter = std::numbers::pi / 2;
+        const auto point = [&](std::size_t corner, double angle) {
+            return gp_Pnt(centers[corner].X() + r * std::cos(angle),
+                          centers[corner].Y() + r * std::sin(angle), start);
+        };
+        BRepBuilderAPI_MakeWire wire;
+        auto previous = point(3, 3 * quarter);
+        for (std::size_t i = 0; i < centers.size(); ++i) {
+            const double from = (static_cast<double>(i) - 1) * quarter;
+            const auto first = point(i, from), last = point(i, from + quarter);
+            wire.Add(BRepBuilderAPI_MakeEdge(previous, first));
+            wire.Add(BRepBuilderAPI_MakeEdge(
+                GC_MakeArcOfCircle(first, point(i, from + quarter / 2), last).Value()));
+            previous = last;
+        }
+        return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()), gp_Vec(0, 0, length))
+            .Shape();
+    };
+    const auto roundedStock =
+        BRepAlgoAPI_Cut(roundedPrism(5.25, 0, 0, 1350), roundedPrism(1.75, 3.5, -1, 1352)).Shape();
+    const auto roundedEnds = cutBoth(roundedStock, 50);
+    const auto openAtEnd =
+        build(load(drilledWall(roundedEnds, 5, 3, 4), folder + "/curved-opening-at-tube-end.step"));
+    require(openAtEnd->tubeProfile && openAtEnd->bends.empty() && !openAtEnd->flatPattern &&
+                countEndViews(*openAtEnd) == 2,
+            "A rounded opening at the end changed a proven tube into a bending drawing");
+    for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+        const auto plan = ui::DrawingSheet::compose(
+            openAtEnd, ui::DrawingSheet::defaultViews(*openAtEnd), {}, {}, {}, format);
+        require(plan->omittedDimensions > 0,
+                "An unmeasured rounded opening was silently omitted from the drawing report");
+    }
+
+    const auto diagonalCut = [](double offset) {
+        const auto tilt =
+            BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(offset, 0, 0), gp_Dir(1, 1, -1))).Face();
+        return BRepPrimAPI_MakeHalfSpace(tilt, gp_Pnt(30, 40, -10)).Solid();
+    };
+    const auto endStep = [](double length) {
+        return BRepPrimAPI_MakeBox(gp_Pnt(23, -2, -1), 10, 13, length).Shape();
+    };
+    const auto combined = build(load(
+        cutEnds(cutEnds(stock(-1), diagonalCut(25), diagonalCut(28)), endStep(25), endStep(28)),
+        folder + "/crowded-tube-end-callouts.step"));
+    require(combined->tubeProfile && countEndViews(*combined) == 4,
+            "The oblique tube did not produce independent views at both ends");
+    for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+        ui::DrawingTitle title;
+        title.plan = ui::DrawingSheet::compose(combined, ui::DrawingSheet::defaultViews(*combined),
+                                               {}, {}, {}, format);
+        require(std::count_if(title.plan->views.begin(), title.plan->views.end(),
+                              [](const auto &v) {
+                                  return v.key.kind == application::DrawingViewKind::Auxiliary;
+                              }) == 4 &&
+                    !ui::DrawingSheet::preview(*combined, title).isNull(),
+                "Overlapping references failed Auto or displaced a measured end view");
+    }
+    const auto diagonal = diagonalCut(25);
+    const auto curved = build(
+        load(cutEnds(roundedStock, diagonal, diagonal), folder + "/rounded-tube-reliefs.step"));
+    // The deepest point is at 45 degrees on the outer corner, between its vertices.
+    const double expectedDepth = 24.75 + 34.75 + 5.25 * std::sqrt(2.) - 25.;
+    require(curved->tubeProfile &&
+                std::any_of(curved->auxiliaryViews.begin(), curved->auxiliaryViews.end(),
+                            [&](const auto &view) {
+                                return view.tubeEnd &&
+                                       covers(view.view.dimensions, expectedDepth, true);
+                            }),
+            "The axial depth ignored the extremum inside the curved rim");
+
+    std::vector<gp_Pnt> stairs{{-20, -1, -2}, {40, -1, -2}, {40, -1, 57}, {25, -1, 57}};
+    for (int i = 9; i >= 0; --i) {
+        const double x = -20 + 4.5 * i, z = 5 + 5 * i;
+        stairs.emplace_back(x + 4.5, -1, z);
+        stairs.emplace_back(x, -1, z);
+    }
+    const auto steppedTool = cutterFromOutline(stairs);
+    const auto stepped = build(
+        load(cutEnds(stock(-1), steppedTool, steppedTool), folder + "/many-tube-end-steps.step"));
+    require(stepped->tubeProfile &&
+                std::any_of(stepped->auxiliaryViews.begin(), stepped->auxiliaryViews.end(),
+                            [&](const auto &view) {
+                                return view.tubeEnd && view.view.omittedTubeDimensions > 0 &&
+                                       covers(view.view.dimensions, 57, true);
+                            }),
+            "Extra step dimensions displaced the total depth or were silently discarded");
+    for (const auto format : {ui::DrawingPaperFormat::A4, ui::DrawingPaperFormat::A3}) {
+        const auto plan = ui::DrawingSheet::compose(
+            stepped, ui::DrawingSheet::defaultViews(*stepped), {}, {}, {}, format);
+        require(plan->omittedDimensions > 0,
+                "The sheet did not report its omitted step dimensions");
+    }
+}
+
 void drawingMeasurements(const QString &folder) {
     const auto trimmedDoc = load(fixtures::cornerTrimmedBend(), folder + "/split-cap.step");
     require(trimmedDoc->metadata().bendAnalysis.bends.size() == 1,
@@ -4706,6 +5063,7 @@ int main(int argc, char **argv) {
             tubeWallOpenings(temp.path());
             tubeBoreEntranceNotes(temp.path());
             compoundTubeEnd(temp.path());
+            tubeEndReliefs(temp.path());
             return 0;
         }
         if (app.arguments().contains(QStringLiteral("--tool-notes-only"))) {
@@ -4824,6 +5182,7 @@ int main(int argc, char **argv) {
         tubeWallOpenings(temp.path());
         tubeBoreEntranceNotes(temp.path());
         compoundTubeEnd(temp.path());
+        tubeEndReliefs(temp.path());
         drawingMeasurements(temp.path());
         variableProfile(temp.path());
         obliqueSectionFallback(temp.path());
